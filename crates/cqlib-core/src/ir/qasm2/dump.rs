@@ -86,6 +86,8 @@ use std::io::{self, Write as IoWrite};
 use std::path::Path;
 use std::sync::Arc;
 
+const QELIB1_CUSTOM_GATES: &[&str] = &["ch", "cu1", "cu3"];
+
 /// Errors that can occur during OpenQASM serialization.
 ///
 /// These errors indicate problems that prevent successful conversion
@@ -407,6 +409,9 @@ fn collect_gates_from_operations(
     for op in operations {
         match &op.instruction {
             Instruction::CircuitGate(cg) => {
+                if QELIB1_CUSTOM_GATES.contains(&cg.name.as_str()) {
+                    continue;
+                }
                 // Recurse first (Post-order traversal ensures dependencies are collected first)
                 collect_gates(
                     &cg.circuit.circuit,

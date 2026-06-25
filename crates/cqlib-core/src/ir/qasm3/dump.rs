@@ -651,7 +651,7 @@ fn collect_auto_measurements(
                 let remaining_start = index + 1 + usize::from(consumes_store);
                 let read_later = operations[remaining_start..]
                     .iter()
-                    .any(|operation| operation_reads_value(operation, *result));
+                    .any(|operation| operation.instruction.reads_value(*result));
                 if !consumes_store && !read_later {
                     map.insert(*result);
                 }
