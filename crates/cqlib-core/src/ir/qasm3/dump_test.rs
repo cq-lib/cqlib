@@ -463,11 +463,13 @@ fn qcis_sparse_qubit_measurement_declares_enough_qubits() {
         r#"OPENQASM 3.0;
 include "stdgates.inc";
 
-qubit[2] q;
+qubit[1] q;
+// cqlib qubit mapping: OpenQASM 3 qubit arrays are logical and compact.
+// q[0] -> cqlib Q1
 bit[1] meas;
 
-h q[1];
-meas[0] = measure q[1];
+h q[0];
+meas[0] = measure q[0];
 "#
     );
     assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");

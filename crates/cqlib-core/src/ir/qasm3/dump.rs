@@ -186,18 +186,14 @@ pub fn dumps(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
     writeln!(&mut output)?;
     let skipped_values = skipped_classical_value_declarations(circuit.operations())?;
     let auto_measurements = AutoMeasurementMap::new(circuit.operations())?;
-    let qubit_register_width = qasm_qubit_register_width(circuit);
-    writeln!(&mut output, "qubit[{}] q;", qubit_register_width)?;
+    let qubit_map = logical_qubit_map(circuit);
+    writeln!(&mut output, "qubit[{}] q;", qubit_map.len())?;
+    dump_qubit_mapping_comment(&mut output, &qubit_map)?;
     let classical_names = ClassicalNameMap::new(circuit, &mut output, &skipped_values)?;
     auto_measurements.dump_declaration(&mut output)?;
     writeln!(&mut output)?;
     dump_global_phase(circuit, &mut output)?;
 
-    let mut qubit_map = HashMap::new();
-    for qubit in circuit.qubits() {
-        let name = format!("q[{}]", qubit.index());
-        qubit_map.insert(qubit, name);
-    }
     let param_map = HashMap::new();
     dump_operations(
         circuit,
@@ -212,13 +208,46 @@ pub fn dumps(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
     Ok(output)
 }
 
-fn qasm_qubit_register_width(circuit: &Circuit) -> usize {
-    circuit
-        .qubits()
+fn logical_qubit_map(circuit: &Circuit) -> HashMap<Qubit, String> {
+    let mut qubits = circuit.qubits();
+    qubits.sort_by_key(|qubit| qubit.index());
+    qubits
         .into_iter()
-        .map(|qubit| qubit.index() + 1)
-        .max()
-        .unwrap_or(0)
+        .enumerate()
+        .map(|(logical_index, qubit)| (qubit, format!("q[{logical_index}]")))
+        .collect()
+}
+
+fn dump_qubit_mapping_comment(
+    output: &mut String,
+    qubit_map: &HashMap<Qubit, String>,
+) -> Result<(), Qasm3DumpError> {
+    if qubit_map.is_empty() {
+        return Ok(());
+    }
+
+    let mut mappings = qubit_map.iter().collect::<Vec<_>>();
+    mappings.sort_by_key(|(_, name)| {
+        name.trim_start_matches("q[")
+            .trim_end_matches(']')
+            .parse::<usize>()
+            .unwrap_or(usize::MAX)
+    });
+    if mappings
+        .iter()
+        .all(|(qubit, name)| **name == format!("q[{}]", qubit.index()))
+    {
+        return Ok(());
+    }
+
+    writeln!(
+        output,
+        "// cqlib qubit mapping: OpenQASM 3 qubit arrays are logical and compact."
+    )?;
+    for (qubit, name) in mappings {
+        writeln!(output, "// {name} -> cqlib Q{}", qubit.index())?;
+    }
+    Ok(())
 }
 
 /// Serialize a circuit to an OpenQASM 3 string.
