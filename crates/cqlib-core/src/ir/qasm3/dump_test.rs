@@ -464,8 +464,7 @@ fn qcis_sparse_qubit_measurement_declares_enough_qubits() {
 include "stdgates.inc";
 
 qubit[1] q;
-// cqlib qubit mapping: OpenQASM 3 qubit arrays are logical and compact.
-// q[0] -> cqlib Q1
+// q[0] -> Q1
 bit[1] meas;
 
 h q[0];

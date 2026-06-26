@@ -240,12 +240,8 @@ fn dump_qubit_mapping_comment(
         return Ok(());
     }
 
-    writeln!(
-        output,
-        "// cqlib qubit mapping: OpenQASM 3 qubit arrays are logical and compact."
-    )?;
     for (qubit, name) in mappings {
-        writeln!(output, "// {name} -> cqlib Q{}", qubit.index())?;
+        writeln!(output, "// {name} -> Q{}", qubit.index())?;
     }
     Ok(())
 }
