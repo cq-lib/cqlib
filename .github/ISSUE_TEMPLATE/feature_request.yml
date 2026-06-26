@@ -1,0 +1,85 @@
+name: "\U0001F680 Feature Request / 功能建议"
+description: "Suggest a new feature or enhancement for cqlib / 为 cqlib 提出新功能或改进建议"
+title: "[FEATURE] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Thank you for suggesting a feature! / 感谢你提出功能建议！**
+
+        Before proceeding / 提交前请确认：
+        - Search [existing issues](https://github.com/cq-lib/cqlib/issues) to check if this has already been proposed / 已搜索[现有 Issue](https://github.com/cq-lib/cqlib/issues)，确认未被提出过
+        - Major API changes should be discussed in an Issue first (see [CONTRIBUTING.md](CONTRIBUTING.md)) / 涉及重大 API 变更的建议，请先提 Issue 讨论方案（参考 [CONTRIBUTING.CN.md](CONTRIBUTING.CN.md)）
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problem statement / 问题描述"
+      description: "What problem does this feature solve? Describe your use case. / 这个功能解决什么问题？描述你的使用场景。"
+      placeholder: "E.g., I want to run VQE on custom Hamiltonians but the current API requires... / 例如：我想用 VQE 求解自定义哈密顿量，但当前 API 无法直接传入..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: "Which area does this affect? / 涉及的功能模块（可多选）"
+      multiple: true
+      options:
+        - "Circuit Construction / 量子线路构建（线路构造 / 参数化）"
+        - "Intermediate Representation / 中间表示（IR / 优化）"
+        - "Compiler Passes / 编译优化（门分解 / 路由 / 调度）"
+        - "Device Model / 设备模型（校准数据 / 拓扑 / 噪声）"
+        - "Simulation / 量子态模拟（态矢量 / 噪声模型）"
+        - "Error Mitigation / 误差缓解（ZNE / Virtual Distillation）"
+        - "Visualization / 可视化（线路图 / 结果图）"
+        - "Python Bindings / Python 绑定"
+        - "C Bindings / C 绑定"
+        - "Documentation / Examples / 文档 / 示例"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "Proposed solution / 方案建议"
+      description: "Describe what you would like to see. Code snippets or pseudo-code are welcome. / 描述你期望的功能。欢迎附上代码片段或伪代码。"
+      placeholder: |
+        ```python
+        # Example of how the API might look / 期望的 API 示例
+        from cqlib import Circuit, VQE
+
+        qc = Circuit(4)
+        ...
+        result = VQE(qc, hamiltonian).run()
+        ```
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternatives considered / 替代方案"
+      description: "What workarounds have you tried? Are there existing libraries that solve this? / 你尝试过哪些替代方案？是否有其他库已经实现了类似功能？"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: "Scope check / 范围确认"
+      options:
+        - label: "This is within cqlib's scope (quantum computing SDK: circuits, IR, compilation, simulation, error mitigation) / 该功能属于 cqlib 的项目范围（量子计算 SDK：线路、IR、编译、模拟、误差缓解）"
+          required: false
+        - label: "I am willing to contribute a PR for this feature / 我愿意为这个功能提交 PR"
+          required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: "Additional context / 补充信息"
+      placeholder: "References, papers, similar features in other frameworks (Qiskit, Cirq, PennyLane, etc.) / 参考文献、论文、其他框架的类似功能（Qiskit、Cirq、PennyLane 等）"
+    validations:
+      required: false

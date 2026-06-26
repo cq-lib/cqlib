@@ -1,0 +1,60 @@
+name: "\u2753 Question / 使用咨询"
+description: "Ask a question about using cqlib / 提出关于 cqlib 的使用问题"
+title: "[QUESTION] "
+labels: ["question", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Welcome! / 欢迎提问！** This template is for usage questions, troubleshooting help, and general inquiries. / 本模板用于使用问题、故障排查和一般咨询。
+
+        Before asking / 提问前请先：
+        - Check the [README](README.md) and [documentation](https://qc.zdxlz.com/) / 查阅 [README.CN.md](README.CN.md) 和[技术文档](https://qc.zdxlz.com/)
+        - Search [existing questions](https://github.com/cq-lib/cqlib/issues?q=label%3Aquestion) / 搜索[已有问题](https://github.com/cq-lib/cqlib/issues?q=label%3Aquestion)
+
+  - type: dropdown
+    id: topic
+    attributes:
+      label: "What is your question about? / 你的问题属于哪类？"
+      options:
+        - "Installation / Build / 安装 / 构建"
+        - "API Usage / API 使用"
+        - "Quantum Computing Theory / 量子计算理论"
+        - "Performance / Optimization / 性能 / 优化"
+        - "Documentation / 文档问题"
+        - "Other / 其他"
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: "Your question / 你的问题"
+      description: "Describe what you are trying to do and what you need help with. / 描述你在做什么、遇到了什么困难。"
+      placeholder: |
+        I am trying to... / 我正在尝试...
+        I have read / tried... / 我已经阅读 / 尝试了...
+        I expected..., but got... / 我期望...，但实际上...
+    validations:
+      required: true
+
+  - type: textarea
+    id: code
+    attributes:
+      label: "Relevant code (if applicable) / 相关代码（如有）"
+      description: "Paste the code or circuit you are working with. / 贴出你正在使用的代码或线路。"
+      render: markdown
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: "Environment / 运行环境"
+      description: "If relevant: cqlib version, OS, Python/Rust version / 如有需要：cqlib 版本、操作系统、Python / Rust 版本"
+      placeholder: |
+        - cqlib version / 版本：0.1.0
+        - Python：3.12.0
+        - OS / 操作系统：Ubuntu 22.04
+    validations:
+      required: false

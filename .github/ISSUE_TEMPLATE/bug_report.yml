@@ -1,0 +1,121 @@
+name: "\U0001F41B Bug Report / 缺陷报告"
+description: "Report a bug or unexpected behavior in cqlib / 报告 cqlib 的功能异常或错误"
+title: "[BUG] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Thank you for reporting a bug! / 感谢你报告 Bug！**
+
+        Before submitting / 提交前请确认：
+        - Search [existing issues](https://github.com/cq-lib/cqlib/issues) to avoid duplicates / 已搜索[现有 Issue](https://github.com/cq-lib/cqlib/issues)，避免重复提交
+        - Security vulnerabilities → email <tianyan@chinatelecom.cn> (see [SECURITY.md](SECURITY.md)) / 安全漏洞请发送邮件至 <tianyan@chinatelecom.cn>（参考 [SECURITY.CN.md](SECURITY.CN.md)）
+
+  - type: input
+    id: version
+    attributes:
+      label: "cqlib version / cqlib 版本"
+      description: "Run `pip show cqlib` or check `cargo.toml` / 运行 `pip show cqlib` 或检查 `cargo.toml`"
+      placeholder: "e.g. 0.1.0, commit a1b2c3d"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: "Which component? / 涉及哪个组件？"
+      options:
+        - "cqlib-core (Rust core / Rust 核心库)"
+        - "binding-python (Python bindings / Python 绑定)"
+        - "binding-c (C bindings / C 绑定)"
+        - "cqlib (public Rust crate / Rust 对外 crate)"
+        - "Other / Not sure / 其他 / 不确定"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: "Environment / 运行环境"
+      description: "OS, architecture, Rust version, Python version / 操作系统、CPU 架构、Rust 版本、Python 版本"
+      placeholder: |
+        - OS / 操作系统：Ubuntu 22.04 / macOS 14 / Windows 11
+        - Architecture / CPU 架构：x86_64 / ARM64
+        - Rust：1.85.0
+        - Python：3.12.0
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: "Steps to reproduce / 复现步骤"
+      description: "Minimal code to reproduce the bug / 提供最小复现代码"
+      placeholder: |
+        **Python：**
+        ```python
+        from cqlib import Circuit
+        qc = Circuit(2)
+        qc.h(0)
+        qc.cx(0, 1)
+        # bug happens here / 此处出现 Bug
+        ```
+
+        **Rust：**
+        ```rust
+        use cqlib_core::circuit::{Circuit, Qubit};
+        let mut qc = Circuit::new(2);
+        // bug happens here / 此处出现 Bug
+        ```
+
+        **C：**
+        ```c
+        #include <cqlib/circuit.h>
+        cqlib_circuit_t *qc = cqlib_circuit_new(2);
+        // bug happens here / 此处出现 Bug
+        ```
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: "Expected behavior / 期望行为"
+      placeholder: "What did you expect to happen? / 你期望发生什么？"
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: "Actual behavior / 实际行为"
+      placeholder: "What actually happened? Include full error messages, logs, or stack traces. / 实际发生了什么？请附上完整的错误信息、日志或堆栈跟踪。"
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: quantum_context
+    attributes:
+      label: "Quantum-specific context (if applicable) / 量子计算相关上下文（如适用）"
+      description: "For issues related to simulation, noise, or numerical computation / 如果问题涉及模拟、噪声或数值计算，请补充以下信息"
+      placeholder: |
+        - Input circuit / gates / 输入线路 / 量子门
+        - Parameters used (theta, random seed, etc.) / 使用的参数（theta、随机种子等）
+        - Simulator / backend configuration / 模拟器 / 后端配置
+        - Noise model parameters / 噪声模型参数
+        - Expected vs actual tolerance / precision / 预期与实际误差范围 / 精度
+      render: markdown
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: "Additional context / 补充信息"
+      placeholder: "Screenshots, related issues, workarounds tried, etc. / 截图、相关 Issue、尝试过的解决方案等"
+    validations:
+      required: false
