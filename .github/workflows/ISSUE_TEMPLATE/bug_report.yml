@@ -1,0 +1,121 @@
+name: "🐛 Bug Report"
+description: "Report a bug or unexpected behavior in cqlib"
+title: "[BUG] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Thank you for reporting a bug!**
+
+        Before submitting:
+        - Search [existing issues](https://github.com/cq-lib/cqlib/issues) to avoid duplicates
+        - Security vulnerabilities → email <tianyan@chinatelecom.cn> (see [SECURITY.md](SECURITY.md))
+
+  - type: input
+    id: version
+    attributes:
+      label: "cqlib version"
+      description: "Run `pip show cqlib` or check `cargo.toml`"
+      placeholder: "e.g. 0.1.0, commit a1b2c3d"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: "Which component?"
+      options:
+        - "cqlib-core (Rust core)"
+        - "binding-python (Python bindings)"
+        - "binding-c (C bindings)"
+        - "cqlib (public Rust crate)"
+        - "Other / Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: "Environment"
+      description: "OS, architecture, Rust version, Python version"
+      placeholder: |
+        - OS: Ubuntu 22.04 / macOS 14 / Windows 11
+        - Architecture: x86_64 / ARM64
+        - Rust: 1.85.0
+        - Python: 3.12.0
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: "Steps to reproduce"
+      description: "Minimal code to reproduce the bug"
+      placeholder: |
+        **Python:**
+        ```python
+        from cqlib import Circuit
+        qc = Circuit(2)
+        qc.h(0)
+        qc.cx(0, 1)
+        # bug happens here
+        ```
+
+        **Rust:**
+        ```rust
+        use cqlib_core::circuit::{Circuit, Qubit};
+        let mut qc = Circuit::new(2);
+        // bug happens here
+        ```
+
+        **C:**
+        ```c
+        #include <cqlib/circuit.h>
+        cqlib_circuit_t *qc = cqlib_circuit_new(2);
+        // bug happens here
+        ```
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: "Expected behavior"
+      placeholder: "What did you expect to happen?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: "Actual behavior"
+      placeholder: "What actually happened? Include full error messages, logs, or stack traces."
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: quantum_context
+    attributes:
+      label: "Quantum-specific context (if applicable)"
+      description: "For issues related to simulation, noise, or numerical computation"
+      placeholder: |
+        - Input circuit / gates
+        - Parameters used (theta, random seed, etc.)
+        - Simulator / backend configuration
+        - Noise model parameters
+        - Expected vs actual tolerance / precision
+      render: markdown
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: "Additional context"
+      placeholder: "Screenshots, related issues, workarounds tried, etc."
+    validations:
+      required: false

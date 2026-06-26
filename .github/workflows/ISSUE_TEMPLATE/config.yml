@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "\uD83D\uDCAC Ask a question in Discussions"
+    url: https://github.com/cq-lib/cqlib/discussions
+    about: "Please use Discussions for general questions and community conversation"
+  - name: "\uD83D\uDCD6 Read the documentation"
+    url: https://qc.zdxlz.com/
+    about: "Check the official cqlib documentation before opening an issue"
+  - name: "\u270D\uFE0F Contribution guide (\u4E2D\u6587)"
+    url: https://github.com/cq-lib/cqlib/blob/main/CONTRIBUTING.CN.md
+    about: "Read the contributing guide before submitting code"
