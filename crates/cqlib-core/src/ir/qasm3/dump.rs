@@ -186,7 +186,8 @@ pub fn dumps(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
     writeln!(&mut output)?;
     let skipped_values = skipped_classical_value_declarations(circuit.operations())?;
     let auto_measurements = AutoMeasurementMap::new(circuit.operations())?;
-    writeln!(&mut output, "qubit[{}] q;", circuit.num_qubits())?;
+    let qubit_register_width = qasm_qubit_register_width(circuit);
+    writeln!(&mut output, "qubit[{}] q;", qubit_register_width)?;
     let classical_names = ClassicalNameMap::new(circuit, &mut output, &skipped_values)?;
     auto_measurements.dump_declaration(&mut output)?;
     writeln!(&mut output)?;
@@ -209,6 +210,15 @@ pub fn dumps(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
         false,
     )?;
     Ok(output)
+}
+
+fn qasm_qubit_register_width(circuit: &Circuit) -> usize {
+    circuit
+        .qubits()
+        .into_iter()
+        .map(|qubit| qubit.index() + 1)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Serialize a circuit to an OpenQASM 3 string.

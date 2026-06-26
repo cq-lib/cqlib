@@ -454,6 +454,26 @@ meas[0] = measure q[0];
 }
 
 #[test]
+fn qcis_sparse_qubit_measurement_declares_enough_qubits() {
+    let circuit = qcis_loads("H Q1\nM Q1\n").unwrap();
+    let qasm = dumps(&circuit).unwrap();
+
+    assert_eq!(
+        qasm,
+        r#"OPENQASM 3.0;
+include "stdgates.inc";
+
+qubit[2] q;
+bit[1] meas;
+
+h q[1];
+meas[0] = measure q[1];
+"#
+    );
+    assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
+}
+
+#[test]
 fn rejects_general_store() {
     let mut circuit = Circuit::new(0);
     let bit = circuit.var(ClassicalType::Bit);
