@@ -75,11 +75,13 @@
 //! defined once before the circuit body and are still called by their Cqlib
 //! names in the main circuit.
 //!
-//! Classical variables are emitted as `c0`, `c1`, ... and immutable classical
-//! measurement values as `v0`, `v1`, .... Measurement followed immediately by a
-//! compatible store is folded to OpenQASM 3 assignment form, for example
-//! `c0 = measure q;`. Standalone measurements are assigned to the corresponding
-//! `vN` value.
+//! The top-level qubit collection is emitted as `qubit[n] q`, including the
+//! single-qubit case. Classical variables are emitted as `c0`, `c1`, ... and
+//! immutable classical measurement values as `v0`, `v1`, .... Measurement
+//! followed immediately by a compatible store is folded to OpenQASM 3 assignment
+//! form, for example `c0 = measure q;`. Standalone measurements are assigned to
+//! a generated `bit[k] meas` register instead of being discarded, so downstream
+//! hardware-oriented consumers get explicit classical destinations.
 //!
 //! The dumper is intentionally conservative. It rejects constructs that would
 //! lose semantics in generated OpenQASM 3, including delay, matrix-only unitary

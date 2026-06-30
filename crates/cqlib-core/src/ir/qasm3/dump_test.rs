@@ -243,7 +243,7 @@ fn dumps_circuit_global_phase_as_gphase_statement() {
         r#"OPENQASM 3.0;
 include "stdgates.inc";
 
-qubit q;
+qubit[1] q;
 
 gphase(0.25);
 "#
@@ -343,7 +343,7 @@ c0[1] = measure q[0];
 }
 
 #[test]
-fn dumps_unused_partial_bitvec_measurement_as_discarded_bits() {
+fn dumps_unused_partial_bitvec_measurement_to_generated_register() {
     let q0 = Qubit::new(0);
     let q2 = Qubit::new(2);
     let mut circuit = Circuit::new(3);
@@ -357,14 +357,15 @@ fn dumps_unused_partial_bitvec_measurement_as_discarded_bits() {
 include "stdgates.inc";
 
 qubit[3] q;
+bit[2] meas;
 
-measure q[2];
-measure q[0];
+meas[0] = measure q[2];
+meas[1] = measure q[0];
 "#
     );
     let loaded = qasm3_loads(&qasm).unwrap();
     assert_eq!(loaded.num_qubits(), 3);
-    assert_eq!(loaded.operations().len(), 2);
+    assert_eq!(loaded.operations().len(), 4);
 }
 
 #[test]
@@ -381,10 +382,10 @@ fn dumps_single_bit_measurement_round_trip() {
         r#"OPENQASM 3.0;
 include "stdgates.inc";
 
-qubit q;
+qubit[1] q;
 bit c0;
 
-c0 = measure q;
+c0 = measure q[0];
 "#
     );
     let loaded = qasm3_loads(&qasm).unwrap();
@@ -395,7 +396,7 @@ c0 = measure q;
 }
 
 #[test]
-fn dumps_unused_measurement_values_without_classical_declarations() {
+fn dumps_unused_measurement_values_to_generated_register() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let mut circuit = Circuit::new(2);
@@ -410,13 +411,14 @@ fn dumps_unused_measurement_values_without_classical_declarations() {
 include "stdgates.inc";
 
 qubit[2] q;
+bit[2] meas;
 
-measure q[0];
-measure q[1];
+meas[0] = measure q[0];
+meas[1] = measure q[1];
 "#
     );
     let loaded = qasm3_loads(&qasm).unwrap();
-    assert_eq!(loaded.operations().len(), 2);
+    assert_eq!(loaded.operations().len(), 4);
 }
 
 #[test]
@@ -425,13 +427,70 @@ fn qcis_measurements_dump_to_reloadable_qasm3() {
     let qasm = dumps(&circuit).unwrap();
 
     assert!(!qasm.contains("bit v"), "got:\n{qasm}");
-    assert!(qasm.contains("measure q[0];"), "got:\n{qasm}");
-    assert!(qasm.contains("measure q[1];"), "got:\n{qasm}");
+    assert!(qasm.contains("bit[2] meas;"), "got:\n{qasm}");
+    assert!(qasm.contains("meas[0] = measure q[0];"), "got:\n{qasm}");
+    assert!(qasm.contains("meas[1] = measure q[1];"), "got:\n{qasm}");
     assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
 }
 
 #[test]
-fn rejects_general_store() {
+fn qcis_single_measurement_dumps_with_explicit_registers() {
+    let circuit = qcis_loads("H Q0\nM Q0\n").unwrap();
+    let qasm = dumps(&circuit).unwrap();
+
+    assert_eq!(
+        qasm,
+        r#"OPENQASM 3.0;
+include "stdgates.inc";
+
+qubit[1] q;
+bit[1] meas;
+
+h q[0];
+meas[0] = measure q[0];
+"#
+    );
+    assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
+}
+
+#[test]
+fn qcis_sparse_qubit_measurement_declares_enough_qubits() {
+    let circuit = qcis_loads("H Q1\nM Q1\n").unwrap();
+    let qasm = dumps(&circuit).unwrap();
+
+    assert_eq!(
+        qasm,
+        r#"OPENQASM 3.0;
+include "stdgates.inc";
+
+qubit[1] q;
+// q[0] -> Q1
+bit[1] meas;
+
+h q[0];
+meas[0] = measure q[0];
+"#
+    );
+    assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
+}
+
+#[test]
+fn dumps_general_store_assignment() {
+    let mut circuit = Circuit::new(0);
+    let bit = circuit.var(ClassicalType::Bool);
+    circuit
+        .store(bit, ClassicalExpr::bool_literal(true))
+        .unwrap();
+
+    let qasm = dumps(&circuit).unwrap();
+
+    assert!(qasm.contains("bool c0;"), "got:\n{qasm}");
+    assert!(qasm.contains("c0 = true;"), "got:\n{qasm}");
+    assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
+}
+
+#[test]
+fn rejects_scalar_bit_store_assignment() {
     let mut circuit = Circuit::new(0);
     let bit = circuit.var(ClassicalType::Bit);
     circuit
@@ -443,8 +502,148 @@ fn rejects_general_store() {
     assert!(matches!(
         err,
         Qasm3DumpError::UnsupportedClassicalData(message)
-            if message.contains("general store")
+            if message.contains("scalar bit store")
     ));
+}
+
+#[test]
+fn round_trips_if_branch_measurement_with_initializer() {
+    let source = r#"OPENQASM 3.0;
+include "stdgates.inc";
+bool flag = true;
+qubit[2] q;
+if (flag) {
+    h q[0];
+    measure q[0];
+}
+measure q[1];
+"#;
+    let qasm = dumps(&qasm3_loads(source).unwrap()).unwrap();
+
+    assert!(qasm.contains("bool c0;"), "got:\n{qasm}");
+    assert!(qasm.contains("c0 = true;"), "got:\n{qasm}");
+    assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
+}
+
+#[test]
+fn round_trips_switch_branch_measurements_with_initializer() {
+    let source = r#"OPENQASM 3.0;
+include "stdgates.inc";
+uint[2] selector = 1;
+qubit[3] q;
+switch (selector) {
+    case 0 {
+        x q[0];
+        measure q[0];
+    }
+    case 1 {
+        h q[1];
+        measure q[1];
+    }
+    default {
+        z q[2];
+        measure q[2];
+    }
+}
+"#;
+    let qasm = dumps(&qasm3_loads(source).unwrap()).unwrap();
+
+    assert!(qasm.contains("uint[2] c0;"), "got:\n{qasm}");
+    assert!(qasm.contains("c0 = 1;"), "got:\n{qasm}");
+    assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
+}
+
+#[test]
+fn round_trips_extension_gates_then_measurement() {
+    let source = r#"OPENQASM 3.0;
+include "stdgates.inc";
+qubit[2] q;
+rxx(pi/7) q[0], q[1];
+ryy(-pi/5) q[0], q[1];
+rzz(0.125) q[0], q[1];
+measure q[1];
+"#;
+    let qasm = dumps(&qasm3_loads(source).unwrap()).unwrap();
+
+    assert!(qasm.contains("gate rxx(theta)"), "got:\n{qasm}");
+    assert!(qasm.contains("gate ryy(theta)"), "got:\n{qasm}");
+    assert!(qasm.contains("gate rzz(theta)"), "got:\n{qasm}");
+    assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
+}
+
+#[test]
+fn round_trips_nested_if_measurements_with_initializers() {
+    let source = r#"OPENQASM 3.0;
+bool outer = true;
+bool inner = false;
+qubit[2] q;
+if (outer) {
+    if (inner) {
+        measure q[0];
+    } else {
+        measure q[1];
+    }
+}
+"#;
+    let qasm = dumps(&qasm3_loads(source).unwrap()).unwrap();
+
+    assert!(qasm.contains("bool c0;"), "got:\n{qasm}");
+    assert!(qasm.contains("bool c1;"), "got:\n{qasm}");
+    assert!(qasm.contains("c0 = true;"), "got:\n{qasm}");
+    assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
+}
+
+#[test]
+fn round_trips_symbolic_parameter_input() {
+    let source = r#"OPENQASM 3.0;
+include "stdgates.inc";
+input angle[64] theta;
+qubit q;
+rx(theta) q;
+measure q;
+"#;
+    let qasm = dumps(&qasm3_loads(source).unwrap()).unwrap();
+
+    assert!(qasm.contains("input angle[64] theta;"), "got:\n{qasm}");
+    assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
+}
+
+#[test]
+fn avoids_auto_measurement_name_collision_with_gate() {
+    let source = r#"OPENQASM 3.0;
+include "stdgates.inc";
+gate meas a {
+    x a;
+}
+qubit target;
+meas target;
+measure target;
+"#;
+    let qasm = dumps(&qasm3_loads(source).unwrap()).unwrap();
+
+    assert!(qasm.contains("gate meas"), "got:\n{qasm}");
+    assert!(qasm.contains("bit[1] meas0;"), "got:\n{qasm}");
+    assert!(qasm.contains("meas0[0] = measure q[0];"), "got:\n{qasm}");
+    assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
+}
+
+#[test]
+fn avoids_qubit_register_name_collision_with_gate() {
+    let source = r#"OPENQASM 3.0;
+include "stdgates.inc";
+gate q a {
+    h a;
+}
+qubit target;
+q target;
+measure target;
+"#;
+    let qasm = dumps(&qasm3_loads(source).unwrap()).unwrap();
+
+    assert!(qasm.contains("gate q"), "got:\n{qasm}");
+    assert!(qasm.contains("qubit[1] q0;"), "got:\n{qasm}");
+    assert!(qasm.contains("q q0[0];"), "got:\n{qasm}");
+    assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
 }
 
 #[test]

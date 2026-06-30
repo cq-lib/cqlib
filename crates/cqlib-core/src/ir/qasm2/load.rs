@@ -82,6 +82,7 @@ use crate::ir::qasm2::ast::{
 use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Component, Path, PathBuf};
 
 /// Trait for abstracting file system access during OpenQASM parsing.
@@ -213,8 +214,24 @@ fn parse_qasm_source_with_context(
     base_path: Option<PathBuf>,
     resolver: Box<dyn QasmSourceResolver>,
 ) -> Result<Circuit, QasmParseError> {
+    if let Some(literal) = first_oversized_integer_literal(source) {
+        return Err(QasmParseError::ParseError(format!(
+            "Integer literal '{literal}' exceeds supported i64 range"
+        )));
+    }
+
     let parser = parser::MainParser::new();
-    let program = match parser.parse(source) {
+    let parsed = catch_unwind(AssertUnwindSafe(|| parser.parse(source))).map_err(|payload| {
+        let message = if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else if let Some(message) = payload.downcast_ref::<&'static str>() {
+            (*message).to_string()
+        } else {
+            "OpenQASM 2.0 parser panicked".to_string()
+        };
+        QasmParseError::ParseError(message)
+    })?;
+    let program = match parsed {
         Ok(program) => program,
         Err(e) => return Err(QasmParseError::ParseError(format!("{:?}", e))),
     };
@@ -224,6 +241,48 @@ fn parse_qasm_source_with_context(
 
     let mut converter = AstToCircuit::new_with_root(base_path, root_path, resolver);
     converter.convert(&program)
+}
+
+fn first_oversized_integer_literal(source: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            index += 1;
+            while index < bytes.len() && bytes[index] != b'"' {
+                index += 1;
+            }
+            index += usize::from(index < bytes.len());
+            continue;
+        }
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            index += 2;
+            while index < bytes.len() && bytes[index] != b'\n' && bytes[index] != b'\r' {
+                index += 1;
+            }
+            continue;
+        }
+        if !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        let prev = start.checked_sub(1).and_then(|idx| bytes.get(idx)).copied();
+        let next = bytes.get(index).copied();
+        if matches!(prev, Some(b'.' | b'e' | b'E')) || matches!(next, Some(b'.' | b'e' | b'E')) {
+            continue;
+        }
+
+        let literal = &source[start..index];
+        if literal.parse::<i64>().is_err() {
+            return Some(literal.to_string());
+        }
+    }
+    None
 }
 
 /// Errors that can occur during OpenQASM parsing and conversion.

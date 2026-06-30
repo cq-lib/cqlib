@@ -1432,6 +1432,28 @@ fn test_dump_all_standard_gates() {
 }
 
 #[test]
+fn test_dump_qelib1_cu1_without_redefinition_roundtrips() {
+    let circuit = loads(
+        r#"
+        OPENQASM 2.0;
+        include "qelib1.inc";
+        qreg q[2];
+        cu1(pi/2) q[0],q[1];
+        "#,
+    )
+    .unwrap();
+
+    let qasm = dumps(&circuit).unwrap();
+
+    assert!(!qasm.contains("gate cu1"), "got:\n{qasm}");
+    assert!(
+        qasm.contains("cu1(1.5707963267948966) q[0],q[1];"),
+        "got:\n{qasm}"
+    );
+    loads(&qasm).expect("dumped qelib1 cu1 call should reload");
+}
+
+#[test]
 fn test_dump_fsim_gate_roundtrips_as_cqlib_extension() {
     let mut circuit = Circuit::new(2);
     let q0 = Qubit::new(0);

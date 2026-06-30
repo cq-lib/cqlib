@@ -410,6 +410,45 @@ fn test_builtin_qelib1_gate_declarations_are_allowed() {
 }
 
 #[test]
+fn test_register_broadcast_standard_gates() {
+    let circuit = loads(
+        r#"
+        OPENQASM 2.0;
+        include "qelib1.inc";
+        qreg q[3];
+        qreg r[3];
+        h q;
+        cx q,r;
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(circuit.operations().len(), 6);
+    assert_standard_gate(&circuit, 0, StandardGate::H, &[0], &[]);
+    assert_standard_gate(&circuit, 1, StandardGate::H, &[1], &[]);
+    assert_standard_gate(&circuit, 2, StandardGate::H, &[2], &[]);
+    assert_standard_gate(&circuit, 3, StandardGate::CX, &[0, 3], &[]);
+    assert_standard_gate(&circuit, 4, StandardGate::CX, &[1, 4], &[]);
+    assert_standard_gate(&circuit, 5, StandardGate::CX, &[2, 5], &[]);
+}
+
+#[test]
+fn test_integer_overflow_reports_parse_error_instead_of_panicking() {
+    let error = loads(
+        r#"
+        OPENQASM 2.0;
+        include "qelib1.inc";
+        qreg q[1];
+        creg c[1];
+        if(c==2037035976334486086268445688409378161051468393665936250636140449354381299763336706183397376) h q[0];
+        "#,
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, QasmParseError::ParseError(_)));
+}
+
+#[test]
 fn test_qelib1_reserved_gate_names_match_static_tables() {
     use std::collections::HashSet;
 
