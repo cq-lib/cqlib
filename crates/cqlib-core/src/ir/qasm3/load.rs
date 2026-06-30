@@ -57,6 +57,7 @@ pub fn load<P: AsRef<Path>>(path: P) -> Result<Circuit, Qasm3ParseError> {
     let source = fs::read_to_string(path).map_err(Qasm3ParseError::IoError)?;
     let source = normalize_openqasm3_header(&source);
     let source = rewrite_scalar_bit_measurement_assignments(&source);
+    let source = inject_extension_gate_definitions(&source);
     let search_paths = path.parent().map(|parent| vec![parent.to_path_buf()]);
     let result =
         syntax_to_semantics::parse_source_string(source, path.to_str(), search_paths.as_deref());
@@ -99,6 +100,7 @@ pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Circuit, Qasm3ParseError> {
 pub fn loads(source: &str) -> Result<Circuit, Qasm3ParseError> {
     let source = normalize_openqasm3_header(source);
     let source = rewrite_scalar_bit_measurement_assignments(&source);
+    let source = inject_extension_gate_definitions(&source);
     let result =
         syntax_to_semantics::parse_source_string(source, Some("qasm3_source"), None::<&[PathBuf]>);
     convert_parse_result(
@@ -169,6 +171,77 @@ fn rewrite_scalar_bit_measurement_assignments(source: &str) -> String {
         rewritten.push('\n');
     }
     rewritten
+}
+
+fn inject_extension_gate_definitions(source: &str) -> String {
+    let definitions = [
+        (
+            "rxx",
+            "gate rxx(theta) a,b { h a; h b; cx a,b; rz(theta) b; cx a,b; h a; h b; }",
+        ),
+        (
+            "ryy",
+            "gate ryy(theta) a,b { rx(pi/2) a; rx(pi/2) b; cx a,b; rz(theta) b; cx a,b; rx(-pi/2) a; rx(-pi/2) b; }",
+        ),
+        (
+            "rzz",
+            "gate rzz(theta) a,b { cx a,b; rz(theta) b; cx a,b; }",
+        ),
+        (
+            "rzx",
+            "gate rzx(theta) a,b { h b; cx a,b; rz(theta) b; cx a,b; h b; }",
+        ),
+        (
+            "fsim",
+            "gate fsim(theta,phi) a,b { rxx(theta) a,b; ryy(theta) a,b; gphase(-phi/4); rz(-phi/2) a; rz(-phi/2) b; rzz(phi/2) a,b; }",
+        ),
+    ];
+    let injected = definitions
+        .iter()
+        .filter_map(|(name, definition)| {
+            if has_gate_definition(source, name) || !has_gate_call(source, name) {
+                None
+            } else {
+                Some(*definition)
+            }
+        })
+        .collect::<Vec<_>>();
+    if injected.is_empty() {
+        return source.to_string();
+    }
+
+    let insertion = format!("\n{}\n", injected.join("\n\n"));
+    let mut lines = source
+        .lines()
+        .map(ToString::to_string)
+        .collect::<Vec<String>>();
+    let insert_after = lines
+        .iter()
+        .rposition(|line| line.trim() == "include \"stdgates.inc\";")
+        .or_else(|| {
+            lines
+                .iter()
+                .position(|line| line.trim_start().starts_with("OPENQASM "))
+        });
+    if let Some(index) = insert_after {
+        lines.insert(index + 1, insertion);
+    } else {
+        lines.insert(0, insertion);
+    }
+
+    let mut rewritten = lines.join("\n");
+    if source.ends_with('\n') {
+        rewritten.push('\n');
+    }
+    rewritten
+}
+
+fn has_gate_definition(source: &str, name: &str) -> bool {
+    gate_definition_regex(name).is_match(source)
+}
+
+fn has_gate_call(source: &str, name: &str) -> bool {
+    gate_call_regex(name).is_match(source)
 }
 
 #[derive(Debug)]
@@ -278,6 +351,19 @@ fn scalar_bit_measurement_assignment_regex() -> &'static Regex {
         )
         .expect("valid scalar bit measurement assignment regex")
     })
+}
+
+fn gate_definition_regex(name: &str) -> Regex {
+    Regex::new(&format!(r"(?m)^\s*gate\s+{}\b", regex::escape(name)))
+        .expect("valid gate definition regex")
+}
+
+fn gate_call_regex(name: &str) -> Regex {
+    Regex::new(&format!(
+        r"(?m)^\s*{}\s*(?:\(|[A-Za-z_])",
+        regex::escape(name)
+    ))
+    .expect("valid gate call regex")
 }
 
 fn identifier_regex() -> &'static Regex {

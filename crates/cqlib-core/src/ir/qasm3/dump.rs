@@ -184,22 +184,28 @@ pub fn dumps(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
     }
 
     writeln!(&mut output)?;
+    let mut name_allocator =
+        NameAllocator::new(reserved_top_level_names(&defined_gates, &unitary_gate_defs));
+    let param_map = dump_input_parameters(circuit, &mut output, &mut name_allocator)?;
     let skipped_values = skipped_classical_value_declarations(circuit.operations())?;
-    let auto_measurements = AutoMeasurementMap::new(circuit.operations())?;
-    let qubit_map = logical_qubit_map(circuit);
-    writeln!(&mut output, "qubit[{}] q;", qubit_map.len())?;
+    let qubit_register = name_allocator.take("q");
+    let auto_measurements =
+        AutoMeasurementMap::new(circuit.operations(), name_allocator.take("meas"))?;
+    let qubit_map = logical_qubit_map(circuit, &qubit_register);
+    writeln!(&mut output, "qubit[{}] {qubit_register};", qubit_map.len())?;
     dump_qubit_mapping_comment(&mut output, &qubit_map)?;
-    let classical_names = ClassicalNameMap::new(circuit, &mut output, &skipped_values)?;
+    let classical_names =
+        ClassicalNameMap::new(circuit, &mut output, &skipped_values, &mut name_allocator)?;
     auto_measurements.dump_declaration(&mut output)?;
     writeln!(&mut output)?;
-    dump_global_phase(circuit, &mut output)?;
+    dump_global_phase(circuit, &mut output, &param_map)?;
 
-    let param_map = HashMap::new();
     dump_operations(
         circuit,
         circuit.operations(),
         &mut output,
         &qubit_map,
+        &qubit_register,
         &param_map,
         &classical_names,
         &auto_measurements,
@@ -208,13 +214,70 @@ pub fn dumps(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
     Ok(output)
 }
 
-fn logical_qubit_map(circuit: &Circuit) -> HashMap<Qubit, String> {
+#[derive(Debug)]
+struct NameAllocator {
+    used: HashSet<String>,
+}
+
+impl NameAllocator {
+    fn new(used: HashSet<String>) -> Self {
+        Self { used }
+    }
+
+    fn take(&mut self, preferred: &str) -> String {
+        if self.used.insert(preferred.to_string()) {
+            return preferred.to_string();
+        }
+
+        let mut suffix = 0usize;
+        loop {
+            let candidate = format!("{preferred}{suffix}");
+            if self.used.insert(candidate.clone()) {
+                return candidate;
+            }
+            suffix += 1;
+        }
+    }
+
+    fn take_indexed(&mut self, prefix: &str, index: usize) -> String {
+        self.take(&format!("{prefix}{index}"))
+    }
+}
+
+fn reserved_top_level_names(
+    defined_gates: &IndexMap<String, CircuitGate>,
+    unitary_gate_defs: &IndexMap<String, Arc<FrozenCircuit>>,
+) -> HashSet<String> {
+    defined_gates
+        .keys()
+        .chain(unitary_gate_defs.keys())
+        .cloned()
+        .collect()
+}
+
+fn dump_input_parameters(
+    circuit: &Circuit,
+    output: &mut String,
+    name_allocator: &mut NameAllocator,
+) -> Result<HashMap<String, Parameter>, Qasm3DumpError> {
+    let mut param_map = HashMap::new();
+    for symbol in circuit.symbols() {
+        let name = name_allocator.take(symbol);
+        writeln!(output, "input angle[64] {name};")?;
+        if name != *symbol {
+            param_map.insert(symbol.clone(), Parameter::symbol(&name));
+        }
+    }
+    Ok(param_map)
+}
+
+fn logical_qubit_map(circuit: &Circuit, register_name: &str) -> HashMap<Qubit, String> {
     let mut qubits = circuit.qubits();
     qubits.sort_by_key(|qubit| qubit.index());
     qubits
         .into_iter()
         .enumerate()
-        .map(|(logical_index, qubit)| (qubit, format!("q[{logical_index}]")))
+        .map(|(logical_index, qubit)| (qubit, format!("{register_name}[{logical_index}]")))
         .collect()
 }
 
@@ -253,10 +316,18 @@ pub fn to_string(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
     dumps(circuit)
 }
 
-fn dump_global_phase(circuit: &Circuit, output: &mut String) -> Result<(), Qasm3DumpError> {
+fn dump_global_phase(
+    circuit: &Circuit,
+    output: &mut String,
+    param_map: &HashMap<String, Parameter>,
+) -> Result<(), Qasm3DumpError> {
     let phase = circuit.global_phase();
     if phase.is_zero() {
         return Ok(());
+    }
+    let mut phase = phase.clone();
+    for (symbol, replacement) in param_map {
+        phase = phase.replace(symbol, replacement.clone());
     }
     writeln!(output, "gphase({});", phase.to_string().replace("π", "pi"))?;
     Ok(())
@@ -273,10 +344,11 @@ impl ClassicalNameMap {
         circuit: &Circuit,
         output: &mut String,
         skipped_values: &HashSet<ClassicalValue>,
+        name_allocator: &mut NameAllocator,
     ) -> Result<Self, Qasm3DumpError> {
         let mut map = Self::default();
         for (index, ty) in circuit.classical_vars().iter().copied().enumerate() {
-            let name = format!("c{index}");
+            let name = name_allocator.take_indexed("c", index);
             writeln!(output, "{} {name};", classical_decl_type(ty)?)?;
             map.vars
                 .insert(ClassicalVar::new(circuit.id(), index as u32, ty), name);
@@ -286,7 +358,7 @@ impl ClassicalNameMap {
             if skipped_values.contains(&value) {
                 continue;
             }
-            let name = format!("v{index}");
+            let name = name_allocator.take_indexed("v", index);
             writeln!(output, "{} {name};", classical_decl_type(ty)?)?;
             map.values.insert(value, name);
         }
@@ -454,6 +526,7 @@ fn dump_gate_definition(gate: &CircuitGate, output: &mut String) -> Result<(), Q
         gate.circuit.circuit.operations(),
         output,
         &qubit_map,
+        "",
         &HashMap::new(),
         &ClassicalNameMap::default(),
         &AutoMeasurementMap::default(),
@@ -489,6 +562,7 @@ fn dump_unitary_gate_definition(
         frozen.circuit.operations(),
         output,
         &qubit_map,
+        "",
         &HashMap::new(),
         &ClassicalNameMap::default(),
         &AutoMeasurementMap::default(),
@@ -503,6 +577,7 @@ fn dump_operations(
     operations: &[Operation],
     output: &mut String,
     qubit_map: &HashMap<Qubit, String>,
+    qubit_register: &str,
     param_map: &HashMap<String, Parameter>,
     classical_names: &ClassicalNameMap,
     auto_measurements: &AutoMeasurementMap,
@@ -570,6 +645,7 @@ fn dump_operations(
                     destination,
                     output,
                     qubit_map,
+                    qubit_register,
                     classical_names,
                     auto_measurements,
                 )?;
@@ -578,9 +654,7 @@ fn dump_operations(
                 }
             }
             Instruction::ClassicalData(ClassicalDataOp::Store { .. }) => {
-                return Err(Qasm3DumpError::UnsupportedClassicalData(
-                    "general store assignment".to_string(),
-                ));
+                dump_classical_store(op, output, classical_names)?;
             }
             Instruction::ClassicalControl(control) => {
                 if in_gate_body {
@@ -593,6 +667,7 @@ fn dump_operations(
                     circuit,
                     output,
                     qubit_map,
+                    qubit_register,
                     param_map,
                     classical_names,
                     auto_measurements,
@@ -622,6 +697,31 @@ fn is_zero_initializer(target: ClassicalVar, value: &ClassicalExpr) -> bool {
     }
 }
 
+fn dump_classical_store(
+    op: &Operation,
+    output: &mut String,
+    names: &ClassicalNameMap,
+) -> Result<(), Qasm3DumpError> {
+    let Instruction::ClassicalData(ClassicalDataOp::Store { target, value }) = &op.instruction
+    else {
+        return Err(Qasm3DumpError::UnsupportedClassicalData(
+            "non-store classical operation".to_string(),
+        ));
+    };
+    if target.ty() == ClassicalType::Bit {
+        return Err(Qasm3DumpError::UnsupportedClassicalData(
+            "scalar bit store assignment".to_string(),
+        ));
+    }
+    writeln!(
+        output,
+        "{} = {};",
+        names.var(*target)?,
+        classical_expr_to_qasm(value, names)?
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 enum MeasurementDestination {
     Value(ClassicalValue),
@@ -640,11 +740,15 @@ struct AutoMeasurementTarget {
 struct AutoMeasurementMap {
     targets: HashMap<ClassicalValue, AutoMeasurementTarget>,
     width: usize,
+    name: String,
 }
 
 impl AutoMeasurementMap {
-    fn new(operations: &[Operation]) -> Result<Self, Qasm3DumpError> {
-        let mut map = Self::default();
+    fn new(operations: &[Operation], name: String) -> Result<Self, Qasm3DumpError> {
+        let mut map = Self {
+            name,
+            ..Self::default()
+        };
         collect_auto_measurements(operations, &mut map)?;
         Ok(map)
     }
@@ -665,7 +769,7 @@ impl AutoMeasurementMap {
 
     fn dump_declaration(&self, output: &mut String) -> Result<(), Qasm3DumpError> {
         if self.width > 0 {
-            writeln!(output, "bit[{}] meas;", self.width)?;
+            writeln!(output, "bit[{}] {};", self.width, self.name)?;
         }
         Ok(())
     }
@@ -856,6 +960,7 @@ fn dump_measurement(
     destination: MeasurementDestination,
     output: &mut String,
     qubit_map: &HashMap<Qubit, String>,
+    qubit_register: &str,
     names: &ClassicalNameMap,
     auto_measurements: &AutoMeasurementMap,
 ) -> Result<(), Qasm3DumpError> {
@@ -871,7 +976,7 @@ fn dump_measurement(
                     value.index()
                 )));
             };
-            ("meas".to_string(), target.width as u32)
+            (auto_measurements.name.clone(), target.width as u32)
         }
         MeasurementDestination::VarWhole(var) => (names.var(var)?.to_string(), var.ty().width()),
         MeasurementDestination::VarBit(var, bit) => (format!("{}[{bit}]", names.var(var)?), 1),
@@ -888,26 +993,40 @@ fn dump_measurement(
         let source = measurement_source(&qubits[0], qubit_map.len());
         if let MeasurementDestination::Discard(value) = destination {
             let target = auto_measurements.target(value).unwrap();
-            writeln!(output, "meas[{}] = measure {source};", target.start)?;
+            writeln!(
+                output,
+                "{}[{}] = measure {source};",
+                auto_measurements.name, target.start
+            )?;
         } else {
             writeln!(output, "{target} = measure {source};")?;
         }
-    } else if is_full_register_measurement(&qubits, qubit_map.len()) {
+    } else if is_full_register_measurement(&qubits, qubit_register, qubit_map.len()) {
         if let MeasurementDestination::Discard(value) = destination {
             let target = auto_measurements.target(value).unwrap();
             for (index, qubit) in qubits.iter().enumerate() {
                 let source = measurement_source(qubit, qubit_map.len());
-                writeln!(output, "meas[{}] = measure {source};", target.start + index)?;
+                writeln!(
+                    output,
+                    "{}[{}] = measure {source};",
+                    auto_measurements.name,
+                    target.start + index
+                )?;
             }
         } else {
-            writeln!(output, "{target} = measure q;")?;
+            writeln!(output, "{target} = measure {qubit_register};")?;
         }
     } else {
         for (index, qubit) in qubits.iter().enumerate() {
             let source = measurement_source(qubit, qubit_map.len());
             if let MeasurementDestination::Discard(value) = destination {
                 let target = auto_measurements.target(value).unwrap();
-                writeln!(output, "meas[{}] = measure {source};", target.start + index)?;
+                writeln!(
+                    output,
+                    "{}[{}] = measure {source};",
+                    auto_measurements.name,
+                    target.start + index
+                )?;
             } else {
                 writeln!(output, "{target}[{index}] = measure {source};")?;
             }
@@ -921,12 +1040,16 @@ fn measurement_source(qubit: &str, qubit_count: usize) -> &str {
     qubit
 }
 
-fn is_full_register_measurement(qubits: &[String], qubit_count: usize) -> bool {
+fn is_full_register_measurement(
+    qubits: &[String],
+    qubit_register: &str,
+    qubit_count: usize,
+) -> bool {
     qubits.len() == qubit_count
         && qubits
             .iter()
             .enumerate()
-            .all(|(index, qubit)| qubit == &format!("q[{index}]"))
+            .all(|(index, qubit)| qubit == &format!("{qubit_register}[{index}]"))
 }
 
 fn dump_standard_gate(
@@ -1054,6 +1177,7 @@ fn dump_control_flow(
     circuit: &Circuit,
     output: &mut String,
     qubit_map: &HashMap<Qubit, String>,
+    qubit_register: &str,
     param_map: &HashMap<String, Parameter>,
     classical_names: &ClassicalNameMap,
     auto_measurements: &AutoMeasurementMap,
@@ -1067,6 +1191,7 @@ fn dump_control_flow(
                 op.then_body().operations(),
                 output,
                 qubit_map,
+                qubit_register,
                 param_map,
                 classical_names,
                 auto_measurements,
@@ -1079,6 +1204,7 @@ fn dump_control_flow(
                     body.operations(),
                     output,
                     qubit_map,
+                    qubit_register,
                     param_map,
                     classical_names,
                     auto_measurements,
@@ -1097,6 +1223,7 @@ fn dump_control_flow(
                     case.body().operations(),
                     output,
                     qubit_map,
+                    qubit_register,
                     param_map,
                     classical_names,
                     auto_measurements,
@@ -1111,6 +1238,7 @@ fn dump_control_flow(
                     body.operations(),
                     output,
                     qubit_map,
+                    qubit_register,
                     param_map,
                     classical_names,
                     auto_measurements,
@@ -1147,13 +1275,7 @@ fn classical_expr_to_qasm(
         ClassicalExprKind::Var(var) => names.var(*var)?.to_string(),
         ClassicalExprKind::Value(value) => names.value(*value)?.to_string(),
         ClassicalExprKind::BoolLiteral(value) => value.to_string(),
-        ClassicalExprKind::BitLiteral(value) => {
-            if *value {
-                "1".to_string()
-            } else {
-                "0".to_string()
-            }
-        }
+        ClassicalExprKind::BitLiteral(value) => value.to_string(),
         ClassicalExprKind::UIntLiteral { value, .. } => value.to_string(),
         ClassicalExprKind::BitVecLiteral { width, value } => {
             format!("\"{value:0width$b}\"", width = width.get() as usize)
