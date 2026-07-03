@@ -148,13 +148,13 @@ fn loads_indexed_bit_measurement_assignment() {
 }
 
 #[test]
-fn loads_scalar_bit_measurement_assignment_from_indexed_qubit_with_compat_rewrite() {
+fn loads_scalar_bit_measurement_assignment_from_indexed_qubit() {
     let circuit = loads(
         r#"
         OPENQASM 3.0;
         include "stdgates.inc";
         qubit[2] q;
-        bit v0; // scalar target accepted through conservative compatibility rewrite
+        bit v0;
         v0 = measure q[0];
         "#,
     )
@@ -169,13 +169,13 @@ fn loads_scalar_bit_measurement_assignment_from_indexed_qubit_with_compat_rewrit
     assert!(matches!(
         circuit.operations()[1].instruction,
         Instruction::ClassicalData(ClassicalDataOp::Store { target, .. })
-            if target.ty() == ClassicalType::bit_vec(1).unwrap()
+            if target.ty() == ClassicalType::Bit
     ));
 }
 
 #[test]
-fn rejects_scalar_bit_measurement_assignment_when_target_is_read_later() {
-    assert_err(
+fn loads_scalar_bit_measurement_assignment_when_target_is_read_later() {
+    let circuit = loads(
         r#"
         OPENQASM 3.0;
         include "stdgates.inc";
@@ -186,8 +186,14 @@ fn rejects_scalar_bit_measurement_assignment_when_target_is_read_later() {
             x q[0];
         }
         "#,
-        |err| matches!(err, Qasm3ParseError::SemanticError(_)),
-    );
+    )
+    .unwrap();
+
+    assert_eq!(circuit.operations().len(), 3);
+    assert!(matches!(
+        circuit.operations()[2].instruction,
+        Instruction::ClassicalControl(ClassicalControlOp::If(_))
+    ));
 }
 
 #[test]
@@ -760,8 +766,27 @@ fn rejects_unsupported_defcal() {
 }
 
 #[test]
-fn loads_top_level_scope_without_panicking() {
+fn loads_top_level_anonymous_scope() {
     let circuit = loads_without_panicking(
+        r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit q;
+        {
+            x q;
+        }
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(circuit.num_qubits(), 1);
+    assert_eq!(circuit.operations().len(), 1);
+    assert_standard_gate(&circuit, 0, StandardGate::X, &[0]);
+}
+
+#[test]
+fn rejects_qubit_declaration_in_anonymous_scope_without_panicking() {
+    let err = loads_without_panicking(
         r#"
         OPENQASM 3.0;
         include "stdgates.inc";
@@ -771,10 +796,12 @@ fn loads_top_level_scope_without_panicking() {
         }
         "#,
     )
-    .expect("top-level scope is accepted by statementOrScope");
+    .unwrap_err();
 
-    assert_eq!(circuit.num_qubits(), 1);
-    assert_standard_gate(&circuit, 0, StandardGate::X, &[0]);
+    assert!(matches!(
+        err,
+        Qasm3ParseError::ParseError(_) | Qasm3ParseError::SemanticError(_)
+    ));
 }
 
 #[test]
@@ -846,10 +873,15 @@ fn loads_scalar_measurement_assignment_with_unicode_identifiers() {
     .expect("Identifier accepts valid Unicode letters");
 
     assert_eq!(circuit.num_qubits(), 1);
-    assert_eq!(circuit.operations().len(), 1);
+    assert_eq!(circuit.operations().len(), 2);
     assert!(matches!(
         circuit.operations()[0].instruction,
         Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
+    ));
+    assert!(matches!(
+        circuit.operations()[1].instruction,
+        Instruction::ClassicalData(ClassicalDataOp::Store { target, .. })
+            if target.ty() == ClassicalType::Bit
     ));
 }
 
