@@ -1,0 +1,60 @@
+name: "\u2753 Question"
+description: "Ask a question about using cqlib"
+title: "[QUESTION] "
+labels: ["question", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Welcome!** This template is for usage questions, troubleshooting help, and general inquiries.
+
+        Before asking:
+        - Check the [README](README.md) and [documentation](https://qc.zdxlz.com/)
+        - Search [existing questions](https://github.com/cq-lib/cqlib/issues?q=label%3Aquestion)
+
+  - type: dropdown
+    id: topic
+    attributes:
+      label: "What is your question about?"
+      options:
+        - "Installation / Build"
+        - "API Usage"
+        - "Quantum Computing Theory"
+        - "Performance / Optimization"
+        - "Documentation"
+        - "Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: "Your question"
+      description: "Describe what you are trying to do and what you need help with."
+      placeholder: |
+        I am trying to...
+        I have read / tried...
+        I expected..., but got...
+    validations:
+      required: true
+
+  - type: textarea
+    id: code
+    attributes:
+      label: "Relevant code (if applicable)"
+      description: "Paste the code or circuit you are working with."
+      render: markdown
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: "Environment"
+      description: "If relevant: cqlib version, OS, Python/Rust version"
+      placeholder: |
+        - cqlib version: 0.1.0
+        - Python: 3.12.0
+        - OS: Ubuntu 22.04
+    validations:
+      required: false

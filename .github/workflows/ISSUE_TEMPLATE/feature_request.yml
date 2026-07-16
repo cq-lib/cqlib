@@ -1,0 +1,85 @@
+name: "\U0001F680 Feature Request"
+description: "Suggest a new feature or enhancement for cqlib"
+title: "[FEATURE] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Thank you for suggesting a feature!**
+
+        Before submitting:
+        - Search [existing issues](https://github.com/cq-lib/cqlib/issues) to check if this has already been proposed
+        - Major API changes should be discussed in an Issue first (see [CONTRIBUTING.md](CONTRIBUTING.md))
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problem statement"
+      description: "What problem does this feature solve? Describe your use case."
+      placeholder: "E.g., I want to run VQE on custom Hamiltonians but the current API requires..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: "Which area does this affect?"
+      multiple: true
+      options:
+        - "Circuit Construction"
+        - "Intermediate Representation (IR / Optimization)"
+        - "Compiler Passes (gate decomposition / routing / scheduling)"
+        - "Device Model (calibration / topology / noise)"
+        - "Simulation (state vector / noise model)"
+        - "Error Mitigation (ZNE / Virtual Distillation)"
+        - "Visualization"
+        - "Python Bindings"
+        - "C Bindings"
+        - "Documentation / Examples"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "Proposed solution"
+      description: "Describe what you would like to see. Code snippets or pseudo-code are welcome."
+      placeholder: |
+        ```python
+        # Example of how the API might look
+        from cqlib import Circuit, VQE
+
+        qc = Circuit(4)
+        ...
+        result = VQE(qc, hamiltonian).run()
+        ```
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternatives considered"
+      description: "What workarounds have you tried? Are there existing libraries that solve this?"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: "Scope check"
+      options:
+        - label: "This is within cqlib's scope (quantum computing SDK: circuits, IR, compilation, simulation, error mitigation)"
+          required: false
+        - label: "I am willing to contribute a PR for this feature"
+          required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: "Additional context"
+      placeholder: "References, papers, similar features in other frameworks (Qiskit, Cirq, PennyLane, etc.)"
+    validations:
+      required: false
