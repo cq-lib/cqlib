@@ -31,6 +31,40 @@ use std::io::{self, Write as IoWrite};
 use std::path::Path;
 use std::sync::Arc;
 
+/// Controls how circuit qubit identifiers are represented in OpenQASM 3.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Qasm3QubitMode {
+    /// Emit a compact virtual-qubit register such as `qubit[2] q`.
+    #[default]
+    Logical,
+    /// Treat each [`Qubit`] index as a hardware identifier such as `$5`.
+    ///
+    /// The caller is responsible for ensuring that circuit qubit indices
+    /// already represent qubits on the intended target device.
+    Physical,
+}
+
+/// Options for serializing a circuit to OpenQASM 3.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Qasm3DumpOptions {
+    /// Representation used for top-level circuit qubits.
+    pub qubit_mode: Qasm3QubitMode,
+}
+
+impl Qasm3DumpOptions {
+    pub const fn logical() -> Self {
+        Self {
+            qubit_mode: Qasm3QubitMode::Logical,
+        }
+    }
+
+    pub const fn physical() -> Self {
+        Self {
+            qubit_mode: Qasm3QubitMode::Physical,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum Qasm3DumpError {
     IoError(io::Error),
@@ -141,7 +175,16 @@ impl From<io::Error> for Qasm3DumpError {
 }
 
 pub fn dump<P: AsRef<Path>>(circuit: &Circuit, path: P) -> Result<(), Qasm3DumpError> {
-    let qasm = dumps(circuit)?;
+    dump_with_options(circuit, path, Qasm3DumpOptions::default())
+}
+
+/// Serialize a circuit to an OpenQASM 3 file using the supplied options.
+pub fn dump_with_options<P: AsRef<Path>>(
+    circuit: &Circuit,
+    path: P,
+    options: Qasm3DumpOptions,
+) -> Result<(), Qasm3DumpError> {
+    let qasm = dumps_with_options(circuit, options)?;
     let mut file = File::create(path)?;
     file.write_all(qasm.as_bytes())?;
     Ok(())
@@ -156,6 +199,14 @@ pub fn to_path<P: AsRef<Path>>(circuit: &Circuit, path: P) -> Result<(), Qasm3Du
 }
 
 pub fn dumps(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
+    dumps_with_options(circuit, Qasm3DumpOptions::default())
+}
+
+/// Serialize a circuit to OpenQASM 3 using the supplied options.
+pub fn dumps_with_options(
+    circuit: &Circuit,
+    options: Qasm3DumpOptions,
+) -> Result<String, Qasm3DumpError> {
     let mut output = String::new();
     writeln!(&mut output, "OPENQASM 3.0;")?;
     writeln!(&mut output, "include \"stdgates.inc\";")?;
@@ -188,12 +239,21 @@ pub fn dumps(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
         NameAllocator::new(reserved_top_level_names(&defined_gates, &unitary_gate_defs));
     let param_map = dump_input_parameters(circuit, &mut output, &mut name_allocator)?;
     let skipped_values = skipped_classical_value_declarations(circuit.operations())?;
-    let qubit_register = name_allocator.take("q");
+    let qubit_register = match options.qubit_mode {
+        Qasm3QubitMode::Logical => Some(name_allocator.take("q")),
+        Qasm3QubitMode::Physical => None,
+    };
     let auto_measurements =
         AutoMeasurementMap::new(circuit.operations(), name_allocator.take("meas"))?;
-    let qubit_map = logical_qubit_map(circuit, &qubit_register);
-    writeln!(&mut output, "qubit[{}] {qubit_register};", qubit_map.len())?;
-    dump_qubit_mapping_comment(&mut output, &qubit_map)?;
+    let qubit_map = match &qubit_register {
+        Some(register) => {
+            let qubit_map = logical_qubit_map(circuit, register);
+            writeln!(&mut output, "qubit[{}] {register};", qubit_map.len())?;
+            dump_qubit_mapping_comment(&mut output, &qubit_map)?;
+            qubit_map
+        }
+        None => physical_qubit_map(circuit),
+    };
     let classical_names =
         ClassicalNameMap::new(circuit, &mut output, &skipped_values, &mut name_allocator)?;
     auto_measurements.dump_declaration(&mut output)?;
@@ -205,7 +265,7 @@ pub fn dumps(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
         circuit.operations(),
         &mut output,
         &qubit_map,
-        &qubit_register,
+        qubit_register.as_deref().unwrap_or(""),
         &param_map,
         &classical_names,
         &auto_measurements,
@@ -278,6 +338,14 @@ fn logical_qubit_map(circuit: &Circuit, register_name: &str) -> HashMap<Qubit, S
         .into_iter()
         .enumerate()
         .map(|(logical_index, qubit)| (qubit, format!("{register_name}[{logical_index}]")))
+        .collect()
+}
+
+fn physical_qubit_map(circuit: &Circuit) -> HashMap<Qubit, String> {
+    circuit
+        .qubits()
+        .into_iter()
+        .map(|qubit| (qubit, format!("${}", qubit.index())))
         .collect()
 }
 
@@ -1000,7 +1068,9 @@ fn dump_measurement(
         } else {
             writeln!(output, "{target} = measure {source};")?;
         }
-    } else if is_full_register_measurement(&qubits, qubit_register, qubit_map.len()) {
+    } else if !qubit_register.is_empty()
+        && is_full_register_measurement(&qubits, qubit_register, qubit_map.len())
+    {
         if let MeasurementDestination::Discard(value) = destination {
             let target = auto_measurements.target(value).unwrap();
             for (index, qubit) in qubits.iter().enumerate() {

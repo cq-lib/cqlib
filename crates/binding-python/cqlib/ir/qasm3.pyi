@@ -16,6 +16,8 @@ This module provides type hints for parsing and serializing OpenQASM 3.0
 programs.
 """
 
+from typing import Literal
+
 from ..circuit import Circuit
 
 def loads(qasm: str) -> Circuit:
@@ -61,11 +63,15 @@ def load(path: str) -> Circuit:
     """
     ...
 
-def dumps(circuit: Circuit) -> str:
+def dumps(
+    circuit: Circuit, *, qubit_mode: Literal["logical", "physical"] = "logical"
+) -> str:
     """Serialize a Circuit to an OpenQASM 3.0 string.
 
     Args:
         circuit: The Circuit object to serialize.
+        qubit_mode: Emit compact logical qubits or preserve circuit qubit
+            indices as OpenQASM 3 physical qubits.
 
     Returns:
         A string containing the OpenQASM 3.0 representation.
@@ -84,12 +90,19 @@ def dumps(circuit: Circuit) -> str:
     """
     ...
 
-def dump(circuit: Circuit, path: str) -> None:
+def dump(
+    circuit: Circuit,
+    path: str,
+    *,
+    qubit_mode: Literal["logical", "physical"] = "logical",
+) -> None:
     """Serialize a Circuit to an OpenQASM 3.0 file.
 
     Args:
         circuit: The Circuit object to serialize.
         path: Path to the output file.
+        qubit_mode: Emit compact logical qubits or preserve circuit qubit
+            indices as OpenQASM 3 physical qubits.
 
     Raises:
         ValueError: If the circuit contains unsupported instructions.
