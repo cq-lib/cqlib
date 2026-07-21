@@ -122,8 +122,19 @@ print("swap_count:", route_result.swap_count)
 需要复用同一配置编译多条线路时，使用 `CompilerWorkflow`：
 
 ```python
+from cqlib import Circuit
 from cqlib.compile import CompileConfig, CompileMode, CompilerWorkflow
 from cqlib.device import Device
+
+circuits = []
+c1 = Circuit(2)
+c1.cx(0, 1)
+circuits.append(c1)
+
+c2 = Circuit(3)
+c2.h(0)
+c2.cx(0, 2)
+circuits.append(c2)
 
 config = CompileConfig(
     mode=CompileMode.enhanced(),
