@@ -23,10 +23,11 @@ use pyo3::prelude::*;
 
 fn dump_options(qubit_mode: &str) -> PyResult<Qasm3DumpOptions> {
     match qubit_mode {
+        "auto" => Ok(Qasm3DumpOptions::auto()),
         "logical" => Ok(Qasm3DumpOptions::logical()),
         "physical" => Ok(Qasm3DumpOptions::physical()),
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "qubit_mode must be 'logical' or 'physical'",
+            "qubit_mode must be 'auto', 'logical', or 'physical'",
         )),
     }
 }
@@ -88,7 +89,7 @@ pub fn py_qasm3_load(path: &str) -> PyResult<PyCircuit> {
 /// # Errors
 /// Returns `ValueError` if the circuit contains instructions that cannot be
 /// represented in OpenQASM 3.0.
-#[pyfunction(name = "dumps", signature = (circuit, *, qubit_mode = "logical"))]
+#[pyfunction(name = "dumps", signature = (circuit, *, qubit_mode = "auto"))]
 pub fn py_qasm3_dumps(circuit: &PyCircuit, qubit_mode: &str) -> PyResult<String> {
     let options = dump_options(qubit_mode)?;
     match qasm3_dumps_with_options(&circuit.inner, options) {
@@ -109,7 +110,7 @@ pub fn py_qasm3_dumps(circuit: &PyCircuit, qubit_mode: &str) -> PyResult<String>
 /// # Errors
 /// Returns `ValueError` if serialization fails, or `OSError` if the file cannot
 /// be written.
-#[pyfunction(name = "dump", signature = (circuit, path, *, qubit_mode = "logical"))]
+#[pyfunction(name = "dump", signature = (circuit, path, *, qubit_mode = "auto"))]
 pub fn py_qasm3_dump(circuit: &PyCircuit, path: &str, qubit_mode: &str) -> PyResult<()> {
     let options = dump_options(qubit_mode)?;
     match qasm3_dump_with_options(&circuit.inner, path, options) {

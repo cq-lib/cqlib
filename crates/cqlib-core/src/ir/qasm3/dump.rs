@@ -21,7 +21,7 @@ use crate::circuit::parameter::Parameter;
 use crate::circuit::{
     Circuit, ClassicalBinaryOp, ClassicalCast, ClassicalCompareOp, ClassicalControlOp,
     ClassicalExpr, ClassicalExprKind, ClassicalType, ClassicalUnaryOp, ClassicalValue,
-    ClassicalVar, Qubit,
+    ClassicalVar, Qubit, QubitDomain,
 };
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
@@ -34,8 +34,10 @@ use std::sync::Arc;
 /// Controls how circuit qubit identifiers are represented in OpenQASM 3.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Qasm3QubitMode {
-    /// Emit a compact virtual-qubit register such as `qubit[2] q`.
+    /// Select logical or physical syntax from [`Circuit::qubit_domain`].
     #[default]
+    Auto,
+    /// Emit a compact virtual-qubit register such as `qubit[2] q`.
     Logical,
     /// Treat each [`Qubit`] index as a hardware identifier such as `$5`.
     ///
@@ -47,11 +49,18 @@ pub enum Qasm3QubitMode {
 /// Options for serializing a circuit to OpenQASM 3.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Qasm3DumpOptions {
-    /// Representation used for top-level circuit qubits.
+    /// Representation used for top-level circuit qubits. The default is
+    /// [`Qasm3QubitMode::Auto`].
     pub qubit_mode: Qasm3QubitMode,
 }
 
 impl Qasm3DumpOptions {
+    pub const fn auto() -> Self {
+        Self {
+            qubit_mode: Qasm3QubitMode::Auto,
+        }
+    }
+
     pub const fn logical() -> Self {
         Self {
             qubit_mode: Qasm3QubitMode::Logical,
@@ -239,7 +248,15 @@ pub fn dumps_with_options(
         NameAllocator::new(reserved_top_level_names(&defined_gates, &unitary_gate_defs));
     let param_map = dump_input_parameters(circuit, &mut output, &mut name_allocator)?;
     let skipped_values = skipped_classical_value_declarations(circuit.operations())?;
-    let qubit_register = match options.qubit_mode {
+    let qubit_mode = match options.qubit_mode {
+        Qasm3QubitMode::Auto => match circuit.qubit_domain() {
+            QubitDomain::Logical => Qasm3QubitMode::Logical,
+            QubitDomain::Physical => Qasm3QubitMode::Physical,
+        },
+        explicit => explicit,
+    };
+    let qubit_register = match qubit_mode {
+        Qasm3QubitMode::Auto => unreachable!("automatic qubit mode is resolved above"),
         Qasm3QubitMode::Logical => Some(name_allocator.take("q")),
         Qasm3QubitMode::Physical => None,
     };

@@ -16,7 +16,7 @@ use super::layer::Layer;
 use crate::circuit::value_instruction::storage_operation_to_value;
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, ControlBody, ForOp, IfOp, Instruction, Operation,
-    Parameter, Qubit, StandardGate, SwitchCase, SwitchOp, WhileOp,
+    Parameter, Qubit, QubitDomain, StandardGate, SwitchCase, SwitchOp, WhileOp,
 };
 use crate::compile::CompilerError;
 use crate::compile::physical_target::PhysicalLayoutGraph;
@@ -195,6 +195,7 @@ pub fn sabre_route(
         Some(circuit.classical_vars().to_vec()),
         Some(circuit.classical_values().to_vec()),
     )?;
+    routed.set_qubit_domain(QubitDomain::Physical);
     for parameter in parameter_order {
         routed.add_parameter(parameter);
     }

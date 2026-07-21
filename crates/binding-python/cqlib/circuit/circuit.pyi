@@ -42,6 +42,7 @@ Type aliases for gate arguments
 import numpy as np
 from collections.abc import Callable
 from numpy.typing import NDArray
+from typing import Literal
 from .bit import Qubit
 from .classical import CircuitId, ClassicalType, ClassicalVar, Measurement
 from .classical_expr import ClassicalExpr
@@ -152,6 +153,10 @@ class Circuit:
     @property
     def num_qubits(self) -> int:
         """Number of qubits in the circuit."""
+        ...
+    @property
+    def qubit_domain(self) -> Literal["logical", "physical"]:
+        """Interpretation of this circuit's qubit identifiers."""
         ...
     @property
     def width(self) -> int:

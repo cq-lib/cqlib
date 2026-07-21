@@ -23,8 +23,8 @@ use crate::circuit::gate::{ClassicalDataOp, Directive, Instruction};
 use crate::circuit::value_instruction::storage_operation_to_value;
 use crate::circuit::{
     Circuit, CircuitError, ClassicalControlOp, ClassicalExpr, ClassicalType, ClassicalValue,
-    ClassicalVar, ControlBody, ForOp, IfOp, Operation, Parameter, Qubit, SwitchCase, SwitchOp,
-    ValueClassicalControlOp, ValueControlBody, ValueInstruction, ValueOperation, WhileOp,
+    ClassicalVar, ControlBody, ForOp, IfOp, Operation, Parameter, Qubit, QubitDomain, SwitchCase,
+    SwitchOp, ValueClassicalControlOp, ValueControlBody, ValueInstruction, ValueOperation, WhileOp,
 };
 use indexmap::{IndexMap, IndexSet};
 use rustworkx_core::dag_algo::lexicographical_topological_sort;
@@ -98,6 +98,7 @@ pub struct DagSwitchCase {
 /// Operation-level dependency DAG for a circuit.
 #[derive(Debug, Clone)]
 pub struct CircuitDag {
+    qubit_domain: QubitDomain,
     qubits: IndexSet<Qubit>,
     symbols: IndexSet<String>,
     parameters: IndexSet<Parameter>,
@@ -113,6 +114,7 @@ pub struct CircuitDag {
 }
 
 struct DagParts {
+    qubit_domain: QubitDomain,
     qubits: IndexSet<Qubit>,
     symbols: IndexSet<String>,
     parameters: IndexSet<Parameter>,
@@ -125,12 +127,15 @@ impl CircuitDag {
     /// Builds a dependency DAG from a circuit.
     pub fn from_circuit(circuit: &Circuit) -> Result<Self, CircuitError> {
         Self::from_parts(
-            circuit.qubits().into_iter().collect(),
-            circuit.symbols().clone(),
-            circuit.parameters().clone(),
-            circuit.classical_vars().to_vec(),
-            circuit.classical_values().to_vec(),
-            circuit.global_phase_param().clone(),
+            DagParts {
+                qubit_domain: circuit.qubit_domain(),
+                qubits: circuit.qubits().into_iter().collect(),
+                symbols: circuit.symbols().clone(),
+                parameters: circuit.parameters().clone(),
+                classical_vars: circuit.classical_vars().to_vec(),
+                classical_values: circuit.classical_values().to_vec(),
+                global_phase: circuit.global_phase_param().clone(),
+            },
             circuit.operations(),
         )
     }
@@ -156,6 +161,7 @@ impl CircuitDag {
             Some(self.classical_vars.clone()),
             Some(self.classical_values.clone()),
         )?;
+        circuit.set_qubit_domain(self.qubit_domain);
         circuit.set_global_phase(self.global_phase_parameter()?);
         Ok(circuit)
     }
@@ -760,27 +766,8 @@ impl CircuitDag {
         self.rebuild_from_operations(&operations)
     }
 
-    fn from_parts(
-        qubits: IndexSet<Qubit>,
-        symbols: IndexSet<String>,
-        parameters: IndexSet<Parameter>,
-        classical_vars: Vec<ClassicalType>,
-        classical_values: Vec<ClassicalType>,
-        global_phase: CircuitParam,
-        operations: &[Operation],
-    ) -> Result<Self, CircuitError> {
-        Self::from_parts_with_validation(
-            DagParts {
-                qubits,
-                symbols,
-                parameters,
-                classical_vars,
-                classical_values,
-                global_phase,
-            },
-            operations,
-            true,
-        )
+    fn from_parts(parts: DagParts, operations: &[Operation]) -> Result<Self, CircuitError> {
+        Self::from_parts_with_validation(parts, operations, true)
     }
 
     fn from_parts_with_validation(
@@ -789,6 +776,7 @@ impl CircuitDag {
         validate: bool,
     ) -> Result<Self, CircuitError> {
         let mut dag = Self {
+            qubit_domain: parts.qubit_domain,
             qubits: parts.qubits,
             symbols: parts.symbols,
             parameters: parts.parameters,
@@ -897,6 +885,7 @@ impl CircuitDag {
     ) -> Result<(), CircuitError> {
         let rebuilt = Self::from_parts_with_validation(
             DagParts {
+                qubit_domain: self.qubit_domain,
                 qubits: self.qubits.clone(),
                 symbols: self.symbols.clone(),
                 parameters: self.parameters.clone(),
@@ -920,12 +909,15 @@ impl CircuitDag {
         };
         let build_body = |ops: &[Operation]| {
             Self::from_parts(
-                self.qubits.clone(),
-                self.symbols.clone(),
-                self.parameters.clone(),
-                self.classical_vars.clone(),
-                self.classical_values.clone(),
-                self.global_phase.clone(),
+                DagParts {
+                    qubit_domain: self.qubit_domain,
+                    qubits: self.qubits.clone(),
+                    symbols: self.symbols.clone(),
+                    parameters: self.parameters.clone(),
+                    classical_vars: self.classical_vars.clone(),
+                    classical_values: self.classical_values.clone(),
+                    global_phase: self.global_phase.clone(),
+                },
                 ops,
             )
             .map(Box::new)

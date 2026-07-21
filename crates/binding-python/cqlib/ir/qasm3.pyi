@@ -32,6 +32,8 @@ def loads(qasm: str) -> Circuit:
     Raises:
         ValueError: If the QASM string is invalid, cannot be parsed, or uses
             OpenQASM 3.0 features unsupported by the current circuit IR.
+            Pure physical-qubit programs using ``$n`` are supported, but
+            mixing physical and declared logical qubits is not.
 
     Example:
         >>> qasm_code = '''
@@ -56,6 +58,8 @@ def load(path: str) -> Circuit:
 
     Raises:
         ValueError: If parsing fails or the source uses unsupported features.
+            Pure physical-qubit programs using ``$n`` are supported, but
+            mixing physical and declared logical qubits is not.
         OSError: If file cannot be read.
 
     Example:
@@ -64,14 +68,15 @@ def load(path: str) -> Circuit:
     ...
 
 def dumps(
-    circuit: Circuit, *, qubit_mode: Literal["logical", "physical"] = "logical"
+    circuit: Circuit, *, qubit_mode: Literal["auto", "logical", "physical"] = "auto"
 ) -> str:
     """Serialize a Circuit to an OpenQASM 3.0 string.
 
     Args:
         circuit: The Circuit object to serialize.
-        qubit_mode: Emit compact logical qubits or preserve circuit qubit
-            indices as OpenQASM 3 physical qubits.
+        qubit_mode: ``"auto"`` follows ``circuit.qubit_domain``. Explicit
+            modes emit compact logical qubits or preserve circuit qubit indices
+            as OpenQASM 3 physical qubits.
 
     Returns:
         A string containing the OpenQASM 3.0 representation.
@@ -94,15 +99,16 @@ def dump(
     circuit: Circuit,
     path: str,
     *,
-    qubit_mode: Literal["logical", "physical"] = "logical",
+    qubit_mode: Literal["auto", "logical", "physical"] = "auto",
 ) -> None:
     """Serialize a Circuit to an OpenQASM 3.0 file.
 
     Args:
         circuit: The Circuit object to serialize.
         path: Path to the output file.
-        qubit_mode: Emit compact logical qubits or preserve circuit qubit
-            indices as OpenQASM 3 physical qubits.
+        qubit_mode: ``"auto"`` follows ``circuit.qubit_domain``. Explicit
+            modes emit compact logical qubits or preserve circuit qubit indices
+            as OpenQASM 3 physical qubits.
 
     Raises:
         ValueError: If the circuit contains unsupported instructions.

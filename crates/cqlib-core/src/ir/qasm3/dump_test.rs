@@ -13,7 +13,8 @@
 use super::*;
 use crate::circuit::gate::{ClassicalDataOp, Instruction};
 use crate::circuit::{
-    Circuit, ClassicalExpr, ClassicalType, Parameter, ParameterValue, Qubit, StandardGate,
+    Circuit, ClassicalExpr, ClassicalType, Parameter, ParameterValue, Qubit, QubitDomain,
+    StandardGate,
 };
 use crate::ir::qasm3::load::Qasm3ParseError;
 use crate::ir::{qasm3_load, qasm3_loads, qcis_loads};
@@ -347,6 +348,22 @@ c0[1] = measure $1;
 }
 
 #[test]
+fn dumps_automatically_uses_circuit_qubit_domain() {
+    let q5 = Qubit::new(5);
+    let mut circuit = Circuit::from_qubits(vec![q5]).unwrap();
+    circuit.set_qubit_domain(QubitDomain::Physical);
+    circuit.h(q5).unwrap();
+
+    let automatic = dumps(&circuit).unwrap();
+    assert!(automatic.contains("h $5;"), "got:\n{automatic}");
+    assert!(!automatic.contains("qubit["), "got:\n{automatic}");
+
+    let logical = dumps_with_options(&circuit, Qasm3DumpOptions::logical()).unwrap();
+    assert!(logical.contains("qubit[1] q;"), "got:\n{logical}");
+    assert!(logical.contains("h q[0];"), "got:\n{logical}");
+}
+
+#[test]
 fn dump_with_physical_options_writes_file() {
     let q5 = Qubit::new(5);
     let mut circuit = Circuit::from_qubits(vec![q5]).unwrap();
@@ -474,8 +491,8 @@ fn qcis_measurements_dump_to_reloadable_qasm3() {
 
     assert!(!qasm.contains("bit v"), "got:\n{qasm}");
     assert!(qasm.contains("bit[2] meas;"), "got:\n{qasm}");
-    assert!(qasm.contains("meas[0] = measure q[0];"), "got:\n{qasm}");
-    assert!(qasm.contains("meas[1] = measure q[1];"), "got:\n{qasm}");
+    assert!(qasm.contains("meas[0] = measure $0;"), "got:\n{qasm}");
+    assert!(qasm.contains("meas[1] = measure $1;"), "got:\n{qasm}");
     assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
 }
 
@@ -489,18 +506,17 @@ fn qcis_single_measurement_dumps_with_explicit_registers() {
         r#"OPENQASM 3.0;
 include "stdgates.inc";
 
-qubit[1] q;
 bit[1] meas;
 
-h q[0];
-meas[0] = measure q[0];
+h $0;
+meas[0] = measure $0;
 "#
     );
     assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
 }
 
 #[test]
-fn qcis_sparse_qubit_measurement_declares_enough_qubits() {
+fn qcis_sparse_qubit_measurement_preserves_physical_identifier() {
     let circuit = qcis_loads("H Q1\nM Q1\n").unwrap();
     let qasm = dumps(&circuit).unwrap();
 
@@ -509,12 +525,10 @@ fn qcis_sparse_qubit_measurement_declares_enough_qubits() {
         r#"OPENQASM 3.0;
 include "stdgates.inc";
 
-qubit[1] q;
-// q[0] -> Q1
 bit[1] meas;
 
-h q[0];
-meas[0] = measure q[0];
+h $1;
+meas[0] = measure $1;
 "#
     );
     assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");

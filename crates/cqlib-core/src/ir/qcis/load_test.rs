@@ -11,6 +11,7 @@
 // that they have been altered from the originals.
 
 use super::*;
+use crate::circuit::QubitDomain;
 use crate::circuit::gate::{Instruction, StandardGate};
 use crate::ir::qcis_dumps;
 use std::error::Error;
@@ -45,6 +46,13 @@ fn test_parse_simple_params() {
         ParameterValue::Fixed(v) => assert!((v - 42.0).abs() < 1e-10),
         _ => panic!("Expected fixed value"),
     }
+}
+
+#[test]
+fn qcis_loads_marks_hardware_qubit_domain() {
+    let circuit = loads("H Q5\nM Q5\n").unwrap();
+
+    assert_eq!(circuit.qubit_domain(), QubitDomain::Physical);
 }
 
 #[test]
