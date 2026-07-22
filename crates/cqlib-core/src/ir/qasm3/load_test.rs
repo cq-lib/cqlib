@@ -12,8 +12,7 @@
 
 use super::*;
 use crate::circuit::gate::{ClassicalDataOp, Instruction};
-use crate::circuit::{ClassicalControlOp, ClassicalType, Qubit, QubitDomain, StandardGate};
-use crate::ir::{Qasm3DumpOptions, qasm3_dumps_with_options};
+use crate::circuit::{ClassicalControlOp, ClassicalType, Qubit, StandardGate};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -91,7 +90,7 @@ fn loads_bell_circuit() {
 }
 
 #[test]
-fn loads_sparse_physical_qubits_and_round_trips() {
+fn loads_physical_qubits_with_sparse_identifiers() {
     let circuit = loads(
         r#"
         OPENQASM 3.0;
@@ -99,8 +98,6 @@ fn loads_sparse_physical_qubits_and_round_trips() {
         bit[2] c;
         h $1;
         cx $1, $5;
-        barrier $1, $5;
-        reset $5;
         c[0] = measure $1;
         c[1] = measure $5;
         "#,
@@ -108,78 +105,17 @@ fn loads_sparse_physical_qubits_and_round_trips() {
     .unwrap();
 
     assert_eq!(circuit.qubits(), vec![Qubit::new(1), Qubit::new(5)]);
-    assert_eq!(circuit.qubit_domain(), QubitDomain::Physical);
     assert_standard_gate(&circuit, 0, StandardGate::H, &[1]);
     assert_standard_gate(&circuit, 1, StandardGate::CX, &[1, 5]);
-    assert!(circuit.operations().iter().all(|operation| {
-        operation
-            .qubits
-            .iter()
-            .all(|qubit| matches!(qubit.index(), 1 | 5))
-    }));
-
-    let dumped = qasm3_dumps_with_options(&circuit, Qasm3DumpOptions::physical()).unwrap();
-    assert!(dumped.contains("h $1;"), "got:\n{dumped}");
-    assert!(dumped.contains("cx $1,$5;"), "got:\n{dumped}");
-    assert!(dumped.contains("c0[0] = measure $1;"), "got:\n{dumped}");
-    assert!(dumped.contains("c0[1] = measure $5;"), "got:\n{dumped}");
-
-    let reloaded = loads(&dumped).unwrap();
-    assert_eq!(reloaded.qubits(), circuit.qubits());
-    assert_eq!(reloaded.qubit_domain(), QubitDomain::Physical);
 }
 
 #[test]
-fn loads_physical_qubits_used_by_custom_gate() {
+fn loads_physical_qubits_ignores_comments() {
     let circuit = loads(
         r#"
         OPENQASM 3.0;
         include "stdgates.inc";
-        gate pair a, b {
-            h a;
-            cx a, b;
-        }
-        pair $2, $12;
-        "#,
-    )
-    .unwrap();
-
-    assert_eq!(circuit.qubits(), vec![Qubit::new(2), Qubit::new(12)]);
-    assert_eq!(
-        circuit.operations()[0].qubits.as_slice(),
-        &[Qubit::new(2), Qubit::new(12)]
-    );
-}
-
-#[test]
-fn loads_physical_qubits_used_inside_control_flow() {
-    let circuit = loads(
-        r#"
-        OPENQASM 3.0;
-        include "stdgates.inc";
-        bit flag;
-        flag = measure $1;
-        if (flag) {
-            x $9;
-        }
-        "#,
-    )
-    .unwrap();
-
-    assert_eq!(circuit.qubits(), vec![Qubit::new(1), Qubit::new(9)]);
-    assert!(circuit.operations().iter().any(|operation| matches!(
-        operation.instruction,
-        Instruction::ClassicalControl(ClassicalControlOp::If { .. })
-    )));
-}
-
-#[test]
-fn ignores_physical_qubits_in_comments() {
-    let circuit = loads(
-        r#"
-        OPENQASM 3.0;
-        include "stdgates.inc";
-        // This comment mentions $99 but does not use it.
+        // $99 is documentation, not a circuit operand.
         x $5;
         "#,
     )
@@ -216,7 +152,13 @@ fn rejects_physical_qubit_index_outside_u32_range() {
         include "stdgates.inc";
         x $4294967296;
         "#,
-        |err| matches!(err, Qasm3ParseError::InvalidArgument(message) if message.contains("exceeds the supported range")),
+        |err| {
+            matches!(
+                err,
+                Qasm3ParseError::InvalidArgument(message)
+                    if message.contains("exceeds the supported range")
+            )
+        },
     );
 }
 

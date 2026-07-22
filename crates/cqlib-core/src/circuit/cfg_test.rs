@@ -13,24 +13,10 @@
 use crate::circuit::cfg::{BasicBlock, CircuitCFG, FlowEdge, Terminator};
 use crate::circuit::{
     Circuit, CircuitError, ClassicalControlOp, ClassicalExpr, ClassicalType, Instruction,
-    Operation, Qubit, QubitDomain, StandardGate,
+    Operation, Qubit, StandardGate,
 };
 use rustworkx_core::petgraph::prelude::NodeIndex;
 use smallvec::smallvec;
-
-#[test]
-fn cfg_round_trip_preserves_qubit_domain() {
-    let mut circuit = Circuit::new(1);
-    circuit.set_qubit_domain(QubitDomain::Physical);
-    circuit.h(Qubit::new(0)).unwrap();
-
-    let rebuilt = CircuitCFG::from_circuit(&circuit)
-        .unwrap()
-        .to_circuit()
-        .unwrap();
-
-    assert_eq!(rebuilt.qubit_domain(), QubitDomain::Physical);
-}
 
 #[test]
 fn basic_block_tracks_operations_and_terminator() {

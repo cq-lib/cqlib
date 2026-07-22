@@ -164,12 +164,7 @@ impl<'a> CanonicalizeRound<'a> {
         Self {
             source,
             config,
-            target: {
-                let mut target =
-                    Circuit::from_qubits(source.qubits()).expect("source qubits are unique");
-                target.set_qubit_domain(source.qubit_domain());
-                target
-            },
+            target: Circuit::from_qubits(source.qubits()).expect("source qubits are unique"),
             top_phase: source.global_phase(),
         }
     }
@@ -441,7 +436,6 @@ fn rebuild_circuit_from_value_operations(
         Some(source.classical_values().to_vec()),
     )
     .map_err(CompilerError::Circuit)?;
-    target.set_qubit_domain(source.qubit_domain());
     target.set_global_phase(global_phase);
     Ok(target)
 }

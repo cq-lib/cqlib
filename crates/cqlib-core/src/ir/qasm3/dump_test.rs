@@ -13,8 +13,7 @@
 use super::*;
 use crate::circuit::gate::{ClassicalDataOp, Instruction};
 use crate::circuit::{
-    Circuit, ClassicalExpr, ClassicalType, Parameter, ParameterValue, Qubit, QubitDomain,
-    StandardGate,
+    Circuit, ClassicalExpr, ClassicalType, Parameter, ParameterValue, Qubit, StandardGate,
 };
 use crate::ir::qasm3::load::Qasm3ParseError;
 use crate::ir::{qasm3_load, qasm3_loads, qcis_loads};
@@ -328,7 +327,7 @@ fn dumps_sparse_qubits_as_physical_identifiers() {
     let bits = circuit.var(ClassicalType::bit_vec(2).unwrap());
     circuit.measure_bits_into([q5, q1], bits).unwrap();
 
-    let qasm = dumps_with_options(&circuit, Qasm3DumpOptions::physical()).unwrap();
+    let qasm = dumps_with_physical_qubits(&circuit, &[7, 2]).unwrap();
 
     assert_eq!(
         qasm,
@@ -337,45 +336,47 @@ include "stdgates.inc";
 
 bit[2] c0;
 
-h $1;
-cx $1,$5;
-barrier $1,$5;
-reset $5;
-c0[0] = measure $5;
-c0[1] = measure $1;
+h $7;
+cx $7,$2;
+barrier $7,$2;
+reset $2;
+c0[0] = measure $2;
+c0[1] = measure $7;
 "#
     );
 }
 
 #[test]
-fn dumps_automatically_uses_circuit_qubit_domain() {
-    let q5 = Qubit::new(5);
-    let mut circuit = Circuit::from_qubits(vec![q5]).unwrap();
-    circuit.set_qubit_domain(QubitDomain::Physical);
-    circuit.h(q5).unwrap();
-
-    let automatic = dumps(&circuit).unwrap();
-    assert!(automatic.contains("h $5;"), "got:\n{automatic}");
-    assert!(!automatic.contains("qubit["), "got:\n{automatic}");
-
-    let logical = dumps_with_options(&circuit, Qasm3DumpOptions::logical()).unwrap();
-    assert!(logical.contains("qubit[1] q;"), "got:\n{logical}");
-    assert!(logical.contains("h q[0];"), "got:\n{logical}");
-}
-
-#[test]
-fn dump_with_physical_options_writes_file() {
+fn dump_with_physical_qubits_writes_file() {
     let q5 = Qubit::new(5);
     let mut circuit = Circuit::from_qubits(vec![q5]).unwrap();
     circuit.h(q5).unwrap();
     let path = unique_temp_path("physical_qubits");
 
-    dump_with_options(&circuit, &path, Qasm3DumpOptions::physical()).unwrap();
+    dump_with_physical_qubits(&circuit, &path, &[9]).unwrap();
 
     let qasm = fs::read_to_string(&path).unwrap();
     fs::remove_file(path).unwrap();
-    assert!(qasm.contains("h $5;"), "got:\n{qasm}");
+    assert!(qasm.contains("h $9;"), "got:\n{qasm}");
     assert!(!qasm.contains("qubit["), "got:\n{qasm}");
+}
+
+#[test]
+fn physical_qubit_mapping_must_match_circuit_width() {
+    let circuit = Circuit::new(2);
+
+    let error = dumps_with_physical_qubits(&circuit, &[5]).unwrap_err();
+
+    assert!(error.to_string().contains("has length 1"));
+}
+
+#[test]
+fn physical_qubit_mapping_rejects_duplicates() {
+    let circuit = Circuit::new(2);
+
+    let error = dumps_with_physical_qubits(&circuit, &[5, 5]).unwrap_err();
+
+    assert!(error.to_string().contains("$5 is duplicated"));
 }
 
 #[test]
@@ -491,8 +492,8 @@ fn qcis_measurements_dump_to_reloadable_qasm3() {
 
     assert!(!qasm.contains("bit v"), "got:\n{qasm}");
     assert!(qasm.contains("bit[2] meas;"), "got:\n{qasm}");
-    assert!(qasm.contains("meas[0] = measure $0;"), "got:\n{qasm}");
-    assert!(qasm.contains("meas[1] = measure $1;"), "got:\n{qasm}");
+    assert!(qasm.contains("meas[0] = measure q[0];"), "got:\n{qasm}");
+    assert!(qasm.contains("meas[1] = measure q[1];"), "got:\n{qasm}");
     assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
 }
 
@@ -506,17 +507,18 @@ fn qcis_single_measurement_dumps_with_explicit_registers() {
         r#"OPENQASM 3.0;
 include "stdgates.inc";
 
+qubit[1] q;
 bit[1] meas;
 
-h $0;
-meas[0] = measure $0;
+h q[0];
+meas[0] = measure q[0];
 "#
     );
     assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");
 }
 
 #[test]
-fn qcis_sparse_qubit_measurement_preserves_physical_identifier() {
+fn qcis_sparse_qubit_measurement_declares_enough_qubits() {
     let circuit = qcis_loads("H Q1\nM Q1\n").unwrap();
     let qasm = dumps(&circuit).unwrap();
 
@@ -525,10 +527,12 @@ fn qcis_sparse_qubit_measurement_preserves_physical_identifier() {
         r#"OPENQASM 3.0;
 include "stdgates.inc";
 
+qubit[1] q;
+// q[0] -> Q1
 bit[1] meas;
 
-h $1;
-meas[0] = measure $1;
+h q[0];
+meas[0] = measure q[0];
 "#
     );
     assert!(qasm3_loads(&qasm).is_ok(), "got:\n{qasm}");

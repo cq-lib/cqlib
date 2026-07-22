@@ -27,7 +27,7 @@
 //! | Submodule | Purpose | Key types |
 //! |-----------|---------|-----------|
 //! | [`circuit_impl`] | Circuit container and builder API | [`Circuit`] |
-//! | [`bit`] | Qubit identifier, domain, and conversions | [`Qubit`], [`QubitDomain`], [`QubitError`] |
+//! | [`bit`] | Qubit identifier and conversions | [`Qubit`], [`QubitError`] |
 //! | [`gate`] | Gate definitions, matrix generation, arity | [`StandardGate`], [`Instruction`], [`UnitaryGate`], [`MCGate`], [`Directive`], [`ClassicalDataOp`] |
 //! | [`operation`] | Storage-IR operation (instruction + qubits + params) | [`Operation`] |
 //! | [`value_instruction`] | Construction-IR operation tree, pre-insertion | [`ValueOperation`], [`ValueInstruction`], [`ValueClassicalControlOp`] |
@@ -167,7 +167,7 @@ pub mod parameter;
 pub mod symbolic_matrix;
 pub mod value_instruction;
 
-pub use bit::{Qubit, QubitDomain, QubitError};
+pub use bit::{Qubit, QubitError};
 pub use cfg::CircuitCFG;
 pub use circuit_classical::SwitchBuilder;
 #[doc(hidden)]

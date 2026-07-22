@@ -47,7 +47,7 @@
 //! assert_eq!(measured.ty().width(), 1);
 //! ```
 
-use crate::circuit::bit::{Qubit, QubitDomain};
+use crate::circuit::bit::Qubit;
 use crate::circuit::circuit_classical::ControlScopeKind;
 use crate::circuit::circuit_param::{CircuitParam, ParameterValue};
 use crate::circuit::classical::CircuitId;
@@ -86,8 +86,6 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug)]
 pub struct Circuit {
     pub(super) circuit_id: CircuitId,
-    /// Whether qubit identifiers represent virtual wires or hardware positions.
-    pub(super) qubit_domain: QubitDomain,
     /// The set of quantum bits (qubits) managed by this circuit.
     ///
     /// # Implementation Note
@@ -184,7 +182,6 @@ impl Clone for Circuit {
 
         Self {
             circuit_id,
-            qubit_domain: self.qubit_domain,
             qubits: self.qubits.clone(),
             symbols: self.symbols.clone(),
             parameters: self.parameters.clone(),
@@ -200,8 +197,7 @@ impl Clone for Circuit {
 /// Compares exact compiler-IR structure while ignoring process-local circuit identity.
 impl PartialEq for Circuit {
     fn eq(&self, other: &Self) -> bool {
-        if self.qubit_domain != other.qubit_domain
-            || self.qubits != other.qubits
+        if self.qubits != other.qubits
             || self.symbols != other.symbols
             || self.parameters != other.parameters
             || self.classical_vars != other.classical_vars
@@ -402,7 +398,6 @@ impl Circuit {
 
         Self {
             circuit_id: CircuitId::new(),
-            qubit_domain: QubitDomain::Logical,
             qubits,
             data: vec![],
             classical_vars: vec![],
@@ -432,7 +427,6 @@ impl Circuit {
 
         Ok(Self {
             circuit_id: CircuitId::new(),
-            qubit_domain: QubitDomain::Logical,
             symbols: IndexSet::new(),
             qubits: qubits.into_iter().collect(),
             data: vec![],
@@ -630,20 +624,6 @@ impl Circuit {
         self.qubits.len()
     }
 
-    /// Returns how this circuit interprets its qubit identifiers.
-    pub const fn qubit_domain(&self) -> QubitDomain {
-        self.qubit_domain
-    }
-
-    /// Changes how this circuit interprets its existing qubit identifiers.
-    ///
-    /// This operation does not remap identifiers. Callers must only select
-    /// [`QubitDomain::Physical`] after establishing that every identifier is a
-    /// hardware position on the intended target device.
-    pub fn set_qubit_domain(&mut self, domain: QubitDomain) {
-        self.qubit_domain = domain;
-    }
-
     /// Returns the parameters of the circuit.
     pub fn parameters(&self) -> &IndexSet<Parameter> {
         &self.parameters
@@ -838,7 +818,6 @@ impl Circuit {
 
         let candidate = Self {
             circuit_id: self.circuit_id,
-            qubit_domain: self.qubit_domain,
             qubits: self.qubits.clone(),
             symbols: self.symbols.clone(),
             parameters: self.parameters.clone(),
@@ -1815,7 +1794,6 @@ impl Circuit {
     /// operations (e.g., `Measure`, `Reset`) or gates that cannot be symbolically inverted.
     pub fn inverse(&self) -> Result<Circuit, CircuitError> {
         let mut new_circuit = Circuit::from_qubits(self.qubits())?;
-        new_circuit.qubit_domain = self.qubit_domain;
         new_circuit.classical_vars = self.classical_vars.clone();
         new_circuit.classical_values = self.classical_values.clone();
         new_circuit.data.reserve(self.data.len());
@@ -1938,7 +1916,6 @@ impl Circuit {
     /// or control flow body cannot be evaluated to a concrete value.
     pub fn decompose(&self) -> Result<Circuit, CircuitError> {
         let mut new_circuit = Circuit::from_qubits(self.qubits()).unwrap();
-        new_circuit.qubit_domain = self.qubit_domain;
         new_circuit.classical_vars = self.classical_vars.clone();
         new_circuit.classical_values = self.classical_values.clone();
         // Preserve the order of symbols from the original circuit.
@@ -2184,7 +2161,6 @@ impl Circuit {
         }
 
         let mut new_circuit = Circuit::from_qubits(self.qubits())?;
-        new_circuit.qubit_domain = self.qubit_domain;
         new_circuit.classical_vars = self.classical_vars.clone();
         new_circuit.classical_values = self.classical_values.clone();
 
@@ -2502,19 +2478,6 @@ impl Circuit {
         other: &Circuit,
         qubits_map: Option<&[Qubit]>,
     ) -> Result<(), CircuitError> {
-        let adopt_other_domain = self.qubits.is_empty() && !other.qubits.is_empty();
-        if !self.qubits.is_empty()
-            && !other.qubits.is_empty()
-            && self.qubit_domain != other.qubit_domain
-            && qubits_map.is_none()
-        {
-            return Err(CircuitError::InvalidOperation(format!(
-                "cannot compose a {}-qubit circuit into a {}-qubit circuit without an explicit qubit mapping",
-                other.qubit_domain.as_str(),
-                self.qubit_domain.as_str()
-            )));
-        }
-
         // Build qubit mapping: other_qubit -> target_qubit
         let qubit_mapping: HashMap<Qubit, Qubit> = if let Some(mapping) = qubits_map {
             // Validate mapping length
@@ -2642,9 +2605,6 @@ impl Circuit {
             .extend(other.classical_values.iter().copied());
         self.data.reserve(remapped_ops.len());
         self.data.extend(remapped_ops);
-        if adopt_other_domain {
-            self.qubit_domain = other.qubit_domain;
-        }
 
         Ok(())
     }

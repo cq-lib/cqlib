@@ -10,6 +10,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+use crate::circuit::Qubit;
 use crate::circuit::circuit_impl::Circuit;
 use crate::circuit::circuit_param::{CircuitParam, ParameterValue};
 use crate::circuit::error::CircuitError;
@@ -22,7 +23,6 @@ use crate::circuit::{
     IfOp, Operation, SwitchCase, SwitchOp, ValueClassicalControlOp, ValueControlBody,
     ValueInstruction, WhileOp,
 };
-use crate::circuit::{Qubit, QubitDomain};
 use smallvec::smallvec;
 use std::collections::HashSet;
 use std::f64::consts::PI;
@@ -34,72 +34,6 @@ fn control_operation(op: ClassicalControlOp) -> Operation {
         params: smallvec![],
         label: None,
     }
-}
-
-#[test]
-fn circuit_qubit_domain_defaults_and_clone_are_stable() {
-    let mut circuit = Circuit::new(2);
-    assert_eq!(circuit.qubit_domain(), QubitDomain::Logical);
-
-    circuit.set_qubit_domain(QubitDomain::Physical);
-    assert_eq!(circuit.clone().qubit_domain(), QubitDomain::Physical);
-}
-
-#[test]
-fn compose_rejects_mismatched_nonempty_qubit_domains() {
-    let mut logical = Circuit::new(1);
-    let mut physical = Circuit::new(1);
-    physical.set_qubit_domain(QubitDomain::Physical);
-
-    let error = logical.compose(&physical, None).unwrap_err();
-    assert!(error.to_string().contains("explicit qubit mapping"));
-    assert_eq!(logical.qubit_domain(), QubitDomain::Logical);
-}
-
-#[test]
-fn compose_accepts_explicit_mapping_between_qubit_domains() {
-    let mut physical = Circuit::new(1);
-    physical.set_qubit_domain(QubitDomain::Physical);
-    let mut logical = Circuit::new(1);
-    logical.x(Qubit::new(0)).unwrap();
-
-    physical.compose(&logical, Some(&[Qubit::new(0)])).unwrap();
-
-    assert_eq!(physical.qubit_domain(), QubitDomain::Physical);
-    assert_eq!(physical.operations().len(), 1);
-}
-
-#[test]
-fn empty_circuit_adopts_composed_qubit_domain() {
-    let mut target = Circuit::new(0);
-    let mut physical = Circuit::new(1);
-    physical.set_qubit_domain(QubitDomain::Physical);
-
-    target.compose(&physical, None).unwrap();
-
-    assert_eq!(target.qubit_domain(), QubitDomain::Physical);
-}
-
-#[test]
-fn derived_circuits_preserve_qubit_domain() {
-    let mut circuit = Circuit::new(1);
-    circuit.set_qubit_domain(QubitDomain::Physical);
-    circuit
-        .rx(Qubit::new(0), Parameter::symbol("theta"))
-        .unwrap();
-
-    assert_eq!(
-        circuit.inverse().unwrap().qubit_domain(),
-        QubitDomain::Physical
-    );
-    assert_eq!(
-        circuit.decompose().unwrap().qubit_domain(),
-        QubitDomain::Physical
-    );
-    assert_eq!(
-        circuit.assign_parameters(&None).unwrap().qubit_domain(),
-        QubitDomain::Physical
-    );
 }
 
 #[test]

@@ -13,7 +13,7 @@
 use crate::circuit::gate::circuit_gate::{CircuitGate, FrozenCircuit};
 use crate::circuit::{
     Circuit, ClassicalExpr, ClassicalType, ClassicalVar, Instruction, Parameter, ParameterValue,
-    Qubit, QubitDomain, StandardGate, UnitaryGate,
+    Qubit, StandardGate, UnitaryGate,
 };
 use oq3_semantics::asg::{
     self, ArithOp, BinaryOp, CmpOp, Expr, ForIterable, GateModifier, GateOperand, IndexOperator,
@@ -41,8 +41,7 @@ const DEFAULT_MAX_RECURSION_DEPTH: usize = 100;
 /// `stdgates.inc` is handled by `oq3_semantics` and does not require a file
 /// on disk.
 /// Physical qubits such as `$5` retain their numeric identifiers. Programs
-/// that mix declared logical qubits with physical qubits are rejected because
-/// the current circuit IR does not distinguish the two namespaces.
+/// that mix declared logical qubits with physical qubits are rejected.
 ///
 /// # Errors
 ///
@@ -85,8 +84,6 @@ pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Circuit, Qasm3ParseError> {
 /// The loader accepts both `OPENQASM 3;` and `OPENQASM 3.0;`. The former is
 /// normalized before calling `oq3_semantics` because version `0.7.0` of that
 /// crate expects a minor version in the header.
-/// Physical qubits such as `$5` retain their numeric identifiers. Programs
-/// that mix declared logical qubits with physical qubits are rejected.
 ///
 /// # Example
 ///
@@ -777,9 +774,7 @@ impl<'a> LoweringContext<'a> {
         let mut circuit = if self.hardware_qubits.is_empty() {
             Circuit::new(total_qubits)
         } else {
-            let mut circuit = Circuit::from_qubits(self.hardware_qubits.clone())?;
-            circuit.set_qubit_domain(QubitDomain::Physical);
-            circuit
+            Circuit::from_qubits(self.hardware_qubits.clone())?
         };
 
         for stmt in program.stmts() {

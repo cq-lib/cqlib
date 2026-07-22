@@ -112,12 +112,6 @@ impl PyCircuit {
         self.inner.num_qubits()
     }
 
-    /// Returns whether qubit identifiers are logical or physical.
-    #[getter]
-    fn qubit_domain(&self) -> &'static str {
-        self.inner.qubit_domain().as_str()
-    }
-
     #[getter]
     fn width(&self) -> usize {
         self.inner.width()

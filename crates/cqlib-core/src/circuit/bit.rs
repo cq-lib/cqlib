@@ -28,30 +28,6 @@
 use std::{fmt, hash::Hash};
 use thiserror::Error;
 
-/// Describes how an owning circuit interprets its qubit identifiers.
-///
-/// The domain belongs to the circuit rather than to individual [`Qubit`]
-/// handles, keeping those handles compact while preventing serializers and
-/// compiler passes from guessing whether an index is logical or physical.
-#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Hash)]
-pub enum QubitDomain {
-    /// Qubit identifiers name virtual circuit wires.
-    #[default]
-    Logical,
-    /// Qubit identifiers name positions on a target device.
-    Physical,
-}
-
-impl QubitDomain {
-    /// Returns the stable lowercase name used by language bindings.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Logical => "logical",
-            Self::Physical => "physical",
-        }
-    }
-}
-
 /// Errors returned when converting an integer into a [`Qubit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum QubitError {
@@ -63,11 +39,11 @@ pub enum QubitError {
     IndexTooLarge(u128),
 }
 
-/// A lightweight qubit identifier.
+/// A lightweight logical qubit identifier.
 ///
 /// Equality compares only the numeric identifier. A `Qubit` does not carry a circuit
-/// identity, physical-device location, or state-vector position. The owning circuit's
-/// [`QubitDomain`] and the matrix or simulator qubit order determine those meanings.
+/// identity, physical-device location, or state-vector position. The owning circuit and
+/// the matrix or simulator qubit order determine those meanings.
 ///
 /// It wraps a `u32` to provide a compact representation. Numeric IDs may be sparse,
 /// so callers must not assume that [`Qubit::index`] is a valid position in a circuit's
@@ -100,7 +76,7 @@ impl fmt::Display for Qubit {
 }
 
 impl Qubit {
-    /// Creates a qubit with the supplied numeric identifier.
+    /// Creates a logical qubit with the supplied numeric identifier.
     ///
     /// This is the only way for external users to create a Qubit instance,
     /// as the internal field is private to enforce encapsulation.

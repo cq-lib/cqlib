@@ -15,22 +15,12 @@
 //! This module provides functions to parse and serialize OpenQASM 3.0 programs.
 
 use crate::circuit::PyCircuit;
-use cqlib_core::ir::{
-    Qasm3DumpOptions, qasm3_dump_with_options, qasm3_dumps_with_options, qasm3_load, qasm3_loads,
-};
 use cqlib_core::ir::{qasm3::dump::Qasm3DumpError, qasm3::load::Qasm3ParseError};
+use cqlib_core::ir::{
+    qasm3_dump, qasm3_dump_with_physical_qubits, qasm3_dumps, qasm3_dumps_with_physical_qubits,
+    qasm3_load, qasm3_loads,
+};
 use pyo3::prelude::*;
-
-fn dump_options(qubit_mode: &str) -> PyResult<Qasm3DumpOptions> {
-    match qubit_mode {
-        "auto" => Ok(Qasm3DumpOptions::auto()),
-        "logical" => Ok(Qasm3DumpOptions::logical()),
-        "physical" => Ok(Qasm3DumpOptions::physical()),
-        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "qubit_mode must be 'auto', 'logical', or 'physical'",
-        )),
-    }
-}
 
 /// Parse OpenQASM 3.0 source string into a Circuit.
 ///
@@ -89,10 +79,13 @@ pub fn py_qasm3_load(path: &str) -> PyResult<PyCircuit> {
 /// # Errors
 /// Returns `ValueError` if the circuit contains instructions that cannot be
 /// represented in OpenQASM 3.0.
-#[pyfunction(name = "dumps", signature = (circuit, *, qubit_mode = "auto"))]
-pub fn py_qasm3_dumps(circuit: &PyCircuit, qubit_mode: &str) -> PyResult<String> {
-    let options = dump_options(qubit_mode)?;
-    match qasm3_dumps_with_options(&circuit.inner, options) {
+#[pyfunction(name = "dumps", signature = (circuit, *, physical_qubits = None))]
+pub fn py_qasm3_dumps(circuit: &PyCircuit, physical_qubits: Option<Vec<u32>>) -> PyResult<String> {
+    let result = match physical_qubits {
+        Some(mapping) => qasm3_dumps_with_physical_qubits(&circuit.inner, &mapping),
+        None => qasm3_dumps(&circuit.inner),
+    };
+    match result {
         Ok(qasm) => Ok(qasm),
         Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "QASM3 dump error: {}",
@@ -110,10 +103,17 @@ pub fn py_qasm3_dumps(circuit: &PyCircuit, qubit_mode: &str) -> PyResult<String>
 /// # Errors
 /// Returns `ValueError` if serialization fails, or `OSError` if the file cannot
 /// be written.
-#[pyfunction(name = "dump", signature = (circuit, path, *, qubit_mode = "auto"))]
-pub fn py_qasm3_dump(circuit: &PyCircuit, path: &str, qubit_mode: &str) -> PyResult<()> {
-    let options = dump_options(qubit_mode)?;
-    match qasm3_dump_with_options(&circuit.inner, path, options) {
+#[pyfunction(name = "dump", signature = (circuit, path, *, physical_qubits = None))]
+pub fn py_qasm3_dump(
+    circuit: &PyCircuit,
+    path: &str,
+    physical_qubits: Option<Vec<u32>>,
+) -> PyResult<()> {
+    let result = match physical_qubits {
+        Some(mapping) => qasm3_dump_with_physical_qubits(&circuit.inner, path, &mapping),
+        None => qasm3_dump(&circuit.inner, path),
+    };
+    match result {
         Ok(()) => Ok(()),
         Err(Qasm3DumpError::IoError(e)) => Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(
             format!("QASM3 dump error: {}", e),

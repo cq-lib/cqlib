@@ -13,7 +13,7 @@
 use super::*;
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, ClassicalExpr, ClassicalType, Instruction,
-    Operation, Parameter, ParameterValue, Qubit, QubitDomain, StandardGate,
+    Operation, Parameter, ParameterValue, Qubit, StandardGate,
 };
 use crate::compile::CompilerError;
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit, Topology};
@@ -97,7 +97,6 @@ fn route_keeps_adjacent_two_qubit_gate_without_swap() {
     let result = sabre_route(&circuit, &device, &layout, &config).unwrap();
 
     assert_eq!(result.swap_count, 0);
-    assert_eq!(result.circuit.qubit_domain(), QubitDomain::Physical);
     assert_eq!(result.circuit.operations().len(), 1);
     assert!(matches!(
         result.circuit.operations()[0].instruction,

@@ -67,8 +67,8 @@
 use crate::circuit::{
     Circuit, CircuitId, CircuitParam, ClassicalControlOp, ClassicalDataOp, ClassicalExpr,
     ClassicalType, ClassicalValue, ClassicalVar, Instruction, Operation, Parameter, ParameterValue,
-    Qubit, QubitDomain, ValueClassicalControlOp, ValueControlBody, ValueInstruction,
-    ValueOperation, ValueSwitchCase,
+    Qubit, ValueClassicalControlOp, ValueControlBody, ValueInstruction, ValueOperation,
+    ValueSwitchCase,
 };
 use crate::compile::CompilerError;
 use smallvec::SmallVec;
@@ -183,7 +183,6 @@ impl ClassicalRemap {
 #[derive(Debug, Clone)]
 pub struct CircuitRebuildContext {
     target_circuit_id: CircuitId,
-    qubit_domain: QubitDomain,
     classical_vars: Vec<ClassicalType>,
     classical_values: Vec<ClassicalType>,
     root_classical: ClassicalRemap,
@@ -226,7 +225,6 @@ impl CircuitRebuildContext {
 
         Self {
             target_circuit_id,
-            qubit_domain: source.qubit_domain(),
             classical_vars,
             classical_values,
             root_classical: ClassicalRemap { vars, values },
@@ -296,7 +294,6 @@ impl CircuitRebuildContext {
             Some(self.classical_vars),
             Some(self.classical_values),
         )?;
-        circuit.set_qubit_domain(self.qubit_domain);
         circuit.set_global_phase(global_phase);
         Ok(circuit)
     }
@@ -508,7 +505,6 @@ mod tests {
     #[test]
     fn preserved_rebuild_remaps_runtime_classical_handles_recursively() {
         let mut source = Circuit::new(3);
-        source.set_qubit_domain(QubitDomain::Physical);
         let flag = source.var(ClassicalType::Bool);
         let counter = source.var(ClassicalType::uint(2).unwrap());
         let selector = source.var(ClassicalType::uint(2).unwrap());
@@ -559,7 +555,6 @@ mod tests {
             .unwrap();
 
         assert_ne!(source.id(), rebuilt.id());
-        assert_eq!(rebuilt.qubit_domain(), QubitDomain::Physical);
         assert_eq!(rebuilt.classical_vars(), source.classical_vars());
         assert_eq!(rebuilt.classical_values(), source.classical_values());
         rebuilt.validate().unwrap();

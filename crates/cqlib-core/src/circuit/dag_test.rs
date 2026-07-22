@@ -1,9 +1,9 @@
-use super::{CircuitDag, DagControlFlow, DagNode, DagParts, DagWire};
+use super::{CircuitDag, DagControlFlow, DagNode, DagWire};
 use crate::circuit::Parameter;
 use crate::circuit::{
     Circuit, CircuitError, CircuitParam, ClassicalControlOp, ClassicalDataOp, ClassicalExpr,
-    ClassicalType, ControlBody, IfOp, Instruction, Operation, ParameterValue, Qubit, QubitDomain,
-    StandardGate, ValueInstruction, ValueOperation,
+    ClassicalType, ControlBody, IfOp, Instruction, Operation, ParameterValue, Qubit, StandardGate,
+    ValueInstruction, ValueOperation,
 };
 use indexmap::IndexSet;
 use proptest::prelude::*;
@@ -12,20 +12,6 @@ use smallvec::smallvec;
 
 fn q(index: u32) -> Qubit {
     Qubit::new(index)
-}
-
-#[test]
-fn circuit_dag_round_trip_preserves_qubit_domain() {
-    let mut circuit = Circuit::new(1);
-    circuit.set_qubit_domain(QubitDomain::Physical);
-    circuit.h(q(0)).unwrap();
-
-    let rebuilt = CircuitDag::from_circuit(&circuit)
-        .unwrap()
-        .to_circuit()
-        .unwrap();
-
-    assert_eq!(rebuilt.qubit_domain(), QubitDomain::Physical);
 }
 
 fn h_op(qubit: Qubit) -> Operation {
@@ -60,15 +46,12 @@ fn dag_from_ops_with_bool_var(
     operations: &[Operation],
 ) -> CircuitDag {
     CircuitDag::from_parts(
-        DagParts {
-            qubit_domain: QubitDomain::Logical,
-            qubits: vec![q(0)].into_iter().collect(),
-            symbols: IndexSet::new(),
-            parameters: IndexSet::new(),
-            classical_vars: vec![var.ty()],
-            classical_values: vec![],
-            global_phase: CircuitParam::Fixed(0.0),
-        },
+        vec![q(0)].into_iter().collect(),
+        IndexSet::new(),
+        IndexSet::new(),
+        vec![var.ty()],
+        vec![],
+        CircuitParam::Fixed(0.0),
         operations,
     )
     .unwrap()

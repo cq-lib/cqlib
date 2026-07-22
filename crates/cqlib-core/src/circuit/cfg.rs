@@ -28,8 +28,8 @@ use crate::circuit::gate::instruction::Instruction;
 use crate::circuit::value_instruction::storage_operation_to_value;
 use crate::circuit::{
     Circuit, CircuitError, ClassicalControlOp, ClassicalDataOp, ClassicalExpr, ClassicalType,
-    ClassicalVar, ControlBody, ForOp, IfOp, Operation, Parameter, Qubit, QubitDomain, SwitchCase,
-    SwitchOp, ValueOperation, WhileOp,
+    ClassicalVar, ControlBody, ForOp, IfOp, Operation, Parameter, Qubit, SwitchCase, SwitchOp,
+    ValueOperation, WhileOp,
 };
 use indexmap::IndexSet;
 use rustworkx_core::petgraph::prelude::{EdgeIndex, NodeIndex, StableDiGraph};
@@ -256,7 +256,6 @@ impl Default for BasicBlock {
 /// round-trip back to circuit control-flow operations.
 #[derive(Debug)]
 pub struct CircuitCFG {
-    pub(crate) qubit_domain: QubitDomain,
     pub(crate) qubits: IndexSet<Qubit>,
     pub(crate) symbols: IndexSet<String>,
     pub(crate) parameters: IndexSet<Parameter>,
@@ -273,7 +272,6 @@ impl CircuitCFG {
     pub fn new(num_qubits: usize) -> Self {
         let qubits = (0..num_qubits).map(|i| Qubit::new(i as u32)).collect();
         Self {
-            qubit_domain: QubitDomain::Logical,
             qubits,
             symbols: IndexSet::new(),
             parameters: IndexSet::new(),
@@ -289,7 +287,6 @@ impl CircuitCFG {
     /// Creates an empty CFG with the supplied logical qubits in insertion order.
     pub fn from_qubits(qubits: Vec<Qubit>) -> Self {
         Self {
-            qubit_domain: QubitDomain::Logical,
             qubits: qubits.into_iter().collect(),
             symbols: IndexSet::new(),
             parameters: IndexSet::new(),
@@ -405,7 +402,6 @@ impl CircuitCFG {
     /// structured representation or the generated graph fails validation.
     pub fn from_circuit(circuit: &Circuit) -> Result<Self, CircuitError> {
         let mut cfg = Self::from_qubits(circuit.qubits());
-        cfg.qubit_domain = circuit.qubit_domain();
         cfg.symbols = circuit.symbols().clone();
         cfg.parameters = circuit.parameters().clone();
         cfg.classical_vars = circuit.classical_vars().to_vec();
@@ -509,7 +505,6 @@ impl CircuitCFG {
             Some(self.classical_vars.clone()),
             Some(self.classical_values.clone()),
         )?;
-        circuit.set_qubit_domain(self.qubit_domain);
         circuit.set_global_phase(self.global_phase_parameter()?);
         Ok(circuit)
     }

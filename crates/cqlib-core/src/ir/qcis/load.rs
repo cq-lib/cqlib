@@ -50,7 +50,7 @@
 
 use crate::circuit::circuit_param::ParameterValue;
 use crate::circuit::gate::Instruction;
-use crate::circuit::{Circuit, Parameter, Qubit, QubitDomain, StandardGate};
+use crate::circuit::{Circuit, Parameter, Qubit, StandardGate};
 use regex::Regex;
 use std::collections::HashSet;
 use std::path::Path;
@@ -277,7 +277,6 @@ pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Circuit> {
 
 pub fn loads(qcis: &str) -> Result<Circuit> {
     let mut c = Circuit::new(0);
-    c.set_qubit_domain(QubitDomain::Physical);
     // Maintain a set of existing qubit IDs to avoid repeated circuit.qubits() calls
     let mut existing_qubits: HashSet<u32> = HashSet::new();
 

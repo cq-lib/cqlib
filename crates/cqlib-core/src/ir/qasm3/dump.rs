@@ -21,7 +21,7 @@ use crate::circuit::parameter::Parameter;
 use crate::circuit::{
     Circuit, ClassicalBinaryOp, ClassicalCast, ClassicalCompareOp, ClassicalControlOp,
     ClassicalExpr, ClassicalExprKind, ClassicalType, ClassicalUnaryOp, ClassicalValue,
-    ClassicalVar, Qubit, QubitDomain,
+    ClassicalVar, Qubit,
 };
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
@@ -30,49 +30,6 @@ use std::fs::File;
 use std::io::{self, Write as IoWrite};
 use std::path::Path;
 use std::sync::Arc;
-
-/// Controls how circuit qubit identifiers are represented in OpenQASM 3.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Qasm3QubitMode {
-    /// Select logical or physical syntax from [`Circuit::qubit_domain`].
-    #[default]
-    Auto,
-    /// Emit a compact virtual-qubit register such as `qubit[2] q`.
-    Logical,
-    /// Treat each [`Qubit`] index as a hardware identifier such as `$5`.
-    ///
-    /// The caller is responsible for ensuring that circuit qubit indices
-    /// already represent qubits on the intended target device.
-    Physical,
-}
-
-/// Options for serializing a circuit to OpenQASM 3.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Qasm3DumpOptions {
-    /// Representation used for top-level circuit qubits. The default is
-    /// [`Qasm3QubitMode::Auto`].
-    pub qubit_mode: Qasm3QubitMode,
-}
-
-impl Qasm3DumpOptions {
-    pub const fn auto() -> Self {
-        Self {
-            qubit_mode: Qasm3QubitMode::Auto,
-        }
-    }
-
-    pub const fn logical() -> Self {
-        Self {
-            qubit_mode: Qasm3QubitMode::Logical,
-        }
-    }
-
-    pub const fn physical() -> Self {
-        Self {
-            qubit_mode: Qasm3QubitMode::Physical,
-        }
-    }
-}
 
 #[derive(Debug)]
 pub enum Qasm3DumpError {
@@ -184,16 +141,22 @@ impl From<io::Error> for Qasm3DumpError {
 }
 
 pub fn dump<P: AsRef<Path>>(circuit: &Circuit, path: P) -> Result<(), Qasm3DumpError> {
-    dump_with_options(circuit, path, Qasm3DumpOptions::default())
+    let qasm = dumps(circuit)?;
+    let mut file = File::create(path)?;
+    file.write_all(qasm.as_bytes())?;
+    Ok(())
 }
 
-/// Serialize a circuit to an OpenQASM 3 file using the supplied options.
-pub fn dump_with_options<P: AsRef<Path>>(
+/// Serialize a circuit using explicit OpenQASM 3 physical-qubit identifiers.
+///
+/// `physical_qubits[i]` is assigned to the circuit's i-th qubit after sorting
+/// circuit qubits by their internal index.
+pub fn dump_with_physical_qubits<P: AsRef<Path>>(
     circuit: &Circuit,
     path: P,
-    options: Qasm3DumpOptions,
+    physical_qubits: &[u32],
 ) -> Result<(), Qasm3DumpError> {
-    let qasm = dumps_with_options(circuit, options)?;
+    let qasm = dumps_with_physical_qubits(circuit, physical_qubits)?;
     let mut file = File::create(path)?;
     file.write_all(qasm.as_bytes())?;
     Ok(())
@@ -208,13 +171,24 @@ pub fn to_path<P: AsRef<Path>>(circuit: &Circuit, path: P) -> Result<(), Qasm3Du
 }
 
 pub fn dumps(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
-    dumps_with_options(circuit, Qasm3DumpOptions::default())
+    dumps_impl(circuit, None)
 }
 
-/// Serialize a circuit to OpenQASM 3 using the supplied options.
-pub fn dumps_with_options(
+/// Serialize a circuit using explicit OpenQASM 3 physical-qubit identifiers.
+///
+/// For example, `[5, 7]` maps the circuit's first qubit to `$5` and its second
+/// qubit to `$7`. Mapping length must equal the number of circuit qubits and
+/// physical identifiers must be unique.
+pub fn dumps_with_physical_qubits(
     circuit: &Circuit,
-    options: Qasm3DumpOptions,
+    physical_qubits: &[u32],
+) -> Result<String, Qasm3DumpError> {
+    dumps_impl(circuit, Some(physical_qubits))
+}
+
+fn dumps_impl(
+    circuit: &Circuit,
+    physical_qubits: Option<&[u32]>,
 ) -> Result<String, Qasm3DumpError> {
     let mut output = String::new();
     writeln!(&mut output, "OPENQASM 3.0;")?;
@@ -248,17 +222,10 @@ pub fn dumps_with_options(
         NameAllocator::new(reserved_top_level_names(&defined_gates, &unitary_gate_defs));
     let param_map = dump_input_parameters(circuit, &mut output, &mut name_allocator)?;
     let skipped_values = skipped_classical_value_declarations(circuit.operations())?;
-    let qubit_mode = match options.qubit_mode {
-        Qasm3QubitMode::Auto => match circuit.qubit_domain() {
-            QubitDomain::Logical => Qasm3QubitMode::Logical,
-            QubitDomain::Physical => Qasm3QubitMode::Physical,
-        },
-        explicit => explicit,
-    };
-    let qubit_register = match qubit_mode {
-        Qasm3QubitMode::Auto => unreachable!("automatic qubit mode is resolved above"),
-        Qasm3QubitMode::Logical => Some(name_allocator.take("q")),
-        Qasm3QubitMode::Physical => None,
+    let qubit_register = if physical_qubits.is_some() {
+        None
+    } else {
+        Some(name_allocator.take("q"))
     };
     let auto_measurements =
         AutoMeasurementMap::new(circuit.operations(), name_allocator.take("meas"))?;
@@ -269,7 +236,10 @@ pub fn dumps_with_options(
             dump_qubit_mapping_comment(&mut output, &qubit_map)?;
             qubit_map
         }
-        None => physical_qubit_map(circuit),
+        None => physical_qubit_map(
+            circuit,
+            physical_qubits.expect("physical mapping selected above"),
+        )?,
     };
     let classical_names =
         ClassicalNameMap::new(circuit, &mut output, &skipped_values, &mut name_allocator)?;
@@ -358,12 +328,35 @@ fn logical_qubit_map(circuit: &Circuit, register_name: &str) -> HashMap<Qubit, S
         .collect()
 }
 
-fn physical_qubit_map(circuit: &Circuit) -> HashMap<Qubit, String> {
-    circuit
-        .qubits()
+fn physical_qubit_map(
+    circuit: &Circuit,
+    physical_qubits: &[u32],
+) -> Result<HashMap<Qubit, String>, Qasm3DumpError> {
+    let mut circuit_qubits = circuit.qubits();
+    circuit_qubits.sort_by_key(|qubit| qubit.index());
+
+    if circuit_qubits.len() != physical_qubits.len() {
+        return Err(Qasm3DumpError::FormatError(format!(
+            "physical_qubits has length {}, but circuit contains {} qubits",
+            physical_qubits.len(),
+            circuit_qubits.len()
+        )));
+    }
+
+    let mut seen = HashSet::new();
+    let mut qubit_map = HashMap::new();
+    for (qubit, physical) in circuit_qubits
         .into_iter()
-        .map(|qubit| (qubit, format!("${}", qubit.index())))
-        .collect()
+        .zip(physical_qubits.iter().copied())
+    {
+        if !seen.insert(physical) {
+            return Err(Qasm3DumpError::FormatError(format!(
+                "physical qubit identifier ${physical} is duplicated"
+            )));
+        }
+        qubit_map.insert(qubit, format!("${physical}"));
+    }
+    Ok(qubit_map)
 }
 
 fn dump_qubit_mapping_comment(
