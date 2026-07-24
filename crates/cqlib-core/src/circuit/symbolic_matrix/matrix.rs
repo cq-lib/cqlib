@@ -407,7 +407,7 @@ pub fn substitute_symbolic_matrix(
             .re
             .get_symbols()
             .into_iter()
-            .chain(value.im.get_symbols().into_iter())
+            .chain(value.im.get_symbols())
         {
             if sym.contains(INTERNAL_SUB_PREFIX) {
                 return Err(CircuitError::InvalidOperation(format!(

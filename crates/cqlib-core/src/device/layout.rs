@@ -158,10 +158,7 @@ impl Layout {
             .filter(|logical| !layout.l2p.contains_key(logical))
             .collect();
 
-        for (logical, physical) in unmapped_logical
-            .into_iter()
-            .zip(vacant_physical.into_iter())
-        {
+        for (logical, physical) in unmapped_logical.into_iter().zip(vacant_physical) {
             debug_assert!(
                 !layout.p2l.contains_key(&physical),
                 "vacant physical qubit became occupied before initial mapping completed"
