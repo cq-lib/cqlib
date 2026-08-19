@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+license-file.workspace = true
 description = "The high-performance core foundation for the CQLib quantum computing ecosystem."
 authors = ["Cqlib Development Team <tianyan@chinatelecom.cn >"]
 homepage = "https://qc.zdxlz.com/"

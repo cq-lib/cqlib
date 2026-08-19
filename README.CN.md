@@ -184,7 +184,3 @@ pytest crates/binding-python/tests/
 ## 许可证
 
 Cqlib 采用 [Apache License, Version 2.0](LICENSE.txt) 许可证。
-
----
-
-*版权所有 (C) 2025–2026 中国电信量子集团。保留所有权利。*

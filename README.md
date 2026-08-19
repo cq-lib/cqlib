@@ -191,7 +191,3 @@ and ensure all relevant tests pass.
 ## License
 
 Cqlib is licensed under the [Apache License, Version 2.0](LICENSE.txt).
-
----
-
-*Copyright (C) 2025–2026 China Telecom Quantum Group. All rights reserved.*
