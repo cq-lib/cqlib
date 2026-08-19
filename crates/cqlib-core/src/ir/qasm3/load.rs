@@ -1736,15 +1736,9 @@ impl<'a> LoweringContext<'a> {
                     BinaryOp::ArithOp(ArithOp::Mul) => left.checked_mul(right).ok_or_else(|| {
                         Qasm3ParseError::InvalidArgument("constant mul overflow".to_string())
                     }),
-                    BinaryOp::ArithOp(ArithOp::Div) => {
-                        if right == 0 {
-                            Err(Qasm3ParseError::InvalidArgument(
-                                "division by zero".to_string(),
-                            ))
-                        } else {
-                            Ok(left / right)
-                        }
-                    }
+                    BinaryOp::ArithOp(ArithOp::Div) => left.checked_div(right).ok_or_else(|| {
+                        Qasm3ParseError::InvalidArgument("division by zero".to_string())
+                    }),
                     _ => Err(Qasm3ParseError::UnsupportedFeature(format!(
                         "constant operator {:?}",
                         binary.op()
