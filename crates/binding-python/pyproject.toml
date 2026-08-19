@@ -35,6 +35,11 @@ dynamic = ["version"]
 [dependency-groups]
 test = ["pytest>=8.0"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = ["--strict-markers"]
+
 [project.urls]
 Homepage = "https://qc.zdxlz.com/"
 Documentation = "https://qc.zdxlz.com/learn/#/resource/informationSpace?lang=zh&cId=/mkdocs/zh/cqlib/01-overview.html"

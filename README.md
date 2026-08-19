@@ -167,7 +167,7 @@ Run the test suite:
 
 ```bash
 cargo test --all
-pytest tests/python/
+pytest crates/binding-python/tests/
 ```
 
 ## Documentation

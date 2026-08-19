@@ -163,7 +163,7 @@ cargo build --release -p binding-c
 
 ```bash
 cargo test --all
-pytest tests/python/
+pytest crates/binding-python/tests/
 ```
 
 ## 文档
