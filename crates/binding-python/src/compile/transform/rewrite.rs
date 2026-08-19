@@ -127,12 +127,13 @@ impl PyRewriteConfig {
             },
         );
         format!(
-            "RewriteConfig(max_rounds={}, max_window_ops={}, max_pattern_len={}, recurse_control_flow={}, skip_labeled_ops={}, enabled_kinds=[{}], mode={}, target_instructions={})",
+            "RewriteConfig(max_rounds={}, max_window_ops={}, max_pattern_len={}, recurse_control_flow={}, skip_labeled_ops={}, preserve_two_qubit_connectivity={}, enabled_kinds=[{}], mode={}, target_instructions={})",
             self.inner.max_rounds(),
             self.inner.max_window_ops(),
             self.inner.max_pattern_len(),
             python_bool(self.inner.recurses_control_flow()),
             python_bool(self.inner.skips_labeled_ops()),
+            python_bool(self.inner.preserve_two_qubit_connectivity()),
             enabled_kinds,
             PyRewriteMode::from(self.inner.mode()).__repr__(),
             target_instructions,
@@ -144,7 +145,7 @@ impl PyRewriteConfig {
 impl PyRewriteConfig {
     /// Creates a rewrite configuration from a production or lowering preset.
     #[new]
-    #[pyo3(signature = (*, max_rounds=8, max_window_ops=16, max_pattern_len=8, recurse_control_flow=true, skip_labeled_ops=true, enabled_kinds=None, mode=None, target_instructions=None))]
+    #[pyo3(signature = (*, max_rounds=8, max_window_ops=16, max_pattern_len=8, recurse_control_flow=true, skip_labeled_ops=true, preserve_two_qubit_connectivity=false, enabled_kinds=None, mode=None, target_instructions=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         max_rounds: u8,
@@ -152,6 +153,7 @@ impl PyRewriteConfig {
         max_pattern_len: usize,
         recurse_control_flow: bool,
         skip_labeled_ops: bool,
+        preserve_two_qubit_connectivity: bool,
         enabled_kinds: Option<Vec<PyRuleKind>>,
         mode: Option<PyRewriteMode>,
         target_instructions: Option<Vec<PyInstruction>>,
@@ -166,6 +168,7 @@ impl PyRewriteConfig {
         .with_max_pattern_len(max_pattern_len)
         .recurse_control_flow(recurse_control_flow)
         .skip_labeled_ops(skip_labeled_ops)
+        .with_preserve_two_qubit_connectivity(preserve_two_qubit_connectivity)
         .with_mode(mode);
 
         if let Some(kinds) = enabled_kinds {
@@ -220,6 +223,11 @@ impl PyRewriteConfig {
     #[getter]
     fn skip_labeled_ops(&self) -> bool {
         self.inner.skips_labeled_ops()
+    }
+
+    #[getter]
+    fn preserve_two_qubit_connectivity(&self) -> bool {
+        self.inner.preserve_two_qubit_connectivity()
     }
 
     #[getter]

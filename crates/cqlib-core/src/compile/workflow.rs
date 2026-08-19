@@ -232,6 +232,7 @@ impl CompilerWorkflow {
         self.canonicalize_native_input(&mut state)?;
         self.optimize_native_instructions(&mut state)?;
         self.validate_device(&mut state)?;
+        self.validate_topology_target(&mut state)?;
 
         Ok(CompileResult {
             circuit: state.current,
@@ -497,18 +498,51 @@ impl CompilerWorkflow {
         Ok(())
     }
 
+    /// Validates the final circuit against a topology-basis target.
+    ///
+    /// Topology-basis compilation routes onto a physical coupling graph but
+    /// does not lower to exact ordered device capabilities, so the strict
+    /// device validator does not apply. Instead, the loose-topology device
+    /// built for routing approximates this contract: `Device::validate_circuit`
+    /// is a full device validator, and here it is configured with bidirectional
+    /// coupling edges and the explicit basis as native gates, so the check
+    /// covers valid qubits, undirected connectivity, and basis membership.
+    fn validate_topology_target(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
+        let CompileTarget::TopologyBasis { device_target, .. } = &self.config.target else {
+            return Ok(());
+        };
+        let device = self.routing_device(device_target)?;
+        device.validate_circuit(&state.current)?;
+        state.steps.push(WorkflowStepReport {
+            stage: "validation",
+            name: "validate.topology",
+            changed: false,
+            skipped: false,
+            reason: None,
+        });
+        Ok(())
+    }
+
     /// Builds the rewrite configuration for a workflow phase.
     ///
     /// Rewrite phases use the production optimizer. Enhanced mode only
     /// increases bounded search budgets rather than changing correctness
     /// requirements.
+    ///
+    /// Compiler invariant: once a circuit has been physically routed, every
+    /// two-qubit operation acts on a device coupling edge, so any rewrite
+    /// phase that runs after routing must preserve undirected two-qubit
+    /// connectivity. New physical phases added to the workflow must opt into
+    /// this policy; pre-routing phases and basis-only cleanup (which never
+    /// routes) stay unrestricted.
     fn rewrite_config(&self, phase: RewritePhase) -> Result<RewriteConfig, CompilerError> {
-        let mut config = match phase {
-            RewritePhase::PreDecomposition
-            | RewritePhase::PostDecomposition
-            | RewritePhase::PostRouting
-            | RewritePhase::TargetCleanup => RewriteConfig::production(),
+        let preserve_connectivity = match phase {
+            RewritePhase::PreDecomposition | RewritePhase::PostDecomposition => false,
+            RewritePhase::PostRouting => true,
+            RewritePhase::TargetCleanup => self.routing_device_target().is_some(),
         };
+        let mut config =
+            RewriteConfig::production().with_preserve_two_qubit_connectivity(preserve_connectivity);
 
         if self.config.mode == CompileMode::Enhanced {
             config = config

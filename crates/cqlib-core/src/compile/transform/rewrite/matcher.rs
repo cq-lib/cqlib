@@ -93,6 +93,7 @@ struct CompiledRule {
     match_len: usize,
     qubit_count: usize,
     static_cost_delta: isize,
+    preserves_two_qubit_connectivity: bool,
     source_keys: SmallVec<[RewriteInstructionKey; 8]>,
     match_keys: SmallVec<[RewriteInstructionKey; 4]>,
     rewrite_keys: SmallVec<[RewriteInstructionKey; 4]>,
@@ -456,6 +457,7 @@ impl CompiledRuleSet {
                 rule.kind != RuleKind::Commute
                     && config.allows_kind(rule.kind)
                     && rule.match_len <= config.max_pattern_len()
+                    && rule_allowed_by_connectivity_policy(rule, config)
             })
             .map(|rule| {
                 rule.match_len
@@ -563,12 +565,63 @@ fn push_compiled_rule(
         match_len,
         qubit_count: rule_qubits.len(),
         static_cost_delta: rewrite_len as isize - match_len as isize,
+        preserves_two_qubit_connectivity: rule_preserves_two_qubit_connectivity(&rule),
         source_keys,
         match_keys,
         rewrite_keys,
         rule,
     });
     Ok(())
+}
+
+/// Computes whether a rule's replacement can only act on two-qubit pairs
+/// already present in its match.
+///
+/// A routed circuit has every two-qubit operation on a device coupling edge.
+/// A rule preserves that invariant when every exactly-two-qubit operation in
+/// its rewrite uses an unordered qubit pair that some exactly-two-qubit
+/// operation in its match already uses, and the rewrite emits no operations
+/// on more than two qubits. Pair order is ignored: direction flips such as
+/// `CX 0 1 -> CX 1 0` are legal because gate direction is resolved by device
+/// lowering, not by routing.
+///
+/// Only exactly-two-qubit match operations count as evidence that a pair is
+/// a valid physical edge: a three-qubit operation spanning qubits 0, 1, 2
+/// does not prove that {0, 2} is routable. Rules may therefore not shrink a
+/// multi-qubit match onto an arbitrary sub-pair.
+///
+/// Rewrites cannot introduce qubits absent from the match block; that is
+/// already enforced by `Rule::validate` at library load time
+/// (`UnboundRewriteQubit`), so this classification only inspects edge sets
+/// and rewrite arity.
+///
+/// `pub(super)` so the rewrite test module can exercise the classification
+/// directly on hand-written rules without routing a full circuit.
+pub(super) fn rule_preserves_two_qubit_connectivity(rule: &Rule) -> bool {
+    let mut source_pairs = HashSet::new();
+    for item in &rule.operations {
+        if item.qubits.len() == 2 {
+            source_pairs.insert(normalized_qubit_pair(item.qubits[0], item.qubits[1]));
+        }
+    }
+
+    for item in &rule.target {
+        match item.qubits.len() {
+            0 | 1 => {}
+            2 => {
+                if !source_pairs.contains(&normalized_qubit_pair(item.qubits[0], item.qubits[1])) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Returns the unordered qubit pair `(min, max)` for edge-set membership.
+fn normalized_qubit_pair(a: u32, b: u32) -> (u32, u32) {
+    if a <= b { (a, b) } else { (b, a) }
 }
 
 /// Selects the rewrite patches for one block, optionally restricted to dirty
@@ -644,6 +697,7 @@ fn is_eligible_anchor(
             rule.kind != RuleKind::Commute
                 && config.allows_kind(rule.kind)
                 && rule.match_len <= config.max_pattern_len()
+                && rule_allowed_by_connectivity_policy(rule, config)
         })
 }
 
@@ -815,7 +869,20 @@ fn rule_passes_static_filters(
         && config.allows_kind(rule.kind)
         && rule.match_len <= config.max_pattern_len()
         && rule.qubit_count <= block.cache.qubit_count
+        && rule_allowed_by_connectivity_policy(rule, config)
         && rule_passes_target_filter(rule, target_context, block)
+}
+
+/// Returns whether `rule` is admissible under the configured two-qubit
+/// connectivity policy.
+///
+/// The policy is only restrictive when explicitly enabled (post-routing
+/// phases); otherwise every rule passes. This predicate is shared by the
+/// static filter, the match-reach estimate, and anchor eligibility so the
+/// incremental matcher never budgets scan windows for rules that the filter
+/// would reject anyway.
+fn rule_allowed_by_connectivity_policy(rule: &CompiledRule, config: &RewriteConfig) -> bool {
+    !config.preserve_two_qubit_connectivity() || rule.preserves_two_qubit_connectivity
 }
 
 /// Checks whether a rule is legal for an optional target-basis context.

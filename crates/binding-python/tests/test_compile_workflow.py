@@ -217,6 +217,9 @@ def test_explicit_topology_basis_target_is_inspectable_and_does_not_warn() -> No
     assert target.device_target.seed is None
     result = compile(circuit, target=target, seed=13)
     assert result.device_metadata is not None
+    topology_validation = result.step("validate.topology")
+    assert topology_validation is not None
+    assert topology_validation.skipped is False
 
 
 @pytest.mark.parametrize(

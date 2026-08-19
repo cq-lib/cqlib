@@ -204,6 +204,7 @@ def test_rewrite_modes_and_config_expose_immutable_options() -> None:
         max_pattern_len=4,
         recurse_control_flow=False,
         skip_labeled_ops=False,
+        preserve_two_qubit_connectivity=True,
         enabled_kinds=kinds,
         mode=lowering,
         target_instructions=[h, h],
@@ -218,15 +219,46 @@ def test_rewrite_modes_and_config_expose_immutable_options() -> None:
     assert config.max_pattern_len == 4
     assert config.recurse_control_flow is False
     assert config.skip_labeled_ops is False
+    assert config.preserve_two_qubit_connectivity is True
     assert config.enabled_kinds == kinds
     assert config.mode == lowering
     assert [instruction.name for instruction in config.target_instructions] == ["H"]
     assert copy.copy(config) == config
     assert copy.deepcopy(config) == config
     assert repr(config).startswith("RewriteConfig(max_rounds=3,")
+    assert "preserve_two_qubit_connectivity=True" in repr(config)
 
     with pytest.raises(AttributeError):
         config.max_rounds = 4
+
+
+def test_rewrite_connectivity_policy_blocks_bridge_collapse() -> None:
+    circuit = Circuit(3)
+    circuit.cx(0, 1)
+    circuit.cx(1, 2)
+    circuit.cx(0, 1)
+    circuit.cx(1, 2)
+
+    unrestricted = rewrite_circuit(circuit)
+    preserved = rewrite_circuit(
+        circuit,
+        RewriteConfig(preserve_two_qubit_connectivity=True),
+    )
+
+    assert len(unrestricted.circuit.operations) == 1
+    assert [qubit.index for qubit in unrestricted.circuit.operations[0].qubits] == [
+        0,
+        2,
+    ]
+    assert len(preserved.circuit.operations) == 4
+    assert all(
+        operation.instruction.instruction.name == "CX"
+        for operation in preserved.circuit.operations
+    )
+    assert [
+        [qubit.index for qubit in operation.qubits]
+        for operation in preserved.circuit.operations
+    ] == [[0, 1], [1, 2], [0, 1], [1, 2]]
 
 
 def test_lowering_mode_selects_lowering_rule_defaults() -> None:

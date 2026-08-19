@@ -58,6 +58,7 @@ class RewriteConfig:
         max_pattern_len: int = 8,
         recurse_control_flow: bool = True,
         skip_labeled_ops: bool = True,
+        preserve_two_qubit_connectivity: bool = False,
         enabled_kinds: Sequence[RuleKind] | None = None,
         mode: RewriteMode | None = None,
         target_instructions: Sequence[Instruction] | None = None,
@@ -87,6 +88,10 @@ class RewriteConfig:
     def recurse_control_flow(self) -> bool: ...
     @property
     def skip_labeled_ops(self) -> bool: ...
+    @property
+    def preserve_two_qubit_connectivity(self) -> bool:
+        """Whether rewrites must avoid introducing new two-qubit pairs."""
+        ...
     @property
     def enabled_kinds(self) -> list[RuleKind]:
         """Copies of the enabled rule categories in selection order."""

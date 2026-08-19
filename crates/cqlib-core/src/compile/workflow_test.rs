@@ -2212,3 +2212,246 @@ fn fixpoint_loop_reruns_cancellation_after_stable_resynthesis() {
     let gates = standard_ops(&state.current);
     assert!(gates.is_empty(), "gates: {gates:?}");
 }
+
+/// Asserts that every two-qubit operation in `circuit` acts on an adjacent
+/// pair of the 0-1-2 line topology.
+fn assert_two_qubit_gates_on_line(circuit: &Circuit) {
+    for operation in circuit.operations() {
+        if operation.qubits.len() != 2 {
+            continue;
+        }
+        let a = operation.qubits[0].index();
+        let b = operation.qubits[1].index();
+        let (lo, hi) = (a.min(b), a.max(b));
+        assert!(
+            matches!((lo, hi), (0, 1) | (1, 2)),
+            "two-qubit gate acts on non-adjacent pair ({a}, {b})"
+        );
+    }
+}
+
+#[test]
+fn enhanced_device_target_keeps_routed_two_qubit_gates_on_topology() {
+    // End-to-end smoke test: a non-adjacent CX forces routing to insert SWAPs,
+    // and the full Enhanced pipeline must finish with every two-qubit gate on a
+    // line-topology edge. The bridge-collapse regression itself is pinned
+    // deterministically by `post_routing_cleanup_does_not_collapse_bridge`.
+    let mut circuit = Circuit::new(3);
+    circuit.cx(Qubit::new(0), Qubit::new(2)).unwrap();
+
+    let device = Device::bidirectional_line("device-post-routing-line", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let initial_layout = Layout::from_pairs(&[(0, 0), (1, 1), (2, 2)], 3).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Enhanced,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: Some(initial_layout),
+            seed: Some(47),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    // Strict device validation fails loudly if any two-qubit gate escaped the
+    // line topology. (Matrix equivalence against the logical input is omitted:
+    // the routed circuit lives on physical qubits whose final layout may be
+    // permuted by the inserted SWAPs, so a direct matrix comparison is not the
+    // invariant under test here.)
+    device.validate_circuit(&result.circuit).unwrap();
+    assert_two_qubit_gates_on_line(&result.circuit);
+}
+
+#[test]
+fn enhanced_topology_basis_target_keeps_routed_two_qubit_gates_on_topology() {
+    // End-to-end smoke test for the TopologyBasis path: routing a non-adjacent
+    // CX and lowering to the H/CZ basis must keep every two-qubit gate on the
+    // line topology, and the validate.topology backstop must actually run.
+    let mut circuit = Circuit::new(3);
+    circuit.cx(Qubit::new(0), Qubit::new(2)).unwrap();
+
+    let device = Device::bidirectional_line("topology-basis-post-routing-line", 3)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+        .unwrap();
+    let initial_layout = Layout::from_pairs(&[(0, 0), (1, 1), (2, 2)], 3).unwrap();
+    let basis = vec![
+        Instruction::Standard(StandardGate::H),
+        Instruction::Standard(StandardGate::CZ),
+    ];
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Enhanced,
+        target: CompileTarget::TopologyBasis {
+            device_target: DeviceCompileTarget {
+                device: device.clone(),
+                initial_layout: Some(initial_layout),
+                seed: Some(47),
+            },
+            basis,
+        },
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    // The workflow's validate.topology step already ran internally; assert the
+    // invariant directly so a regression in that step still fails here.
+    assert!(!result.step("validate.topology").unwrap().skipped);
+    assert_two_qubit_gates_on_line(&result.circuit);
+    assert!(
+        standard_ops(&result.circuit)
+            .iter()
+            .all(|gate| matches!(gate, StandardGate::H | StandardGate::CZ))
+    );
+}
+
+#[test]
+fn rewrite_connectivity_policy_follows_phase_and_routing() {
+    // Logical target never routes.
+    let logical = CompilerWorkflow::new(compile_config(CompileMode::Enhanced));
+    assert!(
+        !logical
+            .rewrite_config(RewritePhase::PreDecomposition)
+            .unwrap()
+            .preserve_two_qubit_connectivity()
+    );
+    assert!(
+        !logical
+            .rewrite_config(RewritePhase::PostDecomposition)
+            .unwrap()
+            .preserve_two_qubit_connectivity()
+    );
+    assert!(
+        logical
+            .rewrite_config(RewritePhase::PostRouting)
+            .unwrap()
+            .preserve_two_qubit_connectivity()
+    );
+    assert!(
+        !logical
+            .rewrite_config(RewritePhase::TargetCleanup)
+            .unwrap()
+            .preserve_two_qubit_connectivity()
+    );
+
+    // A device target routes, so TargetCleanup (when it runs) must also
+    // preserve connectivity.
+    let device_workflow = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Enhanced,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: Device::bidirectional_line("wiring-device", 2).unwrap(),
+            initial_layout: None,
+            seed: Some(47),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    });
+    assert!(
+        device_workflow
+            .rewrite_config(RewritePhase::TargetCleanup)
+            .unwrap()
+            .preserve_two_qubit_connectivity()
+    );
+}
+
+#[test]
+fn post_routing_cleanup_does_not_collapse_bridge() {
+    // Direct regression for the fix: hand-build an already-routed circuit that
+    // contains the four-CX bridge pattern on physical qubits, then run the
+    // workflow's actual post-routing cleanup. The connectivity policy must keep
+    // the pattern intact instead of collapsing it to the non-adjacent CX(0,2).
+    let (q0, q1, q2) = (Qubit::new(0), Qubit::new(1), Qubit::new(2));
+    let mut circuit = Circuit::new(3);
+    circuit.cx(q0, q1).unwrap();
+    circuit.cx(q1, q2).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    circuit.cx(q1, q2).unwrap();
+
+    let workflow = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Enhanced,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: Device::bidirectional_line("cleanup-bridge", 3).unwrap(),
+            initial_layout: None,
+            seed: Some(47),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    });
+
+    let mut state = workflow_state_without_target_basis();
+    state.analysis = CircuitAnalysis::analyze(&circuit);
+    state.current = circuit;
+
+    workflow.apply_post_routing_cleanup(&mut state).unwrap();
+
+    // Without the policy the four CX collapse to a single CX(0,2); with the
+    // policy they must all remain on the {0,1}/{1,2} line.
+    assert_eq!(standard_ops(&state.current), vec![StandardGate::CX; 4]);
+    assert_two_qubit_gates_on_line(&state.current);
+}
+
+#[test]
+fn validate_topology_target_rejects_non_topological_two_qubit_gate() {
+    // The backstop must catch a topology violation even when the filter
+    // fails: CZ is in the loose device's native basis, but {0,2} is not an
+    // edge of the 0-1-2 line.
+    let mut circuit = Circuit::new(3);
+    circuit.cz(Qubit::new(0), Qubit::new(2)).unwrap();
+
+    let workflow = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Enhanced,
+        target: CompileTarget::TopologyBasis {
+            device_target: DeviceCompileTarget {
+                device: Device::bidirectional_line("validate-topology", 3).unwrap(),
+                initial_layout: None,
+                seed: Some(47),
+            },
+            basis: vec![
+                Instruction::Standard(StandardGate::H),
+                Instruction::Standard(StandardGate::CZ),
+            ],
+        },
+        resource_policy: ResourcePolicy::default(),
+    });
+
+    let mut state = workflow_state_without_target_basis();
+    state.analysis = CircuitAnalysis::analyze(&circuit);
+    state.current = circuit;
+
+    assert!(workflow.validate_topology_target(&mut state).is_err());
+}
+
+#[test]
+fn validate_topology_target_accepts_topological_circuit() {
+    let mut circuit = Circuit::new(3);
+    circuit.cz(Qubit::new(0), Qubit::new(1)).unwrap();
+    circuit.cz(Qubit::new(1), Qubit::new(2)).unwrap();
+
+    let workflow = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Enhanced,
+        target: CompileTarget::TopologyBasis {
+            device_target: DeviceCompileTarget {
+                device: Device::bidirectional_line("validate-topology-ok", 3).unwrap(),
+                initial_layout: None,
+                seed: Some(47),
+            },
+            basis: vec![
+                Instruction::Standard(StandardGate::H),
+                Instruction::Standard(StandardGate::CZ),
+            ],
+        },
+        resource_policy: ResourcePolicy::default(),
+    });
+
+    let mut state = workflow_state_without_target_basis();
+    state.analysis = CircuitAnalysis::analyze(&circuit);
+    state.current = circuit;
+
+    workflow.validate_topology_target(&mut state).unwrap();
+}
