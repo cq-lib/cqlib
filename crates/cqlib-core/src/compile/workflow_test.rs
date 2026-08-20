@@ -30,7 +30,7 @@ use crate::compile::{
     CompileConfig, CompileMode, CompileTarget, CompilerError, DeviceCompileTarget,
     SabreRoutingFailure, compile,
 };
-use crate::device::{Device, EdgeProp, InstructionProp, Layout, PhysicalQubit};
+use crate::device::{Device, EdgeProp, InstructionProp, Layout, LogicalQubit, PhysicalQubit};
 use ndarray::array;
 use num_complex::Complex64;
 use std::collections::{HashMap, HashSet};
@@ -66,6 +66,7 @@ fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowS
         steps: Vec::new(),
         prepared_target_basis: Some(prepared_target_basis),
         two_qubit_target,
+        virtual_permutation: None,
         device_metadata: None,
         one_qubit_optimizer,
         pending_one_qubit_resynthesis: false,
@@ -81,6 +82,7 @@ fn workflow_state_without_target_basis() -> WorkflowState {
         steps: Vec::new(),
         prepared_target_basis: None,
         two_qubit_target: TwoQubitSynthesisTarget::unconstrained(),
+        virtual_permutation: None,
         device_metadata: None,
         one_qubit_optimizer: Some(OptimizeOneQubitRuns::logical()),
         pending_one_qubit_resynthesis: false,
@@ -334,6 +336,20 @@ fn normal_workflow_reports_no_change_for_stable_circuit() {
 }
 
 #[test]
+fn logical_workflow_keeps_swap_when_no_layout_metadata_can_represent_it() {
+    let mut circuit = Circuit::new(2);
+    circuit.swap(Qubit::new(0), Qubit::new(1)).unwrap();
+
+    let result = run_workflow(&circuit, CompileMode::Normal);
+
+    assert!(standard_ops(&result.circuit).contains(&StandardGate::SWAP));
+    let step = result.step("optimize.virtual_permutation").unwrap();
+    assert!(step.skipped);
+    assert_eq!(step.reason.as_deref(), Some("no target device configured"));
+    assert!(result.device_metadata.is_none());
+}
+
+#[test]
 fn normal_workflow_keeps_measurement_circuit_through_definition_stage() {
     let mut circuit = Circuit::new(2);
     circuit
@@ -380,6 +396,7 @@ fn normal_workflow_reports_staged_order() {
             "decompose.mc_gates",
             "canonicalize.after_decomposition",
             "optimize.commutative_cancellation",
+            "optimize.virtual_permutation",
             "resynthesize.two_qubit_blocks",
             "optimize.one_qubit.post_decomposition",
             "optimize.post_decomposition",
@@ -400,6 +417,7 @@ fn normal_workflow_reports_staged_order() {
     );
     for name in [
         "decompose.routing_basis",
+        "optimize.virtual_permutation",
         "route.sabre",
         "translate.target_basis",
         "optimize.one_qubit.post_translation",
@@ -484,6 +502,7 @@ fn enhanced_workflow_uses_richer_stage_sequence() {
             "decompose.mc_gates",
             "canonicalize.after_decomposition",
             "optimize.commutative_cancellation",
+            "optimize.virtual_permutation",
             "resynthesize.two_qubit_blocks",
             "optimize.one_qubit.post_decomposition",
             "optimize.post_decomposition",
@@ -507,6 +526,7 @@ fn enhanced_workflow_uses_richer_stage_sequence() {
     );
     for name in [
         "decompose.routing_basis",
+        "optimize.virtual_permutation",
         "route.sabre",
         "resynthesize.two_qubit_blocks.post_routing",
         "optimize.post_routing",
@@ -1308,6 +1328,156 @@ fn workflow_routes_from_supplied_initial_layout() {
 }
 
 #[test]
+fn supplied_initial_layout_stays_input_oriented_while_final_layout_composes_output_permutation() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.swap(q0, q1).unwrap();
+    circuit.x(q0).unwrap();
+    let supplied = Layout::from_pairs(&[(0, 2), (1, 0)], 3).unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: Device::line("permuted-layout-line", 3)
+                .unwrap()
+                .with_native_gates(vec![
+                    Instruction::Standard(StandardGate::H),
+                    Instruction::Standard(StandardGate::X),
+                    Instruction::Standard(StandardGate::CX),
+                ])
+                .unwrap(),
+            initial_layout: Some(supplied),
+            seed: Some(19),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    assert!(result.step_changed("optimize.virtual_permutation"));
+    let metadata = result.device_metadata.unwrap();
+    assert_eq!(
+        metadata.initial_layout.get_physical(LogicalQubit::new(0)),
+        Some(PhysicalQubit::new(2))
+    );
+    assert_eq!(
+        metadata.initial_layout.get_physical(LogicalQubit::new(1)),
+        Some(PhysicalQubit::new(0))
+    );
+    assert_eq!(
+        metadata
+            .virtual_permutation
+            .rewritten_output(LogicalQubit::new(0)),
+        Some(LogicalQubit::new(1))
+    );
+    assert_eq!(
+        metadata.final_layout.get_physical(LogicalQubit::new(0)),
+        Some(PhysicalQubit::new(0))
+    );
+    assert_eq!(
+        metadata.final_layout.get_physical(LogicalQubit::new(1)),
+        Some(PhysicalQubit::new(2))
+    );
+}
+
+#[test]
+fn automatic_layout_with_virtual_permutation_remains_device_valid() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    circuit.cx(q0, q1).unwrap();
+    circuit.swap(q0, q2).unwrap();
+    let device = Device::line("automatic-permutation-line", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: None,
+            seed: Some(23),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    assert!(result.step_changed("optimize.virtual_permutation"));
+    device.validate_circuit(&result.circuit).unwrap();
+    let metadata = result.device_metadata.unwrap();
+    assert_eq!(
+        metadata
+            .virtual_permutation
+            .rewritten_output(LogicalQubit::new(0)),
+        Some(LogicalQubit::new(2))
+    );
+    assert_eq!(
+        metadata
+            .virtual_permutation
+            .rewritten_output(LogicalQubit::new(2)),
+        Some(LogicalQubit::new(0))
+    );
+}
+
+#[test]
+fn virtual_permutation_precedes_two_qubit_resynthesis() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.swap(q0, q1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    let device = Device::bidirectional_line("permutation-before-resynthesis", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+
+    let result = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Enhanced,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: None,
+            seed: Some(29),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    })
+    .run(&circuit)
+    .unwrap();
+
+    let virtual_index = result
+        .steps
+        .iter()
+        .position(|step| step.name == "optimize.virtual_permutation")
+        .unwrap();
+    let resynthesis_index = result
+        .steps
+        .iter()
+        .position(|step| step.name == "resynthesize.two_qubit_blocks")
+        .unwrap();
+    assert!(virtual_index < resynthesis_index);
+    assert!(result.step_changed("optimize.virtual_permutation"));
+    assert_eq!(
+        result
+            .circuit
+            .operations()
+            .iter()
+            .filter(|operation| operation.qubits.len() == 2)
+            .count(),
+        1
+    );
+    device.validate_circuit(&result.circuit).unwrap();
+}
+
+#[test]
 fn device_workflow_legalizes_reverse_cx_to_directed_native_gates() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
@@ -1346,7 +1516,14 @@ fn device_workflow_legalizes_swap_through_reverse_cx_templates() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let mut circuit = Circuit::new(2);
-    circuit.swap(q0, q1).unwrap();
+    circuit
+        .append(
+            Instruction::Standard(StandardGate::SWAP),
+            [q0, q1],
+            [],
+            Some("preserve-native-realization"),
+        )
+        .unwrap();
 
     let device = Device::line_from_qubits(
         "reverse-swap",
@@ -1380,7 +1557,14 @@ fn device_workflow_selects_lowest_cost_native_swap_realization() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let mut circuit = Circuit::new(2);
-    circuit.swap(q0, q1).unwrap();
+    circuit
+        .append(
+            Instruction::Standard(StandardGate::SWAP),
+            [q0, q1],
+            [],
+            Some("preserve-native-realization"),
+        )
+        .unwrap();
 
     let device = Device::line_from_qubits(
         "reverse-swap-cz",

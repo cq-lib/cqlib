@@ -284,10 +284,31 @@ def test_device_compile_returns_layout_metadata() -> None:
     assert isinstance(result.device_metadata, DeviceCompilationMetadata)
     assert result.device_metadata.initial_layout.num_logical == 1
     assert result.device_metadata.final_layout.num_logical == 1
+    assert result.device_metadata.virtual_permutation == {0: 0}
     assert copy.copy(result.device_metadata) == result.device_metadata
     assert result.step("validate.device") is not None
     assert result.step("missing") is None
     assert result.step_changed("route.sabre") is False
+
+
+def test_device_compile_exposes_elided_output_permutation() -> None:
+    circuit = Circuit(2)
+    circuit.swap(0, 1)
+    device = Device.bidirectional_line("virtual-swap", 2)
+    device.native_gates = [
+        Instruction.from_standard_gate(StandardGate.H),
+        Instruction.from_standard_gate(StandardGate.X),
+        Instruction.from_standard_gate(StandardGate.CX),
+    ]
+
+    result = compile(circuit, device=device, seed=17)
+
+    assert result.device_metadata is not None
+    assert result.device_metadata.virtual_permutation == {0: 1, 1: 0}
+    assert result.step_changed("optimize.virtual_permutation") is True
+    assert all(
+        operation.instruction.name != "SWAP" for operation in result.circuit.operations
+    )
 
 
 def test_compile_config_rejects_unknown_target_gate_name() -> None:

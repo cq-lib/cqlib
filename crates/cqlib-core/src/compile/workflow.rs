@@ -59,7 +59,8 @@ use crate::compile::transform::{
     Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer, KnowledgeRewriter,
     LayoutObjective, LowerToRoutingBasis, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks,
     RewriteConfig, TargetBasisCostModel, TargetBasisLowerer, TransformOutcome, Transformer,
-    TwoQubitBlockResynthesisConfig, route_sabre, route_with_layout,
+    TwoQubitBlockResynthesisConfig, VirtualPermutation, VirtualPermutationElisionStatus,
+    elide_virtual_permutations, route_sabre, route_with_layout,
 };
 use crate::device::{Device, Topology};
 use std::borrow::Cow;
@@ -92,6 +93,7 @@ struct WorkflowState {
     steps: Vec<WorkflowStepReport>,
     prepared_target_basis: Option<PreparedTargetBasis>,
     two_qubit_target: TwoQubitSynthesisTarget,
+    virtual_permutation: Option<VirtualPermutation>,
     device_metadata: Option<DeviceCompilationMetadata>,
     one_qubit_optimizer: Option<OptimizeOneQubitRuns>,
     pending_one_qubit_resynthesis: bool,
@@ -214,6 +216,7 @@ impl CompilerWorkflow {
             steps: Vec::new(),
             prepared_target_basis,
             two_qubit_target,
+            virtual_permutation: None,
             device_metadata: None,
             one_qubit_optimizer,
             pending_one_qubit_resynthesis: false,
@@ -280,6 +283,7 @@ impl CompilerWorkflow {
             "optimize.commutative_cancellation",
             |circuit, analysis| CommutativeCancellation::new().transform(circuit, Some(analysis)),
         )?;
+        self.apply_virtual_permutation_elision(state)?;
         self.apply_two_qubit_resynthesis(
             state,
             "optimization",
@@ -754,6 +758,12 @@ impl CompilerWorkflow {
             return Ok(());
         };
 
+        let virtual_permutation = state.virtual_permutation.clone().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "routing started before virtual-permutation preparation".to_string(),
+            )
+        })?;
+
         let routing_device = self.routing_device(target)?;
         let device = routing_device.as_ref();
         let config = sabre_config_for_mode(self.config.mode, target.seed);
@@ -763,9 +773,12 @@ impl CompilerWorkflow {
                 let route_changed = routed.changed(&state.current);
                 let swap_count = routed.swap_count();
                 let trials_evaluated = routed.diagnostics().trials_evaluated;
+                let final_layout =
+                    virtual_permutation.compose_final_layout(routed.final_layout())?;
                 state.device_metadata = Some(DeviceCompilationMetadata {
                     initial_layout: routed.initial_layout().clone(),
-                    final_layout: routed.final_layout().clone(),
+                    final_layout,
+                    virtual_permutation: virtual_permutation.clone(),
                 });
                 state.current = routed.into_circuit();
                 (route_changed, swap_count, trials_evaluated, true)
@@ -775,9 +788,12 @@ impl CompilerWorkflow {
                 let route_changed = routed.changed(&state.current);
                 let swap_count = routed.swap_count();
                 let trials_evaluated = routed.diagnostics().trials_evaluated;
+                let final_layout =
+                    virtual_permutation.compose_final_layout(routed.final_layout())?;
                 state.device_metadata = Some(DeviceCompilationMetadata {
                     initial_layout: routed.initial_layout().clone(),
-                    final_layout: routed.final_layout().clone(),
+                    final_layout,
+                    virtual_permutation: virtual_permutation.clone(),
                 });
                 state.current = routed.into_routed().into_circuit();
                 (route_changed, swap_count, trials_evaluated, false)
@@ -803,6 +819,65 @@ impl CompilerWorkflow {
             skipped: false,
             reason: Some(reason),
         });
+        Ok(())
+    }
+
+    /// Removes static logical SWAPs before numeric two-qubit optimization can
+    /// absorb them into a strictly equivalent unitary realization.
+    ///
+    /// The resulting output permutation remains valid through later logical
+    /// rewrites because those stages preserve logical wire identity.
+    fn apply_virtual_permutation_elision(
+        &self,
+        state: &mut WorkflowState,
+    ) -> Result<(), CompilerError> {
+        if self.routing_device_target().is_none() {
+            state.record_skipped(
+                "optimization",
+                "optimize.virtual_permutation",
+                "no target device configured",
+            );
+            return Ok(());
+        }
+
+        let elision = elide_virtual_permutations(&state.current)?;
+        let elision_status = elision.status();
+        let elided_swap_count = elision.elided_swap_count();
+        state.virtual_permutation = Some(elision.virtual_permutation().clone());
+        match elision_status {
+            VirtualPermutationElisionStatus::Changed => {
+                state.current = elision.into_changed_circuit().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "changed virtual-permutation result did not contain a circuit".to_string(),
+                    )
+                })?;
+                state.analysis = CircuitAnalysis::analyze(&state.current);
+                state.changed = true;
+                state.steps.push(WorkflowStepReport {
+                    stage: "optimization",
+                    name: "optimize.virtual_permutation",
+                    changed: true,
+                    skipped: false,
+                    reason: Some(format!(
+                        "represented {elided_swap_count} logical swap operations as an output permutation"
+                    )),
+                });
+            }
+            VirtualPermutationElisionStatus::Unchanged => {
+                state.record_skipped(
+                    "optimization",
+                    "optimize.virtual_permutation",
+                    "no eligible logical swap operations",
+                );
+            }
+            VirtualPermutationElisionStatus::SkippedControlFlow => {
+                state.record_skipped(
+                    "optimization",
+                    "optimize.virtual_permutation",
+                    "structured control flow may have path-dependent output permutations",
+                );
+            }
+        }
         Ok(())
     }
 

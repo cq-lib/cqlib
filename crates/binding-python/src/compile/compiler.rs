@@ -25,6 +25,7 @@ use cqlib_core::compile::{
 };
 use pyo3::exceptions::PyUserWarning;
 use pyo3::prelude::*;
+use std::collections::HashMap;
 
 fn convert_target_basis(items: Vec<PyTargetBasisItem>) -> PyResult<Vec<Instruction>> {
     if items.is_empty() {
@@ -568,10 +569,24 @@ impl PyDeviceCompilationMetadata {
         self.inner.final_layout.clone().into()
     }
 
+    /// Original logical output to rewritten logical output mapping accumulated
+    /// before physical layout.
+    #[getter]
+    fn virtual_permutation(&self) -> HashMap<u32, u32> {
+        self.inner
+            .virtual_permutation
+            .original_output_to_rewritten_output()
+            .iter()
+            .map(|(original, rewritten)| (original.id(), rewritten.id()))
+            .collect()
+    }
+
     fn __repr__(&self) -> String {
         format!(
-            "DeviceCompilationMetadata(initial_layout={:?}, final_layout={:?})",
-            self.inner.initial_layout, self.inner.final_layout
+            "DeviceCompilationMetadata(initial_layout={:?}, final_layout={:?}, virtual_permutation={:?})",
+            self.inner.initial_layout,
+            self.inner.final_layout,
+            self.virtual_permutation()
         )
     }
 

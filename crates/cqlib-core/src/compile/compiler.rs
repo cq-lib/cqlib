@@ -33,6 +33,7 @@
 use super::workflow::CompilerWorkflow;
 use crate::circuit::{Circuit, Instruction};
 use crate::compile::resource::ResourcePolicy;
+use crate::compile::transform::VirtualPermutation;
 use crate::compile::{CompilerError, WorkflowStepReport};
 use crate::device::{Device, Layout};
 
@@ -109,8 +110,12 @@ pub struct DeviceCompileTarget {
 pub struct DeviceCompilationMetadata {
     /// Logical-to-physical layout before routing begins.
     pub initial_layout: Layout,
-    /// Logical-to-physical layout after all routed swaps.
+    /// Original logical-output-to-physical layout after all routed swaps and
+    /// pre-layout virtual permutations.
     pub final_layout: Layout,
+    /// Original logical output to rewritten logical output mapping accumulated
+    /// before physical layout. The initial circuit inputs remain identity-mapped.
+    pub virtual_permutation: VirtualPermutation,
 }
 
 /// Result returned by [`compile`].

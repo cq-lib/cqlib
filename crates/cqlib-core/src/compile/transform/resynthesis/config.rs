@@ -24,13 +24,15 @@ use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
 pub struct TwoQubitBlockResynthesisConfig {
     /// Target capability used by exact two-qubit numerical synthesis.
     pub two_qubit_target: TwoQubitSynthesisTarget,
-    /// Maximum number of source operations allowed in one synthesized block.
+    /// Maximum number of source operations allowed in one bounded
+    /// commutation-aware candidate. Maximal uninterrupted pair runs are not
+    /// limited by this supplemental search budget.
     pub max_block_ops: usize,
     /// Maximum number of non-block operations that may be crossed while
     /// collecting a block. Crossed operations are preserved at their original
     /// source positions and must commute with the synthesized replacement.
     pub max_crossed_ops: usize,
-    /// Maximum collection budget per side of a two-qubit anchor.
+    /// Maximum bounded collection budget per side of a two-qubit anchor.
     ///
     /// For source-order collection this is the number of source positions
     /// scanned per side. For DAG collection this is the number of operation

@@ -72,6 +72,7 @@ pub mod routing;
 pub mod routing_basis;
 pub mod target_basis;
 pub mod transformer;
+pub mod virtual_permutation;
 
 pub use analysis::CircuitAnalysis;
 pub use canonicalize::{
@@ -102,3 +103,7 @@ pub use target_basis::{
 #[cfg(test)]
 pub(crate) use transformer::{ResolvedTransform, TransformerTestExt, resolve_transform_for_test};
 pub use transformer::{TransformOutcome, Transformer};
+pub use virtual_permutation::{
+    VirtualPermutation, VirtualPermutationElisionResult, VirtualPermutationElisionStatus,
+    elide_virtual_permutations,
+};

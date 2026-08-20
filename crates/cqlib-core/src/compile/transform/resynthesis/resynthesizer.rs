@@ -22,6 +22,7 @@ use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
 use super::dag_collector::collect_two_qubit_blocks_dag;
 use super::incremental::{NativeResynthesisSession, NativeScopeId, NativeScopeSegment};
+use super::maximal_run::collect_maximal_two_qubit_runs;
 use super::selector::{BlockPatch, select_patches_with_device};
 use super::synthesis_cache::{TwoQubitSynthesisCache, TwoQubitSynthesisCacheStats};
 use crate::circuit::{
@@ -42,9 +43,9 @@ const PHASE_EPS: f64 = 1e-12;
 /// Transformer that numerically resynthesizes fixed standard-gate two-qubit
 /// blocks.
 ///
-/// Use [`TwoQubitBlockResynthesisConfig::normal`] for the default compiler
-/// budget and [`TwoQubitBlockResynthesisConfig::enhanced`] when extra
-/// compile-time can be traded for larger local blocks.
+/// Use [`TwoQubitBlockResynthesisConfig::normal`] for the default supplemental
+/// search budget and [`TwoQubitBlockResynthesisConfig::enhanced`] when extra
+/// compile-time can be traded for larger commutation-aware local blocks.
 #[derive(Debug, Clone)]
 pub struct ResynthesizeTwoQubitBlocks {
     config: TwoQubitBlockResynthesisConfig,
@@ -206,26 +207,63 @@ impl<'a, 'session> ResynthesisPass<'a, 'session> {
     ) -> Result<SequenceRewrite, CompilerError> {
         let views = self.build_views(operations)?;
         let mut commutation = CachedCommutation::new(self.config.commutation.clone());
-        let blocks = if let Some(incremental) = self.incremental.as_deref_mut() {
-            incremental.collect_blocks(
-                scope,
-                self.source,
-                operations,
-                &views,
-                &mut commutation,
-                &self.config,
-            )?
-        } else {
-            collect_two_qubit_blocks_dag(&views, &mut commutation, &self.config)?
-        };
-        let patches = select_patches_with_device(
-            blocks,
+        let maximal_blocks = collect_maximal_two_qubit_runs(&views);
+        let maximal_keys = maximal_blocks
+            .iter()
+            .map(|block| block.matched_orders.clone())
+            .collect::<HashSet<_>>();
+        let mut patches = select_patches_with_device(
+            maximal_blocks,
             &views,
             &commutation,
             &self.config,
             self.device_context.as_ref(),
             &mut self.synthesis_cache,
         )?;
+        let protected_orders = patches
+            .iter()
+            .flat_map(|patch| patch.matched_orders.iter().copied())
+            .collect::<HashSet<_>>();
+
+        // The maximal path owns every run it improves. The bounded collector
+        // remains a fallback for unprofitable maximal runs and for blocks that
+        // require legal commutation crossing, but it must not resynthesize an
+        // identical maximal block or overlap an accepted maximal patch.
+        let needs_bounded_collection = views.iter().enumerate().any(|(order, view)| {
+            super::dag_collector::is_two_qubit_anchor(view, &self.config)
+                && !protected_orders.contains(&order)
+        });
+        if needs_bounded_collection {
+            let mut bounded_blocks = if let Some(incremental) = self.incremental.as_deref_mut() {
+                incremental.collect_blocks(
+                    scope,
+                    self.source,
+                    operations,
+                    &views,
+                    &mut commutation,
+                    &self.config,
+                )?
+            } else {
+                collect_two_qubit_blocks_dag(&views, &mut commutation, &self.config)?
+            };
+            bounded_blocks.retain(|block| {
+                !maximal_keys.contains(&block.matched_orders)
+                    && !block
+                        .matched_orders
+                        .iter()
+                        .chain(&block.crossed_orders)
+                        .any(|order| protected_orders.contains(order))
+            });
+            patches.extend(select_patches_with_device(
+                bounded_blocks,
+                &views,
+                &commutation,
+                &self.config,
+                self.device_context.as_ref(),
+                &mut self.synthesis_cache,
+            )?);
+            patches.sort_by_key(|patch| patch.first_order);
+        }
 
         if patches.is_empty() {
             return self.preserve_sequence(operations, classical_remap, scope);
