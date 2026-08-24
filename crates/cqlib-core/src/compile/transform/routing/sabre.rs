@@ -25,16 +25,20 @@
 //!   Returns [`SabreRouteResult`], which wraps a [`RoutedCircuit`] and adds
 //!   the layout score.
 
-use crate::circuit::Circuit;
+use crate::circuit::{Circuit, CircuitParam, Parameter, Qubit};
 use crate::compile::CompilerError;
 use crate::compile::sabre::{
-    SabreConfig, SabreRoutingDiagnostics, SabreRoutingResult, finish_sabre_route, sabre_route,
+    RouteOperationProvenance, SabreConfig, SabreRoutingDiagnostics, SabreRoutingResult,
+    finish_sabre_route, sabre_route as sabre_route_core, sabre_route_with_provenance,
 };
 use crate::compile::transform::layout::{
     LayoutDiagnostics, LayoutObjective, LayoutScore, prepare_sabre_circuit,
     prepare_sabre_device_target, sabre_route_selection_prepared,
 };
+use crate::compile::transform::{QubitBijection, RewriteEdits};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
+use std::collections::HashMap;
+use std::ops::Range;
 
 /// A physical circuit produced by routing, plus routing metadata.
 ///
@@ -111,6 +115,145 @@ impl RoutedCircuit {
     }
 }
 
+/// Routing result with source provenance retained only for compiler-workflow
+/// proof transfer. Public routing results intentionally do not carry this
+/// potentially circuit-sized metadata.
+pub(crate) struct TrackedRoutedCircuit {
+    routed: RoutedCircuit,
+    provenance: Vec<RouteOperationProvenance>,
+}
+
+impl TrackedRoutedCircuit {
+    pub(crate) fn routed(&self) -> &RoutedCircuit {
+        &self.routed
+    }
+
+    pub(crate) fn into_routed(self) -> RoutedCircuit {
+        self.routed
+    }
+
+    pub(crate) fn rewrite_edits(&self, original: &Circuit) -> RewriteEdits {
+        let provenance = self
+            .provenance
+            .iter()
+            .map(|entry| match entry {
+                RouteOperationProvenance::Source(order) => Some(*order),
+                RouteOperationProvenance::Inserted => None,
+            })
+            .collect::<Vec<_>>();
+        let edits = RewriteEdits::from_route_provenance(original.operations().len(), &provenance);
+        let RewriteEdits::Linear {
+            old_len,
+            new_len,
+            replacements,
+        } = edits
+        else {
+            return RewriteEdits::Unknown;
+        };
+        let Some(clean_gap_bijections) = routed_clean_gap_bijections(
+            original,
+            self.routed.circuit(),
+            &provenance,
+            &replacements,
+        ) else {
+            return RewriteEdits::Unknown;
+        };
+        RewriteEdits::linear_modulo_qubit_bijection(
+            old_len,
+            new_len,
+            replacements,
+            clean_gap_bijections,
+        )
+    }
+}
+
+fn routed_clean_gap_bijections(
+    original: &Circuit,
+    routed: &Circuit,
+    provenance: &[Option<usize>],
+    replacements: &[crate::compile::transform::OperationReplacement],
+) -> Option<Vec<QubitBijection>> {
+    if provenance.len() != routed.operations().len() {
+        return None;
+    }
+    let mut bijections = Vec::with_capacity(replacements.len().saturating_add(1));
+    let mut old_cursor = 0usize;
+    let mut new_cursor = 0usize;
+    for replacement in replacements {
+        bijections.push(routed_gap_bijection(
+            original,
+            routed,
+            provenance,
+            old_cursor..replacement.old.start,
+            new_cursor..replacement.new.start,
+        )?);
+        old_cursor = replacement.old.end;
+        new_cursor = replacement.new.end;
+    }
+    bijections.push(routed_gap_bijection(
+        original,
+        routed,
+        provenance,
+        old_cursor..original.operations().len(),
+        new_cursor..routed.operations().len(),
+    )?);
+    Some(bijections)
+}
+
+fn routed_gap_bijection(
+    original: &Circuit,
+    routed: &Circuit,
+    provenance: &[Option<usize>],
+    old: Range<usize>,
+    new: Range<usize>,
+) -> Option<QubitBijection> {
+    if old.len() != new.len() {
+        return None;
+    }
+    let mut forward = HashMap::<Qubit, Qubit>::new();
+    let mut reverse = HashMap::<Qubit, Qubit>::new();
+    for (old_order, new_order) in old.zip(new) {
+        if provenance.get(new_order).copied().flatten() != Some(old_order) {
+            return None;
+        }
+        let source = &original.operations()[old_order];
+        let target = &routed.operations()[new_order];
+        if source.instruction != target.instruction
+            || source.label != target.label
+            || source.qubits.len() != target.qubits.len()
+            || source.params.len() != target.params.len()
+            || !source
+                .params
+                .iter()
+                .zip(&target.params)
+                .all(|(left, right)| resolve_param(original, left) == resolve_param(routed, right))
+        {
+            return None;
+        }
+        for (&logical, &physical) in source.qubits.iter().zip(&target.qubits) {
+            if forward
+                .insert(logical, physical)
+                .is_some_and(|old| old != physical)
+                || reverse
+                    .insert(physical, logical)
+                    .is_some_and(|old| old != logical)
+            {
+                return None;
+            }
+        }
+    }
+    let mut pairs = forward.into_iter().collect::<Vec<_>>();
+    pairs.sort_by_key(|(source, target)| (*source, *target));
+    Some(QubitBijection { pairs })
+}
+
+fn resolve_param(circuit: &Circuit, parameter: &CircuitParam) -> Option<Parameter> {
+    match parameter {
+        CircuitParam::Fixed(value) => Some(Parameter::from(*value)),
+        CircuitParam::Index(index) => circuit.parameters().get_index(*index as usize).cloned(),
+    }
+}
+
 /// Full SABRE pipeline result: layout selection + routing.
 ///
 /// Returned by [`route_sabre`]. Wraps a [`RoutedCircuit`] and adds the layout
@@ -181,6 +324,7 @@ impl SabreRouteResult {
 
 struct SabreRoutingResultWithScore {
     routing: SabreRoutingResult,
+    provenance: Vec<RouteOperationProvenance>,
     layout_score: Option<LayoutScore>,
     layout_diagnostics: LayoutDiagnostics,
 }
@@ -190,10 +334,17 @@ fn sabre_layout_and_route(
     device: &Device,
     objective: &LayoutObjective,
     config: &SabreConfig,
+    retain_provenance: bool,
 ) -> Result<SabreRoutingResultWithScore, CompilerError> {
     let prepared = prepare_sabre_circuit(circuit)?;
     let prepared_target = prepare_sabre_device_target(&prepared, device)?;
-    let selection = sabre_route_selection_prepared(&prepared, &prepared_target, objective, config)?;
+    let selection = sabre_route_selection_prepared(
+        &prepared,
+        &prepared_target,
+        objective,
+        config,
+        retain_provenance,
+    )?;
     let routed = finish_sabre_route(
         circuit,
         prepared_target.routing_target(),
@@ -203,7 +354,8 @@ fn sabre_layout_and_route(
         selection.trials_evaluated,
     )?;
     Ok(SabreRoutingResultWithScore {
-        routing: routed,
+        routing: routed.routing,
+        provenance: routed.provenance,
         layout_score: Some(selection.score),
         layout_diagnostics: selection.diagnostics,
     })
@@ -222,13 +374,33 @@ pub fn route_with_layout(
     initial_layout: &Layout,
     config: &SabreConfig,
 ) -> Result<RoutedCircuit, CompilerError> {
-    let result = sabre_route(circuit, device, initial_layout, config)?;
+    let routing = sabre_route_core(circuit, device, initial_layout, config)?;
     Ok(RoutedCircuit {
-        circuit: result.circuit,
-        initial_layout: result.initial_layout,
-        final_layout: result.final_layout,
-        swap_count: result.swap_count,
-        diagnostics: result.diagnostics,
+        circuit: routing.circuit,
+        initial_layout: routing.initial_layout,
+        final_layout: routing.final_layout,
+        swap_count: routing.swap_count,
+        diagnostics: routing.diagnostics,
+    })
+}
+
+pub(crate) fn route_with_layout_tracked(
+    circuit: &Circuit,
+    device: &Device,
+    initial_layout: &Layout,
+    config: &SabreConfig,
+) -> Result<TrackedRoutedCircuit, CompilerError> {
+    let result = sabre_route_with_provenance(circuit, device, initial_layout, config)?;
+    let routing = result.routing;
+    Ok(TrackedRoutedCircuit {
+        routed: RoutedCircuit {
+            circuit: routing.circuit,
+            initial_layout: routing.initial_layout,
+            final_layout: routing.final_layout,
+            swap_count: routing.swap_count,
+            diagnostics: routing.diagnostics,
+        },
+        provenance: result.provenance,
     })
 }
 
@@ -266,7 +438,7 @@ pub fn route_sabre(
     objective: &LayoutObjective,
     config: &SabreConfig,
 ) -> Result<SabreRouteResult, CompilerError> {
-    let result = sabre_layout_and_route(circuit, device, objective, config)?;
+    let result = sabre_layout_and_route(circuit, device, objective, config, false)?;
 
     Ok(SabreRouteResult {
         routed: RoutedCircuit {
@@ -278,6 +450,25 @@ pub fn route_sabre(
         },
         layout_score: result.layout_score,
         layout_diagnostics: result.layout_diagnostics,
+    })
+}
+
+pub(crate) fn route_sabre_tracked(
+    circuit: &Circuit,
+    device: &Device,
+    objective: &LayoutObjective,
+    config: &SabreConfig,
+) -> Result<TrackedRoutedCircuit, CompilerError> {
+    let result = sabre_layout_and_route(circuit, device, objective, config, true)?;
+    Ok(TrackedRoutedCircuit {
+        routed: RoutedCircuit {
+            circuit: result.routing.circuit,
+            initial_layout: result.routing.initial_layout,
+            final_layout: result.routing.final_layout,
+            swap_count: result.routing.swap_count,
+            diagnostics: result.routing.diagnostics,
+        },
+        provenance: result.provenance,
     })
 }
 

@@ -189,6 +189,28 @@ fn sabre_changed_detects_non_identity_layout_without_swaps() {
 }
 
 #[test]
+fn routed_circuit_equality_is_structural() {
+    let circuit = Circuit::new(1);
+    let layout = Layout::from_pairs(&[(0, 0)], 1).unwrap();
+    let first = RoutedCircuit {
+        circuit: circuit.clone(),
+        initial_layout: layout.clone(),
+        final_layout: layout.clone(),
+        swap_count: 0,
+        diagnostics: Default::default(),
+    };
+    let second = RoutedCircuit {
+        circuit,
+        initial_layout: layout.clone(),
+        final_layout: layout,
+        swap_count: 0,
+        diagnostics: Default::default(),
+    };
+
+    assert_eq!(first, second);
+}
+
+#[test]
 fn sabre_routing_is_reproducible_for_same_seed() {
     let device = Device::line("line", 4).unwrap();
     let objective = LayoutObjective::topology_only();

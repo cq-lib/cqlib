@@ -20,12 +20,17 @@ use crate::circuit::{
     Circuit, CircuitGate, CircuitParam, Instruction, MCGate, Parameter, ParameterValue, Qubit,
     StandardGate, UnitaryGate,
 };
+use crate::compile::knowledge::library::RuleKind;
 use crate::compile::resource::ResourcePolicy;
 use crate::compile::test_utils::{
     assert_compiled_circuit_equivalent, contains_high_level_gate, standard_ops, two_qubit_device,
 };
 use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
-use crate::compile::transform::{CircuitAnalysis, OptimizeOneQubitRuns, TransformOutcome};
+use crate::compile::transform::{
+    CircuitAnalysis, KnowledgeRewriteSession, KnowledgeRewriteWorksetStats, KnowledgeRewriter,
+    OperationReplacement, OptimizeOneQubitRuns, RewriteConfig, RewriteEdits, TransformOutcome,
+    route_with_layout_tracked,
+};
 use crate::compile::{
     CompileConfig, CompileMode, CompileTarget, CompilerError, DeviceCompileTarget,
     SabreRoutingFailure, compile,
@@ -62,6 +67,8 @@ fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowS
     WorkflowState {
         analysis: CircuitAnalysis::analyze(&current),
         current,
+        circuit_revision: 0,
+        rewrite_session: KnowledgeRewriteSession::default(),
         changed: false,
         steps: Vec::new(),
         prepared_target_basis: Some(prepared_target_basis),
@@ -78,6 +85,8 @@ fn workflow_state_without_target_basis() -> WorkflowState {
     WorkflowState {
         analysis: CircuitAnalysis::analyze(&current),
         current,
+        circuit_revision: 0,
+        rewrite_session: KnowledgeRewriteSession::default(),
         changed: false,
         steps: Vec::new(),
         prepared_target_basis: None,
@@ -150,6 +159,644 @@ fn apply_transform_error_leaves_workflow_state_untouched() {
     assert_eq!(state.analysis, analysis);
     assert!(!state.changed);
     assert!(state.steps.is_empty());
+}
+
+#[test]
+fn rewrite_session_reuses_fixpoint_after_only_unchanged_steps() {
+    let q0 = Qubit::new(0);
+    let config = RewriteConfig::production();
+    let mut state = workflow_state_without_target_basis();
+    state.current.h(q0).unwrap();
+    state.current.h(q0).unwrap();
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+
+    assert!(
+        state
+            .apply_knowledge_rewrite("test", "rewrite.first", config.clone())
+            .unwrap()
+    );
+    let revision_after_rewrite = state.circuit_revision;
+    state
+        .apply_transform("test", "stable", |_circuit, _analysis| {
+            Ok(TransformOutcome::Unchanged)
+        })
+        .unwrap();
+    assert_eq!(state.circuit_revision, revision_after_rewrite);
+
+    let forced_full = KnowledgeRewriter::new(config.clone())
+        .force_full_scan()
+        .run(&state.current)
+        .unwrap();
+    assert!(
+        !state
+            .apply_knowledge_rewrite("test", "rewrite.second", config)
+            .unwrap()
+    );
+
+    let workset = state.rewrite_session.stats();
+    assert_eq!(workset.calls, 2);
+    assert_eq!(workset.executions, 1);
+    assert_eq!(workset.direct_reuses, 1);
+    assert_eq!(workset.anchors_recomputed, 0);
+    assert_eq!(
+        state.rewrite_session.last_rewrite_stats(),
+        Some(&forced_full.stats)
+    );
+    let report = state.steps.last().unwrap();
+    assert!(!report.changed);
+    assert!(!report.skipped);
+}
+
+#[test]
+fn workflow_post_decomposition_reuses_pre_decomposition_fixpoint() {
+    let q0 = Qubit::new(0);
+    let workflow = CompilerWorkflow::new(compile_config(CompileMode::Enhanced));
+    let mut state = workflow_state_without_target_basis();
+    state.current.h(q0).unwrap();
+    state.current.h(q0).unwrap();
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+
+    workflow.lower_init(&mut state).unwrap();
+    workflow.lower_decompose(&mut state).unwrap();
+    workflow.lower_optimize(&mut state).unwrap();
+
+    let workset = state.rewrite_session.stats();
+    assert_eq!(workset.executions, 1);
+    assert_eq!(workset.direct_reuses, 1);
+    assert_eq!(workset.anchors_recomputed, 0);
+    let post = state
+        .steps
+        .iter()
+        .find(|step| step.name == "optimize.post_decomposition")
+        .unwrap();
+    assert!(!post.changed);
+    assert!(!post.skipped);
+}
+
+#[test]
+fn target_cleanup_reuses_target_unaware_proof_when_circuit_is_already_physical() {
+    let target_basis = vec![
+        Instruction::Standard(StandardGate::RZ),
+        Instruction::Standard(StandardGate::X2P),
+        Instruction::Standard(StandardGate::CZ),
+    ];
+    let workflow = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Enhanced,
+        target: CompileTarget::Basis(target_basis.clone()),
+        resource_policy: ResourcePolicy::default(),
+    });
+    let mut state = workflow_state_with_target_basis(target_basis);
+    state.current.rz(Qubit::new(0), 0.25).unwrap();
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+    let proof_config = workflow
+        .rewrite_config(RewritePhase::PostDecomposition)
+        .unwrap();
+    state
+        .apply_knowledge_rewrite("test", "rewrite.proof", proof_config)
+        .unwrap();
+    let cleanup_config = workflow.target_cleanup_config(&state).unwrap().unwrap();
+
+    assert!(
+        !state
+            .apply_knowledge_rewrite("test", "optimize.target_cleanup", cleanup_config)
+            .unwrap()
+    );
+    let workset = state.rewrite_session.stats();
+    assert_eq!(workset.executions, 1);
+    assert_eq!(workset.direct_reuses, 1);
+    assert_eq!(workset.anchors_recomputed, 0);
+}
+
+#[test]
+fn target_translation_keeps_cleanup_rewrite_local() {
+    let target_basis = vec![
+        Instruction::Standard(StandardGate::RZ),
+        Instruction::Standard(StandardGate::X2P),
+        Instruction::Standard(StandardGate::X),
+        Instruction::Standard(StandardGate::CZ),
+    ];
+    let workflow = CompilerWorkflow::new(CompileConfig {
+        mode: CompileMode::Enhanced,
+        target: CompileTarget::Basis(target_basis.clone()),
+        resource_policy: ResourcePolicy::default(),
+    });
+    let mut state = workflow_state_with_target_basis(target_basis);
+    state.current = Circuit::new(512);
+    for index in 0..512 {
+        if index == 256 {
+            state.current.h(Qubit::new(index)).unwrap();
+        } else {
+            state.current.x(Qubit::new(index)).unwrap();
+        }
+    }
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+    let proof_config = workflow
+        .rewrite_config(RewritePhase::PostDecomposition)
+        .unwrap();
+    state
+        .apply_knowledge_rewrite("test", "rewrite.proof", proof_config)
+        .unwrap();
+
+    workflow.apply_target_translation(&mut state).unwrap();
+    let cleanup_config = workflow.target_cleanup_config(&state).unwrap().unwrap();
+    state
+        .apply_knowledge_rewrite("test", "optimize.target_cleanup", cleanup_config)
+        .unwrap();
+
+    let workset = state.rewrite_session.stats();
+    assert_eq!(workset.edits_accepted, 1);
+    assert_eq!(workset.edit_reconciliations, 1);
+    assert_eq!(workset.edit_fallbacks, 0);
+    assert!(workset.anchors_recomputed < state.current.operations().len() / 2);
+}
+
+#[test]
+fn target_cleanup_full_scans_when_target_cost_could_admit_new_candidates() {
+    let q0 = Qubit::new(0);
+    let proof_config = RewriteConfig::production();
+    let cleanup_config = proof_config
+        .clone()
+        .with_target_instructions(vec![Instruction::Standard(StandardGate::X)])
+        .unwrap();
+    let mut state = workflow_state_without_target_basis();
+    state.current.h(q0).unwrap();
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state
+        .apply_knowledge_rewrite("test", "rewrite.proof", proof_config)
+        .unwrap();
+    let forced_full = KnowledgeRewriter::new(cleanup_config.clone())
+        .force_full_scan()
+        .run(&state.current)
+        .unwrap();
+
+    state
+        .apply_knowledge_rewrite("test", "optimize.target_cleanup", cleanup_config)
+        .unwrap();
+
+    assert_eq!(state.current, forced_full.circuit);
+    assert_eq!(
+        state.rewrite_session.last_rewrite_stats(),
+        Some(&forced_full.stats)
+    );
+    let workset = state.rewrite_session.stats();
+    assert_eq!(workset.executions, 2);
+    assert_eq!(workset.direct_reuses, 0);
+}
+
+#[test]
+fn rewrite_session_retains_proof_configuration_reach_after_config_shrink() {
+    let proof_config = RewriteConfig::production().with_max_window_ops(16);
+    let requested_config = proof_config.clone().with_max_window_ops(4);
+    let proof_reach = KnowledgeRewriter::new(proof_config.clone())
+        .proof_reach()
+        .unwrap();
+    let requested_reach = KnowledgeRewriter::new(requested_config.clone())
+        .proof_reach()
+        .unwrap();
+    assert!(proof_reach > requested_reach);
+
+    let mut state = workflow_state_without_target_basis();
+    state
+        .apply_knowledge_rewrite("test", "rewrite.proof", proof_config)
+        .unwrap();
+    state
+        .apply_knowledge_rewrite("test", "rewrite.shrunk", requested_config)
+        .unwrap();
+
+    let workset = state.rewrite_session.stats();
+    assert_eq!(workset.direct_reuses, 1);
+    assert_eq!(workset.last_proof_reach, proof_reach);
+    assert_eq!(state.rewrite_session.proof_reach(), Some(proof_reach));
+}
+
+#[test]
+fn changed_transform_invalidates_direct_rewrite_reuse() {
+    let q0 = Qubit::new(0);
+    let config = RewriteConfig::production();
+    let mut state = workflow_state_without_target_basis();
+    state
+        .apply_knowledge_rewrite("test", "rewrite.proof", config.clone())
+        .unwrap();
+    let revision = state.circuit_revision;
+
+    state
+        .apply_transform_with_edits("test", "changed", |circuit, _analysis| {
+            let mut changed = circuit.clone();
+            changed.x(q0)?;
+            Ok((
+                TransformOutcome::Changed(changed),
+                RewriteEdits::linear(
+                    0,
+                    1,
+                    vec![OperationReplacement {
+                        old: 0..0,
+                        new: 0..1,
+                    }],
+                ),
+            ))
+        })
+        .unwrap();
+    assert_eq!(state.circuit_revision, revision + 1);
+    let forced_full = KnowledgeRewriter::new(config.clone())
+        .force_full_scan()
+        .run(&state.current)
+        .unwrap();
+    state
+        .apply_knowledge_rewrite("test", "rewrite.after_change", config)
+        .unwrap();
+
+    let workset = state.rewrite_session.stats();
+    assert_eq!(workset.executions, 2);
+    assert_eq!(workset.direct_reuses, 0);
+    assert_eq!(workset.edits_accepted, 1);
+    assert_eq!(workset.edit_reconciliations, 1);
+    assert_eq!(
+        state.rewrite_session.last_rewrite_stats(),
+        Some(&forced_full.stats)
+    );
+}
+
+fn large_flat_rewrite_circuit(change_middle: bool) -> Circuit {
+    large_flat_rewrite_circuit_with_changes(if change_middle { &[2_101] } else { &[] })
+}
+
+fn large_flat_rewrite_circuit_with_changes(changes: &[usize]) -> Circuit {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    for index in 0..4_200 {
+        match index % 4 {
+            0 => circuit.t(q0).unwrap(),
+            1 if changes.contains(&index) => circuit.t(q0).unwrap(),
+            1 | 3 => circuit.h(q0).unwrap(),
+            2 => circuit.tdg(q0).unwrap(),
+            _ => unreachable!(),
+        }
+    }
+    circuit
+}
+
+#[test]
+fn rewrite_session_edit_reconciliation_matches_full_scan() {
+    let proof_config = RewriteConfig::production()
+        .with_enabled_kinds(vec![RuleKind::Cancel])
+        .with_max_window_ops(16);
+    let requested_config = proof_config
+        .clone()
+        .with_max_window_ops(4)
+        .with_target_instructions(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::T),
+            Instruction::Standard(StandardGate::TDG),
+        ])
+        .unwrap();
+    let proof_reach = KnowledgeRewriter::new(proof_config.clone())
+        .proof_reach()
+        .unwrap();
+    let requested_reach = KnowledgeRewriter::new(requested_config.clone())
+        .proof_reach()
+        .unwrap();
+    assert!(proof_reach > requested_reach);
+    let mut state = workflow_state_without_target_basis();
+    state.current = large_flat_rewrite_circuit(false);
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+    assert!(
+        !state
+            .apply_knowledge_rewrite("test", "rewrite.proof", proof_config)
+            .unwrap()
+    );
+
+    let changed = large_flat_rewrite_circuit(true);
+    let forced_full = KnowledgeRewriter::new(requested_config.clone())
+        .force_full_scan()
+        .run(&changed)
+        .unwrap();
+    state
+        .apply_transform_with_edits("test", "sparse-change", |_circuit, _analysis| {
+            Ok((
+                TransformOutcome::Changed(changed),
+                RewriteEdits::linear(
+                    4_200,
+                    4_200,
+                    vec![OperationReplacement {
+                        old: 2_101..2_102,
+                        new: 2_101..2_102,
+                    }],
+                ),
+            ))
+        })
+        .unwrap();
+    assert_eq!(state.current.operations().len(), 4_200);
+    assert_eq!(
+        state
+            .apply_knowledge_rewrite("test", "rewrite.incremental", requested_config)
+            .unwrap(),
+        forced_full.changed
+    );
+
+    assert_eq!(state.current, forced_full.circuit);
+    assert_eq!(
+        state.rewrite_session.last_rewrite_stats(),
+        Some(&forced_full.stats)
+    );
+    let workset = state.rewrite_session.stats();
+    assert_eq!(workset.edit_reconciliations, 1);
+    assert_eq!(workset.edits_accepted, 1);
+    assert_eq!(workset.anchors_recomputed, proof_reach + 1);
+}
+
+#[test]
+fn rewrite_session_unknown_edits_force_a_full_scan() {
+    let config = RewriteConfig::production()
+        .with_enabled_kinds(vec![RuleKind::Cancel])
+        .with_max_window_ops(16);
+    let mut state = workflow_state_without_target_basis();
+    state.current = large_flat_rewrite_circuit(false);
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state
+        .apply_knowledge_rewrite("test", "rewrite.proof", config.clone())
+        .unwrap();
+
+    let changed = large_flat_rewrite_circuit(true);
+    let forced_full = KnowledgeRewriter::new(config.clone())
+        .force_full_scan()
+        .run(&changed)
+        .unwrap();
+    state
+        .apply_transform_with_edits("test", "opaque-change", |_circuit, _analysis| {
+            Ok((TransformOutcome::Changed(changed), RewriteEdits::Unknown))
+        })
+        .unwrap();
+    state
+        .apply_knowledge_rewrite("test", "rewrite.incremental", config)
+        .unwrap();
+
+    assert_eq!(state.current, forced_full.circuit);
+    assert_eq!(
+        state.rewrite_session.last_rewrite_stats(),
+        Some(&forced_full.stats)
+    );
+    let workset = state.rewrite_session.stats();
+    assert_eq!(workset.edit_fallbacks, 1);
+    assert_eq!(workset.edit_reconciliations, 0);
+}
+
+#[test]
+fn rewrite_session_composes_multiple_exact_transform_edits() {
+    let config = RewriteConfig::production()
+        .with_enabled_kinds(vec![RuleKind::Cancel])
+        .with_max_window_ops(16);
+    let proof_reach = KnowledgeRewriter::new(config.clone())
+        .proof_reach()
+        .unwrap();
+    let mut state = workflow_state_without_target_basis();
+    state.current = large_flat_rewrite_circuit(false);
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state
+        .apply_knowledge_rewrite("test", "rewrite.proof", config.clone())
+        .unwrap();
+
+    for (index, position) in [1_001usize, 3_001].into_iter().enumerate() {
+        let changed = large_flat_rewrite_circuit_with_changes(&[1_001, 3_001][..=index]);
+        state
+            .apply_transform_with_edits("test", "exact-edit", |_circuit, _analysis| {
+                Ok((
+                    TransformOutcome::Changed(changed),
+                    RewriteEdits::linear(
+                        4_200,
+                        4_200,
+                        vec![OperationReplacement {
+                            old: position..position + 1,
+                            new: position..position + 1,
+                        }],
+                    ),
+                ))
+            })
+            .unwrap();
+    }
+    let forced_full = KnowledgeRewriter::new(config.clone())
+        .force_full_scan()
+        .run(&state.current)
+        .unwrap();
+    state
+        .apply_knowledge_rewrite("test", "rewrite.incremental", config)
+        .unwrap();
+
+    assert_eq!(state.current, forced_full.circuit);
+    assert_eq!(
+        state.rewrite_session.last_rewrite_stats(),
+        Some(&forced_full.stats)
+    );
+    let workset = state.rewrite_session.stats();
+    assert_eq!(workset.edits_accepted, 2);
+    assert_eq!(workset.edit_reconciliations, 1);
+    assert_eq!(workset.anchors_recomputed, 2 * (proof_reach + 1));
+}
+
+#[test]
+fn sabre_route_provenance_limits_post_routing_rewrite_work() {
+    let q0 = Qubit::new(0);
+    let q2 = Qubit::new(2);
+    let mut source = Circuit::new(3);
+    for index in 0..4_200 {
+        if index == 2_101 {
+            source.cx(q0, q2).unwrap();
+        } else {
+            match index % 4 {
+                0 => source.t(q0).unwrap(),
+                1 | 3 => source.h(q0).unwrap(),
+                2 => source.tdg(q0).unwrap(),
+                _ => unreachable!(),
+            }
+        }
+    }
+    let config = RewriteConfig::production()
+        .with_enabled_kinds(vec![RuleKind::Cancel])
+        .with_max_window_ops(16);
+    let mut state = workflow_state_without_target_basis();
+    state.current = source;
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state
+        .apply_knowledge_rewrite("test", "rewrite.pre_route", config.clone())
+        .unwrap();
+
+    let device = Device::line("rewrite-session-route", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::T),
+            Instruction::Standard(StandardGate::TDG),
+            Instruction::Standard(StandardGate::CX),
+            Instruction::Standard(StandardGate::SWAP),
+        ])
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 0), (1, 1), (2, 2)], 3).unwrap();
+    let routed = route_with_layout_tracked(
+        &state.current,
+        &device,
+        &layout,
+        &sabre_config_for_mode(CompileMode::Enhanced, Some(7)),
+    )
+    .unwrap();
+    assert!(routed.routed().swap_count() > 0);
+    let edits = routed.rewrite_edits(&state.current);
+    let routed_circuit = routed.into_routed().into_circuit();
+    let forced_full = KnowledgeRewriter::new(config.clone())
+        .force_full_scan()
+        .run(&routed_circuit)
+        .unwrap();
+    state
+        .apply_transform_with_edits("test", "route", |_circuit, _analysis| {
+            Ok((TransformOutcome::Changed(routed_circuit), edits))
+        })
+        .unwrap();
+    state
+        .apply_knowledge_rewrite("test", "rewrite.post_route", config)
+        .unwrap();
+
+    assert_eq!(state.current, forced_full.circuit);
+    assert_eq!(
+        state.rewrite_session.last_rewrite_stats(),
+        Some(&forced_full.stats)
+    );
+    let workset = state.rewrite_session.stats();
+    assert_eq!(workset.edits_accepted, 1);
+    assert_eq!(workset.edit_reconciliations, 1);
+    assert!(workset.anchors_recomputed < state.current.operations().len() / 2);
+}
+
+#[test]
+fn sabre_pure_layout_relabel_reuses_rewrite_proof_in_constant_time() {
+    let config = RewriteConfig::production()
+        .with_enabled_kinds(vec![RuleKind::Cancel])
+        .with_max_window_ops(16);
+    let mut state = workflow_state_without_target_basis();
+    state.current = large_flat_rewrite_circuit(false);
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state
+        .apply_knowledge_rewrite("test", "rewrite.pre_route", config.clone())
+        .unwrap();
+
+    let device = Device::line("rewrite-session-layout", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::T),
+            Instruction::Standard(StandardGate::TDG),
+        ])
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 2)], 3).unwrap();
+    let routed = route_with_layout_tracked(
+        &state.current,
+        &device,
+        &layout,
+        &sabre_config_for_mode(CompileMode::Enhanced, Some(11)),
+    )
+    .unwrap();
+    assert_eq!(routed.routed().swap_count(), 0);
+    assert!(routed.routed().changed(&state.current));
+    let edits = routed.rewrite_edits(&state.current);
+    let routed_circuit = routed.into_routed().into_circuit();
+    let forced_full = KnowledgeRewriter::new(config.clone())
+        .force_full_scan()
+        .run(&routed_circuit)
+        .unwrap();
+    state
+        .apply_transform_with_edits("test", "route", |_circuit, _analysis| {
+            Ok((TransformOutcome::Changed(routed_circuit), edits))
+        })
+        .unwrap();
+    state
+        .apply_knowledge_rewrite("test", "rewrite.post_route", config)
+        .unwrap();
+
+    assert_eq!(state.current, forced_full.circuit);
+    assert_eq!(
+        state.rewrite_session.last_rewrite_stats(),
+        Some(&forced_full.stats)
+    );
+    let workset = state.rewrite_session.stats();
+    assert_eq!(workset.edits_accepted, 1);
+    assert_eq!(workset.direct_reuses, 1);
+    assert_eq!(workset.edit_reconciliations, 0);
+    assert_eq!(workset.anchors_recomputed, 0);
+}
+
+#[test]
+fn rewrite_session_does_not_certify_a_round_limited_mutation() {
+    let q0 = Qubit::new(0);
+    let config = RewriteConfig::production().with_max_rounds(1);
+    let mut state = workflow_state_without_target_basis();
+    state.current.h(q0).unwrap();
+    state.current.h(q0).unwrap();
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+
+    assert!(
+        state
+            .apply_knowledge_rewrite("test", "rewrite.limited", config.clone())
+            .unwrap()
+    );
+    assert_eq!(state.rewrite_session.proof_reach(), None);
+    assert!(
+        !state
+            .apply_knowledge_rewrite("test", "rewrite.retry", config)
+            .unwrap()
+    );
+
+    let workset = state.rewrite_session.stats();
+    assert_eq!(workset.executions, 2);
+    assert_eq!(workset.direct_reuses, 0);
+    assert!(
+        state
+            .rewrite_session
+            .last_rewrite_stats()
+            .unwrap()
+            .reached_fixpoint
+    );
+}
+
+fn run_edit_session_in_pool(threads: usize) -> (Circuit, KnowledgeRewriteWorksetStats) {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .unwrap()
+        .install(|| {
+            let config = RewriteConfig::production()
+                .with_enabled_kinds(vec![RuleKind::Cancel])
+                .with_max_window_ops(16);
+            let mut state = workflow_state_without_target_basis();
+            state.current = large_flat_rewrite_circuit(false);
+            state.analysis = CircuitAnalysis::analyze(&state.current);
+            state
+                .apply_knowledge_rewrite("test", "rewrite.proof", config.clone())
+                .unwrap();
+            let changed = large_flat_rewrite_circuit(true);
+            state
+                .apply_transform_with_edits("test", "sparse-change", |_circuit, _analysis| {
+                    Ok((
+                        TransformOutcome::Changed(changed),
+                        RewriteEdits::linear(
+                            4_200,
+                            4_200,
+                            vec![OperationReplacement {
+                                old: 2_101..2_102,
+                                new: 2_101..2_102,
+                            }],
+                        ),
+                    ))
+                })
+                .unwrap();
+            state
+                .apply_knowledge_rewrite("test", "rewrite.incremental", config)
+                .unwrap();
+            (state.current, state.rewrite_session.stats())
+        })
+}
+
+#[test]
+fn rewrite_session_edit_reconciliation_is_thread_deterministic() {
+    let single = run_edit_session_in_pool(1);
+    let four = run_edit_session_in_pool(4);
+    assert_eq!(single, four);
 }
 
 #[test]

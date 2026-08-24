@@ -91,11 +91,17 @@ pub use one_qubit_optimization::OptimizeOneQubitRuns;
 pub use resynthesis::{
     ResynthesizeTwoQubitBlocks, TwoQubitBlockResynthesisConfig, resynthesize_two_qubit_blocks,
 };
+#[cfg(test)]
+pub(crate) use rewrite::KnowledgeRewriteWorksetStats;
 pub use rewrite::{
     KnowledgeRewriteResult, KnowledgeRewriteStats, KnowledgeRewriter, RewriteConfig, RewriteMode,
     rewrite_circuit,
 };
+pub(crate) use rewrite::{
+    KnowledgeRewriteSession, OperationReplacement, QubitBijection, RewriteEdits,
+};
 pub use routing::{RoutedCircuit, SabreRouteResult, route_sabre, route_with_layout};
+pub(crate) use routing::{route_sabre_tracked, route_with_layout_tracked};
 pub use routing_basis::LowerToRoutingBasis;
 pub use target_basis::{
     TargetBasisCost, TargetBasisCostModel, TargetBasisLowerer, TargetBasisSignature,

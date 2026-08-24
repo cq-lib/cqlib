@@ -51,7 +51,7 @@ static BUILTIN_COMPILED_RULES: OnceLock<Result<Arc<CompiledRuleSet>, String>> = 
 /// of `PARALLEL_ANCHOR_THRESHOLD` in `matcher.rs`, which controls rayon
 /// parallelism once a scan happens; adjust each only against its own
 /// measurements.
-const SMALL_CIRCUIT_FULL_SCAN_THRESHOLD: usize = 4_096;
+pub(super) const SMALL_CIRCUIT_FULL_SCAN_THRESHOLD: usize = 4_096;
 
 /// Execution strategy for the rewrite fixpoint.
 ///
@@ -197,6 +197,28 @@ impl KnowledgeRewriter {
         &self.config
     }
 
+    /// Returns the maximum forward matcher reach for this configuration.
+    ///
+    /// Workflow-lifetime rewrite certificates store this exact value beside
+    /// their clean-anchor proof. Later mutation invalidation must use the
+    /// stored proof reach rather than deriving a potentially narrower value
+    /// from a subsequent configuration.
+    pub(crate) fn proof_reach(&self) -> Result<usize, CompilerError> {
+        Ok(builtin_compiled_rules()?.max_match_reach(&self.config))
+    }
+
+    /// Returns whether clean-anchor proofs produced by this rewriter survive
+    /// a bijective renaming of runtime qubits.
+    ///
+    /// The current rule language binds dense rule-local qubit labels and its
+    /// conditions observe parameters only. It cannot name a physical qubit or
+    /// inspect a device domain. Keep this capability explicit so a future
+    /// domain-aware rule model must opt out before routing edits can
+    /// advance its proofs.
+    pub(crate) fn proof_is_qubit_bijection_invariant(&self) -> Result<bool, CompilerError> {
+        Ok(builtin_compiled_rules()?.is_qubit_bijection_invariant())
+    }
+
     #[cfg(test)]
     pub(crate) fn force_full_scan(mut self) -> Self {
         self.execution_policy = RewriteExecutionPolicy::FullScan;
@@ -245,7 +267,12 @@ impl KnowledgeRewriter {
             RewriteExecutionPolicy::Incremental => true,
         };
         if incremental && is_linear_workspace_eligible(circuit) {
-            return self.run_linear_workspace(circuit, rules.as_ref(), target_context.as_ref());
+            return self.run_linear_workspace(
+                circuit,
+                rules.as_ref(),
+                target_context.as_ref(),
+                None,
+            );
         }
 
         let mut current = circuit.clone();
@@ -282,14 +309,42 @@ impl KnowledgeRewriter {
         })
     }
 
+    /// Executes a large flat-circuit rewrite from snapshot-reconciled anchor
+    /// ranges. The caller owns the cross-pass proof that every anchor outside
+    /// these ranges remains candidate-free.
+    pub(crate) fn run_from_linear_ranges(
+        &self,
+        circuit: &Circuit,
+        anchor_ranges: Vec<Range<usize>>,
+    ) -> Result<KnowledgeRewriteResult, CompilerError> {
+        if self.config.max_rounds() == 0 {
+            return Err(CompilerError::InvalidInput(
+                "rewrite max_rounds must be greater than zero".to_string(),
+            ));
+        }
+        if !is_linear_workspace_eligible(circuit) {
+            return Err(CompilerError::InvariantViolation(
+                "cross-pass linear rewrite received an ineligible circuit".to_string(),
+            ));
+        }
+        let rules = builtin_compiled_rules()?;
+        let target_context = TargetContext::from_config(&self.config, rules.as_ref())?;
+        self.run_linear_workspace(
+            circuit,
+            rules.as_ref(),
+            target_context.as_ref(),
+            Some(anchor_ranges),
+        )
+    }
+
     /// Runs the rewrite fixpoint on a flat, gate-only circuit without
     /// rebuilding a [`Circuit`] per round.
     ///
     /// Eligible circuits (see [`is_linear_workspace_eligible`]) form a single
     /// rewrite block, so the fixpoint runs on one persistent operation vector
     /// plus a [`BlockMatchCache`]: each round scans only the dirty anchor
-    /// ranges produced by the previous round's patches (or everything, after
-    /// a block-summary change), splices the selected patches in place, and
+    /// ranges produced by the previous round's patches, splices the selected
+    /// patches in place, and
     /// folds global-phase replacements into a running phase delta. The final
     /// [`Circuit`] is materialized exactly once, after the fixpoint.
     ///
@@ -304,10 +359,11 @@ impl KnowledgeRewriter {
         circuit: &Circuit,
         rules: &CompiledRuleSet,
         target_context: Option<&TargetContext>,
+        initial_anchor_ranges: Option<Vec<Range<usize>>>,
     ) -> Result<KnowledgeRewriteResult, CompilerError> {
         let mut operations = circuit.operations().to_vec();
         let mut cache = BlockMatchCache::new(circuit, &operations)?;
-        let mut anchor_ranges: Option<Vec<Range<usize>>> = None;
+        let mut anchor_ranges = initial_anchor_ranges;
         let mut aggregate = KnowledgeRewriteStats::default();
         let mut changed = false;
         let mut phase_delta = Parameter::from(0.0);
@@ -331,13 +387,12 @@ impl KnowledgeRewriter {
             changed = true;
             aggregate.rules_applied = aggregate.rules_applied.saturating_add(patches.len());
             aggregate.changed_sequences = aggregate.changed_sequences.saturating_add(1);
-            let (next_cache, summary_changed) =
-                cache.into_rewritten(&operations, &patches).ok_or_else(|| {
-                    CompilerError::InvariantViolation(
-                        "linear rewrite workspace could not materialize its selected patches"
-                            .to_string(),
-                    )
-                })?;
+            let next_cache = cache.into_rewritten(&operations, &patches).ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "linear rewrite workspace could not materialize its selected patches"
+                        .to_string(),
+                )
+            })?;
             let (next_ranges, expected_len) =
                 dirty_ranges_after_patches(operations.len(), &patches, max_match_reach);
             // The dirty ranges are clamped to this length; a mismatch with the
@@ -353,7 +408,7 @@ impl KnowledgeRewriter {
             phase_delta = &phase_delta + &round_phase;
             operations = next_operations;
             cache = next_cache;
-            anchor_ranges = (!summary_changed).then_some(next_ranges);
+            anchor_ranges = Some(next_ranges);
         }
 
         let output = if changed {
@@ -1001,7 +1056,7 @@ impl<'a> RoundRewriter<'a> {
 /// measurements, control flow, or other unkeyed instructions) and none is a
 /// global-phase operation, whose absorption into the phase delta the
 /// workspace does not model in its operation vector.
-fn is_linear_workspace_eligible(circuit: &Circuit) -> bool {
+pub(super) fn is_linear_workspace_eligible(circuit: &Circuit) -> bool {
     circuit.classical_vars().is_empty()
         && circuit.classical_values().is_empty()
         && circuit.operations().iter().all(|operation| {

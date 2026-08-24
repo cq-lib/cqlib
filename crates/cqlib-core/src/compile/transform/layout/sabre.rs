@@ -243,7 +243,8 @@ pub fn sabre_layout_prepared(
     objective: &LayoutObjective,
     config: &SabreConfig,
 ) -> Result<LayoutResult, CompilerError> {
-    let selection = sabre_route_selection_prepared(prepared, prepared_target, objective, config)?;
+    let selection =
+        sabre_route_selection_prepared(prepared, prepared_target, objective, config, false)?;
     Ok(LayoutResult {
         layout: selection.initial_layout,
         score: Some(selection.score),
@@ -265,6 +266,7 @@ pub(crate) fn sabre_route_selection_prepared(
     prepared_target: &PreparedSabreDeviceTarget,
     objective: &LayoutObjective,
     config: &SabreConfig,
+    retain_provenance: bool,
 ) -> Result<PreparedSabreRouteSelection, CompilerError> {
     validate_layout_config(config)?;
     let physical = &prepared_target.physical;
@@ -399,7 +401,11 @@ pub(crate) fn sabre_route_selection_prepared(
         "winner selected by predicted native 2Q count/depth and total depth; layout score is diagnostic"
             .to_string(),
     );
-    let trial = best.trial.finish(target)?;
+    let trial = if retain_provenance {
+        best.trial.finish(target)?
+    } else {
+        best.trial.finish_without_provenance(target)?
+    };
     Ok(PreparedSabreRouteSelection {
         initial_layout: best.layout,
         trial,

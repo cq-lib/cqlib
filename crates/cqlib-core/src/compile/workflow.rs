@@ -56,11 +56,12 @@ use crate::compile::transform::decompose::{
 };
 use crate::compile::transform::native_optimization::NativeOptimizer;
 use crate::compile::transform::{
-    Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer, KnowledgeRewriter,
-    LayoutObjective, LowerToRoutingBasis, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks,
-    RewriteConfig, TargetBasisCostModel, TargetBasisLowerer, TransformOutcome, Transformer,
+    Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer,
+    KnowledgeRewriteSession, KnowledgeRewriter, LayoutObjective, LowerToRoutingBasis,
+    OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks, RewriteConfig, RewriteEdits,
+    TargetBasisCostModel, TargetBasisLowerer, TransformOutcome, Transformer,
     TwoQubitBlockResynthesisConfig, VirtualPermutation, VirtualPermutationElisionStatus,
-    elide_virtual_permutations, route_sabre, route_with_layout,
+    elide_virtual_permutations, route_sabre_tracked, route_with_layout_tracked,
 };
 use crate::device::{Device, Topology};
 use std::borrow::Cow;
@@ -89,6 +90,8 @@ pub struct WorkflowStepReport {
 struct WorkflowState {
     current: Circuit,
     analysis: CircuitAnalysis,
+    circuit_revision: u64,
+    rewrite_session: KnowledgeRewriteSession,
     changed: bool,
     steps: Vec<WorkflowStepReport>,
     prepared_target_basis: Option<PreparedTargetBasis>,
@@ -121,21 +124,129 @@ impl PreparedTargetBasis {
 }
 
 impl WorkflowState {
+    fn advance_circuit_revision(&mut self) {
+        self.circuit_revision = self.circuit_revision.wrapping_add(1);
+        if self.circuit_revision == 0 {
+            // Prevent a wrapped revision from aliasing an ancient proof.
+            self.rewrite_session.invalidate();
+        }
+    }
+
+    fn adopt_changed_circuit(&mut self, circuit: Circuit, edits: &RewriteEdits) {
+        let old_revision = self.circuit_revision;
+        let new_revision = old_revision.wrapping_add(1);
+        if new_revision == 0 {
+            self.rewrite_session.invalidate();
+        } else {
+            self.rewrite_session.apply_rewrite_edits(
+                old_revision,
+                new_revision,
+                &self.current,
+                &circuit,
+                edits,
+            );
+        }
+        self.analysis = CircuitAnalysis::analyze(&circuit);
+        self.current = circuit;
+        self.circuit_revision = new_revision;
+        self.changed = true;
+    }
+
     fn apply_transform(
         &mut self,
         stage: &'static str,
         name: &'static str,
         transform: impl FnOnce(&Circuit, &CircuitAnalysis) -> Result<TransformOutcome, CompilerError>,
     ) -> Result<bool, CompilerError> {
+        self.apply_transform_with_edits(stage, name, |circuit, analysis| {
+            let outcome = transform(circuit, analysis)?;
+            let edits = match &outcome {
+                TransformOutcome::Unchanged => RewriteEdits::linear(
+                    circuit.operations().len(),
+                    circuit.operations().len(),
+                    Vec::new(),
+                ),
+                TransformOutcome::Changed(after) => {
+                    RewriteEdits::between_linear_circuits(circuit, after)
+                }
+            };
+            Ok((outcome, edits))
+        })
+    }
+
+    fn apply_transform_with_edits(
+        &mut self,
+        stage: &'static str,
+        name: &'static str,
+        transform: impl FnOnce(
+            &Circuit,
+            &CircuitAnalysis,
+        ) -> Result<(TransformOutcome, RewriteEdits), CompilerError>,
+    ) -> Result<bool, CompilerError> {
         let changed = match transform(&self.current, &self.analysis)? {
-            TransformOutcome::Unchanged => false,
-            TransformOutcome::Changed(circuit) => {
-                self.analysis = CircuitAnalysis::analyze(&circuit);
-                self.current = circuit;
-                self.changed = true;
+            (TransformOutcome::Unchanged, _) => false,
+            (TransformOutcome::Changed(circuit), edits) => {
+                self.adopt_changed_circuit(circuit, &edits);
                 true
             }
         };
+        self.steps.push(WorkflowStepReport {
+            stage,
+            name,
+            changed,
+            skipped: false,
+            reason: None,
+        });
+        Ok(changed)
+    }
+
+    fn apply_knowledge_rewrite(
+        &mut self,
+        stage: &'static str,
+        name: &'static str,
+        config: RewriteConfig,
+    ) -> Result<bool, CompilerError> {
+        if let Some((stats, proof_reach)) = self
+            .rewrite_session
+            .reusable_stats(self.circuit_revision, &config)
+        {
+            self.rewrite_session.record_reuse(stats, proof_reach);
+            self.steps.push(WorkflowStepReport {
+                stage,
+                name,
+                changed: false,
+                skipped: false,
+                reason: None,
+            });
+            return Ok(false);
+        }
+
+        let rewriter = KnowledgeRewriter::new(config.clone());
+        let proof_reach = rewriter.proof_reach()?;
+        let qubit_bijection_invariant = rewriter.proof_is_qubit_bijection_invariant()?;
+        let reconciled_ranges = self
+            .rewrite_session
+            .reconcile_linear_ranges(self.circuit_revision, &config);
+        let result = if let Some(ranges) = reconciled_ranges {
+            rewriter.run_from_linear_ranges(&self.current, ranges)?
+        } else {
+            rewriter.run(&self.current)?
+        };
+        let changed = result.changed;
+        if changed {
+            self.analysis = CircuitAnalysis::analyze(&result.circuit);
+            self.current = result.circuit;
+            self.advance_circuit_revision();
+            self.changed = true;
+        }
+        self.rewrite_session.record_execution(
+            &self.current,
+            self.circuit_revision,
+            config,
+            proof_reach,
+            qubit_bijection_invariant,
+            result.stats,
+        );
         self.steps.push(WorkflowStepReport {
             stage,
             name,
@@ -212,6 +323,8 @@ impl CompilerWorkflow {
         let mut state = WorkflowState {
             current: circuit.clone(),
             analysis: CircuitAnalysis::analyze(circuit),
+            circuit_revision: 0,
+            rewrite_session: KnowledgeRewriteSession::default(),
             changed: false,
             steps: Vec::new(),
             prepared_target_basis,
@@ -256,12 +369,10 @@ impl CompilerWorkflow {
         })?;
         self.apply_definition_decomposition(state)?;
         let rewrite_config = self.rewrite_config(RewritePhase::PreDecomposition)?;
-        state.apply_transform(
+        state.apply_knowledge_rewrite(
             "optimization",
             "optimize.pre_decomposition",
-            |circuit, analysis| {
-                KnowledgeRewriter::new(rewrite_config).transform(circuit, Some(analysis))
-            },
+            rewrite_config,
         )?;
         Ok(())
     }
@@ -297,12 +408,10 @@ impl CompilerWorkflow {
 
     fn lower_optimize(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let rewrite_config = self.rewrite_config(RewritePhase::PostDecomposition)?;
-        state.apply_transform(
+        state.apply_knowledge_rewrite(
             "optimization",
             "optimize.post_decomposition",
-            |circuit, analysis| {
-                KnowledgeRewriter::new(rewrite_config).transform(circuit, Some(analysis))
-            },
+            rewrite_config,
         )?;
         self.close_one_qubit_resynthesis(state)
     }
@@ -335,12 +444,10 @@ impl CompilerWorkflow {
         self.apply_target_translation(state)?;
         if self.config.mode == CompileMode::Enhanced {
             if let Some(cleanup_config) = self.target_cleanup_config(state)? {
-                state.apply_transform(
+                state.apply_knowledge_rewrite(
                     "optimization",
                     "optimize.target_cleanup",
-                    |circuit, analysis| {
-                        KnowledgeRewriter::new(cleanup_config).transform(circuit, Some(analysis))
-                    },
+                    cleanup_config,
                 )?;
             } else {
                 state.record_skipped(
@@ -451,6 +558,7 @@ impl CompilerWorkflow {
         let result = optimizer.run(&state.current)?;
         if result.changed {
             state.analysis = CircuitAnalysis::analyze(&result.circuit);
+            state.advance_circuit_revision();
         }
         state.current = result.circuit;
         state.changed |= result.changed;
@@ -767,38 +875,63 @@ impl CompilerWorkflow {
         let routing_device = self.routing_device(target)?;
         let device = routing_device.as_ref();
         let config = sabre_config_for_mode(self.config.mode, target.seed);
-        let (route_changed, swap_count, trials_evaluated, supplied_layout) =
-            if let Some(initial_layout) = target.initial_layout.as_ref() {
-                let routed = route_with_layout(&state.current, device, initial_layout, &config)?;
-                let route_changed = routed.changed(&state.current);
-                let swap_count = routed.swap_count();
-                let trials_evaluated = routed.diagnostics().trials_evaluated;
-                let final_layout =
-                    virtual_permutation.compose_final_layout(routed.final_layout())?;
-                state.device_metadata = Some(DeviceCompilationMetadata {
-                    initial_layout: routed.initial_layout().clone(),
-                    final_layout,
-                    virtual_permutation: virtual_permutation.clone(),
-                });
-                state.current = routed.into_circuit();
-                (route_changed, swap_count, trials_evaluated, true)
-            } else {
-                let objective = LayoutObjective::topology_only();
-                let routed = route_sabre(&state.current, device, &objective, &config)?;
-                let route_changed = routed.changed(&state.current);
-                let swap_count = routed.swap_count();
-                let trials_evaluated = routed.diagnostics().trials_evaluated;
-                let final_layout =
-                    virtual_permutation.compose_final_layout(routed.final_layout())?;
-                state.device_metadata = Some(DeviceCompilationMetadata {
-                    initial_layout: routed.initial_layout().clone(),
-                    final_layout,
-                    virtual_permutation: virtual_permutation.clone(),
-                });
-                state.current = routed.into_routed().into_circuit();
-                (route_changed, swap_count, trials_evaluated, false)
-            };
-        state.changed |= route_changed;
+        let (
+            routed_circuit,
+            route_edits,
+            route_changed,
+            swap_count,
+            trials_evaluated,
+            supplied_layout,
+        ) = if let Some(initial_layout) = target.initial_layout.as_ref() {
+            let routed =
+                route_with_layout_tracked(&state.current, device, initial_layout, &config)?;
+            let route_changed = routed.routed().changed(&state.current);
+            let swap_count = routed.routed().swap_count();
+            let trials_evaluated = routed.routed().diagnostics().trials_evaluated;
+            let final_layout =
+                virtual_permutation.compose_final_layout(routed.routed().final_layout())?;
+            state.device_metadata = Some(DeviceCompilationMetadata {
+                initial_layout: routed.routed().initial_layout().clone(),
+                final_layout,
+                virtual_permutation: virtual_permutation.clone(),
+            });
+            let edits = routed.rewrite_edits(&state.current);
+            (
+                routed.into_routed().into_circuit(),
+                edits,
+                route_changed,
+                swap_count,
+                trials_evaluated,
+                true,
+            )
+        } else {
+            let objective = LayoutObjective::topology_only();
+            let routed = route_sabre_tracked(&state.current, device, &objective, &config)?;
+            let route_changed = routed.routed().changed(&state.current);
+            let swap_count = routed.routed().swap_count();
+            let trials_evaluated = routed.routed().diagnostics().trials_evaluated;
+            let final_layout =
+                virtual_permutation.compose_final_layout(routed.routed().final_layout())?;
+            state.device_metadata = Some(DeviceCompilationMetadata {
+                initial_layout: routed.routed().initial_layout().clone(),
+                final_layout,
+                virtual_permutation: virtual_permutation.clone(),
+            });
+            let edits = routed.rewrite_edits(&state.current);
+            (
+                routed.into_routed().into_circuit(),
+                edits,
+                route_changed,
+                swap_count,
+                trials_evaluated,
+                false,
+            )
+        };
+        if route_changed {
+            state.adopt_changed_circuit(routed_circuit, &route_edits);
+        } else {
+            state.current = routed_circuit;
+        }
 
         let reason = if supplied_layout {
             format!(
@@ -846,13 +979,13 @@ impl CompilerWorkflow {
         state.virtual_permutation = Some(elision.virtual_permutation().clone());
         match elision_status {
             VirtualPermutationElisionStatus::Changed => {
-                state.current = elision.into_changed_circuit().ok_or_else(|| {
+                let circuit = elision.into_changed_circuit().ok_or_else(|| {
                     CompilerError::InvariantViolation(
                         "changed virtual-permutation result did not contain a circuit".to_string(),
                     )
                 })?;
-                state.analysis = CircuitAnalysis::analyze(&state.current);
-                state.changed = true;
+                let edits = RewriteEdits::between_linear_circuits(&state.current, &circuit);
+                state.adopt_changed_circuit(circuit, &edits);
                 state.steps.push(WorkflowStepReport {
                     stage: "optimization",
                     name: "optimize.virtual_permutation",
@@ -892,13 +1025,7 @@ impl CompilerWorkflow {
         }
 
         let rewrite_config = self.rewrite_config(RewritePhase::PostRouting)?;
-        state.apply_transform(
-            "optimization",
-            "optimize.post_routing",
-            |circuit, analysis| {
-                KnowledgeRewriter::new(rewrite_config).transform(circuit, Some(analysis))
-            },
-        )?;
+        state.apply_knowledge_rewrite("optimization", "optimize.post_routing", rewrite_config)?;
         Ok(())
     }
 

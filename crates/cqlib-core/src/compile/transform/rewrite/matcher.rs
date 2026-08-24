@@ -55,7 +55,7 @@ use crate::compile::knowledge::matcher::{
     instantiate_target as knowledge_instantiate_target,
     match_rule_item_with_keys as knowledge_match_rule_item_with_keys,
 };
-use crate::compile::knowledge::rule::{Rule, RuleItem};
+use crate::compile::knowledge::rule::{Condition, Rule, RuleItem};
 use crate::compile::transform::rewrite::basis::TargetContext;
 use crate::compile::transform::rewrite::config::{GPhaseCost, LocalRewriteCost, RewriteConfig};
 use smallvec::SmallVec;
@@ -252,6 +252,7 @@ pub(super) struct CompiledRuleSet {
     rules: Vec<CompiledRule>,
     first_key_map: HashMap<RewriteInstructionKey, SmallVec<[usize; 8]>>,
     commutation: CommutationChecker,
+    qubit_bijection_invariant: bool,
 }
 
 /// One operation emitted by a rewrite target.
@@ -347,9 +348,10 @@ struct CandidatePatch {
 /// and commutation checks, so per-position instruction keys and resolved
 /// symbolic parameters are computed once and reused. Stable operation IDs and
 /// the shared commutation memo preserve source-pair proofs across incremental
-/// rounds. `instruction_set` and `qubit_count` feed the static rule filters; if
-/// a round changes either of them, previously clean anchors may match
-/// differently and the block must be rescanned in full.
+/// rounds. `instruction_set` and `qubit_count` feed static rule filters. A
+/// transition does not by itself require a full rescan: a newly admitted local
+/// match must observe the patch which introduced its missing instruction or
+/// qubit.
 #[derive(Debug, Clone)]
 pub(super) struct BlockMatchCache {
     instruction_keys: Vec<RewriteInstructionKey>,
@@ -416,18 +418,11 @@ impl BlockMatchCache {
         operations: &[Operation],
         patches: &[RewritePatch],
     ) -> Option<Self> {
-        self.clone()
-            .into_rewritten(operations, patches)
-            .map(|(cache, _)| cache)
+        self.clone().into_rewritten(operations, patches)
     }
 
     /// Derives the cache for the block after applying `patches`, consuming
     /// the old cache so unchanged entries move instead of clone.
-    ///
-    /// Returns the new cache together with whether the block summary
-    /// (`instruction_set` or `qubit_count`) changed. A changed summary can
-    /// alter static filter results for anchors far from the applied patches,
-    /// so callers must fall back to a full rescan of the block in that case.
     ///
     /// Returns `None` when the cache cannot be derived incrementally: the
     /// operation slice no longer matches the cached length, the source block
@@ -444,7 +439,7 @@ impl BlockMatchCache {
         self,
         operations: &[Operation],
         patches: &[RewritePatch],
-    ) -> Option<(Self, bool)> {
+    ) -> Option<Self> {
         if operations.len() != self.len()
             || operations
                 .iter()
@@ -479,8 +474,6 @@ impl BlockMatchCache {
         let mut operation_ids = Vec::with_capacity(expected_len);
         let mut instruction_set = HashSet::new();
         let mut touched_qubits = HashSet::new();
-        let old_instruction_set = self.instruction_set;
-        let old_qubit_count = self.qubit_count;
         let commutation_memo = self.commutation_memo;
         let mut old_entries = self
             .instruction_keys
@@ -532,19 +525,14 @@ impl BlockMatchCache {
             return None;
         }
         let qubit_count = touched_qubits.len();
-        let summary_changed =
-            instruction_set != old_instruction_set || qubit_count != old_qubit_count;
-        Some((
-            Self {
-                instruction_keys,
-                resolved_params,
-                operation_ids,
-                commutation_memo,
-                instruction_set,
-                qubit_count,
-            },
-            summary_changed,
-        ))
+        Some(Self {
+            instruction_keys,
+            resolved_params,
+            operation_ids,
+            commutation_memo,
+            instruction_set,
+            qubit_count,
+        })
     }
 }
 
@@ -598,6 +586,10 @@ impl CompiledRuleSet {
             HashMap::new();
         let kind_by_id = build_kind_index(library);
         let commutation = CommutationChecker::from_library(library, rewrite_commutation_config());
+        let qubit_bijection_invariant = library
+            .rules()
+            .iter()
+            .all(rule_is_qubit_bijection_invariant);
 
         for (index, rule) in library.rules().iter().cloned().enumerate() {
             let kind = kind_by_id.get(&index).copied().unwrap_or(RuleKind::Other);
@@ -608,6 +600,7 @@ impl CompiledRuleSet {
             rules,
             first_key_map,
             commutation,
+            qubit_bijection_invariant,
         })
     }
 
@@ -640,6 +633,10 @@ impl CompiledRuleSet {
             .unwrap_or(0)
     }
 
+    pub(super) const fn is_qubit_bijection_invariant(&self) -> bool {
+        self.qubit_bijection_invariant
+    }
+
     pub(super) fn lowerable_rules(
         &self,
     ) -> impl Iterator<
@@ -664,6 +661,29 @@ impl CompiledRuleSet {
             )
         })
     }
+}
+
+fn rule_is_qubit_bijection_invariant(rule: &Rule) -> bool {
+    rule.operations
+        .iter()
+        .chain(&rule.target)
+        .all(|item| match &item.instruction {
+            Instruction::Standard(_) | Instruction::McGate(_) => true,
+            Instruction::UnitaryGate(_)
+            | Instruction::CircuitGate(_)
+            | Instruction::Directive(_)
+            | Instruction::ClassicalData(_)
+            | Instruction::ClassicalControl(_)
+            | Instruction::Delay => false,
+        })
+        && rule
+            .conditions
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .all(|condition| match condition {
+                Condition::Eq(_, _) | Condition::EqMod(_, _, _) => true,
+            })
 }
 
 fn rewrite_commutation_config() -> CommutationConfig {
@@ -801,10 +821,9 @@ fn normalized_qubit_pair(a: u32, b: u32) -> (u32, u32) {
 ///
 /// `anchor_ranges` encodes the workset contract:
 ///
-/// - `None`: full scan of every anchor. Used for the first round and after
-///   any block-level summary change (instruction-set or qubit-count
-///   transition, global-phase involvement, unstable scope) that invalidates
-///   incremental state.
+/// - `None`: full scan of every anchor. Used for the first round and whenever
+///   global-phase involvement, an unstable scope, or failed mutation
+///   reconciliation prevents the caller from preserving incremental state.
 /// - `Some(ranges)`: scan only anchors inside `ranges`. The caller guarantees
 ///   that every anchor outside the ranges was proven candidate-free against
 ///   block content it can still observe, because matching at an anchor reads

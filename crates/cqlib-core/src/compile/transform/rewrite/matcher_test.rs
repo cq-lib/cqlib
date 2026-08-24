@@ -29,6 +29,11 @@ fn builtin_rules() -> CompiledRuleSet {
     CompiledRuleSet::from_library(RuleLibrary::builtin_rules().unwrap()).unwrap()
 }
 
+#[test]
+fn builtin_rule_model_is_qubit_bijection_invariant() {
+    assert!(builtin_rules().is_qubit_bijection_invariant());
+}
+
 #[derive(Default)]
 struct CountingExactCommutationCache {
     entries: RefCell<HashMap<(u64, u64), bool>>,
@@ -237,7 +242,7 @@ fn retained_operation_pair_hits_after_patch_shifts_positions() {
         replacements: vec![],
     };
     let next_operations = operations[2..].to_vec();
-    let next_cache = cache.into_rewritten(&operations, &[patch]).unwrap().0;
+    let next_cache = cache.into_rewritten(&operations, &[patch]).unwrap();
     assert_eq!(next_cache.operation_ids, retained_ids);
 
     let next_block = BlockContext::new(&next_operations, &next_cache).unwrap();
@@ -299,7 +304,7 @@ fn replacement_gets_fresh_identity_and_cannot_hit_consumed_pair() {
             key: cache.instruction_keys[0].clone(),
         }],
     };
-    let next_cache = cache.into_rewritten(&operations, &[patch]).unwrap().0;
+    let next_cache = cache.into_rewritten(&operations, &[patch]).unwrap();
     assert_ne!(next_cache.operation_ids[0], consumed_id);
     let recomputations = AtomicUsize::new(0);
     assert!(!next_cache.commutation_memo.exact_or_insert_with(
@@ -362,7 +367,7 @@ fn retained_negative_pair_is_reused_through_multiple_rewrite_rounds() {
 
         changed_rounds += 1;
         let next_operations = apply_cancellation_patches(&operations, &patches);
-        let next_cache = cache.into_rewritten(&operations, &patches).unwrap().0;
+        let next_cache = cache.into_rewritten(&operations, &patches).unwrap();
         assert_eq!(next_cache.operation_ids[0..2], retained_ids);
         assert!(
             !memo.exact_or_insert_with(retained_ids[1], retained_ids[0], || {

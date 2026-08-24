@@ -35,13 +35,21 @@
 
 mod basis;
 mod config;
+mod edit;
+mod edit_validation;
 mod matcher;
+mod proof;
 mod rewriter;
+mod session;
 
 pub use config::{RewriteConfig, RewriteMode};
+pub(crate) use edit::{OperationReplacement, QubitBijection, RewriteEdits};
 pub use rewriter::{
     KnowledgeRewriteResult, KnowledgeRewriteStats, KnowledgeRewriter, rewrite_circuit,
 };
+pub(crate) use session::KnowledgeRewriteSession;
+#[cfg(test)]
+pub(crate) use session::KnowledgeRewriteWorksetStats;
 
 #[cfg(test)]
 #[path = "./rewrite_test.rs"]

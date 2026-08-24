@@ -83,3 +83,4 @@
 pub mod sabre;
 
 pub use sabre::{RoutedCircuit, SabreRouteResult, route_sabre, route_with_layout};
+pub(crate) use sabre::{route_sabre_tracked, route_with_layout_tracked};

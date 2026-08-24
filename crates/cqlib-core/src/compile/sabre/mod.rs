@@ -113,10 +113,10 @@ pub(crate) use dag::SabreDag;
 pub use heuristic::{SabreConfig, SabreHeuristicConfig, SabreVf2PrepassConfig};
 pub(crate) use routing::{
     ComponentAssignmentSearch, InteractionReachability, PreparedRouteMetadata, RankedTrial,
-    RequirementReachabilityFailure, RoutingTarget, TrialResult, compare_ranked_trials,
-    finish_sabre_route, interaction_reachability_for_target_with_metadata,
+    RequirementReachabilityFailure, RouteOperationProvenance, RoutingTarget, TrialResult,
+    compare_ranked_trials, finish_sabre_route, interaction_reachability_for_target_with_metadata,
     movement_component_assignment, normalize_initial_layout_for_target,
-    refine_layout_with_metadata, route_ranked_trial_with_metadata,
+    refine_layout_with_metadata, route_ranked_trial_with_metadata, sabre_route_with_provenance,
 };
 pub use routing::{SabreRoutingDiagnostics, SabreRoutingResult, sabre_route};
 pub use routing::{normalize_initial_layout, validate_reachable_interactions};
