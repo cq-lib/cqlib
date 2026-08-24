@@ -59,8 +59,11 @@ use crate::compile::knowledge::rule::{Rule, RuleItem};
 use crate::compile::transform::rewrite::basis::TargetContext;
 use crate::compile::transform::rewrite::config::{GPhaseCost, LocalRewriteCost, RewriteConfig};
 use smallvec::SmallVec;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Anchor count above which candidate generation switches to rayon.
 ///
@@ -74,6 +77,150 @@ const PARALLEL_ANCHOR_THRESHOLD: usize = 16_384;
 /// a full scan. Past this point the restricted scan touches most of the block
 /// anyway, and full scans have cheaper per-anchor bookkeeping.
 const DIRTY_FULL_SCAN_PERCENT: usize = 50;
+/// Shards used by the pass-local exact-commutation memo.
+///
+/// Large anchor scans run on rayon, so unrelated operation pairs should not
+/// contend on one global lock. The shard count is a power of two so selecting
+/// a shard remains cheaper than another hash-table lookup.
+const COMMUTATION_CACHE_SHARDS: usize = 64;
+
+type OperationId = u64;
+type CommutationCacheKey = (OperationId, OperationId);
+
+/// Cached outcome of an exact-commutation proof attempt.
+///
+/// Absence from the map is the third state, `Unknown`. A negative entry means
+/// only that the configured checker did not prove exact commutation; it is not
+/// a proof that the operations fail to commute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExactCommutationState {
+    Exact,
+    NotProvenExact,
+}
+
+/// Exact-commutation lookup used by serial and parallel anchor scans.
+///
+/// Stable operation IDs, rather than mutable positions, identify operands so
+/// retained source pairs can reuse results across fixpoint rounds.
+trait ExactCommutationCache {
+    fn exact_or_insert_with(
+        &self,
+        lhs_id: OperationId,
+        rhs_id: OperationId,
+        compute: impl FnOnce() -> bool,
+    ) -> bool;
+}
+
+#[derive(Debug, Default)]
+struct ExactCommutationShard {
+    entries: HashMap<CommutationCacheKey, ExactCommutationState>,
+}
+
+/// Cross-round exact-commutation results for one rewrite block.
+///
+/// Stable operation IDs make entries independent of positional shifts. A
+/// replacement always receives a fresh ID, which makes entries involving a
+/// consumed source operation unreachable without an eager invalidation walk.
+/// All entries are reclaimed together when the owning block cache is dropped.
+#[derive(Debug)]
+struct ExactCommutationMemo {
+    shards: [Mutex<ExactCommutationShard>; COMMUTATION_CACHE_SHARDS],
+    next_operation_id: AtomicU64,
+}
+
+impl ExactCommutationMemo {
+    fn new() -> Self {
+        Self {
+            shards: std::array::from_fn(|_| Mutex::new(ExactCommutationShard::default())),
+            next_operation_id: AtomicU64::new(0),
+        }
+    }
+
+    fn allocate_operation_id(&self) -> OperationId {
+        self.next_operation_id.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+impl ExactCommutationCache for ExactCommutationMemo {
+    fn exact_or_insert_with(
+        &self,
+        lhs_id: OperationId,
+        rhs_id: OperationId,
+        compute: impl FnOnce() -> bool,
+    ) -> bool {
+        let key = normalized_operation_pair(lhs_id, rhs_id);
+        let shard_index = operation_pair_shard(key);
+        let mut shard = self.shards[shard_index]
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(state) = shard.entries.get(&key) {
+            return *state == ExactCommutationState::Exact;
+        }
+
+        let exact = compute();
+        shard.entries.insert(
+            key,
+            if exact {
+                ExactCommutationState::Exact
+            } else {
+                ExactCommutationState::NotProvenExact
+            },
+        );
+        exact
+    }
+}
+
+/// Lock-free front cache for the normal serial anchor-scan path.
+///
+/// The persistent memo is consulted only once per unique pair in a selection;
+/// repeated rule and future-match queries then stay in this `RefCell` map.
+struct SerialExactCommutationCache<'a> {
+    entries: RefCell<HashMap<CommutationCacheKey, ExactCommutationState>>,
+    memo: &'a ExactCommutationMemo,
+}
+
+impl<'a> SerialExactCommutationCache<'a> {
+    fn new(memo: &'a ExactCommutationMemo) -> Self {
+        Self {
+            entries: RefCell::new(HashMap::new()),
+            memo,
+        }
+    }
+}
+
+impl ExactCommutationCache for SerialExactCommutationCache<'_> {
+    fn exact_or_insert_with(
+        &self,
+        lhs_id: OperationId,
+        rhs_id: OperationId,
+        compute: impl FnOnce() -> bool,
+    ) -> bool {
+        let key = normalized_operation_pair(lhs_id, rhs_id);
+        if let Some(state) = self.entries.borrow().get(&key) {
+            return *state == ExactCommutationState::Exact;
+        }
+
+        let exact = self.memo.exact_or_insert_with(lhs_id, rhs_id, compute);
+        self.entries.borrow_mut().insert(
+            key,
+            if exact {
+                ExactCommutationState::Exact
+            } else {
+                ExactCommutationState::NotProvenExact
+            },
+        );
+        exact
+    }
+}
+
+fn normalized_operation_pair(lhs: OperationId, rhs: OperationId) -> CommutationCacheKey {
+    if lhs <= rhs { (lhs, rhs) } else { (rhs, lhs) }
+}
+
+fn operation_pair_shard((lhs, rhs): CommutationCacheKey) -> usize {
+    let mixed = lhs.wrapping_mul(0x9e37_79b9_u64) ^ rhs.rotate_left(u64::BITS / 2);
+    (mixed as usize) & (COMMUTATION_CACHE_SHARDS - 1)
+}
 
 /// Returns whether the instruction is a global-phase operation.
 ///
@@ -198,14 +345,17 @@ struct CandidatePatch {
 ///
 /// Rule matching probes the same operation many times across anchors, rules,
 /// and commutation checks, so per-position instruction keys and resolved
-/// symbolic parameters are computed once and reused. `instruction_set` and
-/// `qubit_count` feed the static rule filters; if a round changes either of
-/// them, previously clean anchors may match differently and the block must be
-/// rescanned in full.
+/// symbolic parameters are computed once and reused. Stable operation IDs and
+/// the shared commutation memo preserve source-pair proofs across incremental
+/// rounds. `instruction_set` and `qubit_count` feed the static rule filters; if
+/// a round changes either of them, previously clean anchors may match
+/// differently and the block must be rescanned in full.
 #[derive(Debug, Clone)]
 pub(super) struct BlockMatchCache {
     instruction_keys: Vec<RewriteInstructionKey>,
     resolved_params: Vec<SmallVec<[Parameter; 3]>>,
+    operation_ids: Vec<OperationId>,
+    commutation_memo: Arc<ExactCommutationMemo>,
     instruction_set: HashSet<RewriteInstructionKey>,
     qubit_count: usize,
 }
@@ -216,6 +366,8 @@ impl BlockMatchCache {
         let mut instruction_keys = Vec::with_capacity(operations.len());
         let mut touched_qubits = HashSet::new();
         let mut instruction_set = HashSet::new();
+        let commutation_memo = Arc::new(ExactCommutationMemo::new());
+        let mut operation_ids = Vec::with_capacity(operations.len());
 
         for operation in operations {
             let key = RewriteInstructionKey::from_instruction(&operation.instruction).ok_or_else(
@@ -236,11 +388,14 @@ impl BlockMatchCache {
             instruction_set.insert(key.clone());
             instruction_keys.push(key);
             resolved_params.push(params);
+            operation_ids.push(commutation_memo.allocate_operation_id());
         }
 
         Ok(Self {
             instruction_keys,
             resolved_params,
+            operation_ids,
+            commutation_memo,
             instruction_set,
             qubit_count: touched_qubits.len(),
         })
@@ -321,11 +476,17 @@ impl BlockMatchCache {
             );
         let mut instruction_keys = Vec::with_capacity(expected_len);
         let mut resolved_params = Vec::with_capacity(expected_len);
+        let mut operation_ids = Vec::with_capacity(expected_len);
         let mut instruction_set = HashSet::new();
         let mut touched_qubits = HashSet::new();
         let old_instruction_set = self.instruction_set;
         let old_qubit_count = self.qubit_count;
-        let mut old_entries = self.instruction_keys.into_iter().zip(self.resolved_params);
+        let commutation_memo = self.commutation_memo;
+        let mut old_entries = self
+            .instruction_keys
+            .into_iter()
+            .zip(self.resolved_params)
+            .zip(self.operation_ids);
 
         for step in steps {
             match step {
@@ -336,6 +497,7 @@ impl BlockMatchCache {
                         }
                         instruction_set.insert(replacement.key.clone());
                         instruction_keys.push(replacement.key.clone());
+                        operation_ids.push(commutation_memo.allocate_operation_id());
                         resolved_params.push(
                             replacement
                                 .params
@@ -353,16 +515,20 @@ impl BlockMatchCache {
                     old_entries.next()?;
                 }
                 PatchPlanStep::Keep(position) => {
-                    let (old_key, old_params) = old_entries.next()?;
+                    let ((old_key, old_params), operation_id) = old_entries.next()?;
                     instruction_set.insert(old_key.clone());
                     instruction_keys.push(old_key);
                     resolved_params.push(old_params);
+                    operation_ids.push(operation_id);
                     touched_qubits.extend(operations[position].qubits.iter().copied());
                 }
             }
         }
 
-        if old_entries.next().is_some() || instruction_keys.len() != expected_len {
+        if old_entries.next().is_some()
+            || instruction_keys.len() != expected_len
+            || operation_ids.len() != expected_len
+        {
             return None;
         }
         let qubit_count = touched_qubits.len();
@@ -372,6 +538,8 @@ impl BlockMatchCache {
             Self {
                 instruction_keys,
                 resolved_params,
+                operation_ids,
+                commutation_memo,
                 instruction_set,
                 qubit_count,
             },
@@ -416,6 +584,10 @@ impl<'a> BlockContext<'a> {
 
     fn params(&self, position: usize) -> &[Parameter] {
         &self.cache.resolved_params[position]
+    }
+
+    fn operation_id(&self, position: usize) -> OperationId {
+        self.cache.operation_ids[position]
     }
 }
 
@@ -725,21 +897,48 @@ fn scan_anchors(
     config: &RewriteConfig,
     target_context: Option<&TargetContext>,
 ) -> Vec<Result<Vec<CandidatePatch>, CompilerError>> {
-    let scan = |&anchor: &usize| scan_anchor(block, anchor, rules, config, target_context);
     if anchors.len() < PARALLEL_ANCHOR_THRESHOLD {
-        return anchors.iter().map(scan).collect();
+        let commutation_cache =
+            SerialExactCommutationCache::new(block.cache.commutation_memo.as_ref());
+        return anchors
+            .iter()
+            .map(|&anchor| {
+                scan_anchor(
+                    block,
+                    anchor,
+                    rules,
+                    config,
+                    target_context,
+                    &commutation_cache,
+                )
+            })
+            .collect();
     }
 
     use rayon::prelude::*;
-    anchors.par_iter().map(scan).collect()
+    let commutation_cache = block.cache.commutation_memo.as_ref();
+    anchors
+        .par_iter()
+        .map(|&anchor| {
+            scan_anchor(
+                block,
+                anchor,
+                rules,
+                config,
+                target_context,
+                commutation_cache,
+            )
+        })
+        .collect()
 }
 
-fn scan_anchor(
+fn scan_anchor<C: ExactCommutationCache>(
     block: &BlockContext<'_>,
     anchor: usize,
     rules: &CompiledRuleSet,
     config: &RewriteConfig,
     target_context: Option<&TargetContext>,
+    commutation_cache: &C,
 ) -> Result<Vec<CandidatePatch>, CompilerError> {
     let mut candidates = Vec::new();
     let operation = block.operation(anchor);
@@ -760,6 +959,7 @@ fn scan_anchor(
             &rules.commutation,
             config,
             target_context,
+            commutation_cache,
         )? {
             candidates.push(candidate);
         }
@@ -935,13 +1135,14 @@ fn is_implicit_target_key(key: &RewriteInstructionKey) -> bool {
 /// The anchor must match the first rule item exactly. Later items may be found
 /// after commuting past unrelated operations, but the first item owns the
 /// candidate's source position and first-key index lookup.
-fn try_match_rule(
+fn try_match_rule<C: ExactCommutationCache>(
     block: &BlockContext<'_>,
     anchor: usize,
     compiled: &CompiledRule,
     commutation: &CommutationChecker,
     config: &RewriteConfig,
     target_context: Option<&TargetContext>,
+    commutation_cache: &C,
 ) -> Result<Option<CandidatePatch>, CompilerError> {
     let rule = &compiled.rule;
     let mut bindings = MatchBindings::new();
@@ -978,6 +1179,7 @@ fn try_match_rule(
                 position,
                 commutation,
                 config,
+                commutation_cache,
             )? {
                 continue;
             }
@@ -1008,6 +1210,7 @@ fn try_match_rule(
         &matched_positions,
         commutation,
         config,
+        commutation_cache,
     ) {
         return Ok(None);
     }
@@ -1057,13 +1260,14 @@ fn try_match_rule(
 /// Only skipped operations touching the match's active qubits can constrain the
 /// rewrite. Operations on disjoint qubits are independent in this local block
 /// model and do not need oracle calls.
-fn can_skip_between(
+fn can_skip_between<C: ExactCommutationCache>(
     block: &BlockContext<'_>,
     skipped: Range<usize>,
     matched_positions: &[usize],
     candidate_position: usize,
     commutation: &CommutationChecker,
     config: &RewriteConfig,
+    commutation_cache: &C,
 ) -> Result<bool, CompilerError> {
     if skipped.is_empty() {
         return Ok(true);
@@ -1097,11 +1301,23 @@ fn can_skip_between(
         }
 
         for &matched_position in matched_positions {
-            if !operations_commute(block, skipped_position, matched_position, commutation) {
+            if !operations_commute(
+                block,
+                skipped_position,
+                matched_position,
+                commutation,
+                commutation_cache,
+            ) {
                 return Ok(false);
             }
         }
-        if !operations_commute(block, skipped_position, candidate_position, commutation) {
+        if !operations_commute(
+            block,
+            skipped_position,
+            candidate_position,
+            commutation,
+            commutation_cache,
+        ) {
             return Ok(false);
         }
     }
@@ -1113,12 +1329,13 @@ fn can_skip_between(
 ///
 /// This second pass catches skipped operations that were seen before all later
 /// match positions were known.
-fn skipped_sources_commute_with_future_matches(
+fn skipped_sources_commute_with_future_matches<C: ExactCommutationCache>(
     block: &BlockContext<'_>,
     skipped_positions: &[usize],
     matched_positions: &[usize],
     commutation: &CommutationChecker,
     config: &RewriteConfig,
+    commutation_cache: &C,
 ) -> bool {
     for &skipped_position in skipped_positions {
         let skipped_operation = block.operation(skipped_position);
@@ -1134,7 +1351,13 @@ fn skipped_sources_commute_with_future_matches(
             {
                 continue;
             }
-            if !operations_commute(block, skipped_position, matched_position, commutation) {
+            if !operations_commute(
+                block,
+                skipped_position,
+                matched_position,
+                commutation,
+                commutation_cache,
+            ) {
                 return false;
             }
         }
@@ -1181,24 +1404,40 @@ fn replacements_commute_with_skipped(
     Ok(true)
 }
 
-fn operations_commute(
+fn operations_commute<C: ExactCommutationCache>(
     block: &BlockContext<'_>,
-    lhs_position: usize,
-    rhs_position: usize,
+    mut lhs_position: usize,
+    mut rhs_position: usize,
     commutation: &CommutationChecker,
+    commutation_cache: &C,
 ) -> bool {
-    let lhs = block.operation(lhs_position);
-    let rhs = block.operation(rhs_position);
-    commutation
-        .check(
-            &lhs.instruction,
-            &lhs.qubits,
-            block.params(lhs_position),
-            &rhs.instruction,
-            &rhs.qubits,
-            block.params(rhs_position),
-        )
-        .is_some_and(|result| result.is_exact())
+    let mut lhs = block.operation(lhs_position);
+    let mut rhs = block.operation(rhs_position);
+    if !lhs.qubits.iter().any(|qubit| rhs.qubits.contains(qubit)) {
+        return true;
+    }
+
+    let mut lhs_id = block.operation_id(lhs_position);
+    let mut rhs_id = block.operation_id(rhs_position);
+    if lhs_id > rhs_id {
+        std::mem::swap(&mut lhs_position, &mut rhs_position);
+        std::mem::swap(&mut lhs_id, &mut rhs_id);
+        lhs = block.operation(lhs_position);
+        rhs = block.operation(rhs_position);
+    }
+
+    commutation_cache.exact_or_insert_with(lhs_id, rhs_id, || {
+        commutation
+            .check(
+                &lhs.instruction,
+                &lhs.qubits,
+                block.params(lhs_position),
+                &rhs.instruction,
+                &rhs.qubits,
+                block.params(rhs_position),
+            )
+            .is_some_and(|result| result.is_exact())
+    })
 }
 
 fn operation_commutes_with_replacement(
@@ -1390,3 +1629,7 @@ fn update_depth_estimate(
     }
     cost.depth_estimate = cost.depth_estimate.max(next_depth);
 }
+
+#[cfg(test)]
+#[path = "./matcher_test.rs"]
+mod matcher_test;
