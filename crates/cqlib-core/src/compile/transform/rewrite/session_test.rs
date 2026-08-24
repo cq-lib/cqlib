@@ -11,16 +11,27 @@
 // that they have been altered from the originals.
 
 use super::{
-    GateInstructionHistogram, KnowledgeRewriteSession, config_is_proven_subset,
-    map_and_invalidate_ranges, valid_clean_gap_bijections, valid_exact_clean_gaps,
-    valid_replacements,
+    GateInstructionHistogram, KnowledgeRewriteSession, RewriteExecutionRecord,
+    config_is_proven_subset, map_and_invalidate_ranges, valid_clean_gap_bijections,
+    valid_exact_clean_gaps, valid_replacements,
 };
 use crate::circuit::{Circuit, ClassicalExpr, Instruction, Qubit, StandardGate};
 use crate::compile::knowledge::library::RuleKind;
 use crate::compile::transform::rewrite::RewriteConfig;
-use crate::compile::transform::{
-    KnowledgeRewriteStats, OperationReplacement, QubitBijection, RewriteEdits,
-};
+use crate::compile::transform::{OperationReplacement, QubitBijection, RewriteEdits};
+
+fn fixed_point_record(
+    config: RewriteConfig,
+    qubit_bijection_invariant: bool,
+) -> RewriteExecutionRecord {
+    RewriteExecutionRecord {
+        config,
+        proof_reach: 1,
+        qubit_bijection_invariant,
+        reached_fixpoint: true,
+        workspace: None,
+    }
+}
 
 #[test]
 fn compatible_configuration_changes_only_shrink_the_proof_policy() {
@@ -167,18 +178,7 @@ fn strict_linear_edits_reject_a_qubit_domain_change() {
     after.x(q0).unwrap();
     let config = RewriteConfig::production();
     let mut session = KnowledgeRewriteSession::default();
-    session.record_execution(
-        &before,
-        0,
-        config,
-        1,
-        true,
-        KnowledgeRewriteStats {
-            rounds_executed: 1,
-            reached_fixpoint: true,
-            ..KnowledgeRewriteStats::default()
-        },
-    );
+    session.record_execution(&before, 0, fixed_point_record(config.clone(), true));
     session.apply_rewrite_edits(
         0,
         1,
@@ -187,8 +187,7 @@ fn strict_linear_edits_reject_a_qubit_domain_change() {
         &RewriteEdits::linear(1, 1, Vec::new()),
     );
 
-    assert_eq!(session.stats().edits_accepted, 0);
-    assert_eq!(session.stats().edit_fallbacks, 1);
+    assert!(session.reusable_proof(1, &config).is_none());
 }
 
 #[test]
@@ -228,37 +227,31 @@ fn qubit_bijection_edits_require_a_compatible_rewrite_proof() {
             pairs: vec![(q0, q1)],
         }],
     );
-    let fixed_point = KnowledgeRewriteStats {
-        rounds_executed: 1,
-        reached_fixpoint: true,
-        ..KnowledgeRewriteStats::default()
-    };
-
     let mut compatible = KnowledgeRewriteSession::default();
     compatible.record_execution(
         &before,
         0,
-        RewriteConfig::production(),
-        1,
-        true,
-        fixed_point.clone(),
+        fixed_point_record(RewriteConfig::production(), true),
     );
     compatible.apply_rewrite_edits(0, 1, &before, &after, &edits);
-    assert_eq!(compatible.stats().edits_accepted, 1);
-    assert_eq!(compatible.stats().edit_fallbacks, 0);
+    assert!(
+        compatible
+            .reusable_proof(1, &RewriteConfig::production())
+            .is_some()
+    );
 
     let mut incompatible = KnowledgeRewriteSession::default();
     incompatible.record_execution(
         &before,
         0,
-        RewriteConfig::production(),
-        1,
-        false,
-        fixed_point,
+        fixed_point_record(RewriteConfig::production(), false),
     );
     incompatible.apply_rewrite_edits(0, 1, &before, &after, &edits);
-    assert_eq!(incompatible.stats().edits_accepted, 0);
-    assert_eq!(incompatible.stats().edit_fallbacks, 1);
+    assert!(
+        incompatible
+            .reusable_proof(1, &RewriteConfig::production())
+            .is_none()
+    );
 }
 
 #[test]

@@ -57,11 +57,12 @@ use crate::compile::transform::decompose::{
 use crate::compile::transform::native_optimization::NativeOptimizer;
 use crate::compile::transform::{
     Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer,
-    KnowledgeRewriteSession, KnowledgeRewriter, LayoutObjective, LowerToRoutingBasis,
-    OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks, RewriteConfig, RewriteEdits,
-    TargetBasisCostModel, TargetBasisLowerer, TransformOutcome, Transformer,
-    TwoQubitBlockResynthesisConfig, VirtualPermutation, VirtualPermutationElisionStatus,
-    elide_virtual_permutations, route_sabre_tracked, route_with_layout_tracked,
+    KnowledgeRewriteDiagnostics, KnowledgeRewriteSession, KnowledgeRewriter, LayoutObjective,
+    LowerToRoutingBasis, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks, RewriteConfig,
+    RewriteEdits, RewriteExecutionRecord, TargetBasisCostModel, TargetBasisLowerer,
+    TransformOutcome, Transformer, TwoQubitBlockResynthesisConfig, VirtualPermutation,
+    VirtualPermutationElisionStatus, elide_virtual_permutations, route_sabre_tracked,
+    route_with_layout_tracked,
 };
 use crate::device::{Device, Topology};
 use std::borrow::Cow;
@@ -92,6 +93,8 @@ struct WorkflowState {
     analysis: CircuitAnalysis,
     circuit_revision: u64,
     rewrite_session: KnowledgeRewriteSession,
+    rewrite_diagnostics: KnowledgeRewriteDiagnostics,
+    collect_rewrite_diagnostics: bool,
     changed: bool,
     steps: Vec<WorkflowStepReport>,
     prepared_target_basis: Option<PreparedTargetBasis>,
@@ -206,11 +209,17 @@ impl WorkflowState {
         name: &'static str,
         config: RewriteConfig,
     ) -> Result<bool, CompilerError> {
-        if let Some((stats, proof_reach)) = self
+        if self
             .rewrite_session
-            .reusable_stats(self.circuit_revision, &config)
+            .reusable_proof(self.circuit_revision, &config)
+            .is_some()
         {
-            self.rewrite_session.record_reuse(stats, proof_reach);
+            if self.collect_rewrite_diagnostics {
+                self.rewrite_diagnostics.merge(KnowledgeRewriteDiagnostics {
+                    direct_reuses: 1,
+                    ..KnowledgeRewriteDiagnostics::default()
+                });
+            }
             self.steps.push(WorkflowStepReport {
                 stage,
                 name,
@@ -224,14 +233,23 @@ impl WorkflowState {
         let rewriter = KnowledgeRewriter::new(config.clone());
         let proof_reach = rewriter.proof_reach()?;
         let qubit_bijection_invariant = rewriter.proof_is_qubit_bijection_invariant()?;
-        let reconciled_ranges = self
+        let reconciliation = self
             .rewrite_session
-            .reconcile_linear_ranges(self.circuit_revision, &config);
-        let result = if let Some(ranges) = reconciled_ranges {
-            rewriter.run_from_linear_ranges(&self.current, ranges)?
-        } else {
-            rewriter.run(&self.current)?
-        };
+            .take_reconciled_linear_state(self.circuit_revision, &config);
+        let (result, workspace) = rewriter.run_for_session(
+            &self.current,
+            reconciliation.state,
+            self.collect_rewrite_diagnostics,
+        )?;
+        if self.collect_rewrite_diagnostics && reconciliation.full_scan_fallback {
+            self.rewrite_diagnostics.full_scan_fallbacks = self
+                .rewrite_diagnostics
+                .full_scan_fallbacks
+                .saturating_add(1);
+        }
+        if self.collect_rewrite_diagnostics {
+            self.rewrite_diagnostics.merge(result.diagnostics);
+        }
         let changed = result.changed;
         if changed {
             self.analysis = CircuitAnalysis::analyze(&result.circuit);
@@ -242,10 +260,13 @@ impl WorkflowState {
         self.rewrite_session.record_execution(
             &self.current,
             self.circuit_revision,
-            config,
-            proof_reach,
-            qubit_bijection_invariant,
-            result.stats,
+            RewriteExecutionRecord {
+                config,
+                proof_reach,
+                qubit_bijection_invariant,
+                reached_fixpoint: result.stats.reached_fixpoint,
+                workspace,
+            },
         );
         self.steps.push(WorkflowStepReport {
             stage,
@@ -300,6 +321,25 @@ impl CompilerWorkflow {
     /// Runs the workflow over `circuit` and returns the rebuilt circuit plus
     /// execution metadata.
     pub fn run(&self, circuit: &Circuit) -> Result<CompileResult, CompilerError> {
+        self.run_internal(circuit, false).map(|(result, _)| result)
+    }
+
+    /// Runs the workflow and also returns aggregate rewrite diagnostics.
+    ///
+    /// This explicit entry point keeps benchmark-only attribution separate
+    /// from [`CompileResult`]'s stable semantic equality and normal API.
+    pub fn run_with_rewrite_diagnostics(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<(CompileResult, KnowledgeRewriteDiagnostics), CompilerError> {
+        self.run_internal(circuit, true)
+    }
+
+    fn run_internal(
+        &self,
+        circuit: &Circuit,
+        collect_rewrite_diagnostics: bool,
+    ) -> Result<(CompileResult, KnowledgeRewriteDiagnostics), CompilerError> {
         let prepared_target_basis = self.prepare_target_basis()?;
         let one_qubit_optimizer = match &self.config.target {
             CompileTarget::Logical => Some(OptimizeOneQubitRuns::logical()),
@@ -325,6 +365,8 @@ impl CompilerWorkflow {
             analysis: CircuitAnalysis::analyze(circuit),
             circuit_revision: 0,
             rewrite_session: KnowledgeRewriteSession::default(),
+            rewrite_diagnostics: KnowledgeRewriteDiagnostics::default(),
+            collect_rewrite_diagnostics,
             changed: false,
             steps: Vec::new(),
             prepared_target_basis,
@@ -350,13 +392,16 @@ impl CompilerWorkflow {
         self.validate_device(&mut state)?;
         self.validate_topology_target(&mut state)?;
 
-        Ok(CompileResult {
-            circuit: state.current,
-            changed: state.changed,
-            mode: self.config.mode,
-            steps: state.steps,
-            device_metadata: state.device_metadata,
-        })
+        Ok((
+            CompileResult {
+                circuit: state.current,
+                changed: state.changed,
+                mode: self.config.mode,
+                steps: state.steps,
+                device_metadata: state.device_metadata,
+            },
+            state.rewrite_diagnostics,
+        ))
     }
 
     /// Establishes a stable high-level IR before gate-specific lowering.
@@ -364,8 +409,8 @@ impl CompilerWorkflow {
     /// Definition expansion precedes the first rewrite pass so knowledge rules
     /// see the operations contained by user-defined gates.
     fn lower_init(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        state.apply_transform("init", "canonicalize.input", |circuit, analysis| {
-            Canonicalizer::production().transform(circuit, Some(analysis))
+        state.apply_transform_with_edits("init", "canonicalize.input", |circuit, _analysis| {
+            Canonicalizer::production().transform_with_rewrite_edits(circuit)
         })?;
         self.apply_definition_decomposition(state)?;
         let rewrite_config = self.rewrite_config(RewritePhase::PreDecomposition)?;
@@ -384,15 +429,17 @@ impl CompilerWorkflow {
     fn lower_decompose(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         self.apply_unitary_decomposition(state)?;
         self.apply_mc_gate_decomposition(state)?;
-        state.apply_transform(
+        state.apply_transform_with_edits(
             "optimization",
             "canonicalize.after_decomposition",
-            |circuit, analysis| Canonicalizer::production().transform(circuit, Some(analysis)),
+            |circuit, _analysis| Canonicalizer::production().transform_with_rewrite_edits(circuit),
         )?;
-        state.apply_transform(
+        state.apply_transform_with_edits(
             "optimization",
             "optimize.commutative_cancellation",
-            |circuit, analysis| CommutativeCancellation::new().transform(circuit, Some(analysis)),
+            |circuit, _analysis| {
+                CommutativeCancellation::new().transform_with_rewrite_edits(circuit)
+            },
         )?;
         self.apply_virtual_permutation_elision(state)?;
         self.apply_two_qubit_resynthesis(
@@ -492,9 +539,11 @@ impl CompilerWorkflow {
     }
 
     fn lower_output(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        state.apply_transform("output", "canonicalize.output", |circuit, analysis| {
-            Canonicalizer::production().transform(circuit, Some(analysis))
-        })?;
+        state.apply_transform_with_edits(
+            "output",
+            "canonicalize.output",
+            |circuit, _analysis| Canonicalizer::production().transform_with_rewrite_edits(circuit),
+        )?;
         Ok(())
     }
 
@@ -743,8 +792,8 @@ impl CompilerWorkflow {
         } else {
             ResynthesizeTwoQubitBlocks::new(config)
         };
-        state.apply_transform(stage, name, |circuit, analysis| {
-            resynthesizer.transform(circuit, Some(analysis))
+        state.apply_transform_with_edits(stage, name, |circuit, _analysis| {
+            resynthesizer.transform_with_rewrite_edits(circuit)
         })
     }
 
@@ -1034,8 +1083,8 @@ impl CompilerWorkflow {
         state: &mut WorkflowState,
         name: &'static str,
     ) -> Result<bool, CompilerError> {
-        state.apply_transform("optimization", name, |circuit, analysis| {
-            CommutativeCancellation::new().transform(circuit, Some(analysis))
+        state.apply_transform_with_edits("optimization", name, |circuit, _analysis| {
+            CommutativeCancellation::new().transform_with_rewrite_edits(circuit)
         })
     }
 

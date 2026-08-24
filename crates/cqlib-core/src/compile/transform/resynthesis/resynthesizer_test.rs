@@ -120,6 +120,32 @@ fn cancels_adjacent_cx_pair() {
 }
 
 #[test]
+fn reports_exact_resynthesis_replacement_provenance() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cx(q0, q1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+
+    let (outcome, edits) = ResynthesizeTwoQubitBlocks::new(cx_config())
+        .transform_with_rewrite_edits(&circuit)
+        .unwrap();
+    assert!(matches!(outcome, TransformOutcome::Changed(_)));
+    let RewriteEdits::Linear {
+        old_len,
+        new_len,
+        replacements,
+    } = edits
+    else {
+        panic!("expected exact linear edits");
+    };
+    assert_eq!((old_len, new_len), (2, 0));
+    assert_eq!(replacements.len(), 1);
+    assert_eq!(replacements[0].old, 0..2);
+    assert_eq!(replacements[0].new, 0..0);
+}
+
+#[test]
 fn single_two_qubit_gate_is_not_resynthesized_without_improvement() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);

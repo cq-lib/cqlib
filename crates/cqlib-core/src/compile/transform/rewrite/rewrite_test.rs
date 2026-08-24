@@ -37,6 +37,34 @@ fn cancels_adjacent_self_inverse_gates() {
 }
 
 #[test]
+fn parameter_cached_replacements_remap_rule_local_qubits_per_match() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.rx(q0, Parameter::pi()).unwrap();
+    circuit.rx(q1, Parameter::pi()).unwrap();
+
+    let result = KnowledgeRewriter::production().run(&circuit).unwrap();
+    let x_qubits = result
+        .circuit
+        .operations()
+        .iter()
+        .filter_map(|operation| {
+            matches!(
+                operation.instruction,
+                Instruction::Standard(StandardGate::X)
+            )
+            .then_some(operation.qubits.as_slice())
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(x_qubits, vec![&[q0][..], &[q1][..]]);
+    assert!(result.diagnostics.condition_cache_hits > 0);
+    assert!(result.diagnostics.condition_cache_misses > 0);
+    assert_eq!(result.diagnostics.symbolic_fallbacks, 0);
+}
+
+#[test]
 fn cancels_across_commuting_disjoint_operation() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
@@ -1380,7 +1408,13 @@ fn incremental_matches_full_scan_with_symbolic_parameters() {
     circuit.rz(q0, Parameter::symbol("theta")).unwrap();
     circuit.rz(q0, Parameter::symbol("theta")).unwrap();
 
-    assert_incremental_matches_full_scan(RewriteConfig::production(), &circuit);
+    let config = RewriteConfig::production();
+    assert_incremental_matches_full_scan(config.clone(), &circuit);
+    let incremental = KnowledgeRewriter::new(config)
+        .force_incremental()
+        .run(&circuit)
+        .unwrap();
+    assert!(incremental.diagnostics.symbolic_fallbacks > 0);
 }
 
 #[test]
@@ -1438,7 +1472,14 @@ fn incremental_matches_full_scan_when_dirty_ratio_forces_full_scan() {
         circuit.rz(q0, 0.0625 * (index % 4 + 1) as f64).unwrap();
     }
 
-    assert_incremental_matches_full_scan(RewriteConfig::production(), &circuit);
+    let config = RewriteConfig::production();
+    assert_incremental_matches_full_scan(config.clone(), &circuit);
+    let incremental = KnowledgeRewriter::new(config)
+        .force_incremental()
+        .run(&circuit)
+        .unwrap();
+    assert!(incremental.diagnostics.dirty_anchors > 0);
+    assert!(incremental.diagnostics.full_scan_fallbacks > 0);
 }
 
 #[test]

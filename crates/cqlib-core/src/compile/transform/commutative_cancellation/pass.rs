@@ -18,6 +18,7 @@ use crate::circuit::{
 };
 use crate::compile::CompilerError;
 use crate::compile::commutation::{CommutationChecker, CommutationConfig};
+use crate::compile::transform::RewriteEdits;
 use crate::compile::transform::analysis::CircuitAnalysis;
 use crate::compile::transform::commutative_cancellation::sets::{
     OperationView, find_cancellable_ops, is_unitary_gate_like,
@@ -47,6 +48,13 @@ impl CommutativeCancellation {
             }),
         }
     }
+
+    pub(crate) fn transform_with_rewrite_edits(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
+        CancellationPass::run_with_edits(circuit, &self.checker)
+    }
 }
 
 impl Default for CommutativeCancellation {
@@ -75,11 +83,24 @@ struct CancellationPass<'source, 'checker> {
     rebuild: CircuitRebuildContext,
 }
 
+struct SequenceCancellation {
+    operations: Vec<ValueOperation>,
+    changed: bool,
+    provenance: Vec<Option<usize>>,
+}
+
 impl<'source, 'checker> CancellationPass<'source, 'checker> {
     fn run(
         source: &'source Circuit,
         checker: &'checker CommutationChecker,
     ) -> Result<TransformOutcome, CompilerError> {
+        Self::run_with_edits(source, checker).map(|(outcome, _)| outcome)
+    }
+
+    fn run_with_edits(
+        source: &'source Circuit,
+        checker: &'checker CommutationChecker,
+    ) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
         let rebuild = CircuitRebuildContext::new(source);
         let root_classical = rebuild.root_classical().clone();
         let mut pass = Self {
@@ -87,14 +108,24 @@ impl<'source, 'checker> CancellationPass<'source, 'checker> {
             checker,
             rebuild,
         };
-        let (operations, changed) = pass.process_sequence(source.operations(), &root_classical)?;
-        if !changed {
-            return Ok(TransformOutcome::Unchanged);
+        let rewrite = pass.process_sequence(source.operations(), &root_classical)?;
+        if !rewrite.changed {
+            return Ok((
+                TransformOutcome::Unchanged,
+                RewriteEdits::linear(
+                    source.operations().len(),
+                    source.operations().len(),
+                    Vec::new(),
+                ),
+            ));
         }
-        let circuit = pass
-            .rebuild
-            .finish(source.qubits(), operations, source.global_phase())?;
-        Ok(TransformOutcome::Changed(circuit))
+        let circuit =
+            pass.rebuild
+                .finish(source.qubits(), rewrite.operations, source.global_phase())?;
+        Ok((
+            TransformOutcome::Changed(circuit),
+            RewriteEdits::from_operation_provenance(source.operations().len(), &rewrite.provenance),
+        ))
     }
 
     /// Processes one flat operation sequence, recursing into control flow.
@@ -106,17 +137,20 @@ impl<'source, 'checker> CancellationPass<'source, 'checker> {
         &mut self,
         operations: &[Operation],
         classical_remap: &ClassicalRemap,
-    ) -> Result<(Vec<ValueOperation>, bool), CompilerError> {
+    ) -> Result<SequenceCancellation, CompilerError> {
         let mut output = Vec::with_capacity(operations.len());
-        let mut block: Vec<&Operation> = Vec::new();
+        let mut provenance = Vec::with_capacity(operations.len());
+        let mut block: Vec<(usize, &Operation)> = Vec::new();
         let mut changed = false;
 
-        for operation in operations {
+        for (source_order, operation) in operations.iter().enumerate() {
             if let Instruction::ClassicalControl(control) = &operation.instruction {
-                changed |= self.flush_block(&mut block, &mut output, classical_remap)?;
+                changed |=
+                    self.flush_block(&mut block, &mut output, &mut provenance, classical_remap)?;
                 let (instruction, body_changed) =
                     self.rebuild_control_flow(control, classical_remap)?;
                 changed |= body_changed;
+                provenance.push((!body_changed).then_some(source_order));
                 output.push(ValueOperation {
                     qubits: instruction.used_qubits().into_iter().collect(),
                     instruction: ValueInstruction::ClassicalControl(instruction),
@@ -127,18 +161,24 @@ impl<'source, 'checker> CancellationPass<'source, 'checker> {
                     label: operation.label.clone(),
                 });
             } else if is_unitary_gate_like(&operation.instruction) && operation.label.is_none() {
-                block.push(operation);
+                block.push((source_order, operation));
             } else {
-                changed |= self.flush_block(&mut block, &mut output, classical_remap)?;
+                changed |=
+                    self.flush_block(&mut block, &mut output, &mut provenance, classical_remap)?;
                 output.push(self.rebuild.remap_preserved_operation(
                     self.source,
                     operation,
                     classical_remap,
                 )?);
+                provenance.push(Some(source_order));
             }
         }
-        changed |= self.flush_block(&mut block, &mut output, classical_remap)?;
-        Ok((output, changed))
+        changed |= self.flush_block(&mut block, &mut output, &mut provenance, classical_remap)?;
+        Ok(SequenceCancellation {
+            operations: output,
+            changed,
+            provenance,
+        })
     }
 
     /// Runs cancellation over one accumulated unitary block and appends the
@@ -149,8 +189,9 @@ impl<'source, 'checker> CancellationPass<'source, 'checker> {
     /// non-finite value) and is propagated instead of degrading the analysis.
     fn flush_block(
         &mut self,
-        block: &mut Vec<&Operation>,
+        block: &mut Vec<(usize, &Operation)>,
         output: &mut Vec<ValueOperation>,
+        provenance: &mut Vec<Option<usize>>,
         classical_remap: &ClassicalRemap,
     ) -> Result<bool, CompilerError> {
         if block.is_empty() {
@@ -158,7 +199,7 @@ impl<'source, 'checker> CancellationPass<'source, 'checker> {
         }
 
         let mut views = Vec::with_capacity(block.len());
-        for (order, op) in block.iter().enumerate() {
+        for (order, (_, op)) in block.iter().enumerate() {
             let params: SmallVec<[Parameter; 3]> = op
                 .params
                 .iter()
@@ -183,6 +224,7 @@ impl<'source, 'checker> CancellationPass<'source, 'checker> {
                 view.op,
                 classical_remap,
             )?);
+            provenance.push(Some(block[view.order].0));
         }
         block.clear();
         Ok(changed)
@@ -193,8 +235,8 @@ impl<'source, 'checker> CancellationPass<'source, 'checker> {
         operations: &[Operation],
         classical_remap: &ClassicalRemap,
     ) -> Result<(ValueControlBody, bool), CompilerError> {
-        let (operations, changed) = self.process_sequence(operations, classical_remap)?;
-        Ok((ValueControlBody::new(operations), changed))
+        let rewrite = self.process_sequence(operations, classical_remap)?;
+        Ok((ValueControlBody::new(rewrite.operations), rewrite.changed))
     }
 
     /// Recursively rebuilds control-flow bodies. Control flow itself is a

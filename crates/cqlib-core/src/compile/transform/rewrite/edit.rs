@@ -202,6 +202,15 @@ impl RewriteEdits {
     /// route. The SABRE adapter subsequently attaches and validates the qubit
     /// bijections for the retained gaps.
     pub(crate) fn from_route_provenance(old_len: usize, provenance: &[Option<usize>]) -> Self {
+        Self::from_operation_provenance(old_len, provenance)
+    }
+
+    /// Builds an exact edit script from output-to-input operation provenance.
+    /// Every retained source index must occur at most once; `None` denotes a
+    /// newly generated operation. The increasing retained subsequence defines
+    /// clean gaps, while moved or replaced spans are conservatively grouped as
+    /// replacements.
+    pub(crate) fn from_operation_provenance(old_len: usize, provenance: &[Option<usize>]) -> Self {
         let mut seen = vec![false; old_len];
         let mut candidates = Vec::<(usize, usize)>::new();
         for (new_order, source_order) in provenance.iter().copied().enumerate() {

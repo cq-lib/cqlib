@@ -297,5 +297,5 @@ pub use sabre::{
     SabreConfig, SabreHeuristicConfig, SabreRoutingDiagnostics, SabreRoutingResult,
     SabreVf2PrepassConfig, normalize_initial_layout, sabre_route, validate_reachable_interactions,
 };
-pub use transform::VirtualPermutation;
+pub use transform::{KnowledgeRewriteDiagnostics, VirtualPermutation};
 pub use workflow::{CompilerWorkflow, WorkflowStepReport};

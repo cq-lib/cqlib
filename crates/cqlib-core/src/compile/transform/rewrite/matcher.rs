@@ -58,12 +58,16 @@ use crate::compile::knowledge::matcher::{
 use crate::compile::knowledge::rule::{Condition, Rule, RuleItem};
 use crate::compile::transform::rewrite::basis::TargetContext;
 use crate::compile::transform::rewrite::config::{GPhaseCost, LocalRewriteCost, RewriteConfig};
+use crate::compile::transform::rewrite::diagnostics::MatcherDiagnostics;
 use smallvec::SmallVec;
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use symb_anafis::CompiledEvaluator;
 
 /// Anchor count above which candidate generation switches to rayon.
 ///
@@ -83,6 +87,13 @@ const DIRTY_FULL_SCAN_PERCENT: usize = 50;
 /// contend on one global lock. The shard count is a power of two so selecting
 /// a shard remains cheaper than another hash-table lookup.
 const COMMUTATION_CACHE_SHARDS: usize = 64;
+/// Shards and bounded admission for parameter-only rule evaluation results.
+///
+/// The cache is owned by a rewrite workspace, never process-global.  A fixed
+/// per-shard ceiling keeps adversarial symbolic workloads from growing it
+/// without bound while retaining lock locality for parallel anchor scans.
+const RULE_EVALUATION_CACHE_SHARDS: usize = 64;
+const RULE_EVALUATION_CACHE_ENTRIES_PER_SHARD: usize = 64;
 
 type OperationId = u64;
 type CommutationCacheKey = (OperationId, OperationId);
@@ -244,7 +255,292 @@ struct CompiledRule {
     source_keys: SmallVec<[RewriteInstructionKey; 8]>,
     match_keys: SmallVec<[RewriteInstructionKey; 4]>,
     rewrite_keys: SmallVec<[RewriteInstructionKey; 4]>,
+    parameter_symbols: SmallVec<[String; 4]>,
+    numeric_conditions: Option<CompiledConditions>,
     rule: Rule,
+}
+
+struct CompiledConditions {
+    /// Rule-bound symbols first, followed by builtin constants used by the
+    /// expression compiler.  Only the rule-bound prefix participates in the
+    /// cache key.
+    evaluator_parameters: Vec<String>,
+    binding_parameter_count: usize,
+    conditions: Vec<CompiledCondition>,
+}
+
+enum CompiledCondition {
+    Eq {
+        lhs: CompiledEvaluator,
+        rhs: CompiledEvaluator,
+    },
+    EqMod {
+        lhs: CompiledEvaluator,
+        rhs: CompiledEvaluator,
+        modulus: CompiledEvaluator,
+    },
+}
+
+impl CompiledConditions {
+    fn compile(conditions: &[Condition]) -> Option<Self> {
+        if conditions.is_empty() {
+            return Some(Self {
+                evaluator_parameters: Vec::new(),
+                binding_parameter_count: 0,
+                conditions: Vec::new(),
+            });
+        }
+
+        let mut binding_parameters = conditions
+            .iter()
+            .flat_map(Condition::symbols)
+            // The rule DSL treats these names as mathematical constants, not
+            // match bindings. Keep them in the evaluator's fixed suffix so
+            // the parameter order and value vector remain exactly aligned.
+            .filter(|symbol| !matches!(symbol.as_str(), "π" | "pi" | "e"))
+            .collect::<Vec<_>>();
+        binding_parameters.sort_unstable();
+        binding_parameters.dedup();
+        let binding_parameter_count = binding_parameters.len();
+        let mut evaluator_parameters = binding_parameters;
+        evaluator_parameters.extend(["π".to_string(), "pi".to_string(), "e".to_string()]);
+        let parameter_order = evaluator_parameters
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let compile = |parameter: &Parameter| {
+            CompiledEvaluator::compile(parameter.as_expr(), &parameter_order, None).ok()
+        };
+
+        let mut compiled = Vec::with_capacity(conditions.len());
+        for condition in conditions {
+            compiled.push(match condition {
+                Condition::Eq(lhs, rhs) => CompiledCondition::Eq {
+                    lhs: compile(lhs)?,
+                    rhs: compile(rhs)?,
+                },
+                Condition::EqMod(lhs, rhs, modulus) => CompiledCondition::EqMod {
+                    lhs: compile(lhs)?,
+                    rhs: compile(rhs)?,
+                    modulus: compile(modulus)?,
+                },
+            });
+        }
+        Some(Self {
+            evaluator_parameters,
+            binding_parameter_count,
+            conditions: compiled,
+        })
+    }
+
+    /// Returns `None` unless every referenced binding and expression can be
+    /// evaluated to a finite number.  `None` deliberately means "use the
+    /// symbolic implementation", never "condition failed".
+    fn evaluate(&self, bindings: &MatchBindings) -> Option<bool> {
+        let mut values = SmallVec::<[f64; 8]>::with_capacity(self.evaluator_parameters.len());
+        for name in &self.evaluator_parameters[..self.binding_parameter_count] {
+            let value = bindings.param(name)?.evaluate(&None).ok()?;
+            if !value.is_finite() {
+                return None;
+            }
+            values.push(value);
+        }
+        values.extend([
+            std::f64::consts::PI,
+            std::f64::consts::PI,
+            std::f64::consts::E,
+        ]);
+
+        self.conditions
+            .iter()
+            .try_fold(true, |all_hold, condition| {
+                if !all_hold {
+                    return Some(false);
+                }
+                match condition {
+                    CompiledCondition::Eq { lhs, rhs } => {
+                        let lhs = lhs.evaluate(&values);
+                        let rhs = rhs.evaluate(&values);
+                        let diff = lhs - rhs;
+                        (lhs.is_finite() && rhs.is_finite() && diff.is_finite())
+                            .then_some(diff.abs() <= crate::compile::PARAMETER_EQ_TOLERANCE)
+                    }
+                    CompiledCondition::EqMod { lhs, rhs, modulus } => {
+                        let lhs = lhs.evaluate(&values);
+                        let rhs = rhs.evaluate(&values);
+                        let modulus = modulus.evaluate(&values);
+                        if !lhs.is_finite() || !rhs.is_finite() || !modulus.is_finite() {
+                            return None;
+                        }
+                        let diff = lhs - rhs;
+                        if !diff.is_finite() {
+                            return None;
+                        }
+                        if diff.abs() <= crate::compile::PARAMETER_EQ_TOLERANCE {
+                            return Some(true);
+                        }
+                        if modulus.abs() <= crate::compile::PARAMETER_EQ_TOLERANCE {
+                            return Some(false);
+                        }
+                        let ratio = diff / modulus;
+                        ratio.is_finite().then_some(
+                            (ratio - ratio.round()).abs() <= crate::compile::PARAMETER_EQ_TOLERANCE,
+                        )
+                    }
+                }
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RuleBindingCacheKey {
+    rule_id: usize,
+    parameters: SmallVec<[Parameter; 4]>,
+}
+
+#[derive(Debug, Clone)]
+struct ReplacementTemplateItem {
+    instruction: Instruction,
+    rule_qubits: SmallVec<[u32; 3]>,
+    params: SmallVec<[ParameterValue; 3]>,
+    key: RewriteInstructionKey,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RuleEvaluationCacheEntry {
+    condition: Option<bool>,
+    replacement: Option<Arc<[ReplacementTemplateItem]>>,
+}
+
+#[derive(Debug, Default)]
+struct RuleEvaluationCacheShard {
+    entries: HashMap<RuleBindingCacheKey, RuleEvaluationCacheEntry>,
+}
+
+#[derive(Debug)]
+struct RuleEvaluationCache {
+    shards: [Mutex<RuleEvaluationCacheShard>; RULE_EVALUATION_CACHE_SHARDS],
+    collect_diagnostics: bool,
+    condition_cache_hits: AtomicUsize,
+    condition_cache_misses: AtomicUsize,
+    symbolic_fallbacks: AtomicUsize,
+    dirty_anchors: AtomicUsize,
+    full_scan_fallbacks: AtomicUsize,
+}
+
+impl RuleEvaluationCache {
+    fn new(collect_diagnostics: bool) -> Self {
+        Self {
+            shards: std::array::from_fn(|_| Mutex::new(RuleEvaluationCacheShard::default())),
+            collect_diagnostics,
+            condition_cache_hits: AtomicUsize::new(0),
+            condition_cache_misses: AtomicUsize::new(0),
+            symbolic_fallbacks: AtomicUsize::new(0),
+            dirty_anchors: AtomicUsize::new(0),
+            full_scan_fallbacks: AtomicUsize::new(0),
+        }
+    }
+
+    fn condition_or_insert_with(
+        &self,
+        key: RuleBindingCacheKey,
+        compute: impl FnOnce() -> bool,
+    ) -> bool {
+        let mut shard = self
+            .shard(&key)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(result) = shard.entries.get(&key).and_then(|entry| entry.condition) {
+            if self.collect_diagnostics {
+                self.condition_cache_hits.fetch_add(1, Ordering::Relaxed);
+            }
+            return result;
+        }
+
+        if self.collect_diagnostics {
+            self.condition_cache_misses.fetch_add(1, Ordering::Relaxed);
+        }
+        let result = compute();
+        if let Some(entry) = shard.entries.get_mut(&key) {
+            entry.condition = Some(result);
+        } else if shard.entries.len() < RULE_EVALUATION_CACHE_ENTRIES_PER_SHARD {
+            shard.entries.insert(
+                key,
+                RuleEvaluationCacheEntry {
+                    condition: Some(result),
+                    replacement: None,
+                },
+            );
+        }
+        result
+    }
+
+    fn replacement(&self, key: &RuleBindingCacheKey) -> Option<Arc<[ReplacementTemplateItem]>> {
+        self.shard(key)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entries
+            .get(key)
+            .and_then(|entry| entry.replacement.clone())
+    }
+
+    fn record_replacement(
+        &self,
+        key: RuleBindingCacheKey,
+        replacement: Arc<[ReplacementTemplateItem]>,
+    ) {
+        self.record(key, |entry| entry.replacement = Some(replacement));
+    }
+
+    fn record(&self, key: RuleBindingCacheKey, update: impl FnOnce(&mut RuleEvaluationCacheEntry)) {
+        let mut shard = self
+            .shard(&key)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = shard.entries.get_mut(&key) {
+            update(entry);
+        } else if shard.entries.len() < RULE_EVALUATION_CACHE_ENTRIES_PER_SHARD {
+            let mut entry = RuleEvaluationCacheEntry::default();
+            update(&mut entry);
+            shard.entries.insert(key, entry);
+        }
+    }
+
+    fn shard(&self, key: &RuleBindingCacheKey) -> &Mutex<RuleEvaluationCacheShard> {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        &self.shards[(hasher.finish() as usize) & (RULE_EVALUATION_CACHE_SHARDS - 1)]
+    }
+
+    fn record_symbolic_fallback(&self) {
+        if self.collect_diagnostics {
+            self.symbolic_fallbacks.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record_incremental_scan(&self, dirty_anchors: usize, full_scan_fallback: bool) {
+        if !self.collect_diagnostics {
+            return;
+        }
+        self.dirty_anchors
+            .fetch_add(dirty_anchors, Ordering::Relaxed);
+        if full_scan_fallback {
+            self.full_scan_fallbacks.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn diagnostics(&self) -> MatcherDiagnostics {
+        if !self.collect_diagnostics {
+            return MatcherDiagnostics::default();
+        }
+        MatcherDiagnostics {
+            condition_cache_hits: self.condition_cache_hits.load(Ordering::Relaxed),
+            condition_cache_misses: self.condition_cache_misses.load(Ordering::Relaxed),
+            symbolic_fallbacks: self.symbolic_fallbacks.load(Ordering::Relaxed),
+            dirty_anchors: self.dirty_anchors.load(Ordering::Relaxed),
+            full_scan_fallbacks: self.full_scan_fallbacks.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// Compiled rule collection with a first-instruction candidate index.
@@ -358,17 +654,23 @@ pub(super) struct BlockMatchCache {
     resolved_params: Vec<SmallVec<[Parameter; 3]>>,
     operation_ids: Vec<OperationId>,
     commutation_memo: Arc<ExactCommutationMemo>,
+    rule_evaluation_cache: Arc<RuleEvaluationCache>,
     instruction_set: HashSet<RewriteInstructionKey>,
     qubit_count: usize,
 }
 
 impl BlockMatchCache {
-    pub(super) fn new(circuit: &Circuit, operations: &[Operation]) -> Result<Self, CompilerError> {
+    pub(super) fn new_with_diagnostics(
+        circuit: &Circuit,
+        operations: &[Operation],
+        collect_diagnostics: bool,
+    ) -> Result<Self, CompilerError> {
         let mut resolved_params = Vec::with_capacity(operations.len());
         let mut instruction_keys = Vec::with_capacity(operations.len());
         let mut touched_qubits = HashSet::new();
         let mut instruction_set = HashSet::new();
         let commutation_memo = Arc::new(ExactCommutationMemo::new());
+        let rule_evaluation_cache = Arc::new(RuleEvaluationCache::new(collect_diagnostics));
         let mut operation_ids = Vec::with_capacity(operations.len());
 
         for operation in operations {
@@ -398,6 +700,7 @@ impl BlockMatchCache {
             resolved_params,
             operation_ids,
             commutation_memo,
+            rule_evaluation_cache,
             instruction_set,
             qubit_count: touched_qubits.len(),
         })
@@ -409,6 +712,131 @@ impl BlockMatchCache {
 
     pub(super) fn params(&self, position: usize) -> &[Parameter] {
         &self.resolved_params[position]
+    }
+
+    pub(super) fn diagnostics(&self) -> MatcherDiagnostics {
+        self.rule_evaluation_cache.diagnostics()
+    }
+
+    /// Advances cached per-operation match inputs through a verified linear
+    /// edit script.  Clean entries retain resolved parameters and instruction
+    /// keys; only replacement ranges are decoded from the new circuit.
+    ///
+    /// A routing qubit renaming invalidates the commutation memo and stable
+    /// operation IDs because exact commutation depends on concrete qargs.  The
+    /// parameter-only rule cache remains valid: its replacement entries use
+    /// rule-local qubit labels and are remapped for every match.
+    pub(super) fn after_linear_replacements(
+        self,
+        after: &Circuit,
+        replacements: &[super::edit::OperationReplacement],
+        qubits_renamed: bool,
+    ) -> Option<Self> {
+        let BlockMatchCache {
+            instruction_keys,
+            resolved_params,
+            operation_ids,
+            commutation_memo: old_commutation_memo,
+            rule_evaluation_cache,
+            instruction_set: _,
+            qubit_count: _,
+        } = self;
+        let old_len = instruction_keys.len();
+        let new_len = after.operations().len();
+        let mut old_entries = instruction_keys
+            .into_iter()
+            .zip(resolved_params)
+            .zip(operation_ids);
+        let commutation_memo = if qubits_renamed {
+            Arc::new(ExactCommutationMemo::new())
+        } else {
+            old_commutation_memo
+        };
+        let mut new_keys = Vec::with_capacity(new_len);
+        let mut new_params = Vec::with_capacity(new_len);
+        let mut new_ids = Vec::with_capacity(new_len);
+        let mut instruction_set = HashSet::new();
+        let mut old_cursor = 0usize;
+
+        let push_old =
+            |entry: (
+                (RewriteInstructionKey, SmallVec<[Parameter; 3]>),
+                OperationId,
+            ),
+             keys: &mut Vec<RewriteInstructionKey>,
+             params: &mut Vec<SmallVec<[Parameter; 3]>>,
+             ids: &mut Vec<OperationId>,
+             instruction_set: &mut HashSet<RewriteInstructionKey>| {
+                let ((key, resolved), old_id) = entry;
+                instruction_set.insert(key.clone());
+                keys.push(key);
+                params.push(resolved);
+                ids.push(if qubits_renamed {
+                    commutation_memo.allocate_operation_id()
+                } else {
+                    old_id
+                });
+            };
+
+        for replacement in replacements {
+            while old_cursor < replacement.old.start {
+                push_old(
+                    old_entries.next()?,
+                    &mut new_keys,
+                    &mut new_params,
+                    &mut new_ids,
+                    &mut instruction_set,
+                );
+                old_cursor += 1;
+            }
+            while old_cursor < replacement.old.end {
+                old_entries.next()?;
+                old_cursor += 1;
+            }
+            for operation in &after.operations()[replacement.new.clone()] {
+                let key = RewriteInstructionKey::from_instruction(&operation.instruction)?;
+                let params = operation
+                    .params
+                    .iter()
+                    .map(|parameter| resolve_operation_param(after, parameter))
+                    .collect::<Result<SmallVec<[_; 3]>, _>>()
+                    .ok()?;
+                instruction_set.insert(key.clone());
+                new_keys.push(key);
+                new_params.push(params);
+                new_ids.push(commutation_memo.allocate_operation_id());
+            }
+        }
+        while old_cursor < old_len {
+            push_old(
+                old_entries.next()?,
+                &mut new_keys,
+                &mut new_params,
+                &mut new_ids,
+                &mut instruction_set,
+            );
+            old_cursor += 1;
+        }
+        if old_entries.next().is_some()
+            || new_keys.len() != new_len
+            || new_params.len() != new_len
+            || new_ids.len() != new_len
+        {
+            return None;
+        }
+
+        Some(Self {
+            instruction_keys: new_keys,
+            resolved_params: new_params,
+            operation_ids: new_ids,
+            commutation_memo,
+            rule_evaluation_cache,
+            instruction_set,
+            // Using the declared circuit domain is a conservative
+            // overestimate for the static width filter and avoids rescanning
+            // every clean operation's qargs after an edit.
+            qubit_count: after.qubits().len(),
+        })
     }
 
     /// Like [`BlockMatchCache::into_rewritten`], but clones the cache first
@@ -475,6 +903,7 @@ impl BlockMatchCache {
         let mut instruction_set = HashSet::new();
         let mut touched_qubits = HashSet::new();
         let commutation_memo = self.commutation_memo;
+        let rule_evaluation_cache = self.rule_evaluation_cache;
         let mut old_entries = self
             .instruction_keys
             .into_iter()
@@ -530,6 +959,7 @@ impl BlockMatchCache {
             resolved_params,
             operation_ids,
             commutation_memo,
+            rule_evaluation_cache,
             instruction_set,
             qubit_count,
         })
@@ -663,6 +1093,20 @@ impl CompiledRuleSet {
     }
 }
 
+impl CompiledRule {
+    fn binding_cache_key(&self, bindings: &MatchBindings) -> Option<RuleBindingCacheKey> {
+        let parameters = self
+            .parameter_symbols
+            .iter()
+            .map(|symbol| bindings.param(symbol).cloned())
+            .collect::<Option<SmallVec<[_; 4]>>>()?;
+        Some(RuleBindingCacheKey {
+            rule_id: self.id,
+            parameters,
+        })
+    }
+}
+
 fn rule_is_qubit_bijection_invariant(rule: &Rule) -> bool {
     rule.operations
         .iter()
@@ -722,6 +1166,22 @@ fn push_compiled_rule(
     let mut source_keys = SmallVec::<[RewriteInstructionKey; 8]>::new();
     let mut match_keys = SmallVec::<[RewriteInstructionKey; 4]>::new();
     let mut rewrite_keys = SmallVec::<[RewriteInstructionKey; 4]>::new();
+    let mut parameter_symbols = rule
+        .operations
+        .iter()
+        .flat_map(|item| item.params.as_deref().unwrap_or_default())
+        .filter_map(|parameter| match parameter {
+            ParameterValue::Fixed(_) => None,
+            ParameterValue::Param(parameter) => Some(parameter.get_symbols()),
+        })
+        .flatten()
+        .collect::<SmallVec<[String; 4]>>();
+    parameter_symbols.sort_unstable();
+    parameter_symbols.dedup();
+    let numeric_conditions = rule
+        .conditions
+        .as_deref()
+        .and_then(CompiledConditions::compile);
 
     for item in &rule.operations {
         let key = RewriteInstructionKey::from_instruction(&item.instruction).ok_or_else(|| {
@@ -761,6 +1221,8 @@ fn push_compiled_rule(
         source_keys,
         match_keys,
         rewrite_keys,
+        parameter_symbols,
+        numeric_conditions,
         rule,
     });
     Ok(())
@@ -834,8 +1296,9 @@ fn normalized_qubit_pair(a: u32, b: u32) -> (u32, u32) {
 ///   set. This is the normal steady state of a converged block, not an error.
 ///
 /// When the dirty ranges cover at least [`DIRTY_FULL_SCAN_PERCENT`] percent
-/// of the eligible anchors, the restriction is dropped and the block is
-/// scanned in full; the result is identical, only cheaper to compute.
+/// of all block anchors, the restriction is dropped and the block is scanned
+/// in full. Using raw density avoids a separate clean-region eligibility scan
+/// before matching begins.
 pub(super) fn select_rewrites_for_anchor_ranges(
     operations: &[Operation],
     cache: &BlockMatchCache,
@@ -846,20 +1309,19 @@ pub(super) fn select_rewrites_for_anchor_ranges(
 ) -> Result<Vec<RewritePatch>, CompilerError> {
     let block = BlockContext::new(operations, cache)?;
     let mut anchors = anchors_for_ranges(block.len(), anchor_ranges);
+    let full_scan_fallback = anchor_ranges.is_some()
+        && !block.operations.is_empty()
+        && anchors.len().saturating_mul(100) >= block.len().saturating_mul(DIRTY_FULL_SCAN_PERCENT);
     if anchor_ranges.is_some() {
-        let eligible_total = (0..block.len())
-            .filter(|&anchor| is_eligible_anchor(&block, anchor, rules, config))
-            .count();
-        let dirty_eligible = anchors
-            .iter()
-            .filter(|&&anchor| is_eligible_anchor(&block, anchor, rules, config))
-            .count();
-        if eligible_total > 0
-            && dirty_eligible.saturating_mul(100)
-                >= eligible_total.saturating_mul(DIRTY_FULL_SCAN_PERCENT)
-        {
-            anchors = (0..block.len()).collect();
-        }
+        cache
+            .rule_evaluation_cache
+            .record_incremental_scan(anchors.len(), full_scan_fallback);
+    }
+    if full_scan_fallback {
+        // Use raw anchor density here.  Computing the exact eligible total
+        // would itself scan every clean anchor, defeating incremental
+        // execution before matching begins.
+        anchors = (0..block.len()).collect();
     }
     let scans = scan_anchors(&block, &anchors, rules, config, target_context);
     let mut candidates = Vec::new();
@@ -868,28 +1330,6 @@ pub(super) fn select_rewrites_for_anchor_ranges(
     }
 
     select_candidate_patches(candidates, block.len(), target_context)
-}
-
-fn is_eligible_anchor(
-    block: &BlockContext<'_>,
-    anchor: usize,
-    rules: &CompiledRuleSet,
-    config: &RewriteConfig,
-) -> bool {
-    let operation = block.operation(anchor);
-    if config.skips_labeled_ops() && operation.label.is_some() {
-        return false;
-    }
-    rules
-        .candidates_for_first_instruction(block.key(anchor))
-        .iter()
-        .any(|&rule_index| {
-            let rule = rules.get(rule_index);
-            rule.kind != RuleKind::Commute
-                && config.allows_kind(rule.kind)
-                && rule.match_len <= config.max_pattern_len()
-                && rule_allowed_by_connectivity_policy(rule, config)
-        })
 }
 
 fn anchors_for_ranges(block_len: usize, ranges: Option<&[Range<usize>]>) -> Vec<usize> {
@@ -1217,7 +1657,25 @@ fn try_match_rule<C: ExactCommutationCache>(
         cursor = position + 1;
     }
 
-    if !knowledge_conditions_hold(rule.conditions.as_deref(), &bindings) {
+    let binding_cache_key = compiled.binding_cache_key(&bindings);
+    let evaluate_conditions = || {
+        compiled
+            .numeric_conditions
+            .as_ref()
+            .and_then(|conditions| conditions.evaluate(&bindings))
+            .unwrap_or_else(|| {
+                block.cache.rule_evaluation_cache.record_symbolic_fallback();
+                knowledge_conditions_hold(rule.conditions.as_deref(), &bindings)
+            })
+    };
+    let conditions_hold = match binding_cache_key.as_ref() {
+        Some(key) => block
+            .cache
+            .rule_evaluation_cache
+            .condition_or_insert_with(key.clone(), evaluate_conditions),
+        None => evaluate_conditions(),
+    };
+    if !conditions_hold {
         return Ok(None);
     }
     // A skipped operation may sit before a later matched operation. Verify the
@@ -1234,16 +1692,40 @@ fn try_match_rule<C: ExactCommutationCache>(
         return Ok(None);
     }
 
-    let replacements = knowledge_instantiate_target(&rule.target, &bindings)
-        .map_err(|error| CompilerError::InvariantViolation(error.to_string()))?
-        .into_iter()
-        .map(|item| ReplacementItem {
-            instruction: item.instruction,
-            qubits: item.qubits,
-            params: item.params,
-            key: item.key,
-        })
-        .collect::<Vec<_>>();
+    let replacements = if let Some(template) = binding_cache_key
+        .as_ref()
+        .and_then(|key| block.cache.rule_evaluation_cache.replacement(key))
+    {
+        instantiate_replacement_template(&template, &bindings)?
+    } else {
+        let instantiated = knowledge_instantiate_target(&rule.target, &bindings)
+            .map_err(|error| CompilerError::InvariantViolation(error.to_string()))?;
+        let template = instantiated
+            .iter()
+            .zip(&rule.target)
+            .map(|(item, source)| ReplacementTemplateItem {
+                instruction: item.instruction.clone(),
+                rule_qubits: source.qubits.clone(),
+                params: item.params.clone(),
+                key: item.key.clone(),
+            })
+            .collect::<Arc<[_]>>();
+        if let Some(key) = binding_cache_key {
+            block
+                .cache
+                .rule_evaluation_cache
+                .record_replacement(key, template);
+        }
+        instantiated
+            .into_iter()
+            .map(|item| ReplacementItem {
+                instruction: item.instruction,
+                qubits: item.qubits,
+                params: item.params,
+                key: item.key,
+            })
+            .collect::<Vec<_>>()
+    };
 
     if !replacements_commute_with_skipped(block, &skipped_positions, &replacements, commutation)? {
         return Ok(None);
@@ -1272,6 +1754,34 @@ fn try_match_rule<C: ExactCommutationCache>(
             replacements,
         },
     }))
+}
+
+fn instantiate_replacement_template(
+    template: &[ReplacementTemplateItem],
+    bindings: &MatchBindings,
+) -> Result<Vec<ReplacementItem>, CompilerError> {
+    template
+        .iter()
+        .map(|item| {
+            let qubits = item
+                .rule_qubits
+                .iter()
+                .map(|rule_qubit| {
+                    bindings.qubit(*rule_qubit).ok_or_else(|| {
+                        CompilerError::InvariantViolation(format!(
+                            "rewrite qubit {rule_qubit} is not bound by the cached match"
+                        ))
+                    })
+                })
+                .collect::<Result<SmallVec<[_; 3]>, _>>()?;
+            Ok(ReplacementItem {
+                instruction: item.instruction.clone(),
+                qubits,
+                params: item.params.clone(),
+                key: item.key.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Checks whether operations between a matched prefix and candidate can be skipped.

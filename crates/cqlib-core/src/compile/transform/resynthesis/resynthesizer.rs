@@ -33,7 +33,7 @@ use crate::circuit::{
 use crate::compile::CompilerError;
 use crate::compile::transform::decompose::unitary::DeviceTwoQubitSynthesisContext;
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
-use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
+use crate::compile::transform::{CircuitAnalysis, RewriteEdits, TransformOutcome, Transformer};
 use smallvec::smallvec;
 use std::collections::{HashMap, HashSet};
 
@@ -73,6 +73,19 @@ impl ResynthesizeTwoQubitBlocks {
 
     pub(crate) fn is_applicable(circuit: &Circuit) -> bool {
         has_fixed_numeric_two_qubit_standard(circuit.operations(), circuit)
+    }
+
+    /// Runs resynthesis and returns the exact top-level operation provenance
+    /// consumed by a later workflow rewrite session.
+    pub(crate) fn transform_with_rewrite_edits(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
+        resynthesize_two_qubit_blocks_with_device_and_edits(
+            circuit,
+            self.config.clone(),
+            self.device_context.clone(),
+        )
     }
 }
 
@@ -117,8 +130,24 @@ fn resynthesize_two_qubit_blocks_with_device(
     config: TwoQubitBlockResynthesisConfig,
     device_context: Option<DeviceTwoQubitSynthesisContext>,
 ) -> Result<TransformOutcome, CompilerError> {
+    resynthesize_two_qubit_blocks_with_device_and_edits(circuit, config, device_context)
+        .map(|(outcome, _)| outcome)
+}
+
+fn resynthesize_two_qubit_blocks_with_device_and_edits(
+    circuit: &Circuit,
+    config: TwoQubitBlockResynthesisConfig,
+    device_context: Option<DeviceTwoQubitSynthesisContext>,
+) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
     if !has_fixed_numeric_two_qubit_standard(circuit.operations(), circuit) {
-        return Ok(TransformOutcome::Unchanged);
+        return Ok((
+            TransformOutcome::Unchanged,
+            RewriteEdits::linear(
+                circuit.operations().len(),
+                circuit.operations().len(),
+                Vec::new(),
+            ),
+        ));
     }
 
     let pass = ResynthesisPass {
@@ -129,7 +158,7 @@ fn resynthesize_two_qubit_blocks_with_device(
         synthesis_cache: TwoQubitSynthesisCache::default(),
         incremental: None,
     };
-    pass.run()
+    pass.run_with_edits()
 }
 
 pub(crate) fn resynthesize_two_qubit_blocks_incremental(
@@ -165,6 +194,9 @@ struct ResynthesisPass<'a, 'session> {
 
 struct SequenceRewrite {
     operations: Vec<ValueOperation>,
+    /// Output-to-input correspondence for this sequence. Replacements are
+    /// `None`; preserved source operations retain their original order.
+    provenance: Vec<Option<usize>>,
     phase_delta: f64,
     changed: bool,
 }
@@ -174,9 +206,21 @@ impl<'a, 'session> ResynthesisPass<'a, 'session> {
         self.run_with_stats().map(|(result, _)| result)
     }
 
+    fn run_with_edits(self) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
+        self.run_with_edits_and_stats()
+            .map(|(outcome, edits, _)| (outcome, edits))
+    }
+
     fn run_with_stats(
-        mut self,
+        self,
     ) -> Result<(TransformOutcome, TwoQubitSynthesisCacheStats), CompilerError> {
+        self.run_with_edits_and_stats()
+            .map(|(outcome, _, stats)| (outcome, stats))
+    }
+
+    fn run_with_edits_and_stats(
+        mut self,
+    ) -> Result<(TransformOutcome, RewriteEdits, TwoQubitSynthesisCacheStats), CompilerError> {
         let root_classical = self.rebuild.root_classical().clone();
         let rewrite = self.process_sequence(
             self.source.operations(),
@@ -191,12 +235,24 @@ impl<'a, 'session> ResynthesisPass<'a, 'session> {
             self.rebuild
                 .finish(self.source.qubits(), rewrite.operations, global_phase)?;
         let stats = self.synthesis_cache.stats();
+        let edits = if rewrite.changed {
+            RewriteEdits::from_operation_provenance(
+                self.source.operations().len(),
+                &rewrite.provenance,
+            )
+        } else {
+            RewriteEdits::linear(
+                self.source.operations().len(),
+                self.source.operations().len(),
+                Vec::new(),
+            )
+        };
         let outcome = if rewrite.changed {
             TransformOutcome::Changed(circuit)
         } else {
             TransformOutcome::Unchanged
         };
-        Ok((outcome, stats))
+        Ok((outcome, edits, stats))
     }
 
     fn process_sequence(
@@ -273,9 +329,11 @@ impl<'a, 'session> ResynthesisPass<'a, 'session> {
         for patch in &patches {
             phase_delta += patch.synthesis_phase;
         }
-        let rebuilt = self.emit_patched_sequence(operations, classical_remap, patches, scope)?;
+        let (rebuilt, provenance) =
+            self.emit_patched_sequence(operations, classical_remap, patches, scope)?;
         Ok(SequenceRewrite {
             operations: rebuilt,
+            provenance,
             phase_delta,
             changed: true,
         })
@@ -320,15 +378,18 @@ impl<'a, 'session> ResynthesisPass<'a, 'session> {
         let mut output = Vec::with_capacity(operations.len());
         let mut phase_delta = 0.0;
         let mut changed = false;
+        let mut provenance = Vec::with_capacity(operations.len());
         for (order, operation) in operations.iter().enumerate() {
             let (rebuilt, body_phase, body_changed) =
                 self.rebuild_operation(operation, classical_remap, scope, order)?;
             output.push(rebuilt);
+            provenance.push((!body_changed).then_some(order));
             phase_delta += body_phase;
             changed |= body_changed;
         }
         Ok(SequenceRewrite {
             operations: output,
+            provenance,
             phase_delta,
             changed,
         })
@@ -340,7 +401,7 @@ impl<'a, 'session> ResynthesisPass<'a, 'session> {
         classical_remap: &ClassicalRemap,
         patches: Vec<BlockPatch>,
         scope: &NativeScopeId,
-    ) -> Result<Vec<ValueOperation>, CompilerError> {
+    ) -> Result<(Vec<ValueOperation>, Vec<Option<usize>>), CompilerError> {
         let mut patches_by_first = HashMap::new();
         let mut skipped = HashSet::new();
         for patch in patches {
@@ -359,24 +420,27 @@ impl<'a, 'session> ResynthesisPass<'a, 'session> {
         }
 
         let mut output = Vec::with_capacity(operations.len());
+        let mut provenance = Vec::with_capacity(operations.len());
         for (order, operation) in operations.iter().enumerate() {
             if let Some(patch) = patches_by_first.remove(&order) {
+                provenance.extend(std::iter::repeat_n(None, patch.replacement.len()));
                 output.extend(patch.replacement);
                 continue;
             }
             if skipped.contains(&order) {
                 continue;
             }
-            let (rebuilt, _, _) =
+            let (rebuilt, _, body_changed) =
                 self.rebuild_operation(operation, classical_remap, scope, order)?;
             output.push(rebuilt);
+            provenance.push((!body_changed).then_some(order));
         }
         debug_assert!(
             patches_by_first.is_empty(),
             "{} unemitted resynthesis patches",
             patches_by_first.len()
         );
-        Ok(output)
+        Ok((output, provenance))
     }
 
     fn rebuild_operation(

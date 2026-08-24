@@ -35,6 +35,7 @@
 
 mod basis;
 mod config;
+mod diagnostics;
 mod edit;
 mod edit_validation;
 mod matcher;
@@ -43,13 +44,12 @@ mod rewriter;
 mod session;
 
 pub use config::{RewriteConfig, RewriteMode};
+pub use diagnostics::KnowledgeRewriteDiagnostics;
 pub(crate) use edit::{OperationReplacement, QubitBijection, RewriteEdits};
 pub use rewriter::{
     KnowledgeRewriteResult, KnowledgeRewriteStats, KnowledgeRewriter, rewrite_circuit,
 };
-pub(crate) use session::KnowledgeRewriteSession;
-#[cfg(test)]
-pub(crate) use session::KnowledgeRewriteWorksetStats;
+pub(crate) use session::{KnowledgeRewriteSession, RewriteExecutionRecord};
 
 #[cfg(test)]
 #[path = "./rewrite_test.rs"]

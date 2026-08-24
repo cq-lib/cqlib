@@ -11,12 +11,15 @@
 // that they have been altered from the originals.
 
 use super::{
-    BlockContext, BlockMatchCache, CompiledRuleSet, ExactCommutationCache, ExactCommutationMemo,
-    PatchPlanStep, ReplacementItem, RewritePatch, SerialExactCommutationCache, operations_commute,
-    patch_application_plan, scan_anchor, select_candidate_patches,
-    select_rewrites_for_anchor_ranges,
+    BlockContext, BlockMatchCache, CompiledConditions, CompiledRuleSet, ExactCommutationCache,
+    ExactCommutationMemo, PatchPlanStep, ReplacementItem, RewritePatch,
+    SerialExactCommutationCache, operations_commute, patch_application_plan, scan_anchor,
+    select_candidate_patches, select_rewrites_for_anchor_ranges,
 };
-use crate::circuit::{Circuit, Instruction, Qubit, StandardGate};
+use crate::circuit::{Circuit, Instruction, Parameter, ParameterValue, Qubit, StandardGate};
+use crate::compile::knowledge::matcher::conditions_hold as knowledge_conditions_hold;
+use crate::compile::knowledge::matcher::{ConcreteOperationView, MatchBindings, match_rule_item};
+use crate::compile::knowledge::rule::{Condition, RuleItem};
 use crate::compile::knowledge::{RuleKind, RuleLibrary};
 use crate::compile::transform::rewrite::RewriteConfig;
 use rayon::prelude::*;
@@ -27,6 +30,86 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn builtin_rules() -> CompiledRuleSet {
     CompiledRuleSet::from_library(RuleLibrary::builtin_rules().unwrap()).unwrap()
+}
+
+fn numeric_binding(symbol: &str, value: Parameter) -> MatchBindings {
+    let item = RuleItem::standard(
+        StandardGate::RX,
+        &[0],
+        vec![ParameterValue::Param(Parameter::symbol(symbol))],
+    );
+    let instruction = Instruction::Standard(StandardGate::RX);
+    let params = [value];
+    let mut bindings = MatchBindings::new();
+    assert!(
+        match_rule_item(
+            &item,
+            ConcreteOperationView::new(&instruction, &[Qubit::new(0)], &params),
+            &mut bindings,
+        )
+        .unwrap()
+    );
+    bindings
+}
+
+#[test]
+fn compiled_numeric_conditions_match_symbolic_modulo_semantics() {
+    let theta = Parameter::symbol("theta");
+    let conditions = [Condition::EqMod(
+        theta,
+        Parameter::pi(),
+        Parameter::from(4.0) * Parameter::pi(),
+    )];
+    let compiled = CompiledConditions::compile(&conditions).unwrap();
+
+    assert_eq!(
+        compiled.evaluate(&numeric_binding("theta", Parameter::pi())),
+        Some(true)
+    );
+    assert_eq!(
+        compiled.evaluate(&numeric_binding("theta", Parameter::from(0.25))),
+        Some(false)
+    );
+    assert_eq!(
+        compiled.evaluate(&numeric_binding("theta", Parameter::symbol("runtime"))),
+        None
+    );
+
+    let condition_sets = [
+        vec![Condition::Eq(
+            Parameter::symbol("theta") * Parameter::from(2.0),
+            Parameter::pi(),
+        )],
+        vec![Condition::EqMod(
+            Parameter::symbol("theta"),
+            Parameter::pi(),
+            Parameter::from(4.0) * Parameter::pi(),
+        )],
+        vec![Condition::EqMod(
+            Parameter::symbol("theta"),
+            Parameter::from(1.0),
+            Parameter::from(0.0),
+        )],
+    ];
+    for conditions in condition_sets {
+        let compiled = CompiledConditions::compile(&conditions).unwrap();
+        for value in [
+            -3.0 * std::f64::consts::PI,
+            0.0,
+            0.5 * std::f64::consts::PI,
+            std::f64::consts::PI,
+            5.0 * std::f64::consts::PI,
+            1.0 + crate::compile::PARAMETER_EQ_TOLERANCE / 2.0,
+            1.0 + crate::compile::PARAMETER_EQ_TOLERANCE * 2.0,
+        ] {
+            let bindings = numeric_binding("theta", Parameter::from(value));
+            assert_eq!(
+                compiled.evaluate(&bindings),
+                Some(knowledge_conditions_hold(Some(&conditions), &bindings)),
+                "conditions={conditions:?}, value={value}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -170,7 +253,7 @@ fn real_commuting_match_computes_only_unique_source_pairs() {
     circuit.rz(qubit, 0.25).unwrap();
 
     let operations = circuit.operations().to_vec();
-    let cache = BlockMatchCache::new(&circuit, &operations).unwrap();
+    let cache = BlockMatchCache::new_with_diagnostics(&circuit, &operations, true).unwrap();
     let rules = builtin_rules();
     let commutation_cache = CountingExactCommutationCache::default();
     let config = RewriteConfig::production()
@@ -192,7 +275,7 @@ fn real_non_commuting_match_caches_failed_proof_across_rules() {
     circuit.rz(qubit, 0.25).unwrap();
 
     let operations = circuit.operations().to_vec();
-    let cache = BlockMatchCache::new(&circuit, &operations).unwrap();
+    let cache = BlockMatchCache::new_with_diagnostics(&circuit, &operations, true).unwrap();
     let rules = builtin_rules();
     let commutation_cache = CountingExactCommutationCache::default();
     let config = RewriteConfig::production()
@@ -215,7 +298,7 @@ fn retained_operation_pair_hits_after_patch_shifts_positions() {
     circuit.s(qubit).unwrap();
 
     let operations = circuit.operations().to_vec();
-    let cache = BlockMatchCache::new(&circuit, &operations).unwrap();
+    let cache = BlockMatchCache::new_with_diagnostics(&circuit, &operations, true).unwrap();
     let retained_ids = [cache.operation_ids[2], cache.operation_ids[3]];
     let rules = builtin_rules();
     let block = BlockContext::new(&operations, &cache).unwrap();
@@ -270,7 +353,7 @@ fn replacement_gets_fresh_identity_and_cannot_hit_consumed_pair() {
     circuit.z(qubit).unwrap();
 
     let operations = circuit.operations().to_vec();
-    let cache = BlockMatchCache::new(&circuit, &operations).unwrap();
+    let cache = BlockMatchCache::new_with_diagnostics(&circuit, &operations, true).unwrap();
     let consumed_id = cache.operation_ids[0];
     let retained_id = cache.operation_ids[1];
     let rules = builtin_rules();
@@ -347,7 +430,7 @@ fn retained_negative_pair_is_reused_through_multiple_rewrite_rounds() {
         .with_enabled_kinds(vec![RuleKind::Merge, RuleKind::Cancel])
         .with_max_window_ops(8);
     let mut operations = circuit.operations().to_vec();
-    let mut cache = BlockMatchCache::new(&circuit, &operations).unwrap();
+    let mut cache = BlockMatchCache::new_with_diagnostics(&circuit, &operations, true).unwrap();
     let retained_ids = [cache.operation_ids[0], cache.operation_ids[1]];
     let memo = cache.commutation_memo.clone();
 
@@ -410,8 +493,10 @@ fn serial_and_parallel_anchor_scans_select_identical_patches() {
     circuit.x(q1).unwrap();
 
     let operations = circuit.operations().to_vec();
-    let serial_block_cache = BlockMatchCache::new(&circuit, &operations).unwrap();
-    let parallel_block_cache = BlockMatchCache::new(&circuit, &operations).unwrap();
+    let serial_block_cache =
+        BlockMatchCache::new_with_diagnostics(&circuit, &operations, true).unwrap();
+    let parallel_block_cache =
+        BlockMatchCache::new_with_diagnostics(&circuit, &operations, true).unwrap();
     let serial_block = BlockContext::new(&operations, &serial_block_cache).unwrap();
     let parallel_block = BlockContext::new(&operations, &parallel_block_cache).unwrap();
     let rules = builtin_rules();

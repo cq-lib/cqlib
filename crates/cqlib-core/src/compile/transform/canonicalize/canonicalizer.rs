@@ -19,6 +19,7 @@ use crate::circuit::{
     ValueOperation, WhileOp,
 };
 use crate::compile::CompilerError;
+use crate::compile::transform::RewriteEdits;
 use crate::compile::transform::transformer::{TransformOutcome, Transformer};
 use smallvec::{SmallVec, smallvec};
 
@@ -82,6 +83,29 @@ impl Canonicalizer {
     /// let _changed = result.changed;
     /// ```
     pub fn run(&self, circuit: &Circuit) -> Result<CanonicalizeResult, CompilerError> {
+        self.run_with_rewrite_edits(circuit)
+            .map(|(result, _)| result)
+    }
+
+    pub(crate) fn transform_with_rewrite_edits(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
+        let (result, edits) = self.run_with_rewrite_edits(circuit)?;
+        Ok((
+            if result.changed {
+                TransformOutcome::Changed(result.circuit)
+            } else {
+                TransformOutcome::Unchanged
+            },
+            edits,
+        ))
+    }
+
+    fn run_with_rewrite_edits(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<(CanonicalizeResult, RewriteEdits), CompilerError> {
         verify_circuit(circuit, VerifyMode::Input)?;
 
         if self.config.round_limit() == 0 {
@@ -99,8 +123,12 @@ impl Canonicalizer {
             value_operations_from(circuit)?,
             circuit.global_phase(),
         )?;
+        let mut provenance = (0..circuit.operations().len())
+            .map(Some)
+            .collect::<Vec<_>>();
         for round in 1..=self.config.round_limit() {
-            let next = CanonicalizeRound::new(&current, &self.config).run()?;
+            let (next, next_provenance) =
+                CanonicalizeRound::new(&current, &self.config, &provenance).run()?;
             verify_circuit(
                 &next,
                 VerifyMode::Output {
@@ -109,14 +137,31 @@ impl Canonicalizer {
             )?;
 
             if current == next {
-                return Ok(CanonicalizeResult {
-                    circuit: next,
-                    changed: circuit != &current,
-                    rounds: round,
-                });
+                let changed = circuit != &current;
+                let edits = if changed {
+                    RewriteEdits::from_operation_provenance(
+                        circuit.operations().len(),
+                        &next_provenance,
+                    )
+                } else {
+                    RewriteEdits::linear(
+                        circuit.operations().len(),
+                        circuit.operations().len(),
+                        Vec::new(),
+                    )
+                };
+                return Ok((
+                    CanonicalizeResult {
+                        circuit: next,
+                        changed,
+                        rounds: round,
+                    },
+                    edits,
+                ));
             }
 
             current = next;
+            provenance = next_provenance;
         }
 
         Err(CompilerError::InvariantViolation(format!(
@@ -155,33 +200,57 @@ pub fn canonicalize_circuit(circuit: &Circuit) -> Result<CanonicalizeResult, Com
 struct CanonicalizeRound<'a> {
     source: &'a Circuit,
     config: &'a CanonicalizeConfig,
+    source_provenance: &'a [Option<usize>],
     target: Circuit,
     top_phase: Parameter,
 }
 
 impl<'a> CanonicalizeRound<'a> {
-    fn new(source: &'a Circuit, config: &'a CanonicalizeConfig) -> Self {
+    fn new(
+        source: &'a Circuit,
+        config: &'a CanonicalizeConfig,
+        source_provenance: &'a [Option<usize>],
+    ) -> Self {
         Self {
             source,
             config,
+            source_provenance,
             target: Circuit::from_qubits(source.qubits()).expect("source qubits are unique"),
             top_phase: source.global_phase(),
         }
     }
 
-    fn run(mut self) -> Result<Circuit, CompilerError> {
+    fn run(mut self) -> Result<(Circuit, Vec<Option<usize>>), CompilerError> {
         self.top_phase = compiler_parameter(self.top_phase.canonicalized())?;
         let mut top_level = Vec::with_capacity(self.source.operations().len());
+        let mut provenance = Vec::with_capacity(self.source.operations().len());
 
         // Top-level `GPhase` operations are not retained as operations. Their
         // phase contribution is accumulated here and materialized into
         // `Circuit::global_phase` after all operations have been rebuilt.
-        for operation in self.source.operations() {
+        for (source_order, operation) in self.source.operations().iter().enumerate() {
             let rewritten = self.rewrite_operation(operation, ScopeKind::TopLevel)?;
+            let preserves_source = rewritten.preserves_source;
             self.top_phase =
                 compiler_parameter((self.top_phase + rewritten.phase).canonicalized())?;
             for operation in rewritten.operations {
+                let old_len = top_level.len();
                 push_operation(&mut top_level, operation, self.config);
+                match top_level.len().saturating_sub(old_len) {
+                    1 => provenance.push(
+                        preserves_source
+                            .then_some(self.source_provenance[source_order])
+                            .flatten(),
+                    ),
+                    0 => {
+                        // Adjacent barrier folding makes the retained output
+                        // depend on both source operations.
+                        if let Some(last) = provenance.last_mut() {
+                            *last = None;
+                        }
+                    }
+                    _ => unreachable!("canonicalization emits at most one operation per input"),
+                }
             }
         }
 
@@ -190,7 +259,10 @@ impl<'a> CanonicalizeRound<'a> {
             .into_iter()
             .map(|operation| self.value_operation(operation))
             .collect::<Result<Vec<_>, _>>()?;
-        rebuild_circuit_from_value_operations(self.source, operations, phase)
+        Ok((
+            rebuild_circuit_from_value_operations(self.source, operations, phase)?,
+            provenance,
+        ))
     }
 
     fn canonicalize_body(&mut self, body: &[Operation]) -> Result<Vec<Operation>, CompilerError> {
@@ -230,6 +302,9 @@ impl<'a> CanonicalizeRound<'a> {
         operation: &Operation,
         scope: ScopeKind,
     ) -> Result<RewriteResult, CompilerError> {
+        let operation_instruction = operation.instruction.clone();
+        let operation_qubits = operation.qubits.clone();
+        let operation_label = operation.label.clone();
         let mut instruction = operation.instruction.clone();
         if self.config.canonicalizes_instruction_form() {
             instruction = instruction.canonicalize_form();
@@ -266,7 +341,8 @@ impl<'a> CanonicalizeRound<'a> {
         }
 
         let params = semantic_params
-            .into_iter()
+            .iter()
+            .cloned()
             .map(|param| self.intern_parameter(param))
             .collect::<Result<SmallVec<[CircuitParam; 1]>, _>>()?;
 
@@ -293,7 +369,17 @@ impl<'a> CanonicalizeRound<'a> {
             operation.qubits = control.used_qubits().into_iter().collect();
         }
 
-        Ok(RewriteResult::keep(operation))
+        let resolved_output_params = operation
+            .params
+            .iter()
+            .map(|parameter| self.target.resolve_parameter(parameter))
+            .collect::<Result<Vec<_>, _>>()?;
+        let preserves_source = operation.instruction == operation_instruction
+            && operation.qubits == operation_qubits
+            && operation.label == operation_label
+            && resolved_output_params == semantic_params;
+
+        Ok(RewriteResult::keep(operation, preserves_source))
     }
 
     fn rewrite_control_flow_instruction(
@@ -450,13 +536,15 @@ enum ScopeKind {
 struct RewriteResult {
     operations: Vec<Operation>,
     phase: Parameter,
+    preserves_source: bool,
 }
 
 impl RewriteResult {
-    fn keep(operation: Operation) -> Self {
+    fn keep(operation: Operation, preserves_source: bool) -> Self {
         Self {
             operations: vec![operation],
             phase: Parameter::from(0.0),
+            preserves_source,
         }
     }
 
@@ -464,6 +552,7 @@ impl RewriteResult {
         Self {
             operations: Vec::new(),
             phase: Parameter::from(0.0),
+            preserves_source: false,
         }
     }
 
@@ -471,6 +560,7 @@ impl RewriteResult {
         Self {
             operations: Vec::new(),
             phase,
+            preserves_source: false,
         }
     }
 }
