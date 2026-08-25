@@ -21,7 +21,7 @@ use cqlib_core::circuit::Instruction;
 use cqlib_core::compile::resource::ResourcePolicy;
 use cqlib_core::compile::{
     CompileConfig, CompileMode, CompileResult, CompileTarget, CompilerWorkflow,
-    DeviceCompilationMetadata, DeviceCompileTarget, WorkflowStepReport, compile,
+    DeviceCompilationMetadata, DeviceCompileTarget, WorkflowStepReport, compile_owned,
 };
 use pyo3::exceptions::PyUserWarning;
 use pyo3::prelude::*;
@@ -779,7 +779,7 @@ impl PyCompilerWorkflow {
     /// Runs the workflow without modifying the input circuit.
     fn run(&self, py: Python<'_>, circuit: PyRef<'_, PyCircuit>) -> PyResult<PyCompileResult> {
         let circuit = circuit.inner.clone();
-        py.detach(|| self.inner.run(&circuit))
+        py.detach(|| self.inner.run_owned(circuit))
             .map(PyCompileResult::from)
             .map_err(compiler_error_to_py_err)
     }
@@ -808,7 +808,7 @@ pub fn py_compile(
     let config = build_compile_config(mode, target, resource_policy)?;
     let circuit = circuit.inner.clone();
 
-    py.detach(move || compile(&circuit, config))
+    py.detach(move || compile_owned(circuit, config))
         .map(PyCompileResult::from)
         .map_err(compiler_error_to_py_err)
 }

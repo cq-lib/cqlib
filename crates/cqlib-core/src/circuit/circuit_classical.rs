@@ -412,6 +412,7 @@ use crate::circuit::control_flow::{
 use crate::circuit::error::CircuitError;
 use crate::circuit::gate::instruction::Instruction;
 use crate::circuit::{ClassicalDataOp, ClassicalType, ClassicalValue, ClassicalVar, Measurement};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ControlScopeKind {
@@ -547,7 +548,7 @@ impl Circuit {
     }
 
     pub(super) fn rollback_to(&mut self, checkpoint: CircuitCheckpoint) {
-        self.data.truncate(checkpoint.data_len);
+        Arc::make_mut(&mut self.data).truncate(checkpoint.data_len);
         self.parameters.truncate(checkpoint.parameter_len);
         self.symbols.truncate(checkpoint.symbol_len);
         self.classical_vars.truncate(checkpoint.classical_var_len);
@@ -773,7 +774,9 @@ impl Circuit {
             .truncate(checkpoint.control_scope_len);
 
         match result {
-            Ok(()) => Ok(ControlBody::new(self.data.split_off(checkpoint.data_len))),
+            Ok(()) => Ok(ControlBody::new(
+                Arc::make_mut(&mut self.data).split_off(checkpoint.data_len),
+            )),
             Err(error) => {
                 self.rollback_to(checkpoint);
                 Err(error)
@@ -813,7 +816,7 @@ impl Circuit {
     ) -> ControlBody {
         self.control_scope_stack
             .truncate(transaction.checkpoint.control_scope_len);
-        ControlBody::new(self.data.split_off(transaction.checkpoint.data_len))
+        ControlBody::new(Arc::make_mut(&mut self.data).split_off(transaction.checkpoint.data_len))
     }
 
     /// Commits state allocated while constructing callback bodies.

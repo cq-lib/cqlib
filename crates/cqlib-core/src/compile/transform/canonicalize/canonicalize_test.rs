@@ -1007,6 +1007,36 @@ fn canonicalization_is_idempotent() {
 }
 
 #[test]
+fn canonical_transform_reports_stable_input_without_an_output_circuit() {
+    let mut circuit = Circuit::new(1);
+    circuit.h(Qubit::new(0)).unwrap();
+
+    let (outcome, edits) = Canonicalizer::production()
+        .transform_with_rewrite_edits(&circuit)
+        .unwrap();
+
+    assert!(matches!(outcome, TransformOutcome::Unchanged));
+    assert!(matches!(
+        edits,
+        RewriteEdits::Linear { replacements, .. } if replacements.is_empty()
+    ));
+}
+
+#[test]
+fn canonical_transform_normalizes_global_phase_accumulator_residue() {
+    let mut circuit = Circuit::new(1);
+    circuit.set_global_phase(Parameter::from(-3.330_669_073_875_469_6e-16));
+    circuit.h(Qubit::new(0)).unwrap();
+
+    let first = Canonicalizer::production().run(&circuit).unwrap();
+    assert!(first.changed);
+    assert_eq!(first.circuit.global_phase(), Parameter::from(0.0));
+
+    let second = Canonicalizer::production().run(&first.circuit).unwrap();
+    assert!(!second.changed);
+}
+
+#[test]
 fn canonicalization_is_idempotent_for_mixed_production_input() {
     let mut circuit = Circuit::new(3);
     circuit.set_global_phase(Parameter::from(0.25));

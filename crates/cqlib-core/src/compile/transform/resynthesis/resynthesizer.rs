@@ -277,13 +277,6 @@ impl<'a, 'session, 'cache> ResynthesisPass<'a, 'session, 'cache> {
             &root_classical,
             &NativeScopeId::default(),
         )?;
-        let mut global_phase = self.source.global_phase();
-        if rewrite.phase_delta.abs() > PHASE_EPS {
-            global_phase = global_phase + Parameter::from(rewrite.phase_delta);
-        }
-        let circuit =
-            self.rebuild
-                .finish(self.source.qubits(), rewrite.operations, global_phase)?;
         let stats = self.synthesis_cache.stats();
         let edits = if rewrite.changed {
             RewriteEdits::from_operation_provenance(
@@ -298,6 +291,13 @@ impl<'a, 'session, 'cache> ResynthesisPass<'a, 'session, 'cache> {
             )
         };
         let outcome = if rewrite.changed {
+            let mut global_phase = self.source.global_phase();
+            if rewrite.phase_delta.abs() > PHASE_EPS {
+                global_phase = global_phase + Parameter::from(rewrite.phase_delta);
+            }
+            let circuit =
+                self.rebuild
+                    .finish(self.source.qubits(), rewrite.operations, global_phase)?;
             TransformOutcome::Changed(circuit)
         } else {
             TransformOutcome::Unchanged

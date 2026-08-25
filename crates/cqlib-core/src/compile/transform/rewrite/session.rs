@@ -74,6 +74,13 @@ pub(crate) struct LinearRewriteReconciliation {
 }
 
 impl KnowledgeRewriteSession {
+    /// Returns whether a changed transform needs an edit script to preserve an
+    /// existing rewrite proof. With no certificate, constructing a circuit
+    /// diff cannot contribute to later reuse.
+    pub(crate) fn tracks_rewrite_edits(&self) -> bool {
+        self.certificate.is_some()
+    }
+
     pub(crate) fn invalidate(&mut self) {
         self.invalidate_for_full_scan();
     }
@@ -154,7 +161,7 @@ impl KnowledgeRewriteSession {
                 *old_len,
                 *new_len,
                 replacements,
-                before.qubits() == after.qubits()
+                before.has_same_qubits(after)
                     && valid_exact_clean_gaps(before, after, replacements),
                 false,
             ),

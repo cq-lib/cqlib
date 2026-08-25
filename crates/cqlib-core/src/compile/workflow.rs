@@ -168,6 +168,7 @@ impl WorkflowState {
         name: &'static str,
         transform: impl FnOnce(&Circuit, &CircuitAnalysis) -> Result<TransformOutcome, CompilerError>,
     ) -> Result<bool, CompilerError> {
+        let tracks_rewrite_edits = self.rewrite_session.tracks_rewrite_edits();
         self.apply_transform_with_edits(stage, name, |circuit, analysis| {
             let outcome = transform(circuit, analysis)?;
             let edits = match &outcome {
@@ -176,9 +177,10 @@ impl WorkflowState {
                     circuit.operations().len(),
                     Vec::new(),
                 ),
-                TransformOutcome::Changed(after) => {
+                TransformOutcome::Changed(after) if tracks_rewrite_edits => {
                     RewriteEdits::between_linear_circuits(circuit, after)
                 }
+                TransformOutcome::Changed(_) => RewriteEdits::Unknown,
             };
             Ok((outcome, edits))
         })
@@ -259,8 +261,13 @@ impl WorkflowState {
         }
         let changed = result.changed;
         if changed {
-            self.analysis = CircuitAnalysis::analyze(&result.circuit);
-            self.current = result.circuit;
+            let circuit = result.circuit.ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "knowledge rewrite reported a change without an output circuit".to_string(),
+                )
+            })?;
+            self.analysis = CircuitAnalysis::analyze(&circuit);
+            self.current = circuit;
             self.advance_circuit_revision();
             self.changed = true;
         }
@@ -328,6 +335,16 @@ impl CompilerWorkflow {
     /// Runs the workflow over `circuit` and returns the rebuilt circuit plus
     /// execution metadata.
     pub fn run(&self, circuit: &Circuit) -> Result<CompileResult, CompilerError> {
+        self.run_owned(circuit.clone())
+    }
+
+    /// Runs the workflow by consuming `circuit`.
+    ///
+    /// This avoids the workflow's defensive input clone when the caller
+    /// already owns an isolated circuit value. The borrowed [`Self::run`]
+    /// entry point remains the compatibility path for callers that need to
+    /// retain their input.
+    pub fn run_owned(&self, circuit: Circuit) -> Result<CompileResult, CompilerError> {
         self.run_internal(circuit, false).map(|(result, _)| result)
     }
 
@@ -339,12 +356,24 @@ impl CompilerWorkflow {
         &self,
         circuit: &Circuit,
     ) -> Result<(CompileResult, KnowledgeRewriteDiagnostics), CompilerError> {
+        self.run_owned_with_rewrite_diagnostics(circuit.clone())
+    }
+
+    /// Runs the workflow by consuming `circuit` and collects rewrite
+    /// diagnostics for benchmark attribution.
+    ///
+    /// This is the owned-input counterpart of
+    /// [`Self::run_with_rewrite_diagnostics`] and avoids its defensive clone.
+    pub fn run_owned_with_rewrite_diagnostics(
+        &self,
+        circuit: Circuit,
+    ) -> Result<(CompileResult, KnowledgeRewriteDiagnostics), CompilerError> {
         self.run_internal(circuit, true)
     }
 
     fn run_internal(
         &self,
-        circuit: &Circuit,
+        circuit: Circuit,
         collect_rewrite_diagnostics: bool,
     ) -> Result<(CompileResult, KnowledgeRewriteDiagnostics), CompilerError> {
         let prepared_target_basis = self.prepare_target_basis()?;
@@ -367,9 +396,10 @@ impl CompilerWorkflow {
             .map_or_else(TwoQubitSynthesisTarget::unconstrained, |prepared| {
                 TwoQubitSynthesisTarget::from_cost_model(Arc::clone(&prepared.cost_model))
             });
+        let analysis = CircuitAnalysis::analyze(&circuit);
         let mut state = WorkflowState {
-            current: circuit.clone(),
-            analysis: CircuitAnalysis::analyze(circuit),
+            current: circuit,
+            analysis,
             circuit_revision: 0,
             rewrite_session: KnowledgeRewriteSession::default(),
             rewrite_diagnostics: KnowledgeRewriteDiagnostics::default(),
@@ -389,7 +419,7 @@ impl CompilerWorkflow {
         };
 
         self.record_pre_init(&mut state);
-        self.validate_resources(circuit, &mut state)?;
+        self.validate_resources(&mut state)?;
         self.lower_init(&mut state)?;
         self.lower_decompose(&mut state)?;
         self.lower_optimize(&mut state)?;
@@ -918,18 +948,14 @@ impl CompilerWorkflow {
     ///
     /// Detailed ancillary leasing is still enforced by the decomposition
     /// resource manager when a specific synthesis candidate is selected.
-    fn validate_resources(
-        &self,
-        circuit: &Circuit,
-        state: &mut WorkflowState,
-    ) -> Result<(), CompilerError> {
+    fn validate_resources(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let resource_limits = self.resource_limits();
         if let Some(max_total_qubits) = resource_limits.max_total_qubits
-            && circuit.qubits().len() > max_total_qubits
+            && state.current.num_qubits() > max_total_qubits
         {
             return Err(CompilerError::InvalidInput(format!(
                 "source circuit uses {} logical qubits but target capacity is {max_total_qubits}",
-                circuit.qubits().len()
+                state.current.num_qubits()
             )));
         }
         state.steps.push(WorkflowStepReport {
@@ -1182,7 +1208,7 @@ impl CompilerWorkflow {
             CompileMode::Normal => 2,
             CompileMode::Enhanced => 4,
         };
-        let before = state.current.clone();
+        let before_revision = state.circuit_revision;
         let mut rounds = 0u8;
         let mut pending_resynthesis = state.pending_one_qubit_resynthesis;
         while rounds < max_rounds {
@@ -1226,7 +1252,7 @@ impl CompilerWorkflow {
         state.steps.push(WorkflowStepReport {
             stage: "optimization",
             name: "optimize.one_qubit_fixed_point",
-            changed: state.current != before,
+            changed: state.circuit_revision != before_revision,
             skipped: false,
             reason: Some(format!("rounds={rounds}; max_rounds={max_rounds}")),
         });

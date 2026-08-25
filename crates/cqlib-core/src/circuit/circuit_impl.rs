@@ -71,6 +71,7 @@ use ndarray::Array2;
 use num_complex::Complex64;
 use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// A quantum circuit representation serving as the core IR for quantum programs.
 ///
@@ -108,7 +109,7 @@ pub struct Circuit {
     /// The ordered sequence of operations (quantum gates, measurements, etc.) in the circuit.
     ///
     /// This vector represents the circuit schedule.
-    pub(super) data: Vec<Operation>,
+    pub(super) data: Arc<Vec<Operation>>,
     /// Static types of circuit-local runtime classical variables.
     ///
     /// A [`ClassicalVar`] ID is an index into this table. Keeping ownership in
@@ -170,23 +171,14 @@ impl Clone for Circuit {
                 )
             })
             .collect::<HashMap<_, _>>();
-        let qubit_mapping = self
-            .qubits
-            .iter()
-            .copied()
-            .map(|qubit| (qubit, qubit))
-            .collect::<HashMap<_, _>>();
-        let param_index_map = (0..self.parameters.len())
-            .map(|index| CircuitParam::Index(index as u32))
-            .collect::<Vec<_>>();
         let data = self
             .data
             .iter()
             .map(|operation| {
-                Self::remap_compose_operation(
+                Self::remap_operation(
                     operation,
-                    &qubit_mapping,
-                    &param_index_map,
+                    &|qubit| Ok(qubit),
+                    &|param| Ok(param.clone()),
                     &var_map,
                     &value_map,
                 )
@@ -199,7 +191,7 @@ impl Clone for Circuit {
             qubits: self.qubits.clone(),
             symbols: self.symbols.clone(),
             parameters: self.parameters.clone(),
-            data,
+            data: Arc::new(data),
             classical_vars: self.classical_vars.clone(),
             classical_values: self.classical_values.clone(),
             control_scope_stack: self.control_scope_stack.clone(),
@@ -231,8 +223,8 @@ impl PartialEq for Circuit {
             &self.parameters,
             &other.parameters,
         ) && operations_structurally_equal(
-            &self.data,
-            &other.data,
+            self.data.as_slice(),
+            other.data.as_slice(),
             &self.parameters,
             &other.parameters,
         )
@@ -242,7 +234,12 @@ impl PartialEq for Circuit {
 impl Circuit {
     /// Compares operation semantics without allocating remapped operation trees.
     pub(crate) fn operations_structurally_equal(&self, other: &Self) -> bool {
-        operations_structurally_equal(&self.data, &other.data, &self.parameters, &other.parameters)
+        operations_structurally_equal(
+            self.data.as_slice(),
+            other.data.as_slice(),
+            &self.parameters,
+            &other.parameters,
+        )
     }
 }
 
@@ -565,7 +562,7 @@ impl Circuit {
         Self {
             circuit_id: CircuitId::new(),
             qubits,
-            data: vec![],
+            data: Arc::new(Vec::new()),
             classical_vars: vec![],
             classical_values: vec![],
             control_scope_stack: vec![],
@@ -595,7 +592,7 @@ impl Circuit {
             circuit_id: CircuitId::new(),
             symbols: IndexSet::new(),
             qubits: qubits.into_iter().collect(),
-            data: vec![],
+            data: Arc::new(Vec::new()),
             classical_vars: vec![],
             classical_values: vec![],
             control_scope_stack: vec![],
@@ -627,6 +624,7 @@ impl Circuit {
     ) -> Result<Self, CircuitError> {
         let operations = operations.into_iter().collect::<Vec<_>>();
         let mut circuit = Self::from_qubits(qubits)?;
+        Arc::make_mut(&mut circuit.data).reserve(operations.len());
         if let Some(circuit_id) = infer_classical_circuit_id(&operations)? {
             circuit.circuit_id = circuit_id;
         }
@@ -664,12 +662,18 @@ impl Circuit {
         operation: ValueOperation,
         validate_builder_state: bool,
     ) -> Result<(), CircuitError> {
-        let instruction = self.lower_instruction(operation.instruction)?;
-        self.append_with_validation(
+        let ValueOperation {
             instruction,
-            operation.qubits,
-            operation.params,
-            operation.label.as_deref(),
+            qubits,
+            params,
+            label,
+        } = operation;
+        let instruction = self.lower_instruction(instruction)?;
+        self.append_owned_with_validation(
+            instruction,
+            qubits,
+            params,
+            label,
             validate_builder_state,
         )
     }
@@ -864,7 +868,7 @@ impl Circuit {
         if let CircuitParam::Index(index) = self.global_phase {
             indices.insert(index);
         }
-        Self::collect_operation_parameter_indices(&self.data, &mut indices);
+        Self::collect_operation_parameter_indices(self.data.as_slice(), &mut indices);
         indices
     }
 
@@ -914,6 +918,18 @@ impl Circuit {
         self.qubits.iter().cloned().collect()
     }
 
+    /// Returns whether `qubit` belongs to this circuit without materializing
+    /// the ordered qubit list.
+    pub(crate) fn contains_qubit(&self, qubit: &Qubit) -> bool {
+        self.qubits.contains(qubit)
+    }
+
+    /// Returns whether two circuits have the same ordered qubit domain without
+    /// allocating either public qubit vector.
+    pub(crate) fn has_same_qubits(&self, other: &Self) -> bool {
+        self.qubits == other.qubits
+    }
+
     /// Returns the global phase of the circuit as a `Parameter`.
     pub fn global_phase(&self) -> Parameter {
         match self.global_phase {
@@ -945,7 +961,7 @@ impl Circuit {
 
     /// Returns storage-IR operations in execution order.
     pub fn operations(&self) -> &[Operation] {
-        &self.data
+        self.data.as_slice()
     }
 
     /// Removes a top-level operation from the circuit schedule.
@@ -1097,7 +1113,7 @@ impl Circuit {
             qubits: self.qubits.clone(),
             symbols: self.symbols.clone(),
             parameters: self.parameters.clone(),
-            data: candidate_data,
+            data: Arc::new(candidate_data),
             classical_vars: self.classical_vars.clone(),
             classical_values: candidate_classical_values,
             control_scope_stack: self.control_scope_stack.clone(),
@@ -1195,7 +1211,11 @@ impl Circuit {
     /// Returns [`CircuitError::ControlFlowPresent`] when `recurse = false` and
     /// the circuit contains control flow.
     pub fn depth(&self, recurse: bool) -> Result<usize, CircuitError> {
-        crate::circuit::depth::circuit_depth(self.qubits.iter().copied(), &self.data, recurse)
+        crate::circuit::depth::circuit_depth(
+            self.qubits.iter().copied(),
+            self.data.as_slice(),
+            recurse,
+        )
     }
 
     /// Returns the static types of runtime classical variables owned by this circuit.
@@ -1264,6 +1284,28 @@ impl Circuit {
         Q::Item: Into<Qubit>,
         P: IntoIterator<Item = ParameterValue>,
     {
+        self.append_owned_with_validation(
+            instruction,
+            qubits,
+            params,
+            label.map(Into::into),
+            validate_builder_state,
+        )
+    }
+
+    fn append_owned_with_validation<Q, P>(
+        &mut self,
+        instruction: Instruction,
+        qubits: Q,
+        params: P,
+        label: Option<Box<str>>,
+        validate_builder_state: bool,
+    ) -> Result<(), CircuitError>
+    where
+        Q: IntoIterator,
+        Q::Item: Into<Qubit>,
+        P: IntoIterator<Item = ParameterValue>,
+    {
         let validate_classical_now = validate_builder_state
             && matches!(
                 instruction,
@@ -1293,10 +1335,21 @@ impl Circuit {
             }
         }
 
-        let mut seen = HashSet::with_capacity(qubits_sv.len());
-        for &qubit in &qubits_sv {
-            if !seen.insert(qubit) {
+        const INLINE_DUPLICATE_CHECK_LIMIT: usize = 8;
+        if qubits_sv.len() <= INLINE_DUPLICATE_CHECK_LIMIT {
+            if qubits_sv
+                .iter()
+                .enumerate()
+                .any(|(index, qubit)| qubits_sv[..index].contains(qubit))
+            {
                 return Err(CircuitError::DuplicateQubits);
+            }
+        } else {
+            let mut seen = HashSet::with_capacity(qubits_sv.len());
+            for &qubit in &qubits_sv {
+                if !seen.insert(qubit) {
+                    return Err(CircuitError::DuplicateQubits);
+                }
             }
         }
 
@@ -1330,11 +1383,11 @@ impl Circuit {
             }
         }
 
-        self.data.push(Operation {
+        Arc::make_mut(&mut self.data).push(Operation {
             instruction,
             qubits: qubits_sv,
             params: circuit_params,
-            label: label.map(Into::into),
+            label,
         });
 
         if validate_classical_now && let Err(error) = self.validate_builder_state() {
@@ -2093,7 +2146,7 @@ impl Circuit {
         let mut new_circuit = Circuit::from_qubits(self.qubits())?;
         new_circuit.classical_vars = self.classical_vars.clone();
         new_circuit.classical_values = self.classical_values.clone();
-        new_circuit.data.reserve(self.data.len());
+        Arc::make_mut(&mut new_circuit.data).reserve(self.data.len());
         // 1. Invert Global Phase
         let current_phase_param = self.global_phase();
         // New phase = -1.0 * old_phase
@@ -2260,7 +2313,7 @@ impl Circuit {
             })
             .collect();
 
-        for op in &self.data {
+        for op in self.data.iter() {
             Self::decompose_recursive(
                 op,
                 self,
@@ -2327,7 +2380,7 @@ impl Circuit {
                 }
 
                 // 3. Recurse
-                for sub_op in &cg.circuit.circuit.data {
+                for sub_op in cg.circuit.circuit.data.iter() {
                     Self::decompose_recursive(
                         sub_op,
                         &cg.circuit.circuit,
@@ -2477,8 +2530,9 @@ impl Circuit {
         }
 
         // Remap operations to use new parameter indices or fixed values
-        new_circuit.data.reserve(self.data.len());
-        for op in &self.data {
+        let new_data = Arc::make_mut(&mut new_circuit.data);
+        new_data.reserve(self.data.len());
+        for op in self.data.iter() {
             let mut new_op = op.clone();
             for p in &mut new_op.params {
                 if let CircuitParam::Index(old_idx) = p {
@@ -2488,7 +2542,7 @@ impl Circuit {
                         .ok_or(CircuitError::InvalidParameterIndex(*old_idx))?;
                 }
             }
-            new_circuit.data.push(new_op);
+            new_data.push(new_op);
         }
 
         // Remap global phase
@@ -2514,40 +2568,51 @@ impl Circuit {
         var_map: &HashMap<ClassicalVar, ClassicalVar>,
         value_map: &HashMap<ClassicalValue, ClassicalValue>,
     ) -> Result<Operation, CircuitError> {
-        let qubits = op
-            .qubits
-            .iter()
-            .map(|q| {
+        Self::remap_operation(
+            op,
+            &|qubit| {
                 qubit_mapping
-                    .get(q)
+                    .get(&qubit)
                     .copied()
-                    .ok_or(CircuitError::QubitNotFound(q.id()))
-            })
-            .collect::<Result<_, _>>()?;
-        let params = op
-            .params
-            .iter()
-            .map(|param| match param {
+                    .ok_or(CircuitError::QubitNotFound(qubit.id()))
+            },
+            &|param| match param {
                 CircuitParam::Index(old_idx) => param_index_map
                     .get(*old_idx as usize)
                     .cloned()
                     .ok_or(CircuitError::InvalidParameterIndex(*old_idx)),
                 CircuitParam::Fixed(value) => Ok(CircuitParam::Fixed(*value)),
-            })
+            },
+            var_map,
+            value_map,
+        )
+    }
+
+    fn remap_operation<QubitMapper, ParamMapper>(
+        op: &Operation,
+        map_qubit: &QubitMapper,
+        map_param: &ParamMapper,
+        var_map: &HashMap<ClassicalVar, ClassicalVar>,
+        value_map: &HashMap<ClassicalValue, ClassicalValue>,
+    ) -> Result<Operation, CircuitError>
+    where
+        QubitMapper: Fn(Qubit) -> Result<Qubit, CircuitError>,
+        ParamMapper: Fn(&CircuitParam) -> Result<CircuitParam, CircuitError>,
+    {
+        let qubits = op
+            .qubits
+            .iter()
+            .copied()
+            .map(map_qubit)
             .collect::<Result<_, _>>()?;
+        let params = op.params.iter().map(map_param).collect::<Result<_, _>>()?;
         let instruction = match &op.instruction {
             Instruction::ClassicalData(classical_op) => Instruction::ClassicalData(
                 Self::remap_classical_data_op(classical_op, var_map, value_map)?,
             ),
-            Instruction::ClassicalControl(op) => {
-                Instruction::ClassicalControl(Self::remap_compose_control_op(
-                    op,
-                    qubit_mapping,
-                    param_index_map,
-                    var_map,
-                    value_map,
-                )?)
-            }
+            Instruction::ClassicalControl(op) => Instruction::ClassicalControl(
+                Self::remap_control_op(op, map_qubit, map_param, var_map, value_map)?,
+            ),
             _ => op.instruction.clone(),
         };
 
@@ -2593,68 +2658,57 @@ impl Circuit {
         }
     }
 
-    fn remap_compose_control_body(
+    fn remap_control_body<QubitMapper, ParamMapper>(
         body: &ControlBody,
-        qubit_mapping: &HashMap<Qubit, Qubit>,
-        param_index_map: &[CircuitParam],
+        map_qubit: &QubitMapper,
+        map_param: &ParamMapper,
         var_map: &HashMap<ClassicalVar, ClassicalVar>,
         value_map: &HashMap<ClassicalValue, ClassicalValue>,
-    ) -> Result<ControlBody, CircuitError> {
+    ) -> Result<ControlBody, CircuitError>
+    where
+        QubitMapper: Fn(Qubit) -> Result<Qubit, CircuitError>,
+        ParamMapper: Fn(&CircuitParam) -> Result<CircuitParam, CircuitError>,
+    {
         body.operations()
             .iter()
-            .map(|op| {
-                Self::remap_compose_operation(
-                    op,
-                    qubit_mapping,
-                    param_index_map,
-                    var_map,
-                    value_map,
-                )
-            })
+            .map(|op| Self::remap_operation(op, map_qubit, map_param, var_map, value_map))
             .collect::<Result<Vec<_>, _>>()
             .map(ControlBody::new)
     }
 
-    fn remap_compose_control_op(
+    fn remap_control_op<QubitMapper, ParamMapper>(
         op: &ClassicalControlOp,
-        qubit_mapping: &HashMap<Qubit, Qubit>,
-        param_index_map: &[CircuitParam],
+        map_qubit: &QubitMapper,
+        map_param: &ParamMapper,
         var_map: &HashMap<ClassicalVar, ClassicalVar>,
         value_map: &HashMap<ClassicalValue, ClassicalValue>,
-    ) -> Result<ClassicalControlOp, CircuitError> {
+    ) -> Result<ClassicalControlOp, CircuitError>
+    where
+        QubitMapper: Fn(Qubit) -> Result<Qubit, CircuitError>,
+        ParamMapper: Fn(&CircuitParam) -> Result<CircuitParam, CircuitError>,
+    {
         match op {
             ClassicalControlOp::If(op) => {
                 let condition = op.condition().remap_classical_ids(var_map, value_map)?;
-                let then_body = Self::remap_compose_control_body(
+                let then_body = Self::remap_control_body(
                     op.then_body(),
-                    qubit_mapping,
-                    param_index_map,
+                    map_qubit,
+                    map_param,
                     var_map,
                     value_map,
                 )?;
                 let else_body = op
                     .else_body()
                     .map(|body| {
-                        Self::remap_compose_control_body(
-                            body,
-                            qubit_mapping,
-                            param_index_map,
-                            var_map,
-                            value_map,
-                        )
+                        Self::remap_control_body(body, map_qubit, map_param, var_map, value_map)
                     })
                     .transpose()?;
                 IfOp::new(condition, then_body, else_body).map(ClassicalControlOp::If)
             }
             ClassicalControlOp::While(op) => {
                 let condition = op.condition().remap_classical_ids(var_map, value_map)?;
-                let body = Self::remap_compose_control_body(
-                    op.body(),
-                    qubit_mapping,
-                    param_index_map,
-                    var_map,
-                    value_map,
-                )?;
+                let body =
+                    Self::remap_control_body(op.body(), map_qubit, map_param, var_map, value_map)?;
                 WhileOp::new(condition, body).map(ClassicalControlOp::While)
             }
             ClassicalControlOp::For(op) => {
@@ -2667,13 +2721,8 @@ impl Circuit {
                 let start = op.start().remap_classical_ids(var_map, value_map)?;
                 let stop = op.stop().remap_classical_ids(var_map, value_map)?;
                 let step = op.step().remap_classical_ids(var_map, value_map)?;
-                let body = Self::remap_compose_control_body(
-                    op.body(),
-                    qubit_mapping,
-                    param_index_map,
-                    var_map,
-                    value_map,
-                )?;
+                let body =
+                    Self::remap_control_body(op.body(), map_qubit, map_param, var_map, value_map)?;
                 ForOp::new(var, start, stop, step, body).map(ClassicalControlOp::For)
             }
             ClassicalControlOp::Switch(op) => {
@@ -2684,10 +2733,10 @@ impl Circuit {
                     .map(|case| {
                         Ok(SwitchCase::new(
                             case.value(),
-                            Self::remap_compose_control_body(
+                            Self::remap_control_body(
                                 case.body(),
-                                qubit_mapping,
-                                param_index_map,
+                                map_qubit,
+                                map_param,
                                 var_map,
                                 value_map,
                             )?,
@@ -2697,13 +2746,7 @@ impl Circuit {
                 let default = op
                     .default()
                     .map(|body| {
-                        Self::remap_compose_control_body(
-                            body,
-                            qubit_mapping,
-                            param_index_map,
-                            var_map,
-                            value_map,
-                        )
+                        Self::remap_control_body(body, map_qubit, map_param, var_map, value_map)
                     })
                     .transpose()?;
                 SwitchOp::new(target, cases, default).map(ClassicalControlOp::Switch)
@@ -2889,8 +2932,9 @@ impl Circuit {
             .extend(other.classical_vars.iter().copied());
         self.classical_values
             .extend(other.classical_values.iter().copied());
-        self.data.reserve(remapped_ops.len());
-        self.data.extend(remapped_ops);
+        let data = Arc::make_mut(&mut self.data);
+        data.reserve(remapped_ops.len());
+        data.extend(remapped_ops);
 
         Ok(())
     }

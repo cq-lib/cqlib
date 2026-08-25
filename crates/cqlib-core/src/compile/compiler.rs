@@ -185,6 +185,17 @@ pub fn compile(circuit: &Circuit, config: CompileConfig) -> Result<CompileResult
     CompilerWorkflow::new(config).run(circuit)
 }
 
+/// Runs the configured compiler workflow by consuming `circuit`.
+///
+/// This is equivalent to [`compile`] but avoids cloning the complete input
+/// circuit when the caller no longer needs it.
+pub fn compile_owned(
+    circuit: Circuit,
+    config: CompileConfig,
+) -> Result<CompileResult, CompilerError> {
+    CompilerWorkflow::new(config).run_owned(circuit)
+}
+
 #[cfg(test)]
 #[path = "./compile_test.rs"]
 mod compile_test;

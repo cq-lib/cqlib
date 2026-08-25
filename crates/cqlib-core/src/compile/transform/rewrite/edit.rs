@@ -76,7 +76,7 @@ impl RewriteEdits {
     /// moves a large span, that span is represented by one larger replacement;
     /// this may admit extra rewrite anchors but can never omit an affected one.
     pub(crate) fn between_linear_circuits(before: &Circuit, after: &Circuit) -> Self {
-        if before.qubits() != after.qubits() {
+        if !before.has_same_qubits(after) {
             return Self::Unknown;
         }
 

@@ -99,6 +99,42 @@ pub struct KnowledgeRewriteResult {
     pub diagnostics: KnowledgeRewriteDiagnostics,
 }
 
+/// Workflow-only result which leaves a stable input circuit in place instead
+/// of cloning it solely to populate the standalone result shape.
+pub(crate) struct KnowledgeRewriteSessionResult {
+    pub(crate) circuit: Option<Circuit>,
+    pub(crate) changed: bool,
+    pub(crate) stats: KnowledgeRewriteStats,
+    pub(crate) diagnostics: KnowledgeRewriteDiagnostics,
+}
+
+struct LinearRewriteResult {
+    circuit: Option<Circuit>,
+    changed: bool,
+    stats: KnowledgeRewriteStats,
+    diagnostics: KnowledgeRewriteDiagnostics,
+}
+
+impl LinearRewriteResult {
+    fn into_public(self, source: &Circuit) -> KnowledgeRewriteResult {
+        KnowledgeRewriteResult {
+            circuit: self.circuit.unwrap_or_else(|| source.clone()),
+            changed: self.changed,
+            stats: self.stats,
+            diagnostics: self.diagnostics,
+        }
+    }
+
+    fn into_session(self) -> KnowledgeRewriteSessionResult {
+        KnowledgeRewriteSessionResult {
+            circuit: self.circuit,
+            changed: self.changed,
+            stats: self.stats,
+            diagnostics: self.diagnostics,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct RoundStats {
     rules_applied: usize,
@@ -314,7 +350,7 @@ impl KnowledgeRewriter {
                     None,
                     collect_diagnostics,
                 )
-                .map(|(result, _)| result);
+                .map(|(result, _)| result.into_public(circuit));
         }
         let active_rules = rules.active_rules(&self.config, target_context.as_ref());
 
@@ -365,7 +401,13 @@ impl KnowledgeRewriter {
         circuit: &Circuit,
         reconciled: Option<(Vec<Range<usize>>, Option<LinearRewriteWorkspace>)>,
         collect_diagnostics: bool,
-    ) -> Result<(KnowledgeRewriteResult, Option<LinearRewriteWorkspace>), CompilerError> {
+    ) -> Result<
+        (
+            KnowledgeRewriteSessionResult,
+            Option<LinearRewriteWorkspace>,
+        ),
+        CompilerError,
+    > {
         if !is_linear_workspace_eligible(circuit) {
             let fell_back_from_incremental = reconciled.is_some();
             return self
@@ -375,7 +417,16 @@ impl KnowledgeRewriter {
                         result.diagnostics.full_scan_fallbacks =
                             result.diagnostics.full_scan_fallbacks.saturating_add(1);
                     }
-                    (result, None)
+                    let circuit = result.changed.then_some(result.circuit);
+                    (
+                        KnowledgeRewriteSessionResult {
+                            circuit,
+                            changed: result.changed,
+                            stats: result.stats,
+                            diagnostics: result.diagnostics,
+                        },
+                        None,
+                    )
                 });
         }
         if self.config.max_rounds() == 0 {
@@ -396,7 +447,7 @@ impl KnowledgeRewriter {
             workspace,
             collect_diagnostics,
         )
-        .map(|(result, workspace)| (result, Some(workspace)))
+        .map(|(result, workspace)| (result.into_session(), Some(workspace)))
     }
 
     /// Runs the rewrite fixpoint on a flat, gate-only circuit without
@@ -424,7 +475,7 @@ impl KnowledgeRewriter {
         initial_anchor_ranges: Option<Vec<Range<usize>>>,
         workspace: Option<LinearRewriteWorkspace>,
         collect_diagnostics: bool,
-    ) -> Result<(KnowledgeRewriteResult, LinearRewriteWorkspace), CompilerError> {
+    ) -> Result<(LinearRewriteResult, LinearRewriteWorkspace), CompilerError> {
         let mut operations = Cow::Borrowed(circuit.operations());
         let mut cache = match workspace {
             Some(workspace) if workspace.cache.len() == operations.len() => workspace.cache,
@@ -501,19 +552,19 @@ impl KnowledgeRewriter {
                     label: operation.label,
                 })
                 .collect();
-            CircuitRebuildContext::new(circuit).finish(
+            Some(CircuitRebuildContext::new(circuit).finish(
                 circuit.qubits(),
                 value_operations,
                 &circuit.global_phase() + &phase_delta,
-            )?
+            )?)
         } else {
-            circuit.clone()
+            None
         };
-        validate_final_target(&output, &self.config)?;
+        validate_final_target(output.as_ref().unwrap_or(circuit), &self.config)?;
         let mut diagnostics = KnowledgeRewriteDiagnostics::default();
         diagnostics.merge_matcher(cache.diagnostics().saturating_delta(diagnostics_before));
         Ok((
-            KnowledgeRewriteResult {
+            LinearRewriteResult {
                 circuit: output,
                 changed,
                 stats: aggregate,

@@ -22,6 +22,7 @@ use crate::compile::CompilerError;
 use crate::compile::transform::RewriteEdits;
 use crate::compile::transform::transformer::{TransformOutcome, Transformer};
 use smallvec::{SmallVec, smallvec};
+use std::borrow::Cow;
 
 use super::config::CanonicalizeConfig;
 use super::ops::{canonicalize_operation_qubits, is_strict_noop, push_operation};
@@ -91,7 +92,19 @@ impl Canonicalizer {
         &self,
         circuit: &Circuit,
     ) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
-        let (result, edits) = self.run_with_rewrite_edits(circuit)?;
+        self.validate_run(circuit)?;
+        if self.is_verified_canonical(circuit) {
+            return Ok((
+                TransformOutcome::Unchanged,
+                RewriteEdits::linear(
+                    circuit.operations().len(),
+                    circuit.operations().len(),
+                    Vec::new(),
+                ),
+            ));
+        }
+
+        let (result, edits) = self.run_with_rewrite_edits_validated(circuit)?;
         Ok((
             if result.changed {
                 TransformOutcome::Changed(result.circuit)
@@ -106,6 +119,36 @@ impl Canonicalizer {
         &self,
         circuit: &Circuit,
     ) -> Result<(CanonicalizeResult, RewriteEdits), CompilerError> {
+        self.validate_run(circuit)?;
+        if self.is_verified_canonical(circuit) {
+            return Ok((
+                CanonicalizeResult {
+                    circuit: circuit.clone(),
+                    changed: false,
+                    rounds: 1,
+                },
+                RewriteEdits::linear(
+                    circuit.operations().len(),
+                    circuit.operations().len(),
+                    Vec::new(),
+                ),
+            ));
+        }
+
+        self.run_with_rewrite_edits_validated(circuit)
+    }
+
+    fn is_verified_canonical(&self, circuit: &Circuit) -> bool {
+        verify_circuit(
+            circuit,
+            VerifyMode::Output {
+                config: &self.config,
+            },
+        )
+        .is_ok()
+    }
+
+    fn validate_run(&self, circuit: &Circuit) -> Result<(), CompilerError> {
         verify_circuit(circuit, VerifyMode::Input)?;
 
         if self.config.round_limit() == 0 {
@@ -113,22 +156,24 @@ impl Canonicalizer {
                 "canonicalize round_limit must be greater than zero".to_string(),
             ));
         }
+        Ok(())
+    }
 
+    fn run_with_rewrite_edits_validated(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<(CanonicalizeResult, RewriteEdits), CompilerError> {
         // A single pass can expose new canonicalization opportunities. For
         // example, parameter simplification can turn `theta - theta` into a
         // fixed zero, which then lets the next pass remove a rotation. The loop
         // therefore proves a stable representation before reporting success.
-        let mut current = rebuild_circuit_from_value_operations(
-            circuit,
-            value_operations_from(circuit)?,
-            circuit.global_phase(),
-        )?;
+        let mut current = Cow::Borrowed(circuit);
         let mut provenance = (0..circuit.operations().len())
             .map(Some)
             .collect::<Vec<_>>();
         for round in 1..=self.config.round_limit() {
             let (next, next_provenance) =
-                CanonicalizeRound::new(&current, &self.config, &provenance).run()?;
+                CanonicalizeRound::new(current.as_ref(), &self.config, &provenance).run()?;
             verify_circuit(
                 &next,
                 VerifyMode::Output {
@@ -136,8 +181,8 @@ impl Canonicalizer {
                 },
             )?;
 
-            if current == next {
-                let changed = circuit != &current;
+            if current.as_ref() == &next {
+                let changed = circuit != &next;
                 let edits = if changed {
                     RewriteEdits::from_operation_provenance(
                         circuit.operations().len(),
@@ -160,7 +205,7 @@ impl Canonicalizer {
                 ));
             }
 
-            current = next;
+            current = Cow::Owned(next);
             provenance = next_provenance;
         }
 
@@ -493,20 +538,6 @@ fn compiler_parameter<T>(
     result: Result<T, crate::circuit::error::ParameterError>,
 ) -> Result<T, CompilerError> {
     result.map_err(|error| CompilerError::Circuit(CircuitError::InvalidParameter(error)))
-}
-
-/// Converts a circuit operation list into value-level operations without
-/// remapping classical handles.
-fn value_operations_from(circuit: &Circuit) -> Result<Vec<ValueOperation>, CompilerError> {
-    circuit
-        .operations()
-        .iter()
-        .cloned()
-        .map(|operation| {
-            storage_operation_to_value(operation, &|param| circuit.parameter_value(param))
-                .map_err(CompilerError::Circuit)
-        })
-        .collect()
 }
 
 /// Rebuilds a circuit while preserving runtime classical tables and handles.

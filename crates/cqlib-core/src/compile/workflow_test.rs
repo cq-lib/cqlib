@@ -114,8 +114,13 @@ fn workflow_rewrite_diagnostics_are_opt_in_and_semantics_neutral() {
 
     let normal = workflow.run(&circuit).unwrap();
     let (observed, diagnostics) = workflow.run_with_rewrite_diagnostics(&circuit).unwrap();
+    let (owned, owned_diagnostics) = workflow
+        .run_owned_with_rewrite_diagnostics(circuit)
+        .unwrap();
 
     assert_eq!(normal, observed);
+    assert_eq!(normal, owned);
+    assert_eq!(diagnostics, owned_diagnostics);
     assert!(diagnostics.direct_reuses > 0);
 }
 

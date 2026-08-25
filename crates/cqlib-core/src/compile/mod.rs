@@ -290,7 +290,7 @@ pub use commutation::{
 };
 pub use compiler::{
     CompileConfig, CompileMode, CompileResult, CompileTarget, DeviceCompilationMetadata,
-    DeviceCompileTarget, compile,
+    DeviceCompileTarget, compile, compile_owned,
 };
 pub use error::{CompilerError, SabreRoutingFailure};
 pub use sabre::{

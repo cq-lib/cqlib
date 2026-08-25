@@ -97,7 +97,7 @@ impl RoutedCircuit {
     /// - a non-identity initial layout was selected.
     pub fn changed(&self, original: &Circuit) -> bool {
         if self.swap_count > 0
-            || original.qubits() != self.circuit.qubits()
+            || !original.has_same_qubits(&self.circuit)
             || original.global_phase() != self.circuit.global_phase()
         {
             return true;

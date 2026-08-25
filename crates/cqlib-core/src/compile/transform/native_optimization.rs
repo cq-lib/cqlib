@@ -516,6 +516,9 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
             rebuild,
         };
         let rewrite = pass.process_sequence(source.operations(), &root_classical)?;
+        if !rewrite.changed {
+            return Ok(TransformOutcome::Unchanged);
+        }
         let mut global_phase = source.global_phase();
         if rewrite.phase_delta.abs() > PHASE_EPS {
             global_phase = global_phase + Parameter::from(rewrite.phase_delta);
@@ -523,11 +526,7 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
         let circuit = pass
             .rebuild
             .finish(source.qubits(), rewrite.operations, global_phase)?;
-        Ok(if rewrite.changed {
-            TransformOutcome::Changed(circuit)
-        } else {
-            TransformOutcome::Unchanged
-        })
+        Ok(TransformOutcome::Changed(circuit))
     }
 
     fn process_sequence(
