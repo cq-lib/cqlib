@@ -33,7 +33,12 @@ struct MaximalRun {
 }
 
 impl MaximalRun {
-    fn new(qubits: [Qubit; 2], matched_orders: Vec<usize>, first_two_qubit: usize) -> Self {
+    fn new(
+        qubits: [Qubit; 2],
+        matched_orders: Vec<usize>,
+        first_two_qubit: usize,
+        gate: StandardGate,
+    ) -> Self {
         let matched_1q_count = matched_orders.len();
         let mut matched_orders = matched_orders;
         matched_orders.push(first_two_qubit);
@@ -42,7 +47,7 @@ impl MaximalRun {
             matched_orders,
             matched_1q_count,
             matched_2q_count: 1,
-            contains_swap: false,
+            contains_swap: gate == StandardGate::SWAP,
             active: true,
         }
     }
@@ -60,14 +65,13 @@ impl MaximalRun {
 
     fn finish(mut self) -> TwoQubitNumericBlock {
         self.matched_orders.sort_unstable();
-        TwoQubitNumericBlock {
-            qubits: self.qubits,
-            matched_orders: self.matched_orders,
-            crossed_orders: Vec::new(),
-            matched_1q_count: self.matched_1q_count,
-            matched_2q_count: self.matched_2q_count,
-            contains_swap: self.contains_swap,
-        }
+        TwoQubitNumericBlock::maximal_closed_run(
+            self.qubits,
+            self.matched_orders,
+            self.matched_1q_count,
+            self.matched_2q_count,
+            self.contains_swap,
+        )
     }
 }
 
@@ -152,8 +156,7 @@ pub(super) fn collect_maximal_two_qubit_runs(
                 prefix.retain(|prefix_order| cutoff.is_none_or(|cutoff| *prefix_order > cutoff));
                 prefix.sort_unstable();
                 let run_id = runs.len();
-                let mut run = MaximalRun::new([*left, *right], prefix, order);
-                run.contains_swap = gate == StandardGate::SWAP;
+                let run = MaximalRun::new([*left, *right], prefix, order, gate);
                 runs.push(run);
                 active_by_qubit.insert(*left, run_id);
                 active_by_qubit.insert(*right, run_id);

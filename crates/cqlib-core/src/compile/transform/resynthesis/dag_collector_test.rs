@@ -99,6 +99,27 @@ fn dag_collector_ignores_disjoint_source_order_interleaving() {
 fn shared_commuting_operation_can_be_crossed() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    circuit.cz(q0, q1).unwrap();
+    circuit.cz(q0, q2).unwrap();
+    circuit.cz(q0, q1).unwrap();
+    let views = views(&circuit);
+    let mut checker = checker();
+
+    let blocks = collect_two_qubit_blocks_dag(&views, &mut checker, &config()).unwrap();
+
+    assert!(
+        blocks
+            .iter()
+            .any(|block| { block.matched_orders == vec![0, 2] && block.crossed_orders == vec![1] })
+    );
+}
+
+#[test]
+fn shared_symbolic_operation_is_a_hard_boundary() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
     let mut circuit = Circuit::new(2);
     circuit.cz(q0, q1).unwrap();
     circuit.rz(q0, ParameterValue::from("theta")).unwrap();
@@ -111,7 +132,7 @@ fn shared_commuting_operation_can_be_crossed() {
     assert!(
         blocks
             .iter()
-            .any(|block| { block.matched_orders == vec![0, 2] && block.crossed_orders == vec![1] })
+            .all(|block| block.matched_orders != vec![0, 2])
     );
 }
 

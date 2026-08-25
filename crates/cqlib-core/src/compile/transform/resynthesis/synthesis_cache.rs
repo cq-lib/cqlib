@@ -13,7 +13,7 @@
 //! Bit-exact caching for two-qubit synthesis planners.
 //!
 //! The cache stores planner candidates rather than selected patches. A caller
-//! must therefore repeat source-cost, commutation, span, and overlap checks for
+//! must therefore repeat source-cost, structural, commutation, and overlap checks for
 //! every block. Keys preserve the exact complex floating-point representation
 //! exactly. Generic candidates are stored on canonical tensor roles and
 //! remapped to requested qubits at consumption; device candidates retain their
@@ -41,7 +41,7 @@ use ndarray::Array2;
 use num_complex::Complex64;
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::collector::TwoQubitNumericBlock;
 use super::commutation::OperationView;
@@ -189,7 +189,9 @@ impl ExactBlockFactsKey {
 
 #[derive(Debug, Clone)]
 pub(super) struct CachedBlockFacts {
-    pub(super) matrix: Array2<Complex64>,
+    /// Matrix construction is deferred until a block survives cheap overlap
+    /// bounds. `None` memoizes a deterministic matrix-construction failure.
+    pub(super) matrix: OnceLock<Option<Array2<Complex64>>>,
     pub(super) source_operations: Vec<ValueOperation>,
     pub(super) source_cost: ResynthesisCost,
 }
@@ -269,6 +271,32 @@ impl<T> CachedPlan<T> {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ResynthesisSelectionStats {
+    pub(crate) input_blocks: usize,
+    pub(crate) bounded_blocks: usize,
+    pub(crate) invalid_blocks: usize,
+    pub(crate) duplicate_blocks: usize,
+    pub(crate) terminal_lookups: usize,
+    pub(crate) terminal_hits: usize,
+    pub(crate) terminal_misses: usize,
+    pub(crate) source_fact_attempts: usize,
+    pub(crate) source_fact_failures: usize,
+    pub(crate) matrix_attempts: usize,
+    pub(crate) synthesis_attempts: usize,
+    pub(crate) plan_failures: usize,
+    pub(crate) candidates_considered: usize,
+    pub(crate) cost_rejections: usize,
+    pub(crate) device_cost_rejections: usize,
+    pub(crate) crossing_rejections: usize,
+    pub(crate) replacement_rejections: usize,
+    pub(crate) patches_produced: usize,
+    pub(crate) selected_patches: usize,
+    pub(crate) overlap_rejections: usize,
+    pub(crate) lower_bound_pruned: usize,
+    pub(crate) conflict_components: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct TwoQubitSynthesisCacheStats {
     pub(crate) generic_lookups: usize,
     pub(crate) generic_hits: usize,
@@ -292,6 +320,7 @@ pub(crate) struct TwoQubitSynthesisCacheStats {
     pub(crate) block_fact_entries: usize,
     pub(crate) terminal_decision_hits: usize,
     pub(crate) terminal_decision_entries: usize,
+    pub(crate) selection: ResynthesisSelectionStats,
 }
 
 /// Candidate, block-fact, and terminal-decision entries are valid only inside
@@ -321,6 +350,16 @@ impl Default for TwoQubitSynthesisCache {
 }
 
 impl TwoQubitSynthesisCache {
+    /// Starts a compiler-pass-local selection measurement. Cache counters stay
+    /// cumulative so reuse across fixed-point rounds remains observable.
+    pub(super) fn begin_selection_pass(&mut self) {
+        self.stats.selection = ResynthesisSelectionStats::default();
+    }
+
+    pub(super) fn selection_stats_mut(&mut self) -> &mut ResynthesisSelectionStats {
+        &mut self.stats.selection
+    }
+
     pub(super) fn new(budget: usize) -> Self {
         Self {
             generic: HashMap::new(),
@@ -476,15 +515,26 @@ impl TwoQubitSynthesisCache {
         block: &TwoQubitNumericBlock,
         ops: &[OperationView<'_>],
     ) -> bool {
+        self.stats.selection.terminal_lookups =
+            self.stats.selection.terminal_lookups.saturating_add(1);
         if !self.native_round_reuse {
+            self.stats.selection.terminal_misses =
+                self.stats.selection.terminal_misses.saturating_add(1);
             return false;
         }
         let Some(key) = ExactTerminalDecisionKey::new(block, ops) else {
+            self.stats.selection.terminal_misses =
+                self.stats.selection.terminal_misses.saturating_add(1);
             return false;
         };
         let hit = self.terminal_no_patch.contains(&key);
         if hit {
             self.stats.terminal_decision_hits = self.stats.terminal_decision_hits.saturating_add(1);
+            self.stats.selection.terminal_hits =
+                self.stats.selection.terminal_hits.saturating_add(1);
+        } else {
+            self.stats.selection.terminal_misses =
+                self.stats.selection.terminal_misses.saturating_add(1);
         }
         hit
     }

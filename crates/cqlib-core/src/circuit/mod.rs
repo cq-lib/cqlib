@@ -178,6 +178,7 @@ pub use circuit_classical::{ControlBodyTransaction, ExternalControlScope};
 pub use circuit_impl::Circuit;
 pub use circuit_param::{CircuitParam, ParameterValue};
 pub use circuit_to_matrix::circuit_to_matrix;
+#[cfg(any(test, debug_assertions))]
 pub(crate) use circuit_to_matrix::value_operations_to_matrix;
 pub use classical::{CircuitId, ClassicalType, ClassicalValue, ClassicalVar, Measurement};
 pub use classical_expr::{

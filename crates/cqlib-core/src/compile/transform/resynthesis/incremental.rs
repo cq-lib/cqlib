@@ -13,7 +13,7 @@
 
 //! Run-scoped incremental collection for native fixed-point resynthesis.
 
-use super::collector::TwoQubitNumericBlock;
+use super::collector::{BlockOrigin, TwoQubitNumericBlock};
 use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
 use super::dag_collector::{AnchorDependencyTrace, DagCollectionContext, is_two_qubit_anchor};
@@ -225,6 +225,7 @@ struct CachedBlock {
     matched_1q_count: usize,
     matched_2q_count: usize,
     contains_swap: bool,
+    origin: BlockOrigin,
 }
 
 impl CachedBlock {
@@ -244,6 +245,7 @@ impl CachedBlock {
             matched_1q_count: block.matched_1q_count,
             matched_2q_count: block.matched_2q_count,
             contains_swap: block.contains_swap,
+            origin: block.origin(),
         }
     }
 
@@ -263,13 +265,22 @@ impl CachedBlock {
             .collect::<Option<Vec<_>>>()?;
         matched_orders.sort_unstable();
         crossed_orders.sort_unstable();
-        Some(TwoQubitNumericBlock {
-            qubits: self.qubits,
-            matched_orders,
-            crossed_orders,
-            matched_1q_count: self.matched_1q_count,
-            matched_2q_count: self.matched_2q_count,
-            contains_swap: self.contains_swap,
+        Some(match self.origin {
+            BlockOrigin::MaximalClosedRun => TwoQubitNumericBlock::maximal_closed_run(
+                self.qubits,
+                matched_orders,
+                self.matched_1q_count,
+                self.matched_2q_count,
+                self.contains_swap,
+            ),
+            BlockOrigin::DagDependencyClosed => TwoQubitNumericBlock::dag_dependency_closed(
+                self.qubits,
+                matched_orders,
+                crossed_orders,
+                self.matched_1q_count,
+                self.matched_2q_count,
+                self.contains_swap,
+            ),
         })
     }
 

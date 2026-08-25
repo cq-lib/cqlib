@@ -34,9 +34,8 @@ pub struct TwoQubitBlockResynthesisConfig {
     pub max_crossed_ops: usize,
     /// Maximum bounded collection budget per side of a two-qubit anchor.
     ///
-    /// For source-order collection this is the number of source positions
-    /// scanned per side. For DAG collection this is the number of operation
-    /// frontier nodes visited per direction.
+    /// This is the number of dependency-DAG frontier nodes visited per
+    /// direction.
     pub max_scan_span: usize,
     /// Treat labeled operations as hard boundaries.
     pub skip_labeled_ops: bool,

@@ -15,7 +15,7 @@ use cqlib_core::compile::transform::decompose::unitary::{
     TwoQubitSynthesisTarget, UnitaryDecomposeConfig, decompose_unitaries_with_rule_stats,
 };
 use cqlib_core::compile::transform::{
-    TwoQubitBlockResynthesisConfig, resynthesize_two_qubit_blocks,
+    TransformOutcome, TwoQubitBlockResynthesisConfig, resynthesize_two_qubit_blocks,
 };
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
@@ -73,6 +73,24 @@ fn benchmark_repeated_two_qubit_synthesis_cache(criterion: &mut Criterion) {
             );
         });
     });
+
+    // Alternating commuting CX stars defeat maximal-run collection and create
+    // many overlapping dependency-DAG blocks. This specifically tracks the
+    // selector's conflict-component and optimistic-bound pruning path.
+    let overlapping = overlapping_bounded_blocks(128);
+    assert!(matches!(
+        resynthesize_two_qubit_blocks(&overlapping, config.clone())
+            .expect("overlapping bounded 2q block resynthesis setup"),
+        TransformOutcome::Changed(_)
+    ));
+    criterion.bench_function("2q_resynthesis/overlapping_bounded_blocks", |bencher| {
+        bencher.iter(|| {
+            black_box(
+                resynthesize_two_qubit_blocks(&overlapping, config.clone())
+                    .expect("overlapping bounded 2q block resynthesis"),
+            );
+        });
+    });
 }
 
 fn resynthesis_config() -> TwoQubitBlockResynthesisConfig {
@@ -107,6 +125,18 @@ fn repeated_resynthesis_blocks(blocks: usize, unique: bool) -> Circuit {
         circuit
             .barrier(vec![q0, q1])
             .expect("benchmark block boundary");
+    }
+    circuit
+}
+
+fn overlapping_bounded_blocks(operations: usize) -> Circuit {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    for index in 0..operations {
+        let target = if index % 2 == 0 { q1 } else { q2 };
+        circuit.cx(q0, target).expect("benchmark commuting CX");
     }
     circuit
 }

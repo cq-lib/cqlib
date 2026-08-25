@@ -314,3 +314,27 @@ fn equal_operation_snapshots_have_equal_fast_hashes() {
     assert_eq!(left.fast_hash, right.fast_hash);
     assert!(left.exact_eq(&right));
 }
+
+#[test]
+fn cached_blocks_preserve_collector_origin() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let ids = [
+        NativeOperationId(10),
+        NativeOperationId(11),
+        NativeOperationId(12),
+    ];
+    let orders = BTreeMap::from([(ids[0], 0), (ids[1], 1), (ids[2], 2)]);
+
+    let maximal = TwoQubitNumericBlock::maximal_closed_run([q0, q1], vec![0, 2], 0, 2, false);
+    let restored_maximal = CachedBlock::new(&maximal, &ids)
+        .materialize(&orders)
+        .unwrap();
+    assert_eq!(restored_maximal.origin(), BlockOrigin::MaximalClosedRun);
+
+    let dag =
+        TwoQubitNumericBlock::dag_dependency_closed([q0, q1], vec![0, 2], vec![1], 0, 2, false);
+    let restored_dag = CachedBlock::new(&dag, &ids).materialize(&orders).unwrap();
+    assert_eq!(restored_dag.origin(), BlockOrigin::DagDependencyClosed);
+    assert_eq!(restored_dag.crossed_orders, vec![1]);
+}

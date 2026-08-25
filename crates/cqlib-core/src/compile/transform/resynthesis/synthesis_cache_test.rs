@@ -486,3 +486,18 @@ fn production_budget_bounds_entry_count() {
     );
     assert_eq!(cache.stats().capacity_rejections, 1);
 }
+
+#[test]
+fn selection_measurements_reset_without_resetting_cache_counters() {
+    let mut cache = TwoQubitSynthesisCache::default();
+    cache.selection_stats_mut().input_blocks = 7;
+    cache.stats.generic_hits = 3;
+
+    cache.begin_selection_pass();
+
+    assert_eq!(
+        cache.stats().selection,
+        ResynthesisSelectionStats::default()
+    );
+    assert_eq!(cache.stats().generic_hits, 3);
+}

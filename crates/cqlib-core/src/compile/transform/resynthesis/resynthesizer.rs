@@ -184,6 +184,7 @@ fn resynthesize_two_qubit_blocks_with_cache(
     synthesis_cache: &mut TwoQubitSynthesisCache,
 ) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
     if !has_fixed_numeric_two_qubit_standard(circuit.operations(), circuit) {
+        synthesis_cache.begin_selection_pass();
         return Ok((
             TransformOutcome::Unchanged,
             RewriteEdits::linear(
@@ -269,6 +270,7 @@ impl<'a, 'session, 'cache> ResynthesisPass<'a, 'session, 'cache> {
     fn run_with_edits_and_stats(
         mut self,
     ) -> Result<(TransformOutcome, RewriteEdits, TwoQubitSynthesisCacheStats), CompilerError> {
+        self.synthesis_cache.begin_selection_pass();
         let root_classical = self.rebuild.root_classical().clone();
         let rewrite = self.process_sequence(
             self.source.operations(),
