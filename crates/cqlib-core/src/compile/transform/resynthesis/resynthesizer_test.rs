@@ -32,12 +32,14 @@ fn resynthesize_two_qubit_blocks_with_cache_budget(
     config: TwoQubitBlockResynthesisConfig,
     budget: usize,
 ) -> Result<(ResolvedTransform, TwoQubitSynthesisCacheStats), CompilerError> {
+    let mut synthesis_cache = TwoQubitSynthesisCache::new(budget);
+    synthesis_cache.ensure_namespace(&config, None);
     let pass = ResynthesisPass {
         source: circuit,
         rebuild: CircuitRebuildContext::new(circuit),
         config,
         device_context: None,
-        synthesis_cache: TwoQubitSynthesisCache::new(budget),
+        synthesis_cache: &mut synthesis_cache,
         incremental: None,
     };
     pass.run_with_stats()
@@ -50,12 +52,14 @@ fn resynthesize_two_qubit_blocks_with_device_cache_budget(
     device_context: DeviceTwoQubitSynthesisContext,
     budget: usize,
 ) -> Result<(ResolvedTransform, TwoQubitSynthesisCacheStats), CompilerError> {
+    let mut synthesis_cache = TwoQubitSynthesisCache::new(budget);
+    synthesis_cache.ensure_namespace(&config, Some(&device_context));
     ResynthesisPass {
         source: circuit,
         rebuild: CircuitRebuildContext::new(circuit),
         config,
         device_context: Some(device_context),
-        synthesis_cache: TwoQubitSynthesisCache::new(budget),
+        synthesis_cache: &mut synthesis_cache,
         incremental: None,
     }
     .run_with_stats()
@@ -618,7 +622,7 @@ fn numeric_rotation_mixed_block_preserves_semantics() {
 }
 
 #[test]
-fn repeated_blocks_hit_pass_local_synthesis_cache() {
+fn repeated_blocks_hit_pass_local_plan_cache_without_block_fact_overhead() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let mut circuit = Circuit::new(2);
@@ -634,6 +638,10 @@ fn repeated_blocks_hit_pass_local_synthesis_cache() {
     assert!(result.changed);
     assert!(stats.generic_misses > 0);
     assert!(stats.generic_hits > 0);
+    assert_eq!(stats.block_fact_lookups, 0);
+    assert_eq!(stats.block_fact_hits, 0);
+    assert_eq!(stats.block_fact_misses, 0);
+    assert_eq!(stats.block_fact_entries, 0);
     assert_eq!(
         stats.generic_lookups,
         stats.generic_hits + stats.generic_misses
@@ -738,12 +746,24 @@ fn cached_and_uncached_resynthesis_are_bit_exact() {
 
         assert_eq!(cached.changed, uncached.changed, "target={name}");
         assert_eq!(cached.circuit, uncached.circuit, "target={name}");
-        assert!(cached_stats.generic_hits > 0, "target={name}");
-        assert_eq!(uncached_stats.generic_hits, 0, "target={name}");
-        assert_eq!(
-            uncached_stats.capacity_rejections, uncached_stats.generic_misses,
+        assert!(
+            cached_stats
+                .generic_hits
+                .saturating_add(cached_stats.block_fact_hits)
+                .saturating_add(cached_stats.terminal_decision_hits)
+                > 0,
             "target={name}"
         );
+        assert_eq!(uncached_stats.generic_hits, 0, "target={name}");
+        assert_eq!(uncached_stats.block_fact_hits, 0, "target={name}");
+        assert!(
+            uncached_stats.capacity_rejections
+                >= uncached_stats
+                    .generic_misses
+                    .saturating_add(uncached_stats.block_fact_misses),
+            "target={name}: {uncached_stats:?}"
+        );
+        assert_eq!(uncached_stats.terminal_decision_hits, 0, "target={name}");
     }
 }
 
@@ -789,8 +809,15 @@ fn device_cached_and_uncached_resynthesis_are_bit_exact() {
         assert_eq!(cached.circuit, uncached.circuit, "placement={placement:?}");
         assert!(cached_stats.device_hits > 0, "placement={placement:?}");
         assert_eq!(uncached_stats.device_hits, 0, "placement={placement:?}");
+        assert!(
+            uncached_stats.capacity_rejections
+                >= uncached_stats
+                    .device_misses
+                    .saturating_add(uncached_stats.block_fact_misses),
+            "placement={placement:?}: {uncached_stats:?}"
+        );
         assert_eq!(
-            uncached_stats.capacity_rejections, uncached_stats.device_misses,
+            uncached_stats.terminal_decision_hits, 0,
             "placement={placement:?}"
         );
     }

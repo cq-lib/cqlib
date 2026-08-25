@@ -55,6 +55,9 @@ use crate::compile::transform::decompose::{
     UnitaryDecomposeConfig,
 };
 use crate::compile::transform::native_optimization::NativeOptimizer;
+use crate::compile::transform::resynthesis::{
+    WorkflowResynthesisSession, resynthesize_two_qubit_blocks_workflow,
+};
 use crate::compile::transform::{
     Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer,
     KnowledgeRewriteDiagnostics, KnowledgeRewriteSession, KnowledgeRewriter, LayoutObjective,
@@ -103,6 +106,7 @@ struct WorkflowState {
     device_metadata: Option<DeviceCompilationMetadata>,
     one_qubit_optimizer: Option<OptimizeOneQubitRuns>,
     pending_one_qubit_resynthesis: bool,
+    resynthesis_session: WorkflowResynthesisSession,
 }
 
 struct PreparedTargetBasis {
@@ -375,6 +379,7 @@ impl CompilerWorkflow {
             device_metadata: None,
             one_qubit_optimizer,
             pending_one_qubit_resynthesis: false,
+            resynthesis_session: WorkflowResynthesisSession::default(),
         };
 
         self.record_pre_init(&mut state);
@@ -782,19 +787,22 @@ impl CompilerWorkflow {
         placement: DeviceSynthesisPlacement,
     ) -> Result<bool, CompilerError> {
         let config = self.two_qubit_resynthesis_config_for_state(state);
-        let resynthesizer = if let Some(target) = self
+        let device_context = if let Some(target) = self
             .strict_device_target()
             .filter(|_| ResynthesizeTwoQubitBlocks::is_applicable(&state.current))
         {
             let context =
                 DeviceTwoQubitSynthesisContext::build(&target.device, &state.current, placement)?;
-            ResynthesizeTwoQubitBlocks::new_device_aware(config, context)
+            Some(context)
         } else {
-            ResynthesizeTwoQubitBlocks::new(config)
+            None
         };
-        state.apply_transform_with_edits(stage, name, |circuit, _analysis| {
-            resynthesizer.transform_with_rewrite_edits(circuit)
-        })
+        let mut session = std::mem::take(&mut state.resynthesis_session);
+        let result = state.apply_transform_with_edits(stage, name, |circuit, _analysis| {
+            resynthesize_two_qubit_blocks_workflow(circuit, config, device_context, &mut session)
+        });
+        state.resynthesis_session = session;
+        result
     }
 
     fn apply_post_routing_resynthesis(

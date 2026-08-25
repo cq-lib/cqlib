@@ -377,6 +377,39 @@ impl CalibrationSamples {
 }
 
 impl CalibrationEstimator {
+    /// Starts an allocation-free scheduler for a sequence confined to one
+    /// ordered physical pair.
+    pub(crate) fn two_qubit_cost_accumulator(
+        &self,
+        pair: [PhysicalQubit; 2],
+    ) -> TwoQubitPhysicalCostAccumulator<'_> {
+        TwoQubitPhysicalCostAccumulator {
+            estimator: self,
+            pair,
+            total_depths: [0; 2],
+            two_qubit_depths: [0; 2],
+            total_native_depth: 0,
+            native_two_qubit_depth: 0,
+            availability: [0.0; 2],
+            makespan: 0.0,
+            timing_complete: self.duration_enabled(),
+        }
+    }
+
+    /// The current calibration model keys every native metric by instruction
+    /// kind and exact physical qargs, never by the numeric gate parameters.
+    ///
+    /// Physical sequence caches must consult this capability instead of
+    /// inferring it from [`DeviceGateState`]. If a future estimator introduces
+    /// parameter-sensitive duration or error models, it must return `false`
+    /// until the complete parameter bits are part of the cache key.
+    pub(crate) const fn gate_cost_is_parameter_invariant(
+        &self,
+        _instruction: &Instruction,
+    ) -> bool {
+        true
+    }
+
     pub(crate) fn identity_cost(&self) -> NativePlanCost {
         NativePlanCost {
             error: if self.error_enabled {
@@ -596,6 +629,104 @@ impl CalibrationEstimator {
     }
 }
 
+/// Allocation-free exact scheduler for native leaves confined to two qubits.
+///
+/// This is intentionally separate from [`CalibrationEstimator::schedule_physical_cost`],
+/// whose HashMaps support arbitrary-width plans. The update order mirrors that
+/// generic implementation exactly.
+pub(crate) struct TwoQubitPhysicalCostAccumulator<'a> {
+    estimator: &'a CalibrationEstimator,
+    pair: [PhysicalQubit; 2],
+    total_depths: [u32; 2],
+    two_qubit_depths: [u32; 2],
+    total_native_depth: u32,
+    native_two_qubit_depth: u32,
+    availability: [f64; 2],
+    makespan: f64,
+    timing_complete: bool,
+}
+
+impl TwoQubitPhysicalCostAccumulator<'_> {
+    pub(crate) fn add_leaves(&mut self, leaves: &[NativePlanLeaf]) -> Result<(), String> {
+        for leaf in leaves {
+            let mut indices = SmallVec::<[usize; 2]>::new();
+            for qubit in &leaf.ordered_qargs {
+                let index = if *qubit == self.pair[0] {
+                    0
+                } else if *qubit == self.pair[1] {
+                    1
+                } else {
+                    return Err(format!(
+                        "native leaf {} uses {qubit:?} outside physical pair {:?}",
+                        leaf.instruction, self.pair
+                    ));
+                };
+                indices.push(index);
+            }
+
+            let next_depth = indices
+                .iter()
+                .map(|&index| self.total_depths[index])
+                .max()
+                .unwrap_or(0)
+                + 1;
+            for &index in &indices {
+                self.total_depths[index] = next_depth;
+            }
+            self.total_native_depth = self.total_native_depth.max(next_depth);
+
+            if leaf.ordered_qargs.len() == 2 {
+                let next_two_qubit_depth = indices
+                    .iter()
+                    .map(|&index| self.two_qubit_depths[index])
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                for &index in &indices {
+                    self.two_qubit_depths[index] = next_two_qubit_depth;
+                }
+                self.native_two_qubit_depth = self.native_two_qubit_depth.max(next_two_qubit_depth);
+            }
+
+            if self.timing_complete {
+                if let Some(duration) = self.estimator.leaf_duration(leaf) {
+                    let start = indices
+                        .iter()
+                        .map(|&index| self.availability[index])
+                        .max_by(f64::total_cmp)
+                        .unwrap_or(0.0);
+                    let finish = start + duration;
+                    for &index in &indices {
+                        self.availability[index] = finish;
+                    }
+                    self.makespan = self.makespan.max(finish);
+                } else {
+                    self.timing_complete = false;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(self, aggregate: NativePlanCost) -> DevicePhysicalCost {
+        DevicePhysicalCost {
+            native_two_qubit_ops: aggregate.native_two_qubit_ops,
+            native_two_qubit_depth: self.native_two_qubit_depth,
+            error: aggregate.error,
+            total_native_depth: self.total_native_depth,
+            native_total_ops: aggregate.native_total_ops,
+            duration: aggregate.duration,
+            makespan: if !self.estimator.duration_enabled() {
+                MetricAvailability::Disabled
+            } else if self.timing_complete {
+                MetricAvailability::Available(self.makespan)
+            } else {
+                MetricAvailability::Inconsistent
+            },
+        }
+    }
+}
+
 impl CalibrationEstimator {
     pub(crate) fn schedule_physical_cost(
         &self,
@@ -715,4 +846,60 @@ pub(crate) fn quantiles<K: Eq + std::hash::Hash>(values: HashMap<K, Vec<f64>>) -
             (key, values[index])
         })
         .collect()
+}
+
+#[cfg(test)]
+mod two_qubit_scheduler_tests {
+    use super::*;
+    use smallvec::smallvec;
+
+    #[test]
+    fn fixed_two_qubit_scheduler_matches_generic_scheduler() {
+        let device = Device::line("two-qubit-scheduler", 2).unwrap();
+        let pair = [PhysicalQubit::new(0), PhysicalQubit::new(1)];
+        let estimator = CalibrationEstimator::from_device(&device, &pair);
+        let leaves = vec![
+            NativePlanLeaf {
+                instruction: Instruction::Standard(StandardGate::H),
+                ordered_qargs: smallvec![pair[0]],
+                error_rate: Some(0.001),
+                duration: None,
+            },
+            NativePlanLeaf {
+                instruction: Instruction::Standard(StandardGate::CX),
+                ordered_qargs: smallvec![pair[0], pair[1]],
+                error_rate: Some(0.01),
+                duration: None,
+            },
+            NativePlanLeaf {
+                instruction: Instruction::Standard(StandardGate::X),
+                ordered_qargs: smallvec![pair[1]],
+                error_rate: Some(0.002),
+                duration: None,
+            },
+        ];
+        let aggregate = estimator.cost_for_leaves(&leaves);
+        let generic = estimator.schedule_physical_cost(&leaves, aggregate);
+        let mut fixed = estimator.two_qubit_cost_accumulator(pair);
+        fixed.add_leaves(&leaves).unwrap();
+
+        assert_eq!(fixed.finish(aggregate), generic);
+    }
+
+    #[test]
+    fn fixed_two_qubit_scheduler_rejects_foreign_qargs() {
+        let device = Device::line("two-qubit-scheduler-invalid", 3).unwrap();
+        let qubits = device.usable_qubits().collect::<Vec<_>>();
+        let estimator = CalibrationEstimator::from_device(&device, &qubits);
+        let pair = [PhysicalQubit::new(0), PhysicalQubit::new(1)];
+        let leaf = NativePlanLeaf {
+            instruction: Instruction::Standard(StandardGate::X),
+            ordered_qargs: smallvec![PhysicalQubit::new(2)],
+            error_rate: None,
+            duration: None,
+        };
+        let mut fixed = estimator.two_qubit_cost_accumulator(pair);
+
+        assert!(fixed.add_leaves(&[leaf]).is_err());
+    }
 }

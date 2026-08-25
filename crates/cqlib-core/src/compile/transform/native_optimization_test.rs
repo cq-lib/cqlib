@@ -255,6 +255,51 @@ fn incremental_resynthesis_matches_full_scan_and_reuses_clean_flat_anchors() {
 }
 
 #[test]
+fn native_rounds_reuse_clean_terminal_resynthesis_decisions() {
+    let device = Device::bidirectional_line("native-resynthesis-session-cache", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap()
+        .with_default_single_qubit_error(0.001);
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    // This already-native 2Q block is reconsidered after the disjoint q2 run
+    // is fused in round one, so round two exercises the session warm path.
+    circuit.u(q0, 0.2, -0.3, 0.4).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    circuit.u(q2, 0.1, 0.2, 0.3).unwrap();
+    circuit.u(q2, -0.2, 0.4, -0.1).unwrap();
+    let optimizer = NativeOptimizer::new(
+        &device,
+        TwoQubitBlockResynthesisConfig::normal(Default::default()),
+        4,
+        2,
+    );
+
+    let (result, stats) = optimizer
+        .run_with_policy(&circuit, NativeResynthesisPolicy::Incremental)
+        .unwrap();
+
+    assert!(result.rounds >= 2, "result={result:?}");
+    assert_eq!(
+        stats.synthesis_cache.block_fact_misses, 1,
+        "stats={stats:?}"
+    );
+    assert_eq!(stats.synthesis_cache.device_misses, 1, "stats={stats:?}");
+    assert!(stats.synthesis_cache.kak_entries > 0, "stats={stats:?}");
+    assert!(
+        stats.synthesis_cache.terminal_decision_hits > 0,
+        "stats={stats:?}"
+    );
+    assert!(stats.anchors_reused > 0, "stats={stats:?}");
+}
+
+#[test]
 fn native_optimizer_rebuilds_unprepared_candidate_context() {
     let device = Device::line("native-context-fallback", 2)
         .unwrap()

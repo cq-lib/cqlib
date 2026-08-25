@@ -75,5 +75,8 @@ pub use config::TwoQubitBlockResynthesisConfig;
 pub(crate) use incremental::{
     NativeResynthesisPolicy, NativeResynthesisSession, NativeWorksetStats,
 };
-pub(crate) use resynthesizer::resynthesize_two_qubit_blocks_incremental;
 pub use resynthesizer::{ResynthesizeTwoQubitBlocks, resynthesize_two_qubit_blocks};
+pub(crate) use resynthesizer::{
+    WorkflowResynthesisSession, resynthesize_two_qubit_blocks_incremental,
+    resynthesize_two_qubit_blocks_workflow,
+};

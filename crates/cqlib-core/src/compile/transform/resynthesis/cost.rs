@@ -23,13 +23,12 @@ use crate::compile::transform::decompose::unitary::{
 /// Local cost used to accept only strictly improving resynthesis patches.
 pub(crate) type ResynthesisCost = TargetAwareSynthesisCost;
 
-pub(crate) fn cost_of_source_ops(
-    ops: &[&OperationView<'_>],
+pub(crate) fn cost_of_source_value_operations(
+    operations: &[ValueOperation],
     target: &TwoQubitSynthesisTarget,
 ) -> Result<ResynthesisCost, CompilerError> {
-    let operations = value_operations_of_source_ops(ops)?;
     let mut cost = target_aware_cost_of_value_operations(
-        &operations,
+        operations,
         target,
         TwoQubitUnitaryDecomposeBasis::PauliRotations,
     )?;

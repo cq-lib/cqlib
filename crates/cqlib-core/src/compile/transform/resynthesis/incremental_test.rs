@@ -176,6 +176,35 @@ fn unchanged_scope_reuses_every_anchor_without_recollection() {
 }
 
 #[test]
+fn maximal_preparation_does_not_build_bounded_dag_eagerly() {
+    let circuit = three_pair_circuit(false);
+    let config = TwoQubitBlockResynthesisConfig::default();
+    let scope = NativeScopeId::default();
+    let mut session = NativeResynthesisSession::new(NativeResynthesisPolicy::Incremental);
+
+    session.begin_round(&config);
+    session
+        .prepare_scope_for_maximal(&scope, &circuit, circuit.operations(), &config)
+        .unwrap();
+    let operation_views = views(&circuit);
+    let first = session
+        .collect_maximal_blocks(&scope, &operation_views)
+        .unwrap();
+    assert!(!first.is_empty());
+    assert_eq!(session.stats().anchors_recomputed, 0);
+    assert_eq!(session.stats().scopes_full_scan, 0);
+    session.finish_round();
+
+    session.begin_round(&config);
+    let reused = session
+        .reuse_unchanged_maximal_blocks(&scope, &circuit, circuit.operations())
+        .unwrap()
+        .expect("unchanged maximal workset should be reusable");
+    assert_eq!(first, reused);
+    assert!(session.stats().maximal_blocks_reused >= reused.len());
+}
+
+#[test]
 fn local_insertion_recomputes_touched_pair_and_reuses_disjoint_anchors() {
     let before_circuit = three_pair_circuit(false);
     let after_circuit = three_pair_circuit(true);

@@ -78,6 +78,108 @@ fn pre_layout_prefers_broad_family_over_single_calibrated_edge() {
 }
 
 #[test]
+fn pre_layout_evaluation_derives_all_fields_from_one_pair_scan() {
+    let device = Device::bidirectional_line("single-pair-scan", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(3);
+    circuit.cx(q0, q1).unwrap();
+    let context = DeviceTwoQubitSynthesisContext::build(
+        &device,
+        &circuit,
+        DeviceSynthesisPlacement::PreLayoutEnvelope,
+    )
+    .unwrap();
+    let operations = vec![ValueOperation::from_standard(
+        StandardGate::CX,
+        [q0, q1],
+        [],
+    )];
+
+    let evaluation = context.evaluate_pre_layout(&operations, [q0, q1]).unwrap();
+    let stats = context.physical_cost_cache_stats();
+    assert_eq!(stats.lookups, context.data.eligible_pairs.len());
+    assert_eq!(stats.misses, context.data.eligible_pairs.len());
+    assert_eq!(stats.hits, 0);
+
+    let expected_pair_costs = context
+        .data
+        .eligible_pairs
+        .iter()
+        .filter_map(|pair| {
+            context
+                .cost_on_pair(&operations, [q0, q1], *pair)
+                .map(|cost| (*pair, cost))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let expected_domain = expected_pair_costs
+        .keys()
+        .copied()
+        .collect::<OrderedPairDomain>();
+    let expected_worst = expected_pair_costs
+        .values()
+        .copied()
+        .max_by(|left, right| left.compare(*right))
+        .unwrap();
+    assert_eq!(evaluation.domain, expected_domain);
+    assert_eq!(evaluation.coverage, context.coverage_key(&expected_domain));
+    assert_eq!(evaluation.worst_cost, expected_worst);
+    assert_eq!(
+        evaluation.worst_cost_on_domain(&expected_domain),
+        Some(expected_worst)
+    );
+}
+
+#[test]
+fn parameter_independent_physical_cost_cache_reuses_distinct_angles() {
+    let device = Device::bidirectional_line("parameter-independent-cost", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::RZ),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap()
+        .with_default_single_qubit_error(0.001)
+        .with_default_two_qubit_error(0.01);
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.rz(q0, 0.1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    let context = DeviceTwoQubitSynthesisContext::build(
+        &device,
+        &circuit,
+        DeviceSynthesisPlacement::ExactPhysical,
+    )
+    .unwrap();
+    let sequence = |angle| {
+        vec![
+            ValueOperation::from_standard(StandardGate::RZ, [q0], [ParameterValue::Fixed(angle)]),
+            ValueOperation::from_standard(StandardGate::CX, [q0, q1], []),
+        ]
+    };
+
+    let first = context
+        .exact_cost_diagnostic(&sequence(0.1), [q0, q1])
+        .unwrap();
+    let second = context
+        .exact_cost_diagnostic(&sequence(-2.7), [q0, q1])
+        .unwrap();
+    assert_eq!(first, second);
+    let stats = context.physical_cost_cache_stats();
+    assert_eq!(stats.lookups, 2);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+    assert_eq!(stats.entries, 1);
+}
+
+#[test]
 fn equal_physical_cost_is_not_a_strict_improvement() {
     let cost = DevicePhysicalCost {
         native_two_qubit_ops: 3,

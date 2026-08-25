@@ -12,8 +12,8 @@
 // that they have been altered from the originals.
 
 use super::{
-    CompilerWorkflow, DeviceSynthesisPlacement, PreparedTargetBasis, RewritePhase, WorkflowState,
-    sabre_config_for_mode,
+    CompilerWorkflow, DeviceSynthesisPlacement, PreparedTargetBasis, RewritePhase,
+    WorkflowResynthesisSession, WorkflowState, sabre_config_for_mode,
 };
 use crate::circuit::gate::FrozenCircuit;
 use crate::circuit::{
@@ -79,6 +79,7 @@ fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowS
         device_metadata: None,
         one_qubit_optimizer,
         pending_one_qubit_resynthesis: false,
+        resynthesis_session: WorkflowResynthesisSession::default(),
     }
 }
 
@@ -99,6 +100,7 @@ fn workflow_state_without_target_basis() -> WorkflowState {
         device_metadata: None,
         one_qubit_optimizer: Some(OptimizeOneQubitRuns::logical()),
         pending_one_qubit_resynthesis: false,
+        resynthesis_session: WorkflowResynthesisSession::default(),
     }
 }
 

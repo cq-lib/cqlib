@@ -120,6 +120,10 @@ impl<'a> NativeOptimizer<'a> {
             .transform(circuit, None)?
             .into_circuit(circuit);
         self.device.validate_circuit(&initial)?;
+        // Native rounds can carry very large circuits. Share immutable round
+        // states so `current`, `best`, and the exact cycle detector do not each
+        // deep-clone every operation and nested control-flow body.
+        let initial = Arc::new(initial);
         let mut current = initial.clone();
         let mut best = initial;
         // This exact-physical context is immutable and run-scoped. All consumers
@@ -135,6 +139,7 @@ impl<'a> NativeOptimizer<'a> {
         let mut stale = 0;
         let mut restored_best = false;
         let mut resynthesis_session = NativeResynthesisSession::new(policy);
+        let mut seen_states = vec![current.clone()];
 
         'optimization: while rounds < self.max_rounds && stale < self.max_stale_rounds {
             rounds += 1;
@@ -146,7 +151,7 @@ impl<'a> NativeOptimizer<'a> {
             )?;
             let resynthesis_changed = resynthesis_outcome.changed();
             let resynthesized = match &resynthesis_outcome {
-                TransformOutcome::Unchanged => &current,
+                TransformOutcome::Unchanged => current.as_ref(),
                 TransformOutcome::Changed(circuit) => circuit,
             };
             let local_outcome =
@@ -172,7 +177,7 @@ impl<'a> NativeOptimizer<'a> {
                         // that local candidate and retain this round's 2Q result.
                         Err(CompilerError::DeviceLoweringFailed(_)) => {
                             let fallback = match &resynthesis_outcome {
-                                TransformOutcome::Unchanged => &current,
+                                TransformOutcome::Unchanged => current.as_ref(),
                                 TransformOutcome::Changed(circuit) => circuit,
                             };
                             match DeviceLowerer::new(self.device).transform(fallback, None)? {
@@ -212,11 +217,20 @@ impl<'a> NativeOptimizer<'a> {
                 self.device.validate_circuit(&candidate)?;
             }
 
-            if candidate == current {
-                current = candidate;
+            if candidate == *current {
+                break;
+            }
+            // Every stage in a native round is deterministic for a fixed
+            // context and configuration. Re-entering any exact prior circuit
+            // therefore proves a cycle; further stale rounds can only replay
+            // states already compared against `best`.
+            if let Some(seen) = seen_states.iter().find(|seen| seen.as_ref() == &candidate) {
+                current = seen.clone();
+                resynthesis_session.record_cycle_early_exit();
                 break;
             }
             let candidate_costs = self.candidate_costs_with_reuse(&candidate, &mut context)?;
+            let candidate = Arc::new(candidate);
             if scope_costs_dominate(&candidate_costs, &best_costs) {
                 if !validate_every_round {
                     self.device.validate_circuit(&candidate)?;
@@ -227,13 +241,20 @@ impl<'a> NativeOptimizer<'a> {
             } else {
                 stale = stale.saturating_add(1);
             }
+            seen_states.push(candidate.clone());
             current = candidate;
         }
 
-        if current != best {
+        if current.as_ref() != best.as_ref() {
             restored_best = true;
         }
         let after = summarize_scope_costs(&best_costs);
+        // Drop the other shared handles before recovering the owned result.
+        // `try_unwrap` is therefore the normal path and preserves the previous
+        // API without a final full-circuit clone.
+        drop(current);
+        drop(seen_states);
+        let best = Arc::try_unwrap(best).unwrap_or_else(|shared| shared.as_ref().clone());
         let result = NativeOptimizationResult {
             changed: best != *circuit,
             circuit: best,

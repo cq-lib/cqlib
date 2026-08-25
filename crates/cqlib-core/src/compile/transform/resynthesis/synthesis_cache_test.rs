@@ -78,7 +78,7 @@ fn failed_and_empty_generic_plans_are_cached() {
             .with_generic_plan(
                 &matrix,
                 qubits,
-                || {
+                |_| {
                     calls += 1;
                     Err(CompilerError::InvariantViolation("planned failure".into()))
                 },
@@ -99,7 +99,7 @@ fn failed_and_empty_generic_plans_are_cached() {
             .with_generic_plan(
                 &matrix,
                 qubits,
-                || {
+                |_| {
                     calls += 1;
                     Ok(Vec::new())
                 },
@@ -127,7 +127,7 @@ fn successful_generic_plan_preserves_candidates_and_order() {
                 .with_generic_plan(
                     &matrix,
                     [q0, q1],
-                    || {
+                    |_| {
                         calls += 1;
                         Ok(vec![
                             TwoQubitSynthesisCandidate {
@@ -169,7 +169,7 @@ fn successful_generic_plan_preserves_candidates_and_order() {
 }
 
 #[test]
-fn successful_plan_does_not_reuse_operations_for_reversed_qargs() {
+fn successful_generic_plan_remaps_canonical_roles_to_requested_qargs() {
     let matrix = Array2::eye(4);
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
@@ -181,7 +181,7 @@ fn successful_plan_does_not_reuse_operations_for_reversed_qargs() {
             .with_generic_plan(
                 &matrix,
                 qubits,
-                || {
+                |_| {
                     calls += 1;
                     Ok(vec![TwoQubitSynthesisCandidate {
                         backend: TwoQubitUnitaryDecomposeBasis::Cx,
@@ -208,9 +208,9 @@ fn successful_plan_does_not_reuse_operations_for_reversed_qargs() {
         assert_eq!(cached_qubits.as_slice(), &qubits);
     }
 
-    assert_eq!(calls, 2);
-    assert_eq!(cache.stats().generic_misses, 2);
-    assert_eq!(cache.stats().generic_hits, 1);
+    assert_eq!(calls, 1);
+    assert_eq!(cache.stats().generic_misses, 1);
+    assert_eq!(cache.stats().generic_hits, 2);
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn cache_lookup_is_bit_exact_for_matrix_values() {
             .with_generic_plan(
                 matrix,
                 qubits,
-                || {
+                |_| {
                     calls += 1;
                     Ok(Vec::new())
                 },
@@ -273,7 +273,7 @@ fn device_plan_is_cached_for_exact_matrix_and_qargs() {
             .with_device_plan(
                 &matrix,
                 [q0, q1],
-                || {
+                |_| {
                     calls += 1;
                     plan_numeric_2q_unitary_for_device(&matrix, [q0, q1], &context)
                 },
@@ -290,7 +290,7 @@ fn device_plan_is_cached_for_exact_matrix_and_qargs() {
         .with_device_plan(
             &matrix,
             [q1, q0],
-            || {
+            |_| {
                 calls += 1;
                 plan_numeric_2q_unitary_for_device(&matrix, [q1, q0], &context)
             },
@@ -309,6 +309,118 @@ fn device_plan_is_cached_for_exact_matrix_and_qargs() {
 }
 
 #[test]
+fn namespace_reuses_context_clones_and_invalidates_rebuilds() {
+    let device = Device::line("resynthesis-cache-namespace", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.cx(q0, q1).unwrap();
+    let context = DeviceTwoQubitSynthesisContext::build(
+        &device,
+        &circuit,
+        DeviceSynthesisPlacement::ExactPhysical,
+    )
+    .unwrap();
+    let cloned = context.clone();
+    let rebuilt = DeviceTwoQubitSynthesisContext::build(
+        &device,
+        &circuit,
+        DeviceSynthesisPlacement::ExactPhysical,
+    )
+    .unwrap();
+    assert_eq!(context.generation(), cloned.generation());
+    assert_ne!(context.generation(), rebuilt.generation());
+
+    let config = TwoQubitBlockResynthesisConfig::normal(Default::default());
+    let matrix = StandardGate::CX.matrix(&[]).unwrap().into_owned();
+    let mut cache = TwoQubitSynthesisCache::new(4);
+    let mut calls = 0;
+
+    cache.ensure_namespace(&config, Some(&context));
+    cache
+        .with_device_plan(
+            &matrix,
+            [q0, q1],
+            |_| {
+                calls += 1;
+                Ok(Vec::new())
+            },
+            |_| (),
+        )
+        .unwrap();
+    cache.ensure_namespace(&config, Some(&cloned));
+    cache
+        .with_device_plan(
+            &matrix,
+            [q0, q1],
+            |_| {
+                calls += 1;
+                Ok(Vec::new())
+            },
+            |_| (),
+        )
+        .unwrap();
+    assert_eq!(calls, 1);
+
+    cache.ensure_namespace(&config, Some(&rebuilt));
+    cache
+        .with_device_plan(
+            &matrix,
+            [q0, q1],
+            |_| {
+                calls += 1;
+                Ok(Vec::new())
+            },
+            |_| (),
+        )
+        .unwrap();
+    assert_eq!(calls, 2);
+    assert_eq!(cache.stats().namespace_invalidations, 1);
+}
+
+#[test]
+fn kak_cache_is_exact_and_survives_candidate_namespace_changes() {
+    let matrix = StandardGate::CX.matrix(&[]).unwrap().into_owned();
+    let mut cache = TwoQubitSynthesisCache::new_native_session();
+    let config = TwoQubitBlockResynthesisConfig::normal(Default::default());
+    cache.ensure_namespace(&config, None);
+
+    let first = cache.kak_decomposition(&matrix).unwrap().unwrap();
+    let second = cache.kak_decomposition(&matrix).unwrap().unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+
+    let mut changed = config;
+    changed.max_block_ops = changed.max_block_ops.saturating_add(1);
+    cache.ensure_namespace(&changed, None);
+    let after_namespace_change = cache.kak_decomposition(&matrix).unwrap().unwrap();
+
+    assert!(Arc::ptr_eq(&first, &after_namespace_change));
+    assert_eq!(cache.stats().kak_misses, 1);
+    assert_eq!(cache.stats().kak_hits, 2);
+    assert_eq!(cache.stats().kak_entries, 1);
+    assert_eq!(cache.stats().namespace_invalidations, 1);
+}
+
+#[test]
+fn failed_kak_decomposition_is_cached_exactly() {
+    let non_unitary = matrix_with(2.0);
+    let mut cache = TwoQubitSynthesisCache::new_native_session();
+
+    assert!(cache.kak_decomposition(&non_unitary).unwrap().is_none());
+    assert!(cache.kak_decomposition(&non_unitary).unwrap().is_none());
+
+    assert_eq!(cache.stats().kak_misses, 1);
+    assert_eq!(cache.stats().kak_hits, 1);
+    assert_eq!(cache.stats().kak_failed_hits, 1);
+}
+
+#[test]
 fn failed_device_plan_is_cached() {
     let matrix = Array2::eye(4);
     let qubits = [Qubit::new(0), Qubit::new(1)];
@@ -320,7 +432,7 @@ fn failed_device_plan_is_cached() {
             .with_device_plan(
                 &matrix,
                 qubits,
-                || {
+                |_| {
                     calls += 1;
                     Err(CompilerError::InvariantViolation("planned failure".into()))
                 },
@@ -346,7 +458,7 @@ fn admission_budget_does_not_change_uncached_result() {
             .with_generic_plan(
                 &matrix,
                 qubits,
-                || Err(CompilerError::InvariantViolation("failure".into())),
+                |_| Err(CompilerError::InvariantViolation("failure".into())),
                 |plan| matches!(plan, CachedPlanView::Failed),
             )
             .unwrap();
@@ -364,7 +476,7 @@ fn production_budget_bounds_entry_count() {
     for index in 0..=RESYNTHESIS_SYNTHESIS_CACHE_BUDGET {
         let matrix = matrix_with(f64::from_bits(index as u64));
         cache
-            .with_generic_plan(&matrix, qubits, || Ok(Vec::new()), |_| ())
+            .with_generic_plan(&matrix, qubits, |_| Ok(Vec::new()), |_| ())
             .unwrap();
     }
 

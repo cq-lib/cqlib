@@ -20,16 +20,18 @@
 use super::collector::TwoQubitNumericBlock;
 use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
-use super::cost::{ResynthesisCost, cost_of_source_ops, value_operations_of_source_ops};
-use super::synthesis_cache::{CachedPlanView, TwoQubitSynthesisCache};
+use super::cost::{
+    ResynthesisCost, cost_of_source_value_operations, value_operations_of_source_ops,
+};
+use super::synthesis_cache::{CachedBlockFacts, CachedPlanView, TwoQubitSynthesisCache};
 use crate::circuit::{
-    Instruction, ParameterValue, ValueInstruction, ValueOperation, value_operations_to_matrix,
+    Instruction, ParameterValue, Qubit, StandardGate, ValueInstruction, ValueOperation,
+    value_operations_to_matrix,
 };
 use crate::compile::transform::decompose::unitary::unitary_2q::{
-    DeviceTwoQubitSynthesisCandidate, plan_numeric_2q_unitary_for_device,
-};
-use crate::compile::transform::decompose::unitary::unitary_2q::{
-    TwoQubitMatrixOp, two_qubit_operation_matrix_product,
+    TwoQubitMatrixOp, plan_numeric_2q_unitary_for_device,
+    plan_numeric_2q_unitary_for_device_from_kak, plan_numeric_2q_unitary_from_kak,
+    two_qubit_operation_matrix_product,
 };
 use crate::compile::transform::decompose::unitary::{
     DeviceContextCostFailure, DevicePhysicalCost, DeviceSynthesisPlacement,
@@ -94,15 +96,21 @@ pub(crate) fn select_patches_with_device(
 
     let mut patches = Vec::new();
     for block in blocks {
-        if let Some(patch) = try_synthesize_block(
+        if synthesis_cache.has_terminal_no_patch(&block, ops) {
+            continue;
+        }
+        let patch = try_synthesize_block(
             &block,
             ops,
             commutation,
             config,
             device_context,
             synthesis_cache,
-        )? {
+        )?;
+        if let Some(patch) = patch {
             patches.push(patch);
+        } else {
+            synthesis_cache.record_terminal_no_patch(&block, ops);
         }
     }
     patches.sort_by(compare_patches);
@@ -172,19 +180,26 @@ fn try_synthesize_block(
     device_context: Option<&DeviceTwoQubitSynthesisContext>,
     synthesis_cache: &mut TwoQubitSynthesisCache,
 ) -> Result<Option<BlockPatch>, CompilerError> {
-    let matrix = match block_matrix(block, ops) {
-        Ok(matrix) => matrix,
-        Err(_) => return Ok(None),
-    };
     let matched = block
         .matched_orders
         .iter()
         .map(|&order| &ops[order])
         .collect::<Vec<_>>();
-    let before_cost = match cost_of_source_ops(&matched, &config.two_qubit_target) {
-        Ok(cost) => cost,
-        Err(_) => return Ok(None),
+    let Some(facts) = synthesis_cache.block_facts(block, ops, || {
+        let source_operations = value_operations_of_source_ops(&matched)?;
+        let source_cost =
+            cost_of_source_value_operations(&source_operations, &config.two_qubit_target)?;
+        Ok(CachedBlockFacts {
+            matrix: block_matrix(block, ops)?,
+            source_operations,
+            source_cost,
+        })
+    })?
+    else {
+        return Ok(None);
     };
+    let matrix = &facts.matrix;
+    let before_cost = facts.source_cost;
 
     let crossed = block
         .crossed_orders
@@ -194,9 +209,9 @@ fn try_synthesize_block(
     if let Some(device_context) = device_context {
         return try_synthesize_device_block(
             block,
-            &matrix,
+            matrix,
             ops,
-            &matched,
+            &facts.source_operations,
             &crossed,
             commutation,
             device_context,
@@ -205,19 +220,35 @@ fn try_synthesize_block(
         );
     }
     synthesis_cache.with_generic_plan(
-        &matrix,
+        matrix,
         block.qubits,
-        || {
-            plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
-                matrix: &matrix,
-                qubits: block.qubits,
-                target: config.two_qubit_target.clone(),
-            })
+        |cache| {
+            if !cache.artifact_reuse_enabled() {
+                return plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
+                    matrix,
+                    qubits: block.qubits,
+                    target: config.two_qubit_target.clone(),
+                });
+            }
+            let decomp = cache.kak_decomposition(matrix)?.ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "cached KAK decomposition failed for resynthesis matrix".to_string(),
+                )
+            })?;
+            plan_numeric_2q_unitary_from_kak(
+                TwoQubitSynthesisRequest {
+                    matrix,
+                    qubits: block.qubits,
+                    target: config.two_qubit_target.clone(),
+                },
+                &decomp,
+            )
         },
         |plan| {
             let CachedPlanView::Candidates(candidates) = plan else {
                 return Ok(None);
             };
+            let mut span_validation = None;
             for candidate in candidates {
                 if candidate.cost >= before_cost {
                     continue;
@@ -225,11 +256,12 @@ fn try_synthesize_block(
                 if !commutation.replacements_commute_with_crossed(&crossed, &candidate.operations) {
                     continue;
                 }
-                if !patch_preserves_relevant_span(
+                if !patch_preserves_relevant_span_cached(
                     block,
                     ops,
                     &candidate.operations,
                     candidate.global_phase,
+                    &mut span_validation,
                 )? {
                     continue;
                 }
@@ -255,27 +287,23 @@ fn try_synthesize_device_block(
     block: &TwoQubitNumericBlock,
     matrix: &Array2<Complex64>,
     ops: &[OperationView<'_>],
-    matched: &[&OperationView<'_>],
+    source_operations: &[ValueOperation],
     crossed: &[&OperationView<'_>],
     commutation: &CachedCommutation,
     context: &DeviceTwoQubitSynthesisContext,
     before_cost: ResynthesisCost,
     synthesis_cache: &mut TwoQubitSynthesisCache,
 ) -> Result<Option<BlockPatch>, CompilerError> {
-    let source_operations = match value_operations_of_source_ops(matched) {
-        Ok(operations) => operations,
-        Err(_) => return Ok(None),
-    };
     let (device_before_cost, source_domain) = match context.placement() {
         DeviceSynthesisPlacement::PreLayoutEnvelope => {
-            let Some(evaluation) = context.evaluate_pre_layout(&source_operations, block.qubits)
+            let Some(evaluation) = context.evaluate_pre_layout(source_operations, block.qubits)
             else {
                 return Ok(None);
             };
             (evaluation.worst_cost, Some(evaluation.domain))
         }
         DeviceSynthesisPlacement::ExactPhysical => {
-            match context.exact_cost_diagnostic(&source_operations, block.qubits) {
+            match context.exact_cost_diagnostic(source_operations, block.qubits) {
                 Ok(cost) => (cost, None),
                 Err(DeviceContextCostFailure::Unsupported(_)) => return Ok(None),
                 Err(DeviceContextCostFailure::Unprepared(state)) => {
@@ -299,12 +327,39 @@ fn try_synthesize_device_block(
     synthesis_cache.with_device_plan(
         matrix,
         block.qubits,
-        || plan_numeric_2q_unitary_for_device(matrix, block.qubits, context),
+        |cache| {
+            if !cache.artifact_reuse_enabled() {
+                return plan_numeric_2q_unitary_for_device(matrix, block.qubits, context);
+            }
+            let decomp = cache.kak_decomposition(matrix)?.ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "cached KAK decomposition failed for device resynthesis matrix".to_string(),
+                )
+            })?;
+            let swap = StandardGate::SWAP
+                .matrix(&[])
+                .map_err(CompilerError::Circuit)?
+                .into_owned();
+            let reversed_matrix = swap.dot(matrix).dot(&swap);
+            let reversed_decomp = cache.kak_decomposition(&reversed_matrix)?.ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "cached KAK decomposition failed for reversed device matrix".to_string(),
+                )
+            })?;
+            plan_numeric_2q_unitary_for_device_from_kak(
+                matrix,
+                block.qubits,
+                context,
+                &decomp,
+                &reversed_matrix,
+                &reversed_decomp,
+            )
+        },
         |plan| {
             let CachedPlanView::Candidates(candidates) = plan else {
                 return Ok(None);
             };
-            let mut best: Option<(&DeviceTwoQubitSynthesisCandidate, DevicePhysicalCost)> = None;
+            let mut viable = Vec::new();
             for candidate in candidates {
                 let device_after_cost = match context.placement() {
                     DeviceSynthesisPlacement::PreLayoutEnvelope => {
@@ -317,11 +372,7 @@ fn try_synthesize_device_block(
                         if !source_domain.is_subset(&evaluation.domain) {
                             continue;
                         }
-                        let Some(cost) = context.worst_cost_on_domain(
-                            &candidate.candidate.operations,
-                            block.qubits,
-                            source_domain,
-                        ) else {
+                        let Some(cost) = evaluation.worst_cost_on_domain(source_domain) else {
                             continue;
                         };
                         cost
@@ -331,44 +382,41 @@ fn try_synthesize_device_block(
                 if !device_after_cost.strictly_better_than(device_before_cost) {
                     continue;
                 }
+                viable.push((candidate, device_after_cost));
+            }
+            viable.sort_by(|(left, left_cost), (right, right_cost)| {
+                left_cost
+                    .compare(*right_cost)
+                    .then_with(|| left.candidate.cost.cmp(&right.candidate.cost))
+            });
+            let mut span_validation = None;
+            for (candidate, device_after_cost) in viable {
                 if !commutation
                     .replacements_commute_with_crossed(crossed, &candidate.candidate.operations)
                 {
                     continue;
                 }
-                if !patch_preserves_relevant_span(
+                if !patch_preserves_relevant_span_cached(
                     block,
                     ops,
                     &candidate.candidate.operations,
                     candidate.candidate.global_phase,
+                    &mut span_validation,
                 )? {
                     continue;
                 }
-
-                let replace = best.as_ref().is_none_or(|(current, current_cost)| {
-                    device_after_cost
-                        .compare(*current_cost)
-                        .then_with(|| candidate.candidate.cost.cmp(&current.candidate.cost))
-                        .is_lt()
-                });
-                if replace {
-                    best = Some((candidate, device_after_cost));
-                }
+                return Ok(Some(BlockPatch {
+                    first_order: block.first_order(),
+                    matched_orders: block.matched_orders.clone(),
+                    crossed_orders: block.crossed_orders.clone(),
+                    replacement: candidate.candidate.operations.clone(),
+                    before_cost,
+                    after_cost: candidate.candidate.cost,
+                    device_after_cost: Some(device_after_cost),
+                    synthesis_phase: candidate.candidate.global_phase,
+                }));
             }
-
-            let Some((candidate, device_after_cost)) = best else {
-                return Ok(None);
-            };
-            Ok(Some(BlockPatch {
-                first_order: block.first_order(),
-                matched_orders: block.matched_orders.clone(),
-                crossed_orders: block.crossed_orders.clone(),
-                replacement: candidate.candidate.operations.clone(),
-                before_cost,
-                after_cost: candidate.candidate.cost,
-                device_after_cost: Some(device_after_cost),
-                synthesis_phase: candidate.candidate.global_phase,
-            }))
+            Ok(None)
         },
     )?
 }
@@ -414,12 +462,89 @@ fn block_matrix(
     )
 }
 
+struct RelevantSpanValidation {
+    qubits: Vec<Qubit>,
+    source_matrix: Array2<Complex64>,
+    converted: Vec<Option<ValueOperation>>,
+    included_orders: HashSet<usize>,
+    matched_orders: HashSet<usize>,
+    span_start: usize,
+    span_end: usize,
+}
+
+#[cfg(test)]
 fn patch_preserves_relevant_span(
     block: &TwoQubitNumericBlock,
     ops: &[OperationView<'_>],
     replacement: &[ValueOperation],
     synthesis_phase: f64,
 ) -> Result<bool, CompilerError> {
+    patch_preserves_relevant_span_cached(block, ops, replacement, synthesis_phase, &mut None)
+}
+
+fn patch_preserves_relevant_span_cached(
+    block: &TwoQubitNumericBlock,
+    ops: &[OperationView<'_>],
+    replacement: &[ValueOperation],
+    synthesis_phase: f64,
+    prepared: &mut Option<RelevantSpanValidation>,
+) -> Result<bool, CompilerError> {
+    if prepared.is_none() {
+        *prepared = prepare_relevant_span(block, ops)?;
+    }
+    let Some(prepared) = prepared else {
+        return Ok(false);
+    };
+    if replacement
+        .iter()
+        .flat_map(|operation| operation.qubits.iter())
+        .any(|qubit| !prepared.qubits.contains(qubit))
+    {
+        return Ok(false);
+    }
+
+    let mut replacement_ops = Vec::new();
+    for (order, cached) in prepared
+        .converted
+        .iter()
+        .enumerate()
+        .take(prepared.span_end + 1)
+        .skip(prepared.span_start)
+    {
+        if order == block.first_order() {
+            replacement_ops.extend(replacement.iter().cloned());
+        }
+        if prepared.matched_orders.contains(&order) {
+            continue;
+        }
+        if prepared.included_orders.contains(&order) {
+            replacement_ops.push(
+                cached
+                    .as_ref()
+                    .expect("included operation was converted")
+                    .clone(),
+            );
+        }
+    }
+    let Ok(replacement_matrix) =
+        value_operations_to_matrix(&prepared.qubits, &replacement_ops, synthesis_phase)
+    else {
+        return Ok(false);
+    };
+    Ok(prepared.source_matrix.shape() == replacement_matrix.shape()
+        && prepared
+            .source_matrix
+            .iter()
+            .zip(replacement_matrix.iter())
+            .all(|(source, replacement)| {
+                (*source - *replacement).norm() <= PATCH_VALIDATION_TOLERANCE
+            }))
+}
+
+fn prepare_relevant_span(
+    block: &TwoQubitNumericBlock,
+    ops: &[OperationView<'_>],
+) -> Result<Option<RelevantSpanValidation>, CompilerError> {
     let mut relevant_qubits = HashSet::new();
     let mut included_orders = block
         .matched_orders
@@ -430,18 +555,15 @@ fn patch_preserves_relevant_span(
     for &order in &included_orders {
         relevant_qubits.extend(ops[order].operation.qubits.iter().copied());
     }
-    for operation in replacement {
-        relevant_qubits.extend(operation.qubits.iter().copied());
-    }
     if relevant_qubits.len() > MAX_PATCH_VALIDATION_QUBITS {
-        return Ok(false);
+        return Ok(None);
     }
 
     let Some(span_start) = included_orders.iter().min().copied() else {
-        return Ok(false);
+        return Ok(None);
     };
     let Some(span_end) = included_orders.iter().max().copied() else {
-        return Ok(false);
+        return Ok(None);
     };
 
     let mut changed = true;
@@ -462,13 +584,13 @@ fn patch_preserves_relevant_span(
                 continue;
             }
             let Some(operation) = operation_view_to_value(view) else {
-                return Ok(false);
+                return Ok(None);
             };
             converted[order] = Some(operation);
             included_orders.insert(order);
             relevant_qubits.extend(view.operation.qubits.iter().copied());
             if relevant_qubits.len() > MAX_PATCH_VALIDATION_QUBITS {
-                return Ok(false);
+                return Ok(None);
             }
             changed = true;
         }
@@ -477,14 +599,13 @@ fn patch_preserves_relevant_span(
     for &order in &included_orders {
         if converted[order].is_none() {
             let Some(operation) = operation_view_to_value(&ops[order]) else {
-                return Ok(false);
+                return Ok(None);
             };
             converted[order] = Some(operation);
         }
     }
 
     let mut source_ops = Vec::new();
-    let mut replacement_ops = Vec::new();
     let matched_orders = block.matched_orders.iter().copied().collect::<HashSet<_>>();
     for (order, cached) in converted
         .iter()
@@ -500,41 +621,23 @@ fn patch_preserves_relevant_span(
                     .clone(),
             );
         }
-
-        if order == block.first_order() {
-            replacement_ops.extend(replacement.iter().cloned());
-        }
-        if matched_orders.contains(&order) {
-            continue;
-        }
-        if included_orders.contains(&order) {
-            replacement_ops.push(
-                cached
-                    .as_ref()
-                    .expect("included operation was converted")
-                    .clone(),
-            );
-        }
     }
 
     let mut qubits = relevant_qubits.into_iter().collect::<Vec<_>>();
     qubits.sort_by_key(|qubit| qubit.index());
 
     let Ok(source_matrix) = value_operations_to_matrix(&qubits, &source_ops, 0.0) else {
-        return Ok(false);
+        return Ok(None);
     };
-    let Ok(replacement_matrix) =
-        value_operations_to_matrix(&qubits, &replacement_ops, synthesis_phase)
-    else {
-        return Ok(false);
-    };
-    Ok(source_matrix.shape() == replacement_matrix.shape()
-        && source_matrix
-            .iter()
-            .zip(replacement_matrix.iter())
-            .all(|(source, replacement)| {
-                (*source - *replacement).norm() <= PATCH_VALIDATION_TOLERANCE
-            }))
+    Ok(Some(RelevantSpanValidation {
+        qubits,
+        source_matrix,
+        converted,
+        included_orders,
+        matched_orders,
+        span_start,
+        span_end,
+    }))
 }
 
 fn operation_view_to_value(view: &OperationView<'_>) -> Option<ValueOperation> {

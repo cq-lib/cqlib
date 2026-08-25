@@ -323,13 +323,18 @@ pub fn synthesize_numeric_2q_unitary(
 pub fn plan_numeric_2q_unitary(
     request: TwoQubitSynthesisRequest<'_>,
 ) -> Result<Vec<TwoQubitSynthesisCandidate>, CompilerError> {
-    if request.qubits[0] == request.qubits[1] {
-        return Err(CompilerError::InvalidInput(format!(
-            "2q unitary synthesis requires distinct qubits, both are {}",
-            request.qubits[0]
-        )));
-    }
+    validate_two_qubit_qargs(request.qubits)?;
     let decomp = kak_decompose(request.matrix)?;
+    plan_numeric_2q_unitary_from_kak(request, &decomp)
+}
+
+/// Plans candidates from a KAK decomposition already validated for the exact
+/// request matrix.
+pub(crate) fn plan_numeric_2q_unitary_from_kak(
+    request: TwoQubitSynthesisRequest<'_>,
+    decomp: &KakDecomposition,
+) -> Result<Vec<TwoQubitSynthesisCandidate>, CompilerError> {
+    validate_two_qubit_qargs(request.qubits)?;
     let mut candidates = Vec::new();
     let needs_cx_family = request
         .target
@@ -357,7 +362,7 @@ pub fn plan_numeric_2q_unitary(
             backend,
             CandidateGenerationContext {
                 matrix: request.matrix,
-                decomp: &decomp,
+                decomp,
                 qubits: request.qubits,
                 target: &request.target,
                 cx_basis: cx_basis.as_ref(),
@@ -379,6 +384,43 @@ pub(crate) fn plan_numeric_2q_unitary_for_device(
     qubits: [Qubit; 2],
     context: &DeviceTwoQubitSynthesisContext,
 ) -> Result<Vec<DeviceTwoQubitSynthesisCandidate>, CompilerError> {
+    validate_two_qubit_qargs(qubits)?;
+    let decomp = kak_decompose(matrix)?;
+    let swap = StandardGate::SWAP
+        .matrix(&[])
+        .map_err(CompilerError::Circuit)?
+        .into_owned();
+    let reversed_matrix = swap.dot(matrix).dot(&swap);
+    let reversed_decomp = kak_decompose(&reversed_matrix)?;
+    plan_numeric_2q_unitary_for_device_from_kak(
+        matrix,
+        qubits,
+        context,
+        &decomp,
+        &reversed_matrix,
+        &reversed_decomp,
+    )
+}
+
+fn validate_two_qubit_qargs(qubits: [Qubit; 2]) -> Result<(), CompilerError> {
+    if qubits[0] == qubits[1] {
+        return Err(CompilerError::InvalidInput(format!(
+            "2q unitary synthesis requires distinct qubits, both are {}",
+            qubits[0]
+        )));
+    }
+    Ok(())
+}
+
+/// Device-aware planning from exact forward and reversed KAK decompositions.
+pub(crate) fn plan_numeric_2q_unitary_for_device_from_kak(
+    matrix: &Array2<Complex64>,
+    qubits: [Qubit; 2],
+    context: &DeviceTwoQubitSynthesisContext,
+    decomp: &KakDecomposition,
+    reversed_matrix: &Array2<Complex64>,
+    reversed_decomp: &KakDecomposition,
+) -> Result<Vec<DeviceTwoQubitSynthesisCandidate>, CompilerError> {
     let mut native_2q = context
         .native_two_qubit_backends(qubits)
         .into_iter()
@@ -387,25 +429,26 @@ pub(crate) fn plan_numeric_2q_unitary_for_device(
     let target = TwoQubitSynthesisTarget::for_device_backends(native_2q);
     let mut oriented = Vec::new();
 
-    for candidate in plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
-        matrix,
-        qubits,
-        target: target.clone(),
-    })? {
+    for candidate in plan_numeric_2q_unitary_from_kak(
+        TwoQubitSynthesisRequest {
+            matrix,
+            qubits,
+            target: target.clone(),
+        },
+        decomp,
+    )? {
         push_device_candidate(&mut oriented, candidate, qubits, 0, context)?;
     }
 
-    let swap = StandardGate::SWAP
-        .matrix(&[])
-        .map_err(CompilerError::Circuit)?
-        .into_owned();
-    let reversed_matrix = swap.dot(matrix).dot(&swap);
     let reversed_qubits = [qubits[1], qubits[0]];
-    for candidate in plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
-        matrix: &reversed_matrix,
-        qubits: reversed_qubits,
-        target,
-    })? {
+    for candidate in plan_numeric_2q_unitary_from_kak(
+        TwoQubitSynthesisRequest {
+            matrix: reversed_matrix,
+            qubits: reversed_qubits,
+            target,
+        },
+        reversed_decomp,
+    )? {
         if candidate_matches_matrix(
             &candidate.operations,
             candidate.global_phase,
@@ -422,7 +465,7 @@ pub(crate) fn plan_numeric_2q_unitary_for_device(
 /// Selects the best unitary decomposition without comparing unlike placement domains.
 pub(crate) fn select_device_unitary_candidate(
     mut candidates: Vec<DeviceTwoQubitSynthesisCandidate>,
-    qubits: [Qubit; 2],
+    _qubits: [Qubit; 2],
     context: &DeviceTwoQubitSynthesisContext,
 ) -> Option<TwoQubitSynthesisCandidate> {
     if candidates.is_empty() {
@@ -460,11 +503,10 @@ pub(crate) fn select_device_unitary_candidate(
                 candidates.sort_by(compare_stable_device_candidates);
             } else {
                 for candidate in &mut candidates {
-                    candidate.physical_cost = context.worst_cost_on_domain(
-                        &candidate.candidate.operations,
-                        qubits,
-                        &common_domain,
-                    )?;
+                    candidate.physical_cost = candidate
+                        .pre_layout
+                        .as_ref()?
+                        .worst_cost_on_domain(&common_domain)?;
                 }
                 candidates.sort_by(compare_device_candidates);
             }

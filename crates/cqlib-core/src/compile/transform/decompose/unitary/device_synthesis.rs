@@ -37,6 +37,20 @@ use crate::device::{Device, PhysicalQubit};
 use smallvec::smallvec;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_DEVICE_SYNTHESIS_CONTEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+const PHYSICAL_SEQUENCE_COST_CACHE_BUDGET: usize = 4096;
+
+fn next_device_synthesis_context_generation() -> u64 {
+    let generation = NEXT_DEVICE_SYNTHESIS_CONTEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    assert_ne!(
+        generation, 0,
+        "device synthesis context generation exhausted"
+    );
+    generation
+}
 
 /// Explicit interpretation of circuit qubit identifiers during device synthesis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,10 +80,37 @@ pub(crate) struct DevicePreLayoutEvaluation {
     pub(crate) domain: OrderedPairDomain,
     pub(crate) coverage: DeviceCoverageKey,
     pub(crate) worst_cost: DevicePhysicalCost,
+    // Sorted by ordered pair. Arc keeps candidate/template clones shallow and
+    // a packed slice avoids one BTree node allocation per topology edge.
+    pair_costs: Arc<[([PhysicalQubit; 2], DevicePhysicalCost)]>,
+}
+
+impl DevicePreLayoutEvaluation {
+    /// Returns the worst already-computed cost on `domain`.
+    ///
+    /// Pre-layout evaluation deliberately retains the exact per-pair results
+    /// used to derive its public comparison fields. Candidate selection can
+    /// therefore compare a candidate on a source domain without scheduling
+    /// the same native sequence a second time.
+    pub(crate) fn worst_cost_on_domain(
+        &self,
+        domain: &OrderedPairDomain,
+    ) -> Option<DevicePhysicalCost> {
+        domain
+            .iter()
+            .filter_map(|pair| {
+                self.pair_costs
+                    .binary_search_by_key(pair, |(candidate, _)| *candidate)
+                    .ok()
+                    .map(|index| self.pair_costs[index].1)
+            })
+            .max_by(|left, right| left.compare(*right))
+    }
 }
 
 #[derive(Debug)]
 struct DeviceTwoQubitSynthesisData {
+    generation: u64,
     placement: DeviceSynthesisPlacement,
     eligible_pairs: BTreeSet<[PhysicalQubit; 2]>,
     eligible_components: BTreeSet<usize>,
@@ -77,6 +118,30 @@ struct DeviceTwoQubitSynthesisData {
     native_backends: BTreeMap<[PhysicalQubit; 2], HashSet<StandardGate>>,
     catalog: NativePlanCatalog,
     estimator: CalibrationEstimator,
+    physical_cost_cache: Mutex<PhysicalSequenceCostCache>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PhysicalSequenceCostKey {
+    ordered_pair: [PhysicalQubit; 2],
+    states: Vec<DeviceGateState>,
+}
+
+#[derive(Debug, Default)]
+struct PhysicalSequenceCostCache {
+    entries: HashMap<PhysicalSequenceCostKey, Result<DevicePhysicalCost, DeviceContextCostFailure>>,
+    stats: DevicePhysicalCostCacheStats,
+}
+
+/// Low-overhead diagnostics for the request-scoped physical sequence cache.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DevicePhysicalCostCacheStats {
+    pub(crate) lookups: usize,
+    pub(crate) hits: usize,
+    pub(crate) misses: usize,
+    pub(crate) entries: usize,
+    pub(crate) capacity_rejections: usize,
+    pub(crate) parameter_sensitive_bypasses: usize,
 }
 
 /// Pass-local exact device planning data shared by all matrices and blocks.
@@ -153,6 +218,7 @@ impl DeviceTwoQubitSynthesisContext {
 
         Ok(Self {
             data: Arc::new(DeviceTwoQubitSynthesisData {
+                generation: next_device_synthesis_context_generation(),
                 placement,
                 eligible_pairs,
                 eligible_components,
@@ -160,12 +226,28 @@ impl DeviceTwoQubitSynthesisContext {
                 native_backends,
                 catalog,
                 estimator,
+                physical_cost_cache: Mutex::new(PhysicalSequenceCostCache::default()),
             }),
         })
     }
 
     pub(crate) fn placement(&self) -> DeviceSynthesisPlacement {
         self.data.placement
+    }
+
+    /// Opaque identity of the immutable planning and calibration snapshot.
+    /// Clones retain it; every rebuilt context receives a fresh generation.
+    pub(crate) fn generation(&self) -> u64 {
+        self.data.generation
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn physical_cost_cache_stats(&self) -> DevicePhysicalCostCacheStats {
+        self.data
+            .physical_cost_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .stats
     }
 
     /// KAK backends directly native somewhere relevant to this request.
@@ -197,41 +279,29 @@ impl DeviceTwoQubitSynthesisContext {
         if self.data.placement != DeviceSynthesisPlacement::PreLayoutEnvelope {
             return None;
         }
-        let domain = self.feasible_domain(operations, logical_qubits);
-        let worst_cost = self.worst_cost_on_domain(operations, logical_qubits, &domain)?;
+        let pair_costs = self
+            .data
+            .eligible_pairs
+            .iter()
+            .filter_map(|pair| {
+                self.cost_on_pair(operations, logical_qubits, *pair)
+                    .map(|cost| (*pair, cost))
+            })
+            .collect::<Vec<_>>();
+        let domain = pair_costs
+            .iter()
+            .map(|(pair, _)| *pair)
+            .collect::<OrderedPairDomain>();
+        let worst_cost = pair_costs
+            .iter()
+            .map(|(_, cost)| *cost)
+            .max_by(|left, right| left.compare(*right))?;
         Some(DevicePreLayoutEvaluation {
             coverage: self.coverage_key(&domain),
             domain,
             worst_cost,
+            pair_costs: pair_costs.into(),
         })
-    }
-
-    pub(crate) fn feasible_domain(
-        &self,
-        operations: &[ValueOperation],
-        logical_qubits: [Qubit; 2],
-    ) -> OrderedPairDomain {
-        self.data
-            .eligible_pairs
-            .iter()
-            .copied()
-            .filter(|pair| {
-                self.cost_on_pair(operations, logical_qubits, *pair)
-                    .is_some()
-            })
-            .collect()
-    }
-
-    pub(crate) fn worst_cost_on_domain(
-        &self,
-        operations: &[ValueOperation],
-        logical_qubits: [Qubit; 2],
-        domain: &OrderedPairDomain,
-    ) -> Option<DevicePhysicalCost> {
-        domain
-            .iter()
-            .filter_map(|pair| self.cost_on_pair(operations, logical_qubits, *pair))
-            .max_by(|left, right| left.compare(*right))
     }
 
     #[allow(dead_code)]
@@ -346,8 +416,8 @@ impl DeviceTwoQubitSynthesisContext {
         circuit_qubits: [Qubit; 2],
         physical_pair: [PhysicalQubit; 2],
     ) -> Result<DevicePhysicalCost, DeviceContextCostFailure> {
-        let mut leaves = Vec::new();
-        let mut aggregate = self.data.estimator.identity_cost();
+        let mut cacheable = true;
+        let mut states = Vec::with_capacity(operations.len());
         for operation in operations {
             let ValueInstruction::Instruction(instruction) = &operation.instruction else {
                 return Err(DeviceContextCostFailure::InvalidOperation(
@@ -357,6 +427,10 @@ impl DeviceTwoQubitSynthesisContext {
             if matches!(instruction, Instruction::Standard(StandardGate::GPhase)) {
                 continue;
             }
+            cacheable &= self
+                .data
+                .estimator
+                .gate_cost_is_parameter_invariant(instruction);
             let ordered_qargs = operation
                 .qubits
                 .iter()
@@ -382,14 +456,87 @@ impl DeviceTwoQubitSynthesisContext {
                         "missing device-planning key for {instruction}"
                     ))
                 })?;
-            let summary = self.catalog_summary(&state)?;
-            aggregate = aggregate.combine(self.data.estimator.cost(summary));
-            leaves.extend(summary.leaves.iter().cloned());
+            states.push(state);
         }
-        Ok(self
+
+        let key = PhysicalSequenceCostKey {
+            ordered_pair: physical_pair,
+            states,
+        };
+        if cacheable {
+            let cached = {
+                let mut cache = self
+                    .data
+                    .physical_cost_cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                cache.stats.lookups = cache.stats.lookups.saturating_add(1);
+                let cached = cache.entries.get(&key).cloned();
+                if cached.is_some() {
+                    cache.stats.hits = cache.stats.hits.saturating_add(1);
+                } else {
+                    cache.stats.misses = cache.stats.misses.saturating_add(1);
+                }
+                cached
+            };
+            if let Some(cached) = cached {
+                #[cfg(test)]
+                {
+                    let uncached = self.compute_physical_sequence_cost(&key)?;
+                    assert_eq!(
+                        cached.as_ref().ok(),
+                        Some(&uncached),
+                        "parameter-independent physical cost cache changed exact cost"
+                    );
+                }
+                return cached;
+            }
+        } else {
+            let mut cache = self
+                .data
+                .physical_cost_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache.stats.parameter_sensitive_bypasses =
+                cache.stats.parameter_sensitive_bypasses.saturating_add(1);
+        }
+
+        let result = self.compute_physical_sequence_cost(&key);
+        if cacheable {
+            let mut cache = self
+                .data
+                .physical_cost_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cache.entries.len() < PHYSICAL_SEQUENCE_COST_CACHE_BUDGET {
+                cache.entries.insert(key, result.clone());
+                cache.stats.entries = cache.entries.len();
+            } else {
+                cache.stats.capacity_rejections = cache.stats.capacity_rejections.saturating_add(1);
+            }
+        }
+        result
+    }
+
+    fn compute_physical_sequence_cost(
+        &self,
+        key: &PhysicalSequenceCostKey,
+    ) -> Result<DevicePhysicalCost, DeviceContextCostFailure> {
+        let mut scheduler = self
             .data
             .estimator
-            .schedule_physical_cost(&leaves, aggregate))
+            .two_qubit_cost_accumulator(key.ordered_pair);
+        let mut aggregate = self.data.estimator.identity_cost();
+        for state in &key.states {
+            let summary = self.catalog_summary(state)?;
+            aggregate = aggregate.combine(self.data.estimator.cost(summary));
+            scheduler.add_leaves(&summary.leaves).map_err(|reason| {
+                DeviceContextCostFailure::InvalidOperation(format!(
+                    "invalid native two-qubit schedule: {reason}"
+                ))
+            })?;
+        }
+        Ok(scheduler.finish(aggregate))
     }
 
     fn catalog_summary(

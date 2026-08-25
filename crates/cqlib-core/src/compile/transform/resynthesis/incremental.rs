@@ -17,6 +17,8 @@ use super::collector::TwoQubitNumericBlock;
 use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
 use super::dag_collector::{AnchorDependencyTrace, DagCollectionContext, is_two_qubit_anchor};
+use super::maximal_run::collect_maximal_two_qubit_runs;
+use super::synthesis_cache::{TwoQubitSynthesisCache, TwoQubitSynthesisCacheStats};
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, Instruction, Operation, Parameter, Qubit,
 };
@@ -43,6 +45,11 @@ pub(crate) struct NativeWorksetStats {
     pub(crate) anchors_recomputed: usize,
     pub(crate) dependency_failures: usize,
     pub(crate) cache_rejections: usize,
+    pub(crate) maximal_blocks_total: usize,
+    pub(crate) maximal_blocks_reused: usize,
+    pub(crate) maximal_blocks_recomputed: usize,
+    pub(crate) cycle_early_exits: usize,
+    pub(crate) synthesis_cache: TwoQubitSynthesisCacheStats,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -348,14 +355,31 @@ struct ScopeCache {
     snapshots: Vec<OperationSnapshot>,
     operation_ids: Vec<NativeOperationId>,
     anchors: BTreeMap<NativeOperationId, CachedAnchor>,
+    maximal_blocks: Vec<CachedBlock>,
+    maximal_blocks_valid: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PreparedScopeDiff {
+    inserted: BTreeSet<NativeOperationId>,
+    removed: BTreeSet<NativeOperationId>,
+    touched_qubits: BTreeSet<Qubit>,
+    ambiguous_boundary: bool,
 }
 
 impl ScopeCache {
     fn retained_id_count(&self) -> usize {
-        self.anchors
+        let anchors = self
+            .anchors
             .values()
             .map(CachedAnchor::retained_id_count)
-            .fold(0usize, usize::saturating_add)
+            .fold(0usize, usize::saturating_add);
+        anchors.saturating_add(
+            self.maximal_blocks
+                .iter()
+                .map(CachedBlock::retained_id_count)
+                .fold(0usize, usize::saturating_add),
+        )
     }
 }
 
@@ -365,8 +389,10 @@ pub(crate) struct NativeResynthesisSession {
     next_operation_id: u64,
     scopes: BTreeMap<NativeScopeId, ScopeCache>,
     next_scopes: BTreeMap<NativeScopeId, ScopeCache>,
+    prepared_diffs: BTreeMap<NativeScopeId, PreparedScopeDiff>,
     next_cached_dependency_ids: usize,
     stats: NativeWorksetStats,
+    pub(super) synthesis_cache: TwoQubitSynthesisCache,
 }
 
 impl NativeResynthesisSession {
@@ -377,8 +403,10 @@ impl NativeResynthesisSession {
             next_operation_id: 0,
             scopes: BTreeMap::new(),
             next_scopes: BTreeMap::new(),
+            prepared_diffs: BTreeMap::new(),
             next_cached_dependency_ids: 0,
             stats: NativeWorksetStats::default(),
+            synthesis_cache: TwoQubitSynthesisCache::new_native_session(),
         }
     }
 
@@ -388,6 +416,7 @@ impl NativeResynthesisSession {
             self.config = Some(config.clone());
         }
         self.next_scopes.clear();
+        self.prepared_diffs.clear();
         self.next_cached_dependency_ids = 0;
     }
 
@@ -395,8 +424,15 @@ impl NativeResynthesisSession {
         self.scopes = std::mem::take(&mut self.next_scopes);
     }
 
-    pub(crate) const fn stats(&self) -> NativeWorksetStats {
-        self.stats
+    pub(crate) fn stats(&self) -> NativeWorksetStats {
+        NativeWorksetStats {
+            synthesis_cache: self.synthesis_cache.stats(),
+            ..self.stats
+        }
+    }
+
+    pub(crate) fn record_cycle_early_exit(&mut self) {
+        self.stats.cycle_early_exits = self.stats.cycle_early_exits.saturating_add(1);
     }
 
     pub(crate) fn current_operation_key(&self, scope: &NativeScopeId, order: usize) -> Option<u64> {
@@ -405,6 +441,111 @@ impl NativeResynthesisSession {
             .operation_ids
             .get(order)
             .map(|id| id.0)
+    }
+
+    /// Reuses maximal runs without preparing the more expensive bounded-DAG
+    /// workset when the entire scope is bit-exactly unchanged.
+    pub(crate) fn reuse_unchanged_maximal_blocks(
+        &mut self,
+        scope: &NativeScopeId,
+        circuit: &Circuit,
+        operations: &[Operation],
+    ) -> Result<Option<Vec<TwoQubitNumericBlock>>, CompilerError> {
+        if self.policy != NativeResynthesisPolicy::Incremental {
+            return Ok(None);
+        }
+        let snapshots = operations
+            .iter()
+            .map(|operation| OperationSnapshot::new(circuit, operation))
+            .collect::<Result<Vec<_>, _>>()?;
+        let Some(previous) = self.scopes.get(scope) else {
+            return Ok(None);
+        };
+        if !previous.maximal_blocks_valid
+            || previous.snapshots.len() != snapshots.len()
+            || !previous
+                .snapshots
+                .iter()
+                .zip(&snapshots)
+                .all(|(left, right)| left.exact_eq(right))
+        {
+            return Ok(None);
+        }
+
+        let id_to_order = previous
+            .operation_ids
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(order, id)| (id, order))
+            .collect::<BTreeMap<_, _>>();
+        let blocks = previous
+            .maximal_blocks
+            .iter()
+            .map(|block| block.materialize(&id_to_order))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "unchanged maximal block lost an operation mapping".to_string(),
+                )
+            })?;
+        let retained = previous.retained_id_count();
+        self.next_cached_dependency_ids = self.next_cached_dependency_ids.saturating_add(retained);
+        self.next_scopes.insert(scope.clone(), previous.clone());
+        self.prepared_diffs
+            .insert(scope.clone(), PreparedScopeDiff::default());
+        self.stats.scopes_total = self.stats.scopes_total.saturating_add(1);
+        self.stats.scopes_unchanged = self.stats.scopes_unchanged.saturating_add(1);
+        self.stats.maximal_blocks_total =
+            self.stats.maximal_blocks_total.saturating_add(blocks.len());
+        self.stats.maximal_blocks_reused = self
+            .stats
+            .maximal_blocks_reused
+            .saturating_add(blocks.len());
+        Ok(Some(blocks))
+    }
+
+    /// Prepares only the exact operation identity map needed to cache maximal
+    /// runs. Bounded-DAG construction remains deferred until maximal patches
+    /// prove insufficient for this scope.
+    pub(crate) fn prepare_scope_for_maximal(
+        &mut self,
+        scope: &NativeScopeId,
+        circuit: &Circuit,
+        operations: &[Operation],
+        config: &TwoQubitBlockResynthesisConfig,
+    ) -> Result<(), CompilerError> {
+        let snapshots = operations
+            .iter()
+            .map(|operation| OperationSnapshot::new(circuit, operation))
+            .collect::<Result<Vec<_>, _>>()?;
+        let previous = self.scopes.get(scope).cloned();
+        let (operation_ids, inserted, removed, touched_qubits, ambiguous_boundary) =
+            self.reconcile(previous.as_ref(), &snapshots, config);
+        self.stats.scopes_total = self.stats.scopes_total.saturating_add(1);
+        self.next_scopes.insert(
+            scope.clone(),
+            ScopeCache {
+                snapshots,
+                operation_ids,
+                // A changed scope cannot reuse bounded anchor traces until the
+                // DAG validates their dependencies. Keep them empty here so a
+                // later `collect_blocks` takes its normal dirty-check path.
+                anchors: BTreeMap::new(),
+                maximal_blocks: Vec::new(),
+                maximal_blocks_valid: false,
+            },
+        );
+        self.prepared_diffs.insert(
+            scope.clone(),
+            PreparedScopeDiff {
+                inserted,
+                removed,
+                touched_qubits,
+                ambiguous_boundary,
+            },
+        );
+        Ok(())
     }
 
     pub(crate) fn collect_blocks(
@@ -416,14 +557,104 @@ impl NativeResynthesisSession {
         commutation: &mut CachedCommutation,
         config: &TwoQubitBlockResynthesisConfig,
     ) -> Result<Vec<TwoQubitNumericBlock>, CompilerError> {
-        self.stats.scopes_total = self.stats.scopes_total.saturating_add(1);
-        let snapshots = operations
-            .iter()
-            .map(|operation| OperationSnapshot::new(circuit, operation))
-            .collect::<Result<Vec<_>, _>>()?;
+        // A maximal-only fast path may already have committed an exact copy of
+        // this scope. Reuse its anchors if complete. If bounded collection was
+        // not admitted previously, fall through and rebuild only that workset.
+        let prepared = self.next_scopes.remove(scope);
+        let already_counted = prepared.is_some();
+        if let Some(prepared) = &prepared {
+            let anchor_orders = views
+                .iter()
+                .enumerate()
+                .filter_map(|(order, view)| is_two_qubit_anchor(view, config).then_some(order))
+                .collect::<Vec<_>>();
+            if anchor_orders.iter().all(|order| {
+                prepared
+                    .anchors
+                    .contains_key(&prepared.operation_ids[*order])
+            }) {
+                let id_to_order = prepared
+                    .operation_ids
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(order, id)| (id, order))
+                    .collect::<BTreeMap<_, _>>();
+                let blocks = anchor_orders
+                    .iter()
+                    .filter_map(|order| {
+                        prepared.anchors[&prepared.operation_ids[*order]]
+                            .block
+                            .as_ref()
+                    })
+                    .map(|block| block.materialize(&id_to_order))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| {
+                        CompilerError::InvariantViolation(
+                            "prepared resynthesis scope lost an operation mapping".to_string(),
+                        )
+                    })?;
+                self.stats.anchors_total =
+                    self.stats.anchors_total.saturating_add(anchor_orders.len());
+                self.stats.anchors_reused = self
+                    .stats
+                    .anchors_reused
+                    .saturating_add(anchor_orders.len());
+                self.next_scopes.insert(scope.clone(), prepared.clone());
+                self.prepared_diffs.remove(scope);
+                return Ok(blocks);
+            }
+            self.next_cached_dependency_ids = self
+                .next_cached_dependency_ids
+                .saturating_sub(prepared.retained_id_count());
+        }
+        if !already_counted {
+            self.stats.scopes_total = self.stats.scopes_total.saturating_add(1);
+        }
         let previous = self.scopes.get(scope).cloned();
-        let (operation_ids, inserted, removed, touched_qubits, ambiguous_boundary) =
-            self.reconcile(previous.as_ref(), &snapshots, config);
+        let (
+            snapshots,
+            operation_ids,
+            inserted,
+            removed,
+            touched_qubits,
+            ambiguous_boundary,
+            mut maximal_blocks,
+            mut maximal_blocks_valid,
+        ) = if let Some(prepared) = prepared {
+            let diff = self.prepared_diffs.remove(scope).ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "prepared resynthesis scope lost its exact change set".to_string(),
+                )
+            })?;
+            (
+                prepared.snapshots,
+                prepared.operation_ids,
+                diff.inserted,
+                diff.removed,
+                diff.touched_qubits,
+                diff.ambiguous_boundary,
+                prepared.maximal_blocks,
+                prepared.maximal_blocks_valid,
+            )
+        } else {
+            let snapshots = operations
+                .iter()
+                .map(|operation| OperationSnapshot::new(circuit, operation))
+                .collect::<Result<Vec<_>, _>>()?;
+            let (operation_ids, inserted, removed, touched_qubits, ambiguous_boundary) =
+                self.reconcile(previous.as_ref(), &snapshots, config);
+            (
+                snapshots,
+                operation_ids,
+                inserted,
+                removed,
+                touched_qubits,
+                ambiguous_boundary,
+                Vec::new(),
+                false,
+            )
+        };
         let id_to_order = operation_ids
             .iter()
             .copied()
@@ -572,14 +803,102 @@ impl NativeResynthesisSession {
             }
             self.stats.anchors_recomputed = self.stats.anchors_recomputed.saturating_add(1);
         }
+        if maximal_blocks_valid {
+            let retained = maximal_blocks
+                .iter()
+                .map(CachedBlock::retained_id_count)
+                .fold(0usize, usize::saturating_add);
+            if self.next_cached_dependency_ids.saturating_add(retained) <= MAX_CACHED_DEPENDENCY_IDS
+            {
+                self.next_cached_dependency_ids =
+                    self.next_cached_dependency_ids.saturating_add(retained);
+            } else {
+                maximal_blocks.clear();
+                maximal_blocks_valid = false;
+                self.stats.cache_rejections = self.stats.cache_rejections.saturating_add(1);
+            }
+        }
         self.next_scopes.insert(
             scope.clone(),
             ScopeCache {
                 snapshots,
                 operation_ids,
                 anchors,
+                maximal_blocks,
+                maximal_blocks_valid,
             },
         );
+        Ok(blocks)
+    }
+
+    /// Reuses maximal uninterrupted runs for an exact unchanged scope. Changed
+    /// scopes are conservatively recollected; their unchanged blocks still hit
+    /// the run-scoped block-facts and synthesis caches.
+    pub(crate) fn collect_maximal_blocks(
+        &mut self,
+        scope: &NativeScopeId,
+        views: &[OperationView<'_>],
+    ) -> Result<Vec<TwoQubitNumericBlock>, CompilerError> {
+        let current = self.next_scopes.get_mut(scope).ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "maximal collection requested before incremental scope preparation".to_string(),
+            )
+        })?;
+        if self.policy == NativeResynthesisPolicy::Incremental && current.maximal_blocks_valid {
+            let id_to_order = current
+                .operation_ids
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(order, id)| (id, order))
+                .collect::<BTreeMap<_, _>>();
+            let blocks = current
+                .maximal_blocks
+                .iter()
+                .map(|block| block.materialize(&id_to_order))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "cached maximal block lost an operation mapping".to_string(),
+                    )
+                })?;
+            self.stats.maximal_blocks_total =
+                self.stats.maximal_blocks_total.saturating_add(blocks.len());
+            self.stats.maximal_blocks_reused = self
+                .stats
+                .maximal_blocks_reused
+                .saturating_add(blocks.len());
+            return Ok(blocks);
+        }
+
+        let blocks = collect_maximal_two_qubit_runs(views);
+        if self.policy == NativeResynthesisPolicy::Incremental {
+            let cached = blocks
+                .iter()
+                .map(|block| CachedBlock::new(block, &current.operation_ids))
+                .collect::<Vec<_>>();
+            let retained = cached
+                .iter()
+                .map(CachedBlock::retained_id_count)
+                .fold(0usize, usize::saturating_add);
+            if self.next_cached_dependency_ids.saturating_add(retained) <= MAX_CACHED_DEPENDENCY_IDS
+            {
+                current.maximal_blocks = cached;
+                current.maximal_blocks_valid = true;
+                self.next_cached_dependency_ids =
+                    self.next_cached_dependency_ids.saturating_add(retained);
+            } else {
+                current.maximal_blocks.clear();
+                current.maximal_blocks_valid = false;
+                self.stats.cache_rejections = self.stats.cache_rejections.saturating_add(1);
+            }
+        }
+        self.stats.maximal_blocks_total =
+            self.stats.maximal_blocks_total.saturating_add(blocks.len());
+        self.stats.maximal_blocks_recomputed = self
+            .stats
+            .maximal_blocks_recomputed
+            .saturating_add(blocks.len());
         Ok(blocks)
     }
 
