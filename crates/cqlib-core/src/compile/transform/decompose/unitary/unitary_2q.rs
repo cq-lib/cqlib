@@ -27,8 +27,8 @@
 //! The target-aware planner emits only exact candidates. `PauliRotations`
 //! emits the Cartan core directly as `RXX`/`RYY`/`RZZ`; `Rzz` emits the same
 //! Cartan core with local basis changes for `XX` and `YY`; `Cx`/`Cy`/`Cz`
-//! enumerate zero through three entangler templates and keep only candidates
-//! whose reconstructed matrix matches the input matrix within exact numerical
+//! select a feasible entangler template and keep only candidates whose
+//! reconstructed matrix matches the input matrix within exact numerical
 //! tolerance.
 
 use super::matrix::{c, dagger, mat2};
@@ -38,17 +38,15 @@ use super::{
     DevicePhysicalCost, DevicePreLayoutEvaluation, DeviceSynthesisPlacement,
     DeviceTwoQubitSynthesisContext,
 };
-use crate::circuit::gate::gate_matrix::rz_gate;
 use crate::circuit::{Instruction, ParameterValue, Qubit, StandardGate, ValueOperation};
 use crate::compile::CompilerError;
 use crate::compile::transform::target_basis::{
     TargetBasisCost, TargetBasisCostModel, TargetBasisSignature,
 };
-use ndarray::Array2;
-use ndarray::linalg::kron;
+use ndarray::{Array2, ArrayView2};
 use num_complex::Complex64;
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 const ANGLE_EPS: f64 = 1e-12;
 const TWO_QUBIT_EXACT_TOLERANCE: f64 = 1e-10;
@@ -342,7 +340,7 @@ pub(crate) fn plan_numeric_2q_unitary_from_kak(
         .iter()
         .any(|gate| matches!(gate, StandardGate::CX | StandardGate::CY | StandardGate::CZ));
     let cx_basis = if needs_cx_family {
-        Some(CxBasisData::new()?)
+        Some(&*CX_BASIS_DATA)
     } else {
         None
     };
@@ -365,7 +363,7 @@ pub(crate) fn plan_numeric_2q_unitary_from_kak(
                 decomp,
                 qubits: request.qubits,
                 target: &request.target,
-                cx_basis: cx_basis.as_ref(),
+                cx_basis,
             },
         )?;
     }
@@ -386,20 +384,7 @@ pub(crate) fn plan_numeric_2q_unitary_for_device(
 ) -> Result<Vec<DeviceTwoQubitSynthesisCandidate>, CompilerError> {
     validate_two_qubit_qargs(qubits)?;
     let decomp = kak_decompose(matrix)?;
-    let swap = StandardGate::SWAP
-        .matrix(&[])
-        .map_err(CompilerError::Circuit)?
-        .into_owned();
-    let reversed_matrix = swap.dot(matrix).dot(&swap);
-    let reversed_decomp = kak_decompose(&reversed_matrix)?;
-    plan_numeric_2q_unitary_for_device_from_kak(
-        matrix,
-        qubits,
-        context,
-        &decomp,
-        &reversed_matrix,
-        &reversed_decomp,
-    )
+    plan_numeric_2q_unitary_for_device_from_kak(matrix, qubits, context, &decomp)
 }
 
 fn validate_two_qubit_qargs(qubits: [Qubit; 2]) -> Result<(), CompilerError> {
@@ -412,15 +397,15 @@ fn validate_two_qubit_qargs(qubits: [Qubit; 2]) -> Result<(), CompilerError> {
     Ok(())
 }
 
-/// Device-aware planning from exact forward and reversed KAK decompositions.
+/// Device-aware planning from an exact forward KAK decomposition.
 pub(crate) fn plan_numeric_2q_unitary_for_device_from_kak(
     matrix: &Array2<Complex64>,
     qubits: [Qubit; 2],
     context: &DeviceTwoQubitSynthesisContext,
     decomp: &KakDecomposition,
-    reversed_matrix: &Array2<Complex64>,
-    reversed_decomp: &KakDecomposition,
 ) -> Result<Vec<DeviceTwoQubitSynthesisCandidate>, CompilerError> {
+    let reversed_matrix = swap_conjugated_matrix(matrix);
+    let reversed_decomp = swap_conjugated_kak(decomp);
     let mut native_2q = context
         .native_two_qubit_backends(qubits)
         .into_iter()
@@ -443,23 +428,39 @@ pub(crate) fn plan_numeric_2q_unitary_for_device_from_kak(
     let reversed_qubits = [qubits[1], qubits[0]];
     for candidate in plan_numeric_2q_unitary_from_kak(
         TwoQubitSynthesisRequest {
-            matrix: reversed_matrix,
+            matrix: &reversed_matrix,
             qubits: reversed_qubits,
             target,
         },
-        reversed_decomp,
+        &reversed_decomp,
     )? {
-        if candidate_matches_matrix(
-            &candidate.operations,
-            candidate.global_phase,
-            matrix,
-            qubits,
-        )? {
-            push_device_candidate(&mut oriented, candidate, qubits, 1, context)?;
-        }
+        // The candidate was validated against S U S in the reversed tensor
+        // frame. Interpreting the same labelled operations in the original
+        // frame applies the second conjugation: S (S U S) S = U.
+        push_device_candidate(&mut oriented, candidate, qubits, 1, context)?;
     }
 
     Ok(oriented)
+}
+
+fn swap_conjugated_kak(decomp: &KakDecomposition) -> KakDecomposition {
+    KakDecomposition {
+        global_phase: decomp.global_phase,
+        k1l: decomp.k1r.clone(),
+        k1r: decomp.k1l.clone(),
+        k2l: decomp.k2r.clone(),
+        k2r: decomp.k2l.clone(),
+        a: decomp.a,
+        b: decomp.b,
+        c: decomp.c,
+    }
+}
+
+fn swap_conjugated_matrix(matrix: &Array2<Complex64>) -> Array2<Complex64> {
+    const SWAP_PERMUTATION: [usize; 4] = [0, 2, 1, 3];
+    Array2::from_shape_fn((4, 4), |(row, col)| {
+        matrix[[SWAP_PERMUTATION[row], SWAP_PERMUTATION[col]]]
+    })
 }
 
 /// Selects the best unitary decomposition without comparing unlike placement domains.
@@ -793,7 +794,8 @@ fn generate_backend_candidates(
                     "missing shared CX-family basis data for 2q synthesis planner".to_string(),
                 )
             })?;
-            for entanglers in 0..=3 {
+            let minimum_entanglers = minimum_cx_family_entanglers(context.decomp);
+            for entanglers in minimum_entanglers..=3 {
                 let mut builder = OperationBuilder::default();
                 match backend {
                     TwoQubitUnitaryDecomposeBasis::Cx => emit_cx_with_count(
@@ -822,18 +824,38 @@ fn generate_backend_candidates(
                     )?,
                     _ => unreachable!(),
                 }
-                push_validated_candidate(
+                if push_validated_candidate(
                     candidates,
                     backend,
                     builder,
                     context.matrix,
                     context.qubits,
                     context.target,
-                )?;
+                )? {
+                    // Additional CX-family gates cannot improve the primary
+                    // target-aware two-qubit cost within the same backend.
+                    break;
+                }
             }
         }
     }
     Ok(())
+}
+
+fn minimum_cx_family_entanglers(decomp: &KakDecomposition) -> usize {
+    let near_zero = |value: f64| value.abs() <= TWO_QUBIT_EXACT_TOLERANCE;
+    if near_zero(decomp.a) && near_zero(decomp.b) && near_zero(decomp.c) {
+        0
+    } else if (decomp.a - std::f64::consts::FRAC_PI_4).abs() <= TWO_QUBIT_EXACT_TOLERANCE
+        && near_zero(decomp.b)
+        && near_zero(decomp.c)
+    {
+        1
+    } else if near_zero(decomp.c) {
+        2
+    } else {
+        3
+    }
 }
 
 fn push_validated_candidate(
@@ -843,9 +865,9 @@ fn push_validated_candidate(
     matrix: &Array2<Complex64>,
     qubits: [Qubit; 2],
     target: &TwoQubitSynthesisTarget,
-) -> Result<(), CompilerError> {
+) -> Result<bool, CompilerError> {
     if !candidate_matches_matrix(&builder.operations, builder.global_phase, matrix, qubits)? {
-        return Ok(());
+        return Ok(false);
     }
     let cost = match target_aware_cost_of_value_operations(&builder.operations, target, backend) {
         Ok(cost) => cost,
@@ -853,7 +875,7 @@ fn push_validated_candidate(
             // A candidate that cannot be lowered to the configured physical
             // target is not a viable exact synthesis option. Other backends
             // may still be.
-            return Ok(());
+            return Ok(false);
         }
         Err(error) => return Err(error),
     };
@@ -863,7 +885,7 @@ fn push_validated_candidate(
         global_phase: builder.global_phase,
         cost,
     });
-    Ok(())
+    Ok(true)
 }
 
 /// Computes target-aware cost for value operations emitted by synthesis.
@@ -1046,15 +1068,7 @@ fn emit_cy_with_count(
     num_cy: usize,
 ) -> Result<(), CompilerError> {
     let mut locals = basis.local_decomposition(target, num_cy);
-    let s = StandardGate::S
-        .matrix(&[])
-        .map_err(|e| CompilerError::InvalidInput(e.to_string()))?
-        .into_owned();
-    let sdg = StandardGate::SDG
-        .matrix(&[])
-        .map_err(|e| CompilerError::InvalidInput(e.to_string()))?
-        .into_owned();
-    absorb_cx_replacement_locals(&mut locals, num_cy, &s, &sdg);
+    absorb_cx_replacement_locals(&mut locals, num_cy, &basis.s, &basis.sdg);
 
     builder.global_phase += target.global_phase - num_cy as f64 * basis.global_phase;
     if num_cy == 2 {
@@ -1080,11 +1094,7 @@ fn emit_cz_with_count(
     num_cz: usize,
 ) -> Result<(), CompilerError> {
     let mut locals = basis.local_decomposition(target, num_cz);
-    let h = StandardGate::H
-        .matrix(&[])
-        .map_err(|e| CompilerError::InvalidInput(e.to_string()))?
-        .into_owned();
-    absorb_cx_replacement_locals(&mut locals, num_cz, &h, &h);
+    absorb_cx_replacement_locals(&mut locals, num_cz, &basis.h, &basis.h);
 
     builder.global_phase += target.global_phase - num_cz as f64 * basis.global_phase;
     if num_cz == 2 {
@@ -1114,9 +1124,9 @@ fn absorb_cx_replacement_locals(
     for local_index in 0..=entangler_count {
         let right_index = 2 * local_index;
         locals[right_index] = match local_index {
-            0 => pre.dot(&locals[right_index]),
-            index if index == entangler_count => locals[right_index].dot(post),
-            _ => pre.dot(&locals[right_index].dot(post)),
+            0 => multiply_mat2(pre, &locals[right_index]),
+            index if index == entangler_count => multiply_mat2(&locals[right_index], post),
+            _ => multiply_three_mat2(pre, &locals[right_index], post),
         };
     }
 }
@@ -1139,7 +1149,7 @@ fn value_operations_matrix(
     global_phase: f64,
     qubits: [Qubit; 2],
 ) -> Result<Array2<Complex64>, CompilerError> {
-    let mut resolved = Vec::with_capacity(operations.len());
+    let mut result = identity_mat4();
     for operation in operations {
         let crate::circuit::ValueInstruction::Instruction(Instruction::Standard(gate)) =
             &operation.instruction
@@ -1148,28 +1158,34 @@ fn value_operations_matrix(
                 "2q synthesis candidate contains non-standard operation".to_string(),
             ));
         };
-        let params = operation
-            .params
-            .iter()
-            .map(|param| match param {
-                ParameterValue::Fixed(value) => Ok(*value),
-                ParameterValue::Param(_) => Err(CompilerError::InvariantViolation(
-                    "2q synthesis candidate contains symbolic parameter".to_string(),
-                )),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        resolved.push(TwoQubitMatrixOp {
-            gate: *gate,
-            qubits: operation.qubits.iter().copied().collect(),
-            params,
-        });
+        let mut params = [0.0; 3];
+        if operation.params.len() > params.len() {
+            return Err(CompilerError::InvariantViolation(
+                "standard gate exceeds fixed parameter buffer".to_string(),
+            ));
+        }
+        for (index, param) in operation.params.iter().enumerate() {
+            params[index] = match param {
+                ParameterValue::Fixed(value) => *value,
+                ParameterValue::Param(_) => {
+                    return Err(CompilerError::InvariantViolation(
+                        "2q synthesis candidate contains symbolic parameter".to_string(),
+                    ));
+                }
+            };
+        }
+        let matrix = gate
+            .matrix(&params[..operation.params.len()])
+            .map_err(CompilerError::Circuit)?;
+        apply_matrix_in_frame(
+            &mut result,
+            matrix.view(),
+            operation.qubits.as_slice(),
+            qubits,
+            "2q synthesis candidate references outside qubits",
+        )?;
     }
-    two_qubit_operation_matrix_product(
-        &resolved,
-        global_phase,
-        qubits,
-        "2q synthesis candidate references outside qubits",
-    )
+    finish_mat4(result, global_phase)
 }
 
 /// Resolved standard-gate operation used to build a two-qubit matrix product.
@@ -1196,37 +1212,132 @@ pub(crate) fn two_qubit_operation_matrix_product(
     qubits: [Qubit; 2],
     outside_qubits_error: &str,
 ) -> Result<Array2<Complex64>, CompilerError> {
-    let mut result = Array2::<Complex64>::eye(4);
+    let mut result = identity_mat4();
     for operation in operations {
         let matrix = operation
             .gate
             .matrix(&operation.params)
-            .map_err(CompilerError::Circuit)?
-            .into_owned();
-        let identity = Array2::<Complex64>::eye(2);
-        let expanded = match operation.qubits.as_slice() {
-            [] => matrix,
-            [q] if *q == qubits[0] => kron(&matrix.view(), &identity.view()),
-            [q] if *q == qubits[1] => kron(&identity.view(), &matrix.view()),
-            [a, b] if *a == qubits[0] && *b == qubits[1] => matrix,
-            [a, b] if *a == qubits[1] && *b == qubits[0] => {
-                let swap = StandardGate::SWAP.matrix(&[]).unwrap().into_owned();
-                swap.dot(&matrix).dot(&swap)
-            }
-            _ => {
-                return Err(CompilerError::InvariantViolation(
-                    outside_qubits_error.to_string(),
-                ));
-            }
-        };
-        result = expanded.dot(&result);
+            .map_err(CompilerError::Circuit)?;
+        apply_matrix_in_frame(
+            &mut result,
+            matrix.view(),
+            &operation.qubits,
+            qubits,
+            outside_qubits_error,
+        )?;
     }
+    finish_mat4(result, global_phase)
+}
+
+type Mat4 = [Complex64; 16];
+
+fn identity_mat4() -> Mat4 {
+    let mut matrix = [Complex64::new(0.0, 0.0); 16];
+    for diagonal in 0..4 {
+        matrix[4 * diagonal + diagonal] = Complex64::new(1.0, 0.0);
+    }
+    matrix
+}
+
+fn apply_matrix_in_frame(
+    result: &mut Mat4,
+    matrix: ArrayView2<'_, Complex64>,
+    operation_qubits: &[Qubit],
+    frame_qubits: [Qubit; 2],
+    outside_qubits_error: &str,
+) -> Result<(), CompilerError> {
+    match operation_qubits {
+        [] if matrix.dim() == (1, 1) => {
+            let scalar = matrix[[0, 0]];
+            for value in result {
+                *value *= scalar;
+            }
+        }
+        [] if matrix.dim() == (4, 4) => left_multiply_4(result, matrix, false),
+        [q] if *q == frame_qubits[0] && matrix.dim() == (2, 2) => {
+            left_multiply_local(result, matrix, 0)
+        }
+        [q] if *q == frame_qubits[1] && matrix.dim() == (2, 2) => {
+            left_multiply_local(result, matrix, 1)
+        }
+        [a, b] if *a == frame_qubits[0] && *b == frame_qubits[1] && matrix.dim() == (4, 4) => {
+            left_multiply_4(result, matrix, false)
+        }
+        [a, b] if *a == frame_qubits[1] && *b == frame_qubits[0] && matrix.dim() == (4, 4) => {
+            left_multiply_4(result, matrix, true)
+        }
+        _ => {
+            return Err(CompilerError::InvariantViolation(
+                outside_qubits_error.to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn left_multiply_4(result: &mut Mat4, matrix: ArrayView2<'_, Complex64>, swapped: bool) {
+    const SWAP_PERMUTATION: [usize; 4] = [0, 2, 1, 3];
+    let input = *result;
+    let mut output = [Complex64::new(0.0, 0.0); 16];
+    for row in 0..4 {
+        for col in 0..4 {
+            let mut value = Complex64::new(0.0, 0.0);
+            for inner in 0..4 {
+                let matrix_value = if swapped {
+                    matrix[[SWAP_PERMUTATION[row], SWAP_PERMUTATION[inner]]]
+                } else {
+                    matrix[[row, inner]]
+                };
+                value += matrix_value * input[4 * inner + col];
+            }
+            output[4 * row + col] = value;
+        }
+    }
+    *result = output;
+}
+
+fn left_multiply_local(result: &mut Mat4, matrix: ArrayView2<'_, Complex64>, tensor_factor: usize) {
+    let input = *result;
+    let mut output = [Complex64::new(0.0, 0.0); 16];
+    for outer in 0..2 {
+        for row_local in 0..2 {
+            let row = if tensor_factor == 0 {
+                2 * row_local + outer
+            } else {
+                2 * outer + row_local
+            };
+            for col in 0..4 {
+                let mut value = Complex64::new(0.0, 0.0);
+                for inner_local in 0..2 {
+                    let inner = if tensor_factor == 0 {
+                        2 * inner_local + outer
+                    } else {
+                        2 * outer + inner_local
+                    };
+                    value += matrix[[row_local, inner_local]] * input[4 * inner + col];
+                }
+                output[4 * row + col] = value;
+            }
+        }
+    }
+    *result = output;
+}
+
+fn finish_mat4(mut result: Mat4, global_phase: f64) -> Result<Array2<Complex64>, CompilerError> {
     let phase = Complex64::from_polar(1.0, global_phase);
-    Ok(result.mapv(|value| phase * value))
+    for value in &mut result {
+        *value *= phase;
+    }
+    Array2::from_shape_vec((4, 4), result.to_vec()).map_err(|error| {
+        CompilerError::InvariantViolation(format!("failed to materialize 4x4 matrix: {error}"))
+    })
 }
 
 struct CxBasisData {
-    basis: KakDecomposition,
+    basis_k1l_dg: Array2<Complex64>,
+    basis_k1r_dg: Array2<Complex64>,
+    basis_k2l_dg: Array2<Complex64>,
+    basis_k2r_dg: Array2<Complex64>,
     u0l: Array2<Complex64>,
     u0r: Array2<Complex64>,
     u1l: Array2<Complex64>,
@@ -1246,8 +1357,15 @@ struct CxBasisData {
     q1rb: Array2<Complex64>,
     q2l: Array2<Complex64>,
     q2r: Array2<Complex64>,
+    h: Array2<Complex64>,
+    s: Array2<Complex64>,
+    sdg: Array2<Complex64>,
     global_phase: f64,
 }
+
+static CX_BASIS_DATA: LazyLock<CxBasisData> = LazyLock::new(|| {
+    CxBasisData::new().expect("fixed CX basis data must have a valid KAK decomposition")
+});
 
 impl CxBasisData {
     fn new() -> Result<Self, CompilerError> {
@@ -1348,10 +1466,25 @@ impl CxBasisData {
         let q1rb = k11r.dot(&k1rd);
         let q2l = k2ld.dot(&k12l);
         let q2r = k2rd.dot(&k12r);
+        let h = StandardGate::H
+            .matrix(&[])
+            .expect("fixed H matrix must be available")
+            .into_owned();
+        let s = StandardGate::S
+            .matrix(&[])
+            .expect("fixed S matrix must be available")
+            .into_owned();
+        let sdg = StandardGate::SDG
+            .matrix(&[])
+            .expect("fixed Sdg matrix must be available")
+            .into_owned();
         let global_phase = basis.global_phase;
 
         Ok(Self {
-            basis,
+            basis_k1l_dg: k1ld,
+            basis_k1r_dg: k1rd,
+            basis_k2l_dg: k2ld,
+            basis_k2r_dg: k2rd,
             u0l,
             u0r,
             u1l,
@@ -1371,6 +1504,9 @@ impl CxBasisData {
             q1rb,
             q2l,
             q2r,
+            h,
+            s,
+            sdg,
             global_phase,
         })
     }
@@ -1381,34 +1517,67 @@ impl CxBasisData {
         num_cx: usize,
     ) -> Vec<Array2<Complex64>> {
         match num_cx {
-            0 => vec![target.k1r.dot(&target.k2r), target.k1l.dot(&target.k2l)],
+            0 => vec![
+                multiply_mat2(&target.k1r, &target.k2r),
+                multiply_mat2(&target.k1l, &target.k2l),
+            ],
             1 => vec![
-                dagger(&self.basis.k2r).dot(&target.k2r),
-                dagger(&self.basis.k2l).dot(&target.k2l),
-                target.k1r.dot(&dagger(&self.basis.k1r)),
-                target.k1l.dot(&dagger(&self.basis.k1l)),
+                multiply_mat2(&self.basis_k2r_dg, &target.k2r),
+                multiply_mat2(&self.basis_k2l_dg, &target.k2l),
+                multiply_mat2(&target.k1r, &self.basis_k1r_dg),
+                multiply_mat2(&target.k1l, &self.basis_k1l_dg),
             ],
             2 => vec![
-                self.q2r.dot(&target.k2r),
-                self.q2l.dot(&target.k2l),
-                self.q1ra.dot(&rz_gate(2.0 * target.b).dot(&self.q1rb)),
-                self.q1la.dot(&rz_gate(-2.0 * target.a).dot(&self.q1lb)),
-                target.k1r.dot(&self.q0r),
-                target.k1l.dot(&self.q0l),
+                multiply_mat2(&self.q2r, &target.k2r),
+                multiply_mat2(&self.q2l, &target.k2l),
+                multiply_mat2_with_rz(&self.q1ra, 2.0 * target.b, &self.q1rb),
+                multiply_mat2_with_rz(&self.q1la, -2.0 * target.a, &self.q1lb),
+                multiply_mat2(&target.k1r, &self.q0r),
+                multiply_mat2(&target.k1l, &self.q0l),
             ],
             3 => vec![
-                self.u3r.dot(&target.k2r),
-                self.u3l.dot(&target.k2l),
-                self.u2ra.dot(&rz_gate(2.0 * target.b).dot(&self.u2rb)),
-                self.u2la.dot(&rz_gate(-2.0 * target.a).dot(&self.u2lb)),
-                self.u1ra.dot(&rz_gate(-2.0 * target.c).dot(&self.u1rb)),
+                multiply_mat2(&self.u3r, &target.k2r),
+                multiply_mat2(&self.u3l, &target.k2l),
+                multiply_mat2_with_rz(&self.u2ra, 2.0 * target.b, &self.u2rb),
+                multiply_mat2_with_rz(&self.u2la, -2.0 * target.a, &self.u2lb),
+                multiply_mat2_with_rz(&self.u1ra, -2.0 * target.c, &self.u1rb),
                 self.u1l.clone(),
-                target.k1r.dot(&self.u0r),
-                target.k1l.dot(&self.u0l),
+                multiply_mat2(&target.k1r, &self.u0r),
+                multiply_mat2(&target.k1l, &self.u0l),
             ],
             _ => unreachable!("CX decomposer supports at most 3 basis gates"),
         }
     }
+}
+
+fn multiply_mat2(left: &Array2<Complex64>, right: &Array2<Complex64>) -> Array2<Complex64> {
+    Array2::from_shape_fn((2, 2), |(row, col)| {
+        left[[row, 0]] * right[[0, col]] + left[[row, 1]] * right[[1, col]]
+    })
+}
+
+fn multiply_three_mat2(
+    left: &Array2<Complex64>,
+    middle: &Array2<Complex64>,
+    right: &Array2<Complex64>,
+) -> Array2<Complex64> {
+    Array2::from_shape_fn((2, 2), |(row, col)| {
+        let first = left[[row, 0]] * middle[[0, 0]] + left[[row, 1]] * middle[[1, 0]];
+        let second = left[[row, 0]] * middle[[0, 1]] + left[[row, 1]] * middle[[1, 1]];
+        first * right[[0, col]] + second * right[[1, col]]
+    })
+}
+
+fn multiply_mat2_with_rz(
+    left: &Array2<Complex64>,
+    theta: f64,
+    right: &Array2<Complex64>,
+) -> Array2<Complex64> {
+    let negative = Complex64::from_polar(1.0, -0.5 * theta);
+    let positive = Complex64::from_polar(1.0, 0.5 * theta);
+    Array2::from_shape_fn((2, 2), |(row, col)| {
+        left[[row, 0]] * negative * right[[0, col]] + left[[row, 1]] * positive * right[[1, col]]
+    })
 }
 
 #[cfg(test)]
@@ -1459,6 +1628,97 @@ mod tests {
             .iter()
             .filter(|operation| matches!(operation.instruction, Instruction::Standard(actual) if actual == gate))
             .count()
+    }
+
+    #[test]
+    fn swap_conjugation_uses_tensor_factor_permutation() {
+        let mut rng = StdRng::seed_from_u64(0x5A7A);
+        let matrix = seeded_random_unitary_4(&mut rng);
+        let swap = StandardGate::SWAP.matrix(&[]).unwrap();
+        let dense = swap.dot(&matrix).dot(swap.as_ref());
+
+        assert_abs_diff_eq!(swap_conjugated_matrix(&matrix), dense, epsilon = 1e-14);
+
+        let decomp = kak_decompose(&matrix).unwrap();
+        let reversed = swap_conjugated_kak(&decomp);
+        assert_abs_diff_eq!(reversed.k1l, decomp.k1r, epsilon = 0.0);
+        assert_abs_diff_eq!(reversed.k1r, decomp.k1l, epsilon = 0.0);
+        assert_abs_diff_eq!(reversed.k2l, decomp.k2r, epsilon = 0.0);
+        assert_abs_diff_eq!(reversed.k2r, decomp.k2l, epsilon = 0.0);
+        assert_eq!(
+            (reversed.a, reversed.b, reversed.c),
+            (decomp.a, decomp.b, decomp.c)
+        );
+        assert_eq!(reversed.global_phase, decomp.global_phase);
+    }
+
+    #[test]
+    fn cx_family_feasibility_classifies_weyl_boundaries() {
+        let mut decomp = kak_decompose(&Array2::eye(4)).unwrap();
+        assert_eq!(minimum_cx_family_entanglers(&decomp), 0);
+
+        decomp.a = std::f64::consts::FRAC_PI_4;
+        assert_eq!(minimum_cx_family_entanglers(&decomp), 1);
+
+        decomp.a = 0.31;
+        decomp.b = 0.17;
+        assert_eq!(minimum_cx_family_entanglers(&decomp), 2);
+
+        decomp.c = 2.0 * TWO_QUBIT_EXACT_TOLERANCE;
+        assert_eq!(minimum_cx_family_entanglers(&decomp), 3);
+        decomp.c = 0.5 * TWO_QUBIT_EXACT_TOLERANCE;
+        assert_eq!(minimum_cx_family_entanglers(&decomp), 2);
+    }
+
+    #[test]
+    fn fixed_matrix_product_matches_dense_reference_for_mixed_orientations() {
+        let q0 = Qubit::new(3);
+        let q1 = Qubit::new(7);
+        let operations = vec![
+            TwoQubitMatrixOp {
+                gate: StandardGate::U,
+                qubits: vec![q0],
+                params: vec![0.2, -0.3, 0.4],
+            },
+            TwoQubitMatrixOp {
+                gate: StandardGate::RX,
+                qubits: vec![q1],
+                params: vec![0.6],
+            },
+            TwoQubitMatrixOp {
+                gate: StandardGate::CX,
+                qubits: vec![q0, q1],
+                params: vec![],
+            },
+            TwoQubitMatrixOp {
+                gate: StandardGate::CRY,
+                qubits: vec![q1, q0],
+                params: vec![-0.27],
+            },
+        ];
+        let phase = 0.19;
+        let actual =
+            two_qubit_operation_matrix_product(&operations, phase, [q0, q1], "outside frame")
+                .unwrap();
+
+        let identity = Array2::<Complex64>::eye(2);
+        let swap = StandardGate::SWAP.matrix(&[]).unwrap();
+        let mut expected = Array2::<Complex64>::eye(4);
+        for operation in &operations {
+            let matrix = operation.gate.matrix(&operation.params).unwrap();
+            let expanded = match operation.qubits.as_slice() {
+                [q] if *q == q0 => kron(matrix.as_ref(), &identity),
+                [q] if *q == q1 => kron(&identity, matrix.as_ref()),
+                [a, b] if *a == q0 && *b == q1 => matrix.into_owned(),
+                [a, b] if *a == q1 && *b == q0 => swap.dot(matrix.as_ref()).dot(swap.as_ref()),
+                _ => unreachable!(),
+            };
+            expected = expanded.dot(&expected);
+        }
+        let phase = Complex64::from_polar(1.0, phase);
+        expected.mapv_inplace(|value| phase * value);
+
+        assert_abs_diff_eq!(actual, expected, epsilon = 1e-14);
     }
 
     fn seeded_random_unitary_4(rng: &mut StdRng) -> Array2<Complex64> {

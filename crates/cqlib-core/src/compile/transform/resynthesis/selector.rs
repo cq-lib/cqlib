@@ -829,6 +829,7 @@ fn try_synthesize_device_block(
     let result = synthesis_cache.with_device_plan(
         matrix,
         block.qubits,
+        context.placement(),
         |cache| {
             if !cache.artifact_reuse_enabled() {
                 return plan_numeric_2q_unitary_for_device(matrix, block.qubits, context);
@@ -838,24 +839,7 @@ fn try_synthesize_device_block(
                     "cached KAK decomposition failed for device resynthesis matrix".to_string(),
                 )
             })?;
-            let swap = StandardGate::SWAP
-                .matrix(&[])
-                .map_err(CompilerError::Circuit)?
-                .into_owned();
-            let reversed_matrix = swap.dot(matrix).dot(&swap);
-            let reversed_decomp = cache.kak_decomposition(&reversed_matrix)?.ok_or_else(|| {
-                CompilerError::InvariantViolation(
-                    "cached KAK decomposition failed for reversed device matrix".to_string(),
-                )
-            })?;
-            plan_numeric_2q_unitary_for_device_from_kak(
-                matrix,
-                block.qubits,
-                context,
-                &decomp,
-                &reversed_matrix,
-                &reversed_decomp,
-            )
+            plan_numeric_2q_unitary_for_device_from_kak(matrix, block.qubits, context, &decomp)
         },
         |plan| {
             let CachedPlanView::Candidates(candidates) = plan else {

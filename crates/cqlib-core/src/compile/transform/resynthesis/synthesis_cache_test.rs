@@ -273,6 +273,7 @@ fn device_plan_is_cached_for_exact_matrix_and_qargs() {
             .with_device_plan(
                 &matrix,
                 [q0, q1],
+                context.placement(),
                 |_| {
                     calls += 1;
                     plan_numeric_2q_unitary_for_device(&matrix, [q0, q1], &context)
@@ -290,6 +291,7 @@ fn device_plan_is_cached_for_exact_matrix_and_qargs() {
         .with_device_plan(
             &matrix,
             [q1, q0],
+            context.placement(),
             |_| {
                 calls += 1;
                 plan_numeric_2q_unitary_for_device(&matrix, [q1, q0], &context)
@@ -306,6 +308,62 @@ fn device_plan_is_cached_for_exact_matrix_and_qargs() {
     assert_eq!(cache.stats().device_misses, 2);
     assert_eq!(cache.stats().device_hits, 1);
     assert_eq!(cache.stats().device_entries, 2);
+}
+
+#[test]
+fn pre_layout_device_plan_reuses_canonical_logical_qargs() {
+    let device = Device::line("resynthesis-pre-layout-cache", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    circuit.cx(q0, q1).unwrap();
+    let context = DeviceTwoQubitSynthesisContext::build(
+        &device,
+        &circuit,
+        DeviceSynthesisPlacement::PreLayoutEnvelope,
+    )
+    .unwrap();
+    let matrix = StandardGate::CX.matrix(&[]).unwrap().into_owned();
+    let mut cache = TwoQubitSynthesisCache::new(4);
+    let mut calls = 0;
+
+    for qargs in [[q0, q1], [q1, q2]] {
+        let references_requested_qargs = cache
+            .with_device_plan(
+                &matrix,
+                qargs,
+                context.placement(),
+                |_| {
+                    calls += 1;
+                    plan_numeric_2q_unitary_for_device(&matrix, qargs, &context)
+                },
+                |plan| match plan {
+                    CachedPlanView::Candidates(candidates) => candidates.iter().all(|candidate| {
+                        candidate
+                            .candidate
+                            .operations
+                            .iter()
+                            .flat_map(|operation| operation.qubits.iter())
+                            .all(|qubit| qargs.contains(qubit))
+                    }),
+                    CachedPlanView::Failed => false,
+                },
+            )
+            .unwrap();
+        assert!(references_requested_qargs);
+    }
+
+    assert_eq!(calls, 1);
+    assert_eq!(cache.stats().device_misses, 1);
+    assert_eq!(cache.stats().device_hits, 1);
+    assert_eq!(cache.stats().device_entries, 1);
 }
 
 #[test]
@@ -347,6 +405,7 @@ fn namespace_reuses_context_clones_and_invalidates_rebuilds() {
         .with_device_plan(
             &matrix,
             [q0, q1],
+            context.placement(),
             |_| {
                 calls += 1;
                 Ok(Vec::new())
@@ -359,6 +418,7 @@ fn namespace_reuses_context_clones_and_invalidates_rebuilds() {
         .with_device_plan(
             &matrix,
             [q0, q1],
+            cloned.placement(),
             |_| {
                 calls += 1;
                 Ok(Vec::new())
@@ -373,6 +433,7 @@ fn namespace_reuses_context_clones_and_invalidates_rebuilds() {
         .with_device_plan(
             &matrix,
             [q0, q1],
+            rebuilt.placement(),
             |_| {
                 calls += 1;
                 Ok(Vec::new())
@@ -432,6 +493,7 @@ fn failed_device_plan_is_cached() {
             .with_device_plan(
                 &matrix,
                 qubits,
+                DeviceSynthesisPlacement::ExactPhysical,
                 |_| {
                     calls += 1;
                     Err(CompilerError::InvariantViolation("planned failure".into()))

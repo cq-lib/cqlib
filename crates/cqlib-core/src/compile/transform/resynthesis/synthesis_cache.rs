@@ -16,9 +16,10 @@
 //! must therefore repeat source-cost, structural, commutation, and overlap checks for
 //! every block. Keys preserve the exact complex floating-point representation
 //! exactly. Generic candidates are stored on canonical tensor roles and
-//! remapped to requested qubits at consumption; device candidates retain their
-//! ordered physical pair. Numerically close or phase-equivalent matrices are
-//! deliberately unrelated.
+//! remapped to requested qubits at consumption. Pre-layout device candidates
+//! use the same canonical logical tensor roles, while exact-physical candidates
+//! retain their ordered physical pair. Numerically close or phase-equivalent
+//! matrices are deliberately unrelated.
 //!
 //! Capacity is bounded with an admission-only policy. Existing entries remain
 //! available after the budget is reached, while new keys are planned normally
@@ -619,37 +620,80 @@ impl TwoQubitSynthesisCache {
         &mut self,
         matrix: &Array2<Complex64>,
         ordered_qargs: [Qubit; 2],
+        placement: DeviceSynthesisPlacement,
         planner: impl FnOnce(&mut Self) -> Result<Vec<DeviceTwoQubitSynthesisCandidate>, CompilerError>,
         consume: impl FnOnce(CachedPlanView<'_, DeviceTwoQubitSynthesisCandidate>) -> R,
     ) -> Result<R, CompilerError> {
-        let key = ExactTwoQubitSynthesisKey::new(matrix, ordered_qargs)?;
+        let canonical_qargs = [Qubit::new(0), Qubit::new(1)];
+        let cache_qargs = match placement {
+            DeviceSynthesisPlacement::PreLayoutEnvelope => canonical_qargs,
+            DeviceSynthesisPlacement::ExactPhysical => ordered_qargs,
+        };
+        let key = ExactTwoQubitSynthesisKey::new(matrix, cache_qargs)?;
         self.stats.device_lookups = self.stats.device_lookups.saturating_add(1);
         if let Some(plan) = self.device.get(&key) {
             self.stats.device_hits = self.stats.device_hits.saturating_add(1);
             if matches!(plan, CachedPlan::Failed) {
                 self.stats.failed_plan_hits = self.stats.failed_plan_hits.saturating_add(1);
             }
-            return Ok(consume(plan.view()));
+            return Ok(consume_device_plan(
+                plan,
+                cache_qargs,
+                ordered_qargs,
+                consume,
+            ));
         }
 
         self.stats.device_misses = self.stats.device_misses.saturating_add(1);
-        let plan = match planner(self) {
+        let plan = match planner(self).and_then(|candidates| {
+            if cache_qargs == ordered_qargs {
+                Ok(candidates)
+            } else {
+                remap_device_candidates(candidates, ordered_qargs, cache_qargs)
+            }
+        }) {
             Ok(candidates) => CachedPlan::Candidates(candidates),
             Err(_) => CachedPlan::Failed,
         };
         if self.device.len() < self.budget {
             self.device.insert(key.clone(), plan);
             self.stats.device_entries = self.device.len();
-            return Ok(consume(
+            return Ok(consume_device_plan(
                 self.device
                     .get(&key)
-                    .expect("newly inserted device synthesis plan")
-                    .view(),
+                    .expect("newly inserted device synthesis plan"),
+                cache_qargs,
+                ordered_qargs,
+                consume,
             ));
         }
 
         self.stats.capacity_rejections = self.stats.capacity_rejections.saturating_add(1);
-        Ok(consume(plan.view()))
+        Ok(consume_device_plan(
+            &plan,
+            cache_qargs,
+            ordered_qargs,
+            consume,
+        ))
+    }
+}
+
+fn consume_device_plan<R>(
+    plan: &CachedPlan<DeviceTwoQubitSynthesisCandidate>,
+    cached_qargs: [Qubit; 2],
+    ordered_qargs: [Qubit; 2],
+    consume: impl FnOnce(CachedPlanView<'_, DeviceTwoQubitSynthesisCandidate>) -> R,
+) -> R {
+    if cached_qargs == ordered_qargs {
+        return consume(plan.view());
+    }
+    match plan {
+        CachedPlan::Failed => consume(CachedPlanView::Failed),
+        CachedPlan::Candidates(candidates) => {
+            let remapped = remap_device_candidates(candidates.clone(), cached_qargs, ordered_qargs)
+                .expect("cached device synthesis template only references canonical qargs");
+            consume(CachedPlanView::Candidates(&remapped))
+        }
     }
 }
 
@@ -688,6 +732,29 @@ fn remap_generic_candidates(
                 } else {
                     return Err(CompilerError::InvariantViolation(format!(
                         "generic 2q synthesis candidate references unexpected qubit {qubit}"
+                    )));
+                };
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+fn remap_device_candidates(
+    mut candidates: Vec<DeviceTwoQubitSynthesisCandidate>,
+    source: [Qubit; 2],
+    target: [Qubit; 2],
+) -> Result<Vec<DeviceTwoQubitSynthesisCandidate>, CompilerError> {
+    for candidate in &mut candidates {
+        for operation in &mut candidate.candidate.operations {
+            for qubit in &mut operation.qubits {
+                *qubit = if *qubit == source[0] {
+                    target[0]
+                } else if *qubit == source[1] {
+                    target[1]
+                } else {
+                    return Err(CompilerError::InvariantViolation(format!(
+                        "device 2q synthesis candidate references unexpected qubit {qubit}"
                     )));
                 };
             }
