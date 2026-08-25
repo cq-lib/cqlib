@@ -26,7 +26,7 @@ use crate::compile::transform::rewrite::config::RewriteConfig;
 use crate::compile::transform::rewrite::diagnostics::KnowledgeRewriteDiagnostics;
 use crate::compile::transform::rewrite::matcher::{
     BlockMatchCache, CompiledRuleSet, PatchPlanStep, ReplacementItem, RewritePatch,
-    is_gphase_instruction, patch_application_plan, resolve_operation_param,
+    RunActiveRuleSet, is_gphase_instruction, patch_application_plan, resolve_operation_param,
     select_rewrites_for_anchor_ranges,
 };
 
@@ -316,6 +316,7 @@ impl KnowledgeRewriter {
                 )
                 .map(|(result, _)| result);
         }
+        let active_rules = rules.active_rules(&self.config, target_context.as_ref());
 
         let mut current = circuit.clone();
         let mut aggregate = KnowledgeRewriteStats::default();
@@ -328,6 +329,7 @@ impl KnowledgeRewriter {
             let (next, round_stats, next_workset) = RoundRewriter::run(
                 &current,
                 rules.as_ref(),
+                &active_rules,
                 &self.config,
                 target_context.as_ref(),
                 workset.as_ref(),
@@ -434,6 +436,7 @@ impl KnowledgeRewriter {
         let mut changed = false;
         let mut phase_delta = Parameter::from(0.0);
         let max_match_reach = rules.max_match_reach(&self.config);
+        let active_rules = rules.active_rules(&self.config, target_context);
 
         for round in 1..=self.config.max_rounds() {
             aggregate.rounds_executed = round;
@@ -441,6 +444,7 @@ impl KnowledgeRewriter {
                 operations.as_ref(),
                 &cache,
                 rules,
+                &active_rules,
                 &self.config,
                 target_context,
                 anchor_ranges.as_deref(),
@@ -564,6 +568,7 @@ pub fn rewrite_circuit(
 struct RoundRewriter<'a> {
     source: &'a Circuit,
     rules: &'a CompiledRuleSet,
+    active_rules: &'a RunActiveRuleSet,
     config: &'a RewriteConfig,
     target_context: Option<&'a TargetContext>,
     collect_diagnostics: bool,
@@ -578,6 +583,7 @@ impl<'a> RoundRewriter<'a> {
     fn run(
         source: &'a Circuit,
         rules: &'a CompiledRuleSet,
+        active_rules: &'a RunActiveRuleSet,
         config: &'a RewriteConfig,
         target_context: Option<&'a TargetContext>,
         workset: Option<&'a RewriteWorkset>,
@@ -586,6 +592,7 @@ impl<'a> RoundRewriter<'a> {
         let mut rewriter = Self {
             source,
             rules,
+            active_rules,
             config,
             target_context,
             collect_diagnostics,
@@ -678,6 +685,7 @@ impl<'a> RoundRewriter<'a> {
                 block,
                 cache.as_ref(),
                 self.rules,
+                self.active_rules,
                 self.config,
                 self.target_context,
                 ranges,

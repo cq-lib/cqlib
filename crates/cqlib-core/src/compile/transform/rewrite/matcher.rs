@@ -37,10 +37,9 @@
 //! rescanned in full because incremental bookkeeping stops paying off.
 //!
 //! Candidate generation for large anchor sets runs on rayon. This is
-//! deterministic: anchors are visited in ascending order, per-anchor
-//! candidate lists are merged in that order, and the comparator in
-//! [`select_candidate_patches`] is a strict total order (source position and
-//! rule id break all ties), so the selected patch set never depends on
+//! deterministic: workers accumulate candidates locally, and the comparator
+//! in [`select_candidate_patches`] is a strict total order (source position
+//! and rule id break all ties), so the selected patch set never depends on
 //! thread scheduling.
 
 use crate::circuit::{
@@ -76,7 +75,7 @@ use symb_anafis::CompiledEvaluator;
 /// `SMALL_CIRCUIT_FULL_SCAN_THRESHOLD` in `rewriter.rs` (which selects the
 /// incremental engines); the two intentionally live in separate files next to
 /// the code they tune, so adjust each only against its own measurements.
-const PARALLEL_ANCHOR_THRESHOLD: usize = 16_384;
+const PARALLEL_ANCHOR_THRESHOLD: usize = 4_096;
 /// Dirty-to-eligible anchor percentage at which a block rescan falls back to
 /// a full scan. Past this point the restricted scan touches most of the block
 /// anyway, and full scans have cheaper per-anchor bookkeeping.
@@ -94,6 +93,10 @@ const COMMUTATION_CACHE_SHARDS: usize = 64;
 /// without bound while retaining lock locality for parallel anchor scans.
 const RULE_EVALUATION_CACHE_SHARDS: usize = 64;
 const RULE_EVALUATION_CACHE_ENTRIES_PER_SHARD: usize = 64;
+/// Very short windows are cheaper to scan linearly than to binary-search.
+const OCCURRENCE_INDEX_MIN_WINDOW: usize = 8;
+/// Dense keys retain contiguous scanning to avoid index indirection.
+const OCCURRENCE_INDEX_MAX_DENSITY_PERCENT: usize = 25;
 
 type OperationId = u64;
 type CommutationCacheKey = (OperationId, OperationId);
@@ -181,16 +184,16 @@ impl ExactCommutationCache for ExactCommutationMemo {
     }
 }
 
-/// Lock-free front cache for the normal serial anchor-scan path.
+/// Lock-free front cache for one serial scan or rayon worker.
 ///
 /// The persistent memo is consulted only once per unique pair in a selection;
 /// repeated rule and future-match queries then stay in this `RefCell` map.
-struct SerialExactCommutationCache<'a> {
+struct LocalExactCommutationCache<'a> {
     entries: RefCell<HashMap<CommutationCacheKey, ExactCommutationState>>,
     memo: &'a ExactCommutationMemo,
 }
 
-impl<'a> SerialExactCommutationCache<'a> {
+impl<'a> LocalExactCommutationCache<'a> {
     fn new(memo: &'a ExactCommutationMemo) -> Self {
         Self {
             entries: RefCell::new(HashMap::new()),
@@ -199,7 +202,7 @@ impl<'a> SerialExactCommutationCache<'a> {
     }
 }
 
-impl ExactCommutationCache for SerialExactCommutationCache<'_> {
+impl ExactCommutationCache for LocalExactCommutationCache<'_> {
     fn exact_or_insert_with(
         &self,
         lhs_id: OperationId,
@@ -551,6 +554,49 @@ pub(super) struct CompiledRuleSet {
     qubit_bijection_invariant: bool,
 }
 
+/// Rules admitted by configuration and target constraints for one rewrite run.
+///
+/// The bitset is refined with block-local summaries before anchor scanning, so
+/// the hot loop only performs one indexed bit test per first-key candidate.
+pub(super) struct RunActiveRuleSet {
+    bits: Vec<u64>,
+}
+
+struct BlockActiveRuleSet {
+    bits: Vec<u64>,
+}
+
+impl RunActiveRuleSet {
+    fn contains(&self, rule_index: usize) -> bool {
+        bitset_contains(&self.bits, rule_index)
+    }
+
+    fn for_block(&self, rules: &CompiledRuleSet, block: &BlockContext<'_>) -> BlockActiveRuleSet {
+        let mut bits = vec![0; self.bits.len()];
+        for (rule_index, rule) in rules.rules.iter().enumerate() {
+            if self.contains(rule_index) && rule_passes_block_filters(rule, block) {
+                bitset_insert(&mut bits, rule_index);
+            }
+        }
+        BlockActiveRuleSet { bits }
+    }
+}
+
+impl BlockActiveRuleSet {
+    fn contains(&self, rule_index: usize) -> bool {
+        bitset_contains(&self.bits, rule_index)
+    }
+}
+
+fn bitset_insert(bits: &mut [u64], index: usize) {
+    bits[index / u64::BITS as usize] |= 1 << (index % u64::BITS as usize);
+}
+
+fn bitset_contains(bits: &[u64], index: usize) -> bool {
+    bits.get(index / u64::BITS as usize)
+        .is_some_and(|word| word & (1 << (index % u64::BITS as usize)) != 0)
+}
+
 /// One operation emitted by a rewrite target.
 #[derive(Debug, Clone)]
 pub(super) struct ReplacementItem {
@@ -644,7 +690,8 @@ struct CandidatePatch {
 /// and commutation checks, so per-position instruction keys and resolved
 /// symbolic parameters are computed once and reused. Stable operation IDs and
 /// the shared commutation memo preserve source-pair proofs across incremental
-/// rounds. `instruction_set` and `qubit_count` feed static rule filters. A
+/// rounds. `instruction_positions` and `qubit_count` feed static rule filters.
+/// The ordered positions also skip unrelated keys during sparse window scans. A
 /// transition does not by itself require a full rescan: a newly admitted local
 /// match must observe the patch which introduced its missing instruction or
 /// qubit.
@@ -655,7 +702,7 @@ pub(super) struct BlockMatchCache {
     operation_ids: Vec<OperationId>,
     commutation_memo: Arc<ExactCommutationMemo>,
     rule_evaluation_cache: Arc<RuleEvaluationCache>,
-    instruction_set: HashSet<RewriteInstructionKey>,
+    instruction_positions: HashMap<RewriteInstructionKey, Vec<usize>>,
     qubit_count: usize,
 }
 
@@ -668,7 +715,7 @@ impl BlockMatchCache {
         let mut resolved_params = Vec::with_capacity(operations.len());
         let mut instruction_keys = Vec::with_capacity(operations.len());
         let mut touched_qubits = HashSet::new();
-        let mut instruction_set = HashSet::new();
+        let mut instruction_positions = HashMap::<RewriteInstructionKey, Vec<usize>>::new();
         let commutation_memo = Arc::new(ExactCommutationMemo::new());
         let rule_evaluation_cache = Arc::new(RuleEvaluationCache::new(collect_diagnostics));
         let mut operation_ids = Vec::with_capacity(operations.len());
@@ -689,7 +736,10 @@ impl BlockMatchCache {
                 .collect::<Result<SmallVec<[_; 3]>, _>>()?;
 
             touched_qubits.extend(operation.qubits.iter().copied());
-            instruction_set.insert(key.clone());
+            instruction_positions
+                .entry(key.clone())
+                .or_default()
+                .push(instruction_keys.len());
             instruction_keys.push(key);
             resolved_params.push(params);
             operation_ids.push(commutation_memo.allocate_operation_id());
@@ -701,7 +751,7 @@ impl BlockMatchCache {
             operation_ids,
             commutation_memo,
             rule_evaluation_cache,
-            instruction_set,
+            instruction_positions,
             qubit_count: touched_qubits.len(),
         })
     }
@@ -738,7 +788,7 @@ impl BlockMatchCache {
             operation_ids,
             commutation_memo: old_commutation_memo,
             rule_evaluation_cache,
-            instruction_set: _,
+            instruction_positions: _,
             qubit_count: _,
         } = self;
         let old_len = instruction_keys.len();
@@ -755,7 +805,7 @@ impl BlockMatchCache {
         let mut new_keys = Vec::with_capacity(new_len);
         let mut new_params = Vec::with_capacity(new_len);
         let mut new_ids = Vec::with_capacity(new_len);
-        let mut instruction_set = HashSet::new();
+        let mut instruction_positions = HashMap::<RewriteInstructionKey, Vec<usize>>::new();
         let mut old_cursor = 0usize;
 
         let push_old =
@@ -766,9 +816,12 @@ impl BlockMatchCache {
              keys: &mut Vec<RewriteInstructionKey>,
              params: &mut Vec<SmallVec<[Parameter; 3]>>,
              ids: &mut Vec<OperationId>,
-             instruction_set: &mut HashSet<RewriteInstructionKey>| {
+             instruction_positions: &mut HashMap<RewriteInstructionKey, Vec<usize>>| {
                 let ((key, resolved), old_id) = entry;
-                instruction_set.insert(key.clone());
+                instruction_positions
+                    .entry(key.clone())
+                    .or_default()
+                    .push(keys.len());
                 keys.push(key);
                 params.push(resolved);
                 ids.push(if qubits_renamed {
@@ -785,7 +838,7 @@ impl BlockMatchCache {
                     &mut new_keys,
                     &mut new_params,
                     &mut new_ids,
-                    &mut instruction_set,
+                    &mut instruction_positions,
                 );
                 old_cursor += 1;
             }
@@ -801,7 +854,10 @@ impl BlockMatchCache {
                     .map(|parameter| resolve_operation_param(after, parameter))
                     .collect::<Result<SmallVec<[_; 3]>, _>>()
                     .ok()?;
-                instruction_set.insert(key.clone());
+                instruction_positions
+                    .entry(key.clone())
+                    .or_default()
+                    .push(new_keys.len());
                 new_keys.push(key);
                 new_params.push(params);
                 new_ids.push(commutation_memo.allocate_operation_id());
@@ -813,7 +869,7 @@ impl BlockMatchCache {
                 &mut new_keys,
                 &mut new_params,
                 &mut new_ids,
-                &mut instruction_set,
+                &mut instruction_positions,
             );
             old_cursor += 1;
         }
@@ -831,7 +887,7 @@ impl BlockMatchCache {
             operation_ids: new_ids,
             commutation_memo,
             rule_evaluation_cache,
-            instruction_set,
+            instruction_positions,
             // Using the declared circuit domain is a conservative
             // overestimate for the static width filter and avoids rescanning
             // every clean operation's qargs after an edit.
@@ -900,7 +956,7 @@ impl BlockMatchCache {
         let mut instruction_keys = Vec::with_capacity(expected_len);
         let mut resolved_params = Vec::with_capacity(expected_len);
         let mut operation_ids = Vec::with_capacity(expected_len);
-        let mut instruction_set = HashSet::new();
+        let mut instruction_positions = HashMap::<RewriteInstructionKey, Vec<usize>>::new();
         let mut touched_qubits = HashSet::new();
         let commutation_memo = self.commutation_memo;
         let rule_evaluation_cache = self.rule_evaluation_cache;
@@ -917,7 +973,10 @@ impl BlockMatchCache {
                         if is_gphase_instruction(&replacement.instruction) {
                             continue;
                         }
-                        instruction_set.insert(replacement.key.clone());
+                        instruction_positions
+                            .entry(replacement.key.clone())
+                            .or_default()
+                            .push(instruction_keys.len());
                         instruction_keys.push(replacement.key.clone());
                         operation_ids.push(commutation_memo.allocate_operation_id());
                         resolved_params.push(
@@ -938,7 +997,10 @@ impl BlockMatchCache {
                 }
                 PatchPlanStep::Keep(position) => {
                     let ((old_key, old_params), operation_id) = old_entries.next()?;
-                    instruction_set.insert(old_key.clone());
+                    instruction_positions
+                        .entry(old_key.clone())
+                        .or_default()
+                        .push(instruction_keys.len());
                     instruction_keys.push(old_key);
                     resolved_params.push(old_params);
                     operation_ids.push(operation_id);
@@ -960,7 +1022,7 @@ impl BlockMatchCache {
             operation_ids,
             commutation_memo,
             rule_evaluation_cache,
-            instruction_set,
+            instruction_positions,
             qubit_count,
         })
     }
@@ -1007,6 +1069,48 @@ impl<'a> BlockContext<'a> {
     fn operation_id(&self, position: usize) -> OperationId {
         self.cache.operation_ids[position]
     }
+
+    fn candidate_positions<'b>(
+        &'b self,
+        key: &RewriteInstructionKey,
+        range: Range<usize>,
+    ) -> CandidatePositions<'b> {
+        let positions = self
+            .cache
+            .instruction_positions
+            .get(key)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let window_len = range.end.saturating_sub(range.start);
+        let use_index = window_len >= OCCURRENCE_INDEX_MIN_WINDOW
+            && positions.len().saturating_mul(100)
+                <= self
+                    .len()
+                    .saturating_mul(OCCURRENCE_INDEX_MAX_DENSITY_PERCENT);
+        if !use_index {
+            return CandidatePositions::Linear(range);
+        }
+
+        let start = positions.partition_point(|&position| position < range.start);
+        let end = positions.partition_point(|&position| position < range.end);
+        CandidatePositions::Indexed(positions[start..end].iter().copied())
+    }
+}
+
+enum CandidatePositions<'a> {
+    Linear(Range<usize>),
+    Indexed(std::iter::Copied<std::slice::Iter<'a, usize>>),
+}
+
+impl Iterator for CandidatePositions<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Linear(positions) => positions.next(),
+            Self::Indexed(positions) => positions.next(),
+        }
+    }
 }
 
 impl CompiledRuleSet {
@@ -1043,6 +1147,20 @@ impl CompiledRuleSet {
 
     fn get(&self, index: usize) -> &CompiledRule {
         &self.rules[index]
+    }
+
+    pub(super) fn active_rules(
+        &self,
+        config: &RewriteConfig,
+        target_context: Option<&TargetContext>,
+    ) -> RunActiveRuleSet {
+        let mut bits = vec![0; self.rules.len().div_ceil(u64::BITS as usize)];
+        for (rule_index, rule) in self.rules.iter().enumerate() {
+            if rule_passes_run_filters(rule, config, target_context) {
+                bitset_insert(&mut bits, rule_index);
+            }
+        }
+        RunActiveRuleSet { bits }
     }
 
     pub(super) fn max_match_reach(&self, config: &RewriteConfig) -> usize {
@@ -1303,11 +1421,13 @@ pub(super) fn select_rewrites_for_anchor_ranges(
     operations: &[Operation],
     cache: &BlockMatchCache,
     rules: &CompiledRuleSet,
+    run_active_rules: &RunActiveRuleSet,
     config: &RewriteConfig,
     target_context: Option<&TargetContext>,
     anchor_ranges: Option<&[Range<usize>]>,
 ) -> Result<Vec<RewritePatch>, CompilerError> {
     let block = BlockContext::new(operations, cache)?;
+    let active_rules = run_active_rules.for_block(rules, &block);
     let mut anchors = anchors_for_ranges(block.len(), anchor_ranges);
     let full_scan_fallback = anchor_ranges.is_some()
         && !block.operations.is_empty()
@@ -1323,11 +1443,15 @@ pub(super) fn select_rewrites_for_anchor_ranges(
         // execution before matching begins.
         anchors = (0..block.len()).collect();
     }
-    let scans = scan_anchors(&block, &anchors, rules, config, target_context);
-    let mut candidates = Vec::new();
-    for scan in scans {
-        candidates.extend(scan?);
-    }
+    let candidates = scan_anchors(
+        &block,
+        &anchors,
+        rules,
+        &active_rules,
+        config,
+        target_context,
+        PARALLEL_ANCHOR_THRESHOLD,
+    )?;
 
     select_candidate_patches(candidates, block.len(), target_context)
 }
@@ -1353,78 +1477,129 @@ fn scan_anchors(
     block: &BlockContext<'_>,
     anchors: &[usize],
     rules: &CompiledRuleSet,
+    active_rules: &BlockActiveRuleSet,
     config: &RewriteConfig,
     target_context: Option<&TargetContext>,
-) -> Vec<Result<Vec<CandidatePatch>, CompilerError>> {
-    if anchors.len() < PARALLEL_ANCHOR_THRESHOLD {
+    parallel_threshold: usize,
+) -> Result<Vec<CandidatePatch>, CompilerError> {
+    let scanner = AnchorScanner {
+        block,
+        rules,
+        active_rules,
+        config,
+        target_context,
+    };
+    if anchors.len() < parallel_threshold {
         let commutation_cache =
-            SerialExactCommutationCache::new(block.cache.commutation_memo.as_ref());
-        return anchors
-            .iter()
-            .map(|&anchor| {
-                scan_anchor(
-                    block,
-                    anchor,
-                    rules,
-                    config,
-                    target_context,
-                    &commutation_cache,
-                )
-            })
-            .collect();
+            LocalExactCommutationCache::new(block.cache.commutation_memo.as_ref());
+        let mut candidates = Vec::new();
+        for &anchor in anchors {
+            scanner.scan_anchor_into(anchor, &commutation_cache, &mut candidates)?;
+        }
+        return Ok(candidates);
     }
 
     use rayon::prelude::*;
-    let commutation_cache = block.cache.commutation_memo.as_ref();
-    anchors
+    let memo = block.cache.commutation_memo.as_ref();
+    let state = anchors
         .par_iter()
-        .map(|&anchor| {
-            scan_anchor(
-                block,
-                anchor,
-                rules,
-                config,
-                target_context,
-                commutation_cache,
-            )
-        })
-        .collect()
+        .fold(
+            || AnchorScanWorker::new(memo),
+            |mut worker, &anchor| {
+                if worker.error.is_none()
+                    && let Err(error) = scanner.scan_anchor_into(
+                        anchor,
+                        &worker.commutation_cache,
+                        &mut worker.candidates,
+                    )
+                {
+                    worker.error = Some((anchor, error));
+                }
+                worker
+            },
+        )
+        .reduce(
+            || AnchorScanWorker::new(memo),
+            |mut left, mut right| {
+                left.candidates.append(&mut right.candidates);
+                left.error = earliest_scan_error(left.error, right.error);
+                left
+            },
+        );
+    match state.error {
+        Some((_, error)) => Err(error),
+        None => Ok(state.candidates),
+    }
 }
 
-fn scan_anchor<C: ExactCommutationCache>(
-    block: &BlockContext<'_>,
-    anchor: usize,
-    rules: &CompiledRuleSet,
-    config: &RewriteConfig,
-    target_context: Option<&TargetContext>,
-    commutation_cache: &C,
-) -> Result<Vec<CandidatePatch>, CompilerError> {
-    let mut candidates = Vec::new();
-    let operation = block.operation(anchor);
-    if config.skips_labeled_ops() && operation.label.is_some() {
-        return Ok(candidates);
-    }
-    let first_key = block.key(anchor);
+struct AnchorScanWorker<'a> {
+    candidates: Vec<CandidatePatch>,
+    error: Option<(usize, CompilerError)>,
+    commutation_cache: LocalExactCommutationCache<'a>,
+}
 
-    for &rule_index in rules.candidates_for_first_instruction(first_key) {
-        let compiled = rules.get(rule_index);
-        if !rule_passes_static_filters(compiled, config, block, target_context) {
-            continue;
-        }
-        if let Some(candidate) = try_match_rule(
-            block,
-            anchor,
-            compiled,
-            &rules.commutation,
-            config,
-            target_context,
-            commutation_cache,
-        )? {
-            candidates.push(candidate);
+impl<'a> AnchorScanWorker<'a> {
+    fn new(memo: &'a ExactCommutationMemo) -> Self {
+        Self {
+            candidates: Vec::new(),
+            error: None,
+            commutation_cache: LocalExactCommutationCache::new(memo),
         }
     }
+}
 
-    Ok(candidates)
+fn earliest_scan_error(
+    left: Option<(usize, CompilerError)>,
+    right: Option<(usize, CompilerError)>,
+) -> Option<(usize, CompilerError)> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
+        (left @ Some(_), None) => left,
+        (None, right) => right,
+    }
+}
+
+struct AnchorScanner<'a> {
+    block: &'a BlockContext<'a>,
+    rules: &'a CompiledRuleSet,
+    active_rules: &'a BlockActiveRuleSet,
+    config: &'a RewriteConfig,
+    target_context: Option<&'a TargetContext>,
+}
+
+impl AnchorScanner<'_> {
+    fn scan_anchor_into<C: ExactCommutationCache>(
+        &self,
+        anchor: usize,
+        commutation_cache: &C,
+        candidates: &mut Vec<CandidatePatch>,
+    ) -> Result<(), CompilerError> {
+        let operation = self.block.operation(anchor);
+        if self.config.skips_labeled_ops() && operation.label.is_some() {
+            return Ok(());
+        }
+        let first_key = self.block.key(anchor);
+
+        for &rule_index in self.rules.candidates_for_first_instruction(first_key) {
+            if !self.active_rules.contains(rule_index) {
+                continue;
+            }
+            let compiled = self.rules.get(rule_index);
+            if let Some(candidate) = try_match_rule(
+                self.block,
+                anchor,
+                compiled,
+                &self.rules.commutation,
+                self.config,
+                self.target_context,
+                commutation_cache,
+            )? {
+                candidates.push(candidate);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn select_candidate_patches(
@@ -1514,22 +1689,26 @@ fn build_kind_index(library: &RuleLibrary) -> HashMap<usize, RuleKind> {
     index
 }
 
-/// Applies conservative static filters before expensive rule matching.
-///
-/// These checks reject impossible or disabled rules before the matcher clones
-/// bindings or asks the commutation oracle.
-fn rule_passes_static_filters(
+/// Applies configuration and target filters once per rewrite run.
+fn rule_passes_run_filters(
     rule: &CompiledRule,
     config: &RewriteConfig,
-    block: &BlockContext<'_>,
     target_context: Option<&TargetContext>,
 ) -> bool {
     rule.kind != RuleKind::Commute
         && config.allows_kind(rule.kind)
         && rule.match_len <= config.max_pattern_len()
-        && rule.qubit_count <= block.cache.qubit_count
         && rule_allowed_by_connectivity_policy(rule, config)
-        && rule_passes_target_filter(rule, target_context, block)
+        && rule_passes_target_filter(rule, target_context)
+}
+
+/// Applies block summary filters once before scanning its anchors.
+fn rule_passes_block_filters(rule: &CompiledRule, block: &BlockContext<'_>) -> bool {
+    rule.qubit_count <= block.cache.qubit_count
+        && rule
+            .match_keys
+            .iter()
+            .all(|key| block.cache.instruction_positions.contains_key(key))
 }
 
 /// Returns whether `rule` is admissible under the configured two-qubit
@@ -1546,13 +1725,10 @@ fn rule_allowed_by_connectivity_policy(rule: &CompiledRule, config: &RewriteConf
 
 /// Checks whether a rule is legal for an optional target-basis context.
 ///
-/// Target lowering rules must only replace operations present in this block,
-/// and their replacement keys must be legal for the target context.
-fn rule_passes_target_filter(
-    rule: &CompiledRule,
-    target_context: Option<&TargetContext>,
-    block: &BlockContext<'_>,
-) -> bool {
+/// Target lowering rules must preserve already-physical source operations and
+/// emit only keys legal for the target context. Block key presence is handled
+/// separately by [`rule_passes_block_filters`].
+fn rule_passes_target_filter(rule: &CompiledRule, target_context: Option<&TargetContext>) -> bool {
     let Some(target_context) = target_context else {
         return true;
     };
@@ -1561,13 +1737,9 @@ fn rule_passes_target_filter(
         return false;
     }
 
-    rule.match_keys
+    rule.rewrite_keys
         .iter()
-        .all(|key| block.cache.instruction_set.contains(key))
-        && rule
-            .rewrite_keys
-            .iter()
-            .all(|key| target_context.allows_rewrite_key(key))
+        .all(|key| target_context.allows_rewrite_key(key))
 }
 
 fn rule_rewrites_physical_source_through_non_physical_target(
@@ -1617,14 +1789,14 @@ fn try_match_rule<C: ExactCommutationCache>(
         return Ok(None);
     }
 
-    let mut matched_positions = vec![anchor];
-    let mut skipped_positions = Vec::new();
+    let mut matched_positions = SmallVec::<[usize; 8]>::from_slice(&[anchor]);
+    let mut skipped_positions = SmallVec::<[usize; 8]>::new();
     let mut cursor = anchor + 1;
     for (item, item_key) in rule.operations.iter().zip(&compiled.source_keys).skip(1) {
         let mut found = None;
         let limit = block.len().min(cursor + config.max_window_ops());
 
-        for position in cursor..limit {
+        for position in block.candidate_positions(item_key, cursor..limit) {
             if block.key(position) != item_key {
                 continue;
             }
@@ -1750,7 +1922,7 @@ fn try_match_rule<C: ExactCommutationCache>(
             static_cost_delta: compiled.static_cost_delta,
             first_position,
             last_position,
-            matched_positions,
+            matched_positions: matched_positions.into_vec(),
             replacements,
         },
     }))
