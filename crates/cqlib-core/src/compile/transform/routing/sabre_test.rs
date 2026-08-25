@@ -11,8 +11,9 @@
 // that they have been altered from the originals.
 
 use super::*;
-use crate::circuit::{Circuit, Qubit};
+use crate::circuit::{Circuit, Instruction, Qubit, StandardGate};
 use crate::compile::CompilerError;
+use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::sabre::SabreConfig;
 use crate::compile::test_utils::{
     assert_two_qubit_operations_supported_by_topology, generated_small_routable_circuit,
@@ -38,6 +39,49 @@ fn sabre_routing_auto_layout_routes_non_embeddable_interactions() {
     assert_eq!(result.circuit().qubits().len(), 3);
     assert_all_two_qubit_operations_are_adjacent_on_line(result.circuit());
     assert_two_qubit_operations_supported_by_topology(result.circuit(), device.topology());
+}
+
+#[test]
+fn shared_planning_session_preserves_seeded_routing_output() {
+    let device = Device::line("shared-session-line", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let config = SabreConfig::deterministic_seeded(73);
+    let mut circuit = Circuit::new(3);
+    circuit.cx(Qubit::new(0), Qubit::new(2)).unwrap();
+    circuit.cx(Qubit::new(2), Qubit::new(1)).unwrap();
+    let logical = (0..3).map(LogicalQubit::new).collect::<Vec<_>>();
+    let physical = (0..3).map(PhysicalQubit::new).collect::<Vec<_>>();
+    let layout = Layout::new(
+        logical.clone(),
+        physical.clone(),
+        Some(logical.into_iter().zip(physical).collect()),
+    )
+    .unwrap();
+
+    let standalone = route_with_layout_tracked(&circuit, &device, &layout, &config).unwrap();
+    let session = DevicePlanningSession::new(&device);
+    let shared =
+        route_with_layout_tracked_with_session(&circuit, &device, &layout, &config, &session)
+            .unwrap();
+
+    assert_eq!(standalone.routed().circuit(), shared.routed().circuit());
+    assert_eq!(
+        standalone.routed().initial_layout(),
+        shared.routed().initial_layout()
+    );
+    assert_eq!(
+        standalone.routed().final_layout(),
+        shared.routed().final_layout()
+    );
+    assert_eq!(
+        standalone.routed().swap_count(),
+        shared.routed().swap_count()
+    );
 }
 
 #[test]

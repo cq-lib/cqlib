@@ -100,7 +100,10 @@ pub(crate) use rewrite::{
     RewriteExecutionRecord,
 };
 pub use routing::{RoutedCircuit, SabreRouteResult, route_sabre, route_with_layout};
-pub(crate) use routing::{route_sabre_tracked, route_with_layout_tracked};
+pub(crate) use routing::{
+    route_sabre_tracked, route_sabre_tracked_with_session, route_with_layout_tracked,
+    route_with_layout_tracked_with_session,
+};
 pub use routing_basis::LowerToRoutingBasis;
 pub use target_basis::{
     TargetBasisCost, TargetBasisCostModel, TargetBasisLowerer, TargetBasisSignature,

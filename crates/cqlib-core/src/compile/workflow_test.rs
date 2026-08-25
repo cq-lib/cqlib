@@ -80,6 +80,7 @@ fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowS
         one_qubit_optimizer,
         pending_one_qubit_resynthesis: false,
         resynthesis_session: WorkflowResynthesisSession::default(),
+        planning_session: None,
     }
 }
 
@@ -101,6 +102,7 @@ fn workflow_state_without_target_basis() -> WorkflowState {
         one_qubit_optimizer: Some(OptimizeOneQubitRuns::logical()),
         pending_one_qubit_resynthesis: false,
         resynthesis_session: WorkflowResynthesisSession::default(),
+        planning_session: None,
     }
 }
 

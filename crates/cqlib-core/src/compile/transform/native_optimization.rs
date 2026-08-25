@@ -36,9 +36,8 @@ use crate::circuit::{
     ValueOperation, ValueSwitchCase,
 };
 use crate::compile::CompilerError;
+use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::sabre::MetricAvailability;
-#[cfg(test)]
-use crate::compile::transform::ResynthesizeTwoQubitBlocks;
 use crate::compile::transform::decompose::unitary::{
     DeviceContextCostFailure, DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
     OneQubitUnitaryDecomposition, synthesize_numeric_1q_unitary,
@@ -86,20 +85,23 @@ pub(crate) struct NativeOptimizationResult {
 /// Bounded native optimization loop with minimum-point restoration.
 pub(crate) struct NativeOptimizer<'a> {
     device: &'a Device,
+    planning_session: Arc<DevicePlanningSession>,
     resynthesis: TwoQubitBlockResynthesisConfig,
     max_rounds: u8,
     max_stale_rounds: u8,
 }
 
 impl<'a> NativeOptimizer<'a> {
-    pub(crate) fn new(
+    pub(crate) fn with_session(
         device: &'a Device,
         resynthesis: TwoQubitBlockResynthesisConfig,
         max_rounds: u8,
         max_stale_rounds: u8,
+        planning_session: Arc<DevicePlanningSession>,
     ) -> Self {
         Self {
             device,
+            planning_session,
             resynthesis,
             max_rounds,
             max_stale_rounds,
@@ -128,10 +130,11 @@ impl<'a> NativeOptimizer<'a> {
         let mut best = initial;
         // This exact-physical context is immutable and run-scoped. All consumers
         // share its Arc-backed catalog until a candidate exposes missing coverage.
-        let mut context = DeviceTwoQubitSynthesisContext::build(
+        let mut context = DeviceTwoQubitSynthesisContext::build_with_session(
             self.device,
             &best,
             DeviceSynthesisPlacement::ExactPhysical,
+            Arc::clone(&self.planning_session),
         )?;
         let mut best_costs = scope_costs_with_context(&best, &context).map_err(scope_cost_error)?;
         let before = summarize_scope_costs(&best_costs);
@@ -168,7 +171,9 @@ impl<'a> NativeOptimizer<'a> {
             }
             let legalized = match local_outcome {
                 TransformOutcome::Changed(locally_optimized) => {
-                    match DeviceLowerer::new(self.device).transform(&locally_optimized, None) {
+                    match DeviceLowerer::with_session(self.device, &self.planning_session)
+                        .transform(&locally_optimized, None)
+                    {
                         Ok(TransformOutcome::Unchanged) => locally_optimized,
                         Ok(TransformOutcome::Changed(legalized)) => legalized,
                         // Frame propagation is speculative: materializing a combined
@@ -180,7 +185,9 @@ impl<'a> NativeOptimizer<'a> {
                                 TransformOutcome::Unchanged => current.as_ref(),
                                 TransformOutcome::Changed(circuit) => circuit,
                             };
-                            match DeviceLowerer::new(self.device).transform(fallback, None)? {
+                            match DeviceLowerer::with_session(self.device, &self.planning_session)
+                                .transform(fallback, None)?
+                            {
                                 TransformOutcome::Changed(legalized) => legalized,
                                 TransformOutcome::Unchanged => match resynthesis_outcome {
                                     TransformOutcome::Changed(resynthesized) => resynthesized,
@@ -198,7 +205,9 @@ impl<'a> NativeOptimizer<'a> {
                             "a stable native optimization round exits before legalization"
                         ),
                     };
-                    match DeviceLowerer::new(self.device).transform(&resynthesized, None)? {
+                    match DeviceLowerer::with_session(self.device, &self.planning_session)
+                        .transform(&resynthesized, None)?
+                    {
                         TransformOutcome::Unchanged => resynthesized,
                         TransformOutcome::Changed(legalized) => legalized,
                     }
@@ -277,10 +286,11 @@ impl<'a> NativeOptimizer<'a> {
         match scope_costs_with_context(candidate, context) {
             Ok(costs) => Ok(costs),
             Err(ScopeCostError::Context(DeviceContextCostFailure::Unprepared(_))) => {
-                let rebuilt = DeviceTwoQubitSynthesisContext::build(
+                let rebuilt = DeviceTwoQubitSynthesisContext::build_with_session(
                     self.device,
                     candidate,
                     DeviceSynthesisPlacement::ExactPhysical,
+                    Arc::clone(&self.planning_session),
                 )?;
                 let costs = match scope_costs_with_context(candidate, &rebuilt) {
                     Ok(costs) => costs,

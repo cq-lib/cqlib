@@ -27,13 +27,16 @@
 
 use crate::circuit::{Circuit, CircuitParam, Parameter, Qubit};
 use crate::compile::CompilerError;
+use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::sabre::{
     RouteOperationProvenance, SabreConfig, SabreRoutingDiagnostics, SabreRoutingResult,
     finish_sabre_route, sabre_route as sabre_route_core, sabre_route_with_provenance,
+    sabre_route_with_provenance_and_session,
 };
 use crate::compile::transform::layout::{
     LayoutDiagnostics, LayoutObjective, LayoutScore, prepare_sabre_circuit,
-    prepare_sabre_device_target, sabre_route_selection_prepared,
+    prepare_sabre_device_target, prepare_sabre_device_target_with_session,
+    sabre_route_selection_prepared,
 };
 use crate::compile::transform::{QubitBijection, RewriteEdits};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
@@ -336,8 +339,23 @@ fn sabre_layout_and_route(
     config: &SabreConfig,
     retain_provenance: bool,
 ) -> Result<SabreRoutingResultWithScore, CompilerError> {
+    sabre_layout_and_route_with_session(circuit, device, objective, config, retain_provenance, None)
+}
+
+fn sabre_layout_and_route_with_session(
+    circuit: &Circuit,
+    device: &Device,
+    objective: &LayoutObjective,
+    config: &SabreConfig,
+    retain_provenance: bool,
+    planning_session: Option<&DevicePlanningSession>,
+) -> Result<SabreRoutingResultWithScore, CompilerError> {
     let prepared = prepare_sabre_circuit(circuit)?;
-    let prepared_target = prepare_sabre_device_target(&prepared, device)?;
+    let prepared_target = if let Some(session) = planning_session {
+        prepare_sabre_device_target_with_session(&prepared, device, session)?
+    } else {
+        prepare_sabre_device_target(&prepared, device)?
+    };
     let selection = sabre_route_selection_prepared(
         &prepared,
         &prepared_target,
@@ -391,6 +409,33 @@ pub(crate) fn route_with_layout_tracked(
     config: &SabreConfig,
 ) -> Result<TrackedRoutedCircuit, CompilerError> {
     let result = sabre_route_with_provenance(circuit, device, initial_layout, config)?;
+    let routing = result.routing;
+    Ok(TrackedRoutedCircuit {
+        routed: RoutedCircuit {
+            circuit: routing.circuit,
+            initial_layout: routing.initial_layout,
+            final_layout: routing.final_layout,
+            swap_count: routing.swap_count,
+            diagnostics: routing.diagnostics,
+        },
+        provenance: result.provenance,
+    })
+}
+
+pub(crate) fn route_with_layout_tracked_with_session(
+    circuit: &Circuit,
+    device: &Device,
+    initial_layout: &Layout,
+    config: &SabreConfig,
+    planning_session: &DevicePlanningSession,
+) -> Result<TrackedRoutedCircuit, CompilerError> {
+    let result = sabre_route_with_provenance_and_session(
+        circuit,
+        device,
+        initial_layout,
+        config,
+        planning_session,
+    )?;
     let routing = result.routing;
     Ok(TrackedRoutedCircuit {
         routed: RoutedCircuit {
@@ -460,6 +505,33 @@ pub(crate) fn route_sabre_tracked(
     config: &SabreConfig,
 ) -> Result<TrackedRoutedCircuit, CompilerError> {
     let result = sabre_layout_and_route(circuit, device, objective, config, true)?;
+    Ok(TrackedRoutedCircuit {
+        routed: RoutedCircuit {
+            circuit: result.routing.circuit,
+            initial_layout: result.routing.initial_layout,
+            final_layout: result.routing.final_layout,
+            swap_count: result.routing.swap_count,
+            diagnostics: result.routing.diagnostics,
+        },
+        provenance: result.provenance,
+    })
+}
+
+pub(crate) fn route_sabre_tracked_with_session(
+    circuit: &Circuit,
+    device: &Device,
+    objective: &LayoutObjective,
+    config: &SabreConfig,
+    planning_session: &DevicePlanningSession,
+) -> Result<TrackedRoutedCircuit, CompilerError> {
+    let result = sabre_layout_and_route_with_session(
+        circuit,
+        device,
+        objective,
+        config,
+        true,
+        Some(planning_session),
+    )?;
     Ok(TrackedRoutedCircuit {
         routed: RoutedCircuit {
             circuit: result.routing.circuit,

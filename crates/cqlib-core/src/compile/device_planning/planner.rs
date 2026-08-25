@@ -28,6 +28,7 @@ use crate::device::Device;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 
 const MAX_DIAGNOSTIC_CANDIDATES: usize = 16;
 const MAX_FRONTIER_SIZE_PER_STATE: usize = 64;
@@ -172,25 +173,38 @@ pub(crate) struct DevicePlanner<'a> {
     selected: Vec<Option<PlanId>>,
     plans: Vec<Option<PlanChoice>>,
     costs: Vec<Option<DevicePlanCost>>,
-    estimator: CalibrationEstimator,
+    estimator: Arc<CalibrationEstimator>,
     budget: PlannerBudget,
     generated_candidates: usize,
 }
 
 impl<'a> DevicePlanner<'a> {
-    pub(crate) fn build(
+    /// Builds a planner against a compile-scoped immutable calibration model.
+    ///
+    /// Planning batches remain independent, but missing-calibration estimates
+    /// are derived once per device snapshot rather than rescanning the entire
+    /// device for every pass.
+    pub(crate) fn build_with_estimator(
         device: &'a Device,
         library: &RuleLibrary,
         roots: impl IntoIterator<Item = DeviceGateState>,
+        estimator: Arc<CalibrationEstimator>,
     ) -> Result<Self, DevicePlannerError> {
-        Self::build_with_budget(device, library, roots, PlannerBudget::default())
+        Self::build_with_estimator_and_budget(
+            device,
+            library,
+            roots,
+            PlannerBudget::default(),
+            estimator,
+        )
     }
 
-    fn build_with_budget(
+    fn build_with_estimator_and_budget(
         device: &'a Device,
         library: &RuleLibrary,
         roots: impl IntoIterator<Item = DeviceGateState>,
         budget: PlannerBudget,
+        estimator: Arc<CalibrationEstimator>,
     ) -> Result<Self, DevicePlannerError> {
         let mut builder = GraphBuilder::new(library);
         for root in roots {
@@ -199,8 +213,6 @@ impl<'a> DevicePlanner<'a> {
         builder.expand().map_err(DevicePlannerError::Invariant)?;
 
         let state_count = builder.states.len();
-        let physical_qubits = device.usable_qubits().collect::<Vec<_>>();
-
         let mut planner = Self {
             device,
             plans: vec![None; state_count],
@@ -211,7 +223,7 @@ impl<'a> DevicePlanner<'a> {
             states: builder.states,
             state_ids: builder.state_ids,
             edges: builder.edges,
-            estimator: CalibrationEstimator::from_device(device, &physical_qubits),
+            estimator,
             budget,
             generated_candidates: 0,
         };
@@ -232,35 +244,12 @@ impl<'a> DevicePlanner<'a> {
         self.nodes.get(plan.0).map(|node| node.physical_cost)
     }
 
-    /// Returns the number of exact native leaves emitted by one plan without
-    /// cloning the plan summary.
-    pub(crate) fn leaf_count_for_plan(&self, plan: PlanId) -> Option<usize> {
-        self.nodes.get(plan.0).map(|node| node.leaves.len())
-    }
-
-    /// Costs one exact native leaf sequence with this planner's estimator.
-    pub(crate) fn leaves_physical_cost(&self, leaves: &[NativePlanLeaf]) -> DevicePhysicalCost {
-        self.estimator.physical_cost(leaves)
-    }
-
     pub(crate) fn children_for_plan(&self, plan: PlanId) -> Option<&[PlanId]> {
         self.nodes.get(plan.0).map(|node| node.children.as_slice())
     }
 
     pub(crate) fn state_for_plan(&self, plan: PlanId) -> Option<&DeviceGateState> {
         self.nodes.get(plan.0).map(|node| &self.states[node.state])
-    }
-
-    /// Summarizes the exact native leaves selected by this planner.
-    ///
-    pub(crate) fn summary_for(
-        &self,
-        state: &DeviceGateState,
-    ) -> Result<Option<NativePlanSummary>, DevicePlannerError> {
-        let Some(plan) = self.selected_plan_for(state) else {
-            return Ok(None);
-        };
-        self.summary_for_plan(plan).map(Some)
     }
 
     pub(crate) fn summary_for_plan(

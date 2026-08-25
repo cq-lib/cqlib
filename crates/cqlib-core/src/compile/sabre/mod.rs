@@ -117,6 +117,7 @@ pub(crate) use routing::{
     compare_ranked_trials, finish_sabre_route, interaction_reachability_for_target_with_metadata,
     movement_component_assignment, normalize_initial_layout_for_target,
     refine_layout_with_metadata, route_ranked_trial_with_metadata, sabre_route_with_provenance,
+    sabre_route_with_provenance_and_session,
 };
 pub use routing::{SabreRoutingDiagnostics, SabreRoutingResult, sabre_route};
 pub use routing::{normalize_initial_layout, validate_reachable_interactions};

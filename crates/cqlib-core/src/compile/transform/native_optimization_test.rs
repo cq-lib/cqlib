@@ -11,8 +11,26 @@
 // that they have been altered from the originals.
 
 use super::*;
-use crate::compile::transform::TransformerTestExt;
+use crate::compile::device_planning::DevicePlanningSession;
+use crate::compile::test_utils::build_device_synthesis_context;
+use crate::compile::transform::{ResynthesizeTwoQubitBlocks, TransformerTestExt};
 use crate::device::{EdgeProp, InstructionProp, PhysicalQubit};
+use std::sync::Arc;
+
+fn native_optimizer<'a>(
+    device: &'a Device,
+    resynthesis: TwoQubitBlockResynthesisConfig,
+    max_rounds: u8,
+    max_stale_rounds: u8,
+) -> NativeOptimizer<'a> {
+    NativeOptimizer::with_session(
+        device,
+        resynthesis,
+        max_rounds,
+        max_stale_rounds,
+        Arc::new(DevicePlanningSession::new(device)),
+    )
+}
 
 fn assert_same_native_result(
     reused: &NativeOptimizationResult,
@@ -38,7 +56,7 @@ fn run_rebuild_every_use(
     optimizer.device.validate_circuit(&initial)?;
     let mut current = initial.clone();
     let mut best = initial;
-    let initial_context = DeviceTwoQubitSynthesisContext::build(
+    let initial_context = build_device_synthesis_context(
         optimizer.device,
         &best,
         DeviceSynthesisPlacement::ExactPhysical,
@@ -51,7 +69,7 @@ fn run_rebuild_every_use(
 
     while rounds < optimizer.max_rounds && stale < optimizer.max_stale_rounds {
         rounds += 1;
-        let resynthesis_context = DeviceTwoQubitSynthesisContext::build(
+        let resynthesis_context = build_device_synthesis_context(
             optimizer.device,
             &current,
             DeviceSynthesisPlacement::ExactPhysical,
@@ -62,7 +80,7 @@ fn run_rebuild_every_use(
         )
         .transform_resolved(&current, None)?
         .circuit;
-        let local_context = DeviceTwoQubitSynthesisContext::build(
+        let local_context = build_device_synthesis_context(
             optimizer.device,
             &resynthesized,
             DeviceSynthesisPlacement::ExactPhysical,
@@ -90,7 +108,7 @@ fn run_rebuild_every_use(
             break;
         }
 
-        let candidate_context = DeviceTwoQubitSynthesisContext::build(
+        let candidate_context = build_device_synthesis_context(
             optimizer.device,
             &candidate,
             DeviceSynthesisPlacement::ExactPhysical,
@@ -128,7 +146,7 @@ fn native_optimizer_stops_after_one_stable_round() {
     let q0 = Qubit::new(0);
     let mut circuit = Circuit::new(1);
     circuit.u(q0, 0.2, 0.3, 0.4).unwrap();
-    let optimizer = NativeOptimizer::new(
+    let optimizer = native_optimizer(
         &device,
         TwoQubitBlockResynthesisConfig::normal(Default::default()),
         8,
@@ -154,7 +172,7 @@ fn native_optimizer_reuse_matches_rebuild_every_use() {
     let mut circuit = Circuit::new(1);
     circuit.u(q0, 0.2, 0.3, 0.4).unwrap();
     circuit.u(q0, -0.1, 0.5, -0.2).unwrap();
-    let optimizer = NativeOptimizer::new(
+    let optimizer = native_optimizer(
         &device,
         TwoQubitBlockResynthesisConfig::normal(Default::default()),
         8,
@@ -201,7 +219,7 @@ fn native_optimizer_reuse_matches_rebuild_on_calibrated_two_qubit_workload() {
     circuit.cx(q0, q1).unwrap();
     circuit.u(q1, -0.3, 0.5, 0.2).unwrap();
     circuit.cx(q0, q1).unwrap();
-    let optimizer = NativeOptimizer::new(
+    let optimizer = native_optimizer(
         &device,
         TwoQubitBlockResynthesisConfig::normal(Default::default()),
         4,
@@ -228,7 +246,7 @@ fn incremental_resynthesis_matches_full_scan_and_reuses_clean_flat_anchors() {
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     circuit.cx(Qubit::new(2), Qubit::new(3)).unwrap();
     circuit.cx(Qubit::new(4), Qubit::new(5)).unwrap();
-    let optimizer = NativeOptimizer::new(
+    let optimizer = native_optimizer(
         &device,
         TwoQubitBlockResynthesisConfig::normal(Default::default()),
         4,
@@ -274,7 +292,7 @@ fn native_rounds_reuse_clean_terminal_resynthesis_decisions() {
     circuit.cx(q0, q1).unwrap();
     circuit.u(q2, 0.1, 0.2, 0.3).unwrap();
     circuit.u(q2, -0.2, 0.4, -0.1).unwrap();
-    let optimizer = NativeOptimizer::new(
+    let optimizer = native_optimizer(
         &device,
         TwoQubitBlockResynthesisConfig::normal(Default::default()),
         4,
@@ -300,7 +318,7 @@ fn native_rounds_reuse_clean_terminal_resynthesis_decisions() {
 }
 
 #[test]
-fn native_optimizer_rebuilds_unprepared_candidate_context() {
+fn native_optimizer_lazily_prepares_candidate_context() {
     let device = Device::line("native-context-fallback", 2)
         .unwrap()
         .with_native_gates(vec![
@@ -308,30 +326,22 @@ fn native_optimizer_rebuilds_unprepared_candidate_context() {
             Instruction::Standard(StandardGate::FSIM),
         ])
         .unwrap();
-    let optimizer = NativeOptimizer::new(
+    let optimizer = native_optimizer(
         &device,
         TwoQubitBlockResynthesisConfig::normal(Default::default()),
         2,
         1,
     );
     let initial = Circuit::new(2);
-    let mut context = DeviceTwoQubitSynthesisContext::build(
-        &device,
-        &initial,
-        DeviceSynthesisPlacement::ExactPhysical,
-    )
-    .unwrap();
+    let mut context =
+        build_device_synthesis_context(&device, &initial, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
     let mut candidate = Circuit::new(2);
     candidate
         .fsim(Qubit::new(0), Qubit::new(1), 0.2, -0.3)
         .unwrap();
 
-    assert!(matches!(
-        scope_costs_with_context(&candidate, &context),
-        Err(ScopeCostError::Context(
-            DeviceContextCostFailure::Unprepared(_)
-        ))
-    ));
+    assert!(scope_costs_with_context(&candidate, &context).is_ok());
     let costs = optimizer
         .candidate_costs_with_reuse(&candidate, &mut context)
         .unwrap();
@@ -343,7 +353,7 @@ fn native_optimizer_rebuilds_unprepared_candidate_context() {
 #[test]
 fn native_optimizer_does_not_rebuild_unsupported_candidate() {
     let device = Device::line("native-context-unsupported", 2).unwrap();
-    let optimizer = NativeOptimizer::new(
+    let optimizer = native_optimizer(
         &device,
         TwoQubitBlockResynthesisConfig::normal(Default::default()),
         2,
@@ -351,7 +361,7 @@ fn native_optimizer_does_not_rebuild_unsupported_candidate() {
     );
     let mut candidate = Circuit::new(2);
     candidate.cx(Qubit::new(0), Qubit::new(1)).unwrap();
-    let mut context = DeviceTwoQubitSynthesisContext::build(
+    let mut context = build_device_synthesis_context(
         &device,
         &candidate,
         DeviceSynthesisPlacement::ExactPhysical,
@@ -388,12 +398,9 @@ fn one_qubit_fusion_requires_exact_physical_improvement() {
     let mut circuit = Circuit::new(1);
     circuit.u(q0, 0.2, 0.3, 0.4).unwrap();
     circuit.u(q0, -0.1, 0.5, -0.2).unwrap();
-    let context = DeviceTwoQubitSynthesisContext::build(
-        &device,
-        &circuit,
-        DeviceSynthesisPlacement::ExactPhysical,
-    )
-    .unwrap();
+    let context =
+        build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
 
     let result = OptimizeNativeLocalGates::new(context)
         .transform_resolved(&circuit, None)

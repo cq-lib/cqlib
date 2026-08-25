@@ -29,8 +29,8 @@
 use crate::circuit::{Circuit, Instruction, Qubit, StandardGate, ValueInstruction, ValueOperation};
 use crate::compile::CompilerError;
 use crate::compile::device_planning::{
-    CalibrationEstimator, DeviceGateState, NativePlanAvailability, NativePlanCatalog,
-    NativePlanCost, NativePlanLeaf, NativePlanSummary,
+    CalibrationEstimator, DeviceGateState, DevicePlanningSession, NativePlanAvailability,
+    NativePlanCatalog, NativePlanCost, NativePlanLeaf, NativePlanSummary,
 };
 use crate::compile::error::DeviceLoweringFailure;
 use crate::device::{Device, PhysicalQubit};
@@ -116,8 +116,8 @@ struct DeviceTwoQubitSynthesisData {
     eligible_components: BTreeSet<usize>,
     component_by_qubit: HashMap<PhysicalQubit, usize>,
     native_backends: BTreeMap<[PhysicalQubit; 2], HashSet<StandardGate>>,
-    catalog: NativePlanCatalog,
-    estimator: CalibrationEstimator,
+    planning_session: Arc<DevicePlanningSession>,
+    estimator: Arc<CalibrationEstimator>,
     physical_cost_cache: Mutex<PhysicalSequenceCostCache>,
 }
 
@@ -130,18 +130,6 @@ struct PhysicalSequenceCostKey {
 #[derive(Debug, Default)]
 struct PhysicalSequenceCostCache {
     entries: HashMap<PhysicalSequenceCostKey, Result<DevicePhysicalCost, DeviceContextCostFailure>>,
-    stats: DevicePhysicalCostCacheStats,
-}
-
-/// Low-overhead diagnostics for the request-scoped physical sequence cache.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct DevicePhysicalCostCacheStats {
-    pub(crate) lookups: usize,
-    pub(crate) hits: usize,
-    pub(crate) misses: usize,
-    pub(crate) entries: usize,
-    pub(crate) capacity_rejections: usize,
-    pub(crate) parameter_sensitive_bypasses: usize,
 }
 
 /// Pass-local exact device planning data shared by all matrices and blocks.
@@ -164,11 +152,12 @@ pub(crate) enum DeviceContextCostFailure {
 }
 
 impl DeviceTwoQubitSynthesisContext {
-    /// Builds one batched catalog for a synthesis pass.
-    pub(crate) fn build(
+    /// Builds a synthesis view over one workflow-scoped planning session.
+    pub(crate) fn build_with_session(
         device: &Device,
         circuit: &Circuit,
         placement: DeviceSynthesisPlacement,
+        planning_session: Arc<DevicePlanningSession>,
     ) -> Result<Self, CompilerError> {
         let physical_qubits = device.usable_qubits().collect::<Vec<_>>();
         let topology_pairs = ordered_topology_pairs(device, &physical_qubits);
@@ -178,26 +167,27 @@ impl DeviceTwoQubitSynthesisContext {
                 collect_exact_physical_pairs(circuit.operations())
             }
         };
-        let root_qubits = match placement {
-            DeviceSynthesisPlacement::PreLayoutEnvelope => physical_qubits.clone(),
-            DeviceSynthesisPlacement::ExactPhysical => circuit
-                .qubits()
-                .iter()
-                .copied()
-                .map(PhysicalQubit::from_qubit)
-                .collect(),
+        // Only SWAP reachability is device-wide. Candidate KAK gates and exact
+        // circuit roots are prepared on first use by `catalog_summary`.
+        let movement_catalog = match placement {
+            DeviceSynthesisPlacement::PreLayoutEnvelope => {
+                let movement_roots = topology_pairs.iter().map(|pair| {
+                    DeviceGateState::standard(StandardGate::SWAP, smallvec![pair[0], pair[1]])
+                });
+                NativePlanCatalog::build_with_session(&planning_session, movement_roots)?
+            }
+            DeviceSynthesisPlacement::ExactPhysical => {
+                NativePlanCatalog::build_with_session(&planning_session, [])?
+            }
         };
-        let source_gates = collect_source_standard_gates(circuit.operations());
-        let mut roots = catalog_roots(&root_qubits, &ordered_pairs, &source_gates);
         if placement == DeviceSynthesisPlacement::ExactPhysical {
-            roots.extend(collect_exact_physical_gate_roots(circuit.operations()));
+            planning_session.prepare(collect_exact_physical_gate_roots(circuit.operations()))?;
         }
-        let catalog = NativePlanCatalog::build(device, roots)?;
-        let estimator = CalibrationEstimator::from_device(device, &physical_qubits);
+        let estimator = planning_session.estimator();
         let (component_by_qubit, eligible_components, eligible_pairs) = match placement {
             DeviceSynthesisPlacement::PreLayoutEnvelope => {
                 let (component_by_qubit, _component_sizes) =
-                    movement_components(&physical_qubits, &topology_pairs, &catalog);
+                    movement_components(&physical_qubits, &topology_pairs, &movement_catalog);
                 // Terminal pairs remain useful even when no lowerable SWAP
                 // joins their movement components. Excluding such pairs would
                 // reject valid fixed placements on devices that can execute a
@@ -224,7 +214,7 @@ impl DeviceTwoQubitSynthesisContext {
                 eligible_components,
                 component_by_qubit,
                 native_backends,
-                catalog,
+                planning_session,
                 estimator,
                 physical_cost_cache: Mutex::new(PhysicalSequenceCostCache::default()),
             }),
@@ -239,15 +229,6 @@ impl DeviceTwoQubitSynthesisContext {
     /// Clones retain it; every rebuilt context receives a fresh generation.
     pub(crate) fn generation(&self) -> u64 {
         self.data.generation
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn physical_cost_cache_stats(&self) -> DevicePhysicalCostCacheStats {
-        self.data
-            .physical_cost_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .stats
     }
 
     /// KAK backends directly native somewhere relevant to this request.
@@ -279,6 +260,17 @@ impl DeviceTwoQubitSynthesisContext {
         if self.data.placement != DeviceSynthesisPlacement::PreLayoutEnvelope {
             return None;
         }
+        // Prepare this candidate's exact roots as one deterministic batch.
+        // The following scan then performs only cache lookups.
+        let roots = self
+            .data
+            .eligible_pairs
+            .iter()
+            .flat_map(|pair| states_on_pair(operations, logical_qubits, *pair).unwrap_or_default())
+            .collect::<Vec<_>>();
+        if self.data.planning_session.prepare(roots).is_err() {
+            return None;
+        }
         let pair_costs = self
             .data
             .eligible_pairs
@@ -304,15 +296,6 @@ impl DeviceTwoQubitSynthesisContext {
         })
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn exact_cost(
-        &self,
-        operations: &[ValueOperation],
-        physical_qubits: [Qubit; 2],
-    ) -> Option<DevicePhysicalCost> {
-        self.exact_cost_diagnostic(operations, physical_qubits).ok()
-    }
-
     /// Costs a two-qubit sequence and preserves the reason costing is unavailable.
     pub(crate) fn exact_cost_diagnostic(
         &self,
@@ -333,14 +316,6 @@ impl DeviceTwoQubitSynthesisContext {
     /// plan used by [`DeviceLowerer`](crate::compile::transform::DeviceLowerer).
     /// Control flow and non-gate instructions are deliberately outside this
     /// sequence-level API and make the sequence unavailable for costing.
-    #[allow(dead_code)]
-    pub(crate) fn exact_sequence_cost(
-        &self,
-        operations: &[ValueOperation],
-    ) -> Option<DevicePhysicalCost> {
-        self.exact_sequence_cost_diagnostic(operations).ok()
-    }
-
     /// Costs a flat exact-physical sequence with explicit coverage diagnostics.
     ///
     /// Unlike [`Self::exact_sequence_cost`], this method distinguishes a missing
@@ -465,40 +440,16 @@ impl DeviceTwoQubitSynthesisContext {
         };
         if cacheable {
             let cached = {
-                let mut cache = self
+                let cache = self
                     .data
                     .physical_cost_cache
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                cache.stats.lookups = cache.stats.lookups.saturating_add(1);
-                let cached = cache.entries.get(&key).cloned();
-                if cached.is_some() {
-                    cache.stats.hits = cache.stats.hits.saturating_add(1);
-                } else {
-                    cache.stats.misses = cache.stats.misses.saturating_add(1);
-                }
-                cached
+                cache.entries.get(&key).cloned()
             };
             if let Some(cached) = cached {
-                #[cfg(test)]
-                {
-                    let uncached = self.compute_physical_sequence_cost(&key)?;
-                    assert_eq!(
-                        cached.as_ref().ok(),
-                        Some(&uncached),
-                        "parameter-independent physical cost cache changed exact cost"
-                    );
-                }
                 return cached;
             }
-        } else {
-            let mut cache = self
-                .data
-                .physical_cost_cache
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            cache.stats.parameter_sensitive_bypasses =
-                cache.stats.parameter_sensitive_bypasses.saturating_add(1);
         }
 
         let result = self.compute_physical_sequence_cost(&key);
@@ -510,9 +461,6 @@ impl DeviceTwoQubitSynthesisContext {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if cache.entries.len() < PHYSICAL_SEQUENCE_COST_CACHE_BUDGET {
                 cache.entries.insert(key, result.clone());
-                cache.stats.entries = cache.entries.len();
-            } else {
-                cache.stats.capacity_rejections = cache.stats.capacity_rejections.saturating_add(1);
             }
         }
         result
@@ -529,7 +477,7 @@ impl DeviceTwoQubitSynthesisContext {
         let mut aggregate = self.data.estimator.identity_cost();
         for state in &key.states {
             let summary = self.catalog_summary(state)?;
-            aggregate = aggregate.combine(self.data.estimator.cost(summary));
+            aggregate = aggregate.combine(self.data.estimator.cost(&summary));
             scheduler.add_leaves(&summary.leaves).map_err(|reason| {
                 DeviceContextCostFailure::InvalidOperation(format!(
                     "invalid native two-qubit schedule: {reason}"
@@ -542,15 +490,67 @@ impl DeviceTwoQubitSynthesisContext {
     fn catalog_summary(
         &self,
         state: &DeviceGateState,
-    ) -> Result<&NativePlanSummary, DeviceContextCostFailure> {
-        match self.data.catalog.availability(state) {
+    ) -> Result<NativePlanSummary, DeviceContextCostFailure> {
+        self.data
+            .planning_session
+            .prepare([state.clone()])
+            .map_err(|error| {
+                DeviceContextCostFailure::InvalidOperation(format!(
+                    "exact device planning failed: {error}"
+                ))
+            })?;
+        match self.data.planning_session.availability(state) {
             Some(NativePlanAvailability::Feasible(summary)) => Ok(summary),
             Some(NativePlanAvailability::Unsupported(failure)) => {
-                Err(DeviceContextCostFailure::Unsupported(failure.clone()))
+                Err(DeviceContextCostFailure::Unsupported(failure))
             }
             None => Err(DeviceContextCostFailure::Unprepared(state.clone())),
         }
     }
+}
+
+fn states_on_pair(
+    operations: &[ValueOperation],
+    circuit_qubits: [Qubit; 2],
+    physical_pair: [PhysicalQubit; 2],
+) -> Result<Vec<DeviceGateState>, DeviceContextCostFailure> {
+    let mut states = Vec::with_capacity(operations.len());
+    for operation in operations {
+        let ValueInstruction::Instruction(instruction) = &operation.instruction else {
+            return Err(DeviceContextCostFailure::InvalidOperation(
+                "device pair cost requires gate-like instructions".to_string(),
+            ));
+        };
+        if matches!(instruction, Instruction::Standard(StandardGate::GPhase)) {
+            continue;
+        }
+        let ordered_qargs = operation
+            .qubits
+            .iter()
+            .map(|qubit| {
+                if *qubit == circuit_qubits[0] {
+                    Some(physical_pair[0])
+                } else if *qubit == circuit_qubits[1] {
+                    Some(physical_pair[1])
+                } else {
+                    None
+                }
+            })
+            .collect::<Option<_>>()
+            .ok_or_else(|| {
+                DeviceContextCostFailure::InvalidOperation(
+                    "device pair cost references a qubit outside the requested pair".to_string(),
+                )
+            })?;
+        states.push(
+            DeviceGateState::from_instruction(instruction, ordered_qargs).ok_or_else(|| {
+                DeviceContextCostFailure::InvalidOperation(format!(
+                    "missing device-planning key for {instruction}"
+                ))
+            })?,
+        );
+    }
+    Ok(states)
 }
 
 /// Streaming accumulator for exact-physical sequence cost.
@@ -586,7 +586,7 @@ impl ExactSequenceCostAccumulator<'_> {
         let summary = self.context.catalog_summary(&state)?;
         self.aggregate = self
             .aggregate
-            .combine(self.context.data.estimator.cost(summary));
+            .combine(self.context.data.estimator.cost(&summary));
         self.leaves.extend(summary.leaves.iter().cloned());
         Ok(())
     }
@@ -613,86 +613,6 @@ fn ordered_topology_pairs(
         }
     }
     pairs.into_iter().collect()
-}
-
-fn catalog_roots(
-    physical_qubits: &[PhysicalQubit],
-    ordered_pairs: &[[PhysicalQubit; 2]],
-    source_gates: &HashSet<StandardGate>,
-) -> Vec<DeviceGateState> {
-    let mut unary_gates = StandardGate::all()
-        .iter()
-        .copied()
-        .filter(|gate| gate.num_qubits() == 1)
-        .collect::<HashSet<_>>();
-    let mut pair_gates = source_gates
-        .iter()
-        .copied()
-        .filter(|gate| gate.num_qubits() == 2)
-        .collect::<HashSet<_>>();
-    pair_gates.extend([
-        StandardGate::CX,
-        StandardGate::CY,
-        StandardGate::CZ,
-        StandardGate::RXX,
-        StandardGate::RYY,
-        StandardGate::RZZ,
-        StandardGate::SWAP,
-    ]);
-    unary_gates.insert(StandardGate::U);
-
-    let mut roots = Vec::new();
-    for &qubit in physical_qubits {
-        for &gate in &unary_gates {
-            roots.push(DeviceGateState::standard(gate, smallvec![qubit]));
-        }
-    }
-    for &pair in ordered_pairs {
-        for &gate in &pair_gates {
-            roots.push(DeviceGateState::standard(gate, smallvec![pair[0], pair[1]]));
-        }
-    }
-    roots
-}
-
-fn collect_source_standard_gates(
-    operations: &[crate::circuit::Operation],
-) -> HashSet<StandardGate> {
-    use crate::circuit::ClassicalControlOp;
-
-    let mut gates = HashSet::new();
-    for operation in operations {
-        match &operation.instruction {
-            Instruction::Standard(gate) => {
-                gates.insert(*gate);
-            }
-            Instruction::ClassicalControl(control) => match control {
-                ClassicalControlOp::If(op) => {
-                    gates.extend(collect_source_standard_gates(op.then_body().operations()));
-                    if let Some(body) = op.else_body() {
-                        gates.extend(collect_source_standard_gates(body.operations()));
-                    }
-                }
-                ClassicalControlOp::While(op) => {
-                    gates.extend(collect_source_standard_gates(op.body().operations()));
-                }
-                ClassicalControlOp::For(op) => {
-                    gates.extend(collect_source_standard_gates(op.body().operations()));
-                }
-                ClassicalControlOp::Switch(op) => {
-                    for case in op.cases() {
-                        gates.extend(collect_source_standard_gates(case.body().operations()));
-                    }
-                    if let Some(body) = op.default() {
-                        gates.extend(collect_source_standard_gates(body.operations()));
-                    }
-                }
-                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
-            },
-            _ => {}
-        }
-    }
-    gates
 }
 
 fn collect_exact_physical_gate_roots(

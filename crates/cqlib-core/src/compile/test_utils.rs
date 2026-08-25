@@ -14,10 +14,29 @@
 
 use crate::circuit::test_utils::assert_circuits_equivalent_up_to_global_phase;
 use crate::circuit::{Circuit, Instruction, ParameterValue, Qubit, StandardGate};
+use crate::compile::CompilerError;
+use crate::compile::device_planning::DevicePlanningSession;
+use crate::compile::transform::decompose::unitary::{
+    DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
+};
 use crate::device::{Device, PhysicalQubit, Topology};
 use proptest::prelude::*;
+use std::sync::Arc;
 
 const EPSILON: f64 = 1e-9;
+
+pub(super) fn build_device_synthesis_context(
+    device: &Device,
+    circuit: &Circuit,
+    placement: DeviceSynthesisPlacement,
+) -> Result<DeviceTwoQubitSynthesisContext, CompilerError> {
+    DeviceTwoQubitSynthesisContext::build_with_session(
+        device,
+        circuit,
+        placement,
+        Arc::new(DevicePlanningSession::new(device)),
+    )
+}
 
 /// Asserts that a compiled circuit preserves a source circuit's unitary.
 pub(super) fn assert_compiled_circuit_equivalent(actual: &Circuit, expected: &Circuit) {

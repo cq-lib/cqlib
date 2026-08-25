@@ -24,6 +24,7 @@ use crate::compile::knowledge::{KnowledgeInstructionKey, RuleLibrary};
 use crate::device::{Device, PhysicalQubit};
 use smallvec::SmallVec;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 pub(crate) use cost::{
     CalibrationEstimator, DevicePhysicalCost, NativePlanCost, NativePlanLeaf, NativePlanSummary,
@@ -39,102 +40,8 @@ pub(crate) struct DeviceGateState {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::circuit::{Instruction, StandardGate};
-    use smallvec::smallvec;
-
-    #[test]
-    fn catalog_summarizes_the_same_native_swap_plan_used_by_lowering() {
-        let device = Device::line("native-plan-summary", 2)
-            .unwrap()
-            .with_native_gates(vec![
-                Instruction::Standard(StandardGate::H),
-                Instruction::Standard(StandardGate::CX),
-            ])
-            .unwrap()
-            .with_default_single_qubit_error(0.001)
-            .with_default_two_qubit_error(0.01);
-        let root = DeviceGateState::standard(
-            StandardGate::SWAP,
-            smallvec![PhysicalQubit::new(0), PhysicalQubit::new(1)],
-        );
-
-        let catalog = NativePlanCatalog::build(&device, [root.clone()]).unwrap();
-        let summary = catalog.summary(&root).expect("SWAP should be lowerable");
-
-        assert_eq!(summary.native_two_qubit_ops, 3);
-        assert_eq!(summary.native_total_ops, 7);
-        assert_eq!(
-            summary
-                .leaves
-                .iter()
-                .filter(|leaf| matches!(leaf.instruction, Instruction::Standard(StandardGate::CX)))
-                .count(),
-            3
-        );
-        assert!(summary.leaves.iter().all(|leaf| match leaf.instruction {
-            Instruction::Standard(StandardGate::CX) => leaf.error_rate == Some(0.01),
-            Instruction::Standard(StandardGate::H) => leaf.error_rate == Some(0.001),
-            _ => false,
-        }));
-    }
-
-    #[test]
-    fn catalog_results_are_independent_of_root_input_order() {
-        let device = Device::line("native-plan-root-order", 2)
-            .unwrap()
-            .with_native_gates(vec![
-                Instruction::Standard(StandardGate::H),
-                Instruction::Standard(StandardGate::CX),
-            ])
-            .unwrap();
-        let swap = DeviceGateState::standard(
-            StandardGate::SWAP,
-            smallvec![PhysicalQubit::new(0), PhysicalQubit::new(1)],
-        );
-        let h = DeviceGateState::standard(StandardGate::H, smallvec![PhysicalQubit::new(0)]);
-
-        let forward = NativePlanCatalog::build(&device, [swap.clone(), h.clone()]).unwrap();
-        let reverse = NativePlanCatalog::build(&device, [h.clone(), swap.clone()]).unwrap();
-        for root in [&swap, &h] {
-            let project = |catalog: &NativePlanCatalog| {
-                let summary = catalog.summary(root).expect("root should be lowerable");
-                (
-                    summary.native_two_qubit_ops,
-                    summary.native_total_ops,
-                    summary
-                        .leaves
-                        .iter()
-                        .map(|leaf| (leaf.instruction.clone(), leaf.ordered_qargs.clone()))
-                        .collect::<Vec<_>>(),
-                )
-            };
-            assert_eq!(project(&forward), project(&reverse));
-        }
-    }
-
-    #[test]
-    fn catalog_distinguishes_unsupported_from_unprepared_roots() {
-        let device = Device::line("native-plan-availability", 2).unwrap();
-        let unsupported = DeviceGateState::standard(
-            StandardGate::CX,
-            smallvec![PhysicalQubit::new(0), PhysicalQubit::new(1)],
-        );
-        let unprepared = DeviceGateState::standard(
-            StandardGate::CZ,
-            smallvec![PhysicalQubit::new(0), PhysicalQubit::new(1)],
-        );
-
-        let catalog = NativePlanCatalog::build(&device, [unsupported.clone()]).unwrap();
-
-        assert!(matches!(
-            catalog.availability(&unsupported),
-            Some(NativePlanAvailability::Unsupported(_))
-        ));
-        assert!(catalog.availability(&unprepared).is_none());
-    }
-}
+#[path = "device_planning_test.rs"]
+mod device_planning_test;
 
 impl DeviceGateState {
     pub(crate) fn standard(
@@ -167,6 +74,167 @@ pub(crate) enum NativePlanAvailability {
     Unsupported(DeviceLoweringFailure),
 }
 
+#[derive(Debug, Default)]
+struct DevicePlanningSessionCache {
+    availability: HashMap<DeviceGateState, NativePlanAvailability>,
+    selected_plans: HashMap<DeviceGateState, Arc<SelectedNativePlan>>,
+}
+
+/// Owned selected recipe tree reusable after a planner batch is dropped.
+#[derive(Debug)]
+pub(crate) struct SelectedNativePlan {
+    pub(crate) state: DeviceGateState,
+    pub(crate) choice: PlanChoice,
+    pub(crate) children: Arc<[Arc<SelectedNativePlan>]>,
+    pub(crate) physical_cost: DevicePhysicalCost,
+    pub(crate) summary: NativePlanSummary,
+}
+
+/// Immutable device snapshot plus incremental exact-qargs planning results.
+///
+/// A workflow owns one session. Passes ask it to prepare only the states they
+/// actually need; repeated states reuse both the selected plan summary and the
+/// device-wide calibration estimator. The mutex intentionally serializes a
+/// missing-root solve so concurrent callers cannot duplicate the same batch.
+#[derive(Debug)]
+pub(crate) struct DevicePlanningSession {
+    device: Arc<Device>,
+    estimator: Arc<CalibrationEstimator>,
+    cache: Mutex<DevicePlanningSessionCache>,
+}
+
+impl DevicePlanningSession {
+    pub(crate) fn new(device: &Device) -> Self {
+        let device = Arc::new(device.clone());
+        let physical_qubits = device.usable_qubits().collect::<Vec<_>>();
+        let estimator = Arc::new(CalibrationEstimator::from_device(&device, &physical_qubits));
+        Self {
+            device,
+            estimator,
+            cache: Mutex::new(DevicePlanningSessionCache::default()),
+        }
+    }
+
+    pub(crate) fn estimator(&self) -> Arc<CalibrationEstimator> {
+        Arc::clone(&self.estimator)
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        roots: impl IntoIterator<Item = DeviceGateState>,
+    ) -> Result<(), CompilerError> {
+        let mut roots = roots.into_iter().collect::<Vec<_>>();
+        roots.sort();
+        roots.dedup();
+
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        roots.retain(|root| !cache.availability.contains_key(root));
+        if roots.is_empty() {
+            return Ok(());
+        }
+
+        let library = RuleLibrary::builtin_rules()
+            .map_err(|error| CompilerError::InvariantViolation(error.to_string()))?;
+        let planner = DevicePlanner::build_with_estimator(
+            &self.device,
+            library,
+            roots.iter().cloned(),
+            Arc::clone(&self.estimator),
+        )
+        .map_err(DevicePlannerError::into_compiler_error)?;
+        let mut plan_memo = HashMap::new();
+        for root in roots {
+            let planned = if let Some(plan) = planner.selected_plan_for(&root) {
+                let selected = own_selected_plan(&planner, plan, &mut plan_memo)?;
+                let summary = selected.summary.clone();
+                cache.selected_plans.insert(root.clone(), selected);
+                NativePlanAvailability::Feasible(summary)
+            } else {
+                NativePlanAvailability::Unsupported(planner.failure_for(&root))
+            };
+            cache.availability.insert(root, planned);
+        }
+        // Retain selected dependency recipes too. A later pass may request a
+        // state that was previously only a child of another root; it should
+        // not rebuild the same sub-plan merely because its role changed.
+        for selected in plan_memo.into_values() {
+            cache
+                .availability
+                .entry(selected.state.clone())
+                .or_insert_with(|| NativePlanAvailability::Feasible(selected.summary.clone()));
+            cache
+                .selected_plans
+                .entry(selected.state.clone())
+                .or_insert(selected);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn availability(&self, state: &DeviceGateState) -> Option<NativePlanAvailability> {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .availability
+            .get(state)
+            .cloned()
+    }
+
+    pub(crate) fn selected_plan(&self, state: &DeviceGateState) -> Option<Arc<SelectedNativePlan>> {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .selected_plans
+            .get(state)
+            .cloned()
+    }
+
+    pub(crate) fn leaves_physical_cost(&self, leaves: &[NativePlanLeaf]) -> DevicePhysicalCost {
+        self.estimator.physical_cost(leaves)
+    }
+}
+
+fn own_selected_plan(
+    planner: &DevicePlanner<'_>,
+    plan: PlanId,
+    memo: &mut HashMap<PlanId, Arc<SelectedNativePlan>>,
+) -> Result<Arc<SelectedNativePlan>, CompilerError> {
+    if let Some(selected) = memo.get(&plan) {
+        return Ok(Arc::clone(selected));
+    }
+    let state = planner.state_for_plan(plan).cloned().ok_or_else(|| {
+        CompilerError::InvariantViolation(format!("unknown selected device plan {plan:?}"))
+    })?;
+    let choice = planner.choice_for_plan(plan).ok_or_else(|| {
+        CompilerError::InvariantViolation(format!("device plan {plan:?} has no choice"))
+    })?;
+    let children = planner.children_for_plan(plan).ok_or_else(|| {
+        CompilerError::InvariantViolation(format!("device plan {plan:?} has no child list"))
+    })?;
+    let children = children
+        .iter()
+        .copied()
+        .map(|child| own_selected_plan(planner, child, memo))
+        .collect::<Result<Vec<_>, _>>()?;
+    let physical_cost = planner.cost_for_plan(plan).ok_or_else(|| {
+        CompilerError::InvariantViolation(format!("device plan {plan:?} has no physical cost"))
+    })?;
+    let summary = planner
+        .summary_for_plan(plan)
+        .map_err(DevicePlannerError::into_compiler_error)?;
+    let selected = Arc::new(SelectedNativePlan {
+        state,
+        choice,
+        children: children.into(),
+        physical_cost,
+        summary,
+    });
+    memo.insert(plan, Arc::clone(&selected));
+    Ok(selected)
+}
+
 /// Immutable exact-device planning results used by routing cost preparation.
 ///
 /// Every requested root is retained. A missing map entry therefore means the
@@ -178,27 +246,21 @@ pub(crate) struct NativePlanCatalog {
 }
 
 impl NativePlanCatalog {
-    pub(crate) fn build(
-        device: &Device,
+    pub(crate) fn build_with_session(
+        session: &DevicePlanningSession,
         roots: impl IntoIterator<Item = DeviceGateState>,
     ) -> Result<Self, CompilerError> {
-        let library = RuleLibrary::builtin_rules()
-            .map_err(|error| CompilerError::InvariantViolation(error.to_string()))?;
         let mut roots = roots.into_iter().collect::<Vec<_>>();
         roots.sort();
         roots.dedup();
-        let planner = DevicePlanner::build(device, library, roots.iter().cloned())
-            .map_err(DevicePlannerError::into_compiler_error)?;
+        session.prepare(roots.iter().cloned())?;
         let mut availability = HashMap::with_capacity(roots.len());
         for root in roots {
-            let planned = if let Some(summary) = planner
-                .summary_for(&root)
-                .map_err(DevicePlannerError::into_compiler_error)?
-            {
-                NativePlanAvailability::Feasible(summary)
-            } else {
-                NativePlanAvailability::Unsupported(planner.failure_for(&root))
-            };
+            let planned = session.availability(&root).ok_or_else(|| {
+                CompilerError::InvariantViolation(format!(
+                    "device planning session did not retain requested root {root:?}"
+                ))
+            })?;
             availability.insert(root, planned);
         }
         Ok(Self { availability })

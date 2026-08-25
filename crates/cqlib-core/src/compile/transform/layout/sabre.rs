@@ -29,6 +29,7 @@ use super::{
     is_perfect_layout, try_vf2_perfect_layout_prepared,
 };
 use crate::circuit::Circuit;
+use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::sabre::{
     ComponentAssignmentSearch, InteractionReachability, PreparedRouteMetadata, RankedTrial,
     RequirementReachabilityFailure, RoutingTarget, SabreConfig, SabreDag, TrialResult,
@@ -126,8 +127,22 @@ pub fn prepare_sabre_device_target(
     prepared: &PreparedSabreCircuit,
     device: &Device,
 ) -> Result<PreparedSabreDeviceTarget, CompilerError> {
+    let planning_session = DevicePlanningSession::new(device);
+    prepare_sabre_device_target_with_session(prepared, device, &planning_session)
+}
+
+pub(crate) fn prepare_sabre_device_target_with_session(
+    prepared: &PreparedSabreCircuit,
+    device: &Device,
+    planning_session: &DevicePlanningSession,
+) -> Result<PreparedSabreDeviceTarget, CompilerError> {
     let physical = PhysicalLayoutGraph::from_device(device)?;
-    let routing = RoutingTarget::from_device(device, &physical, &prepared.routing_dag)?;
+    let routing = RoutingTarget::from_device_with_session(
+        device,
+        &physical,
+        &prepared.routing_dag,
+        planning_session,
+    )?;
     let routing_metadata = PreparedRouteMetadata::new(&prepared.routing_dag, &routing)?;
     let refinement_metadata = PreparedRouteMetadata::new(&prepared.refinement_dag, &routing)?;
     let backward_refinement_metadata =

@@ -11,7 +11,9 @@
 // that they have been altered from the originals.
 use super::*;
 use crate::circuit::{ClassicalExpr, Qubit};
-use crate::compile::test_utils::assert_compiled_circuit_equivalent;
+use crate::compile::test_utils::{
+    assert_compiled_circuit_equivalent, build_device_synthesis_context,
+};
 use crate::compile::transform::decompose::unitary::{
     DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext, TwoQubitSynthesisTarget,
 };
@@ -549,12 +551,9 @@ fn incremental_device_resynthesis_recollects_current_maximal_runs() {
             Instruction::Standard(StandardGate::CX),
         ])
         .unwrap();
-    let context = DeviceTwoQubitSynthesisContext::build(
-        &device,
-        &circuit,
-        DeviceSynthesisPlacement::ExactPhysical,
-    )
-    .unwrap();
+    let context =
+        build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
     let mut config = cx_config();
     config.max_block_ops = 1;
     config.max_crossed_ops = 0;
@@ -789,7 +788,7 @@ fn device_cached_and_uncached_resynthesis_are_bit_exact() {
         DeviceSynthesisPlacement::ExactPhysical,
         DeviceSynthesisPlacement::PreLayoutEnvelope,
     ] {
-        let context = DeviceTwoQubitSynthesisContext::build(&device, &circuit, placement).unwrap();
+        let context = build_device_synthesis_context(&device, &circuit, placement).unwrap();
         let (cached, cached_stats) = resynthesize_two_qubit_blocks_with_device_cache_budget(
             &circuit,
             cx_config(),

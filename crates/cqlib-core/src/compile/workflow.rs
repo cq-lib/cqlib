@@ -45,6 +45,7 @@
 
 use crate::circuit::{Circuit, ClassicalControlOp, Instruction, Operation, StandardGate};
 use crate::compile::CompilerError;
+use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::resource::ResourceLimits;
 use crate::compile::sabre::SabreConfig;
 use crate::compile::transform::decompose::unitary::{
@@ -65,7 +66,8 @@ use crate::compile::transform::{
     RewriteEdits, RewriteExecutionRecord, TargetBasisCostModel, TargetBasisLowerer,
     TransformOutcome, Transformer, TwoQubitBlockResynthesisConfig, VirtualPermutation,
     VirtualPermutationElisionStatus, elide_virtual_permutations, route_sabre_tracked,
-    route_with_layout_tracked,
+    route_sabre_tracked_with_session, route_with_layout_tracked,
+    route_with_layout_tracked_with_session,
 };
 use crate::device::{Device, Topology};
 use std::borrow::Cow;
@@ -107,6 +109,7 @@ struct WorkflowState {
     one_qubit_optimizer: Option<OptimizeOneQubitRuns>,
     pending_one_qubit_resynthesis: bool,
     resynthesis_session: WorkflowResynthesisSession,
+    planning_session: Option<Arc<DevicePlanningSession>>,
 }
 
 struct PreparedTargetBasis {
@@ -380,6 +383,9 @@ impl CompilerWorkflow {
             one_qubit_optimizer,
             pending_one_qubit_resynthesis: false,
             resynthesis_session: WorkflowResynthesisSession::default(),
+            planning_session: self
+                .strict_device_target()
+                .map(|target| Arc::new(DevicePlanningSession::new(&target.device))),
         };
 
         self.record_pre_init(&mut state);
@@ -561,7 +567,12 @@ impl CompilerWorkflow {
             );
             return Ok(());
         };
-        let lowerer = DeviceLowerer::new(&target.device);
+        let planning_session = state.planning_session.clone();
+        let lowerer = if let Some(session) = planning_session.as_deref() {
+            DeviceLowerer::with_session(&target.device, session)
+        } else {
+            DeviceLowerer::new(&target.device)
+        };
         state.apply_transform(
             "translation",
             "lower.device_instructions",
@@ -603,11 +614,17 @@ impl CompilerWorkflow {
             CompileMode::Normal => (2, 1),
             CompileMode::Enhanced => (8, 3),
         };
-        let optimizer = NativeOptimizer::new(
+        let planning_session = state.planning_session.clone().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "strict device workflow has no planning session".to_string(),
+            )
+        })?;
+        let optimizer = NativeOptimizer::with_session(
             &target.device,
             self.two_qubit_resynthesis_config_for_state(state),
             max_rounds,
             max_stale_rounds,
+            planning_session,
         );
         let result = optimizer.run(&state.current)?;
         if result.changed {
@@ -749,10 +766,16 @@ impl CompilerWorkflow {
             .strict_device_target()
             .filter(|_| state.analysis.has_unitary_gates)
         {
-            let context = DeviceTwoQubitSynthesisContext::build(
+            let planning_session = state.planning_session.clone().ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "strict device workflow has no planning session".to_string(),
+                )
+            })?;
+            let context = DeviceTwoQubitSynthesisContext::build_with_session(
                 &target.device,
                 &state.current,
                 DeviceSynthesisPlacement::PreLayoutEnvelope,
+                planning_session,
             )?;
             DecomposeUnitaries::new_device_aware(config, context)
         } else {
@@ -791,8 +814,17 @@ impl CompilerWorkflow {
             .strict_device_target()
             .filter(|_| ResynthesizeTwoQubitBlocks::is_applicable(&state.current))
         {
-            let context =
-                DeviceTwoQubitSynthesisContext::build(&target.device, &state.current, placement)?;
+            let planning_session = state.planning_session.clone().ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "strict device workflow has no planning session".to_string(),
+                )
+            })?;
+            let context = DeviceTwoQubitSynthesisContext::build_with_session(
+                &target.device,
+                &state.current,
+                placement,
+                planning_session,
+            )?;
             Some(context)
         } else {
             None
@@ -940,8 +972,17 @@ impl CompilerWorkflow {
             trials_evaluated,
             supplied_layout,
         ) = if let Some(initial_layout) = target.initial_layout.as_ref() {
-            let routed =
-                route_with_layout_tracked(&state.current, device, initial_layout, &config)?;
+            let routed = if let Some(session) = state.planning_session.as_deref() {
+                route_with_layout_tracked_with_session(
+                    &state.current,
+                    device,
+                    initial_layout,
+                    &config,
+                    session,
+                )?
+            } else {
+                route_with_layout_tracked(&state.current, device, initial_layout, &config)?
+            };
             let route_changed = routed.routed().changed(&state.current);
             let swap_count = routed.routed().swap_count();
             let trials_evaluated = routed.routed().diagnostics().trials_evaluated;
@@ -963,7 +1004,17 @@ impl CompilerWorkflow {
             )
         } else {
             let objective = LayoutObjective::topology_only();
-            let routed = route_sabre_tracked(&state.current, device, &objective, &config)?;
+            let routed = if let Some(session) = state.planning_session.as_deref() {
+                route_sabre_tracked_with_session(
+                    &state.current,
+                    device,
+                    &objective,
+                    &config,
+                    session,
+                )?
+            } else {
+                route_sabre_tracked(&state.current, device, &objective, &config)?
+            };
             let route_changed = routed.routed().changed(&state.current);
             let swap_count = routed.routed().swap_count();
             let trials_evaluated = routed.routed().diagnostics().trials_evaluated;

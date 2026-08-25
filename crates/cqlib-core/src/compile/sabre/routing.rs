@@ -21,7 +21,8 @@ use crate::circuit::{
     Parameter, Qubit, StandardGate, SwitchCase, SwitchOp, WhileOp,
 };
 use crate::compile::device_planning::{
-    DeviceGateState, NativePlanAvailability, NativePlanCatalog, NativePlanSummary,
+    DeviceGateState, DevicePlanningSession, NativePlanAvailability, NativePlanCatalog,
+    NativePlanSummary,
 };
 use crate::compile::error::DeviceLoweringFailure;
 use crate::compile::knowledge::KnowledgeInstructionKey;
@@ -490,7 +491,7 @@ pub fn sabre_route(
     initial_layout: &Layout,
     config: &SabreConfig,
 ) -> Result<SabreRoutingResult, CompilerError> {
-    sabre_route_with_tracking(circuit, device, initial_layout, config, false)
+    sabre_route_with_tracking(circuit, device, initial_layout, config, false, None)
         .map(|result| result.routing)
 }
 
@@ -500,7 +501,24 @@ pub(crate) fn sabre_route_with_provenance(
     initial_layout: &Layout,
     config: &SabreConfig,
 ) -> Result<TrackedSabreRoutingResult, CompilerError> {
-    sabre_route_with_tracking(circuit, device, initial_layout, config, true)
+    sabre_route_with_tracking(circuit, device, initial_layout, config, true, None)
+}
+
+pub(crate) fn sabre_route_with_provenance_and_session(
+    circuit: &Circuit,
+    device: &Device,
+    initial_layout: &Layout,
+    config: &SabreConfig,
+    planning_session: &DevicePlanningSession,
+) -> Result<TrackedSabreRoutingResult, CompilerError> {
+    sabre_route_with_tracking(
+        circuit,
+        device,
+        initial_layout,
+        config,
+        true,
+        Some(planning_session),
+    )
 }
 
 fn sabre_route_with_tracking(
@@ -509,6 +527,7 @@ fn sabre_route_with_tracking(
     initial_layout: &Layout,
     config: &SabreConfig,
     retain_provenance: bool,
+    planning_session: Option<&DevicePlanningSession>,
 ) -> Result<TrackedSabreRoutingResult, CompilerError> {
     config.validate()?;
     // Build a dense, reusable view of the physical topology once. The routing
@@ -516,7 +535,11 @@ fn sabre_route_with_tracking(
     // deterministic candidate ordering.
     let physical = PhysicalLayoutGraph::from_device(device)?;
     let sabre = SabreDag::from_operations(circuit.operations())?;
-    let target = RoutingTarget::from_device(device, &physical, &sabre)?;
+    let target = if let Some(session) = planning_session {
+        RoutingTarget::from_device_with_session(device, &physical, &sabre, session)?
+    } else {
+        RoutingTarget::from_device(device, &physical, &sabre)?
+    };
     let metadata = PreparedRouteMetadata::new(&sabre, &target)?;
     sabre_route_prepared_impl(
         circuit,
@@ -1347,11 +1370,43 @@ impl RoutingTarget {
         Self::from_device_with_pair_state_budget(device, physical, sabre, EAGER_PAIR_STATE_BUDGET)
     }
 
+    pub(crate) fn from_device_with_session(
+        device: &Device,
+        physical: &PhysicalLayoutGraph,
+        sabre: &SabreDag,
+        planning_session: &DevicePlanningSession,
+    ) -> Result<Self, CompilerError> {
+        Self::from_device_with_pair_state_budget_and_session(
+            device,
+            physical,
+            sabre,
+            EAGER_PAIR_STATE_BUDGET,
+            planning_session,
+        )
+    }
+
     fn from_device_with_pair_state_budget(
         device: &Device,
         physical: &PhysicalLayoutGraph,
         sabre: &SabreDag,
         pair_state_budget: usize,
+    ) -> Result<Self, CompilerError> {
+        let session = DevicePlanningSession::new(device);
+        Self::from_device_with_pair_state_budget_and_session(
+            device,
+            physical,
+            sabre,
+            pair_state_budget,
+            &session,
+        )
+    }
+
+    fn from_device_with_pair_state_budget_and_session(
+        device: &Device,
+        physical: &PhysicalLayoutGraph,
+        sabre: &SabreDag,
+        pair_state_budget: usize,
+        planning_session: &DevicePlanningSession,
     ) -> Result<Self, CompilerError> {
         let topology_edges = undirected_topology_edges(physical);
         let physical_qubits = physical.physical_qubits();
@@ -1380,7 +1435,7 @@ impl RoutingTarget {
 
         let roots = collect_device_plan_roots(physical_qubits, &topology_edges, &signatures);
 
-        let catalog = NativePlanCatalog::build(device, roots)?;
+        let catalog = NativePlanCatalog::build_with_session(planning_session, roots)?;
         let native_identity = NativePlanCost::default();
         let native_plans = catalog
             .iter()
