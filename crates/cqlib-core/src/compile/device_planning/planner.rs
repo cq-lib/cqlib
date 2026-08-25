@@ -24,11 +24,11 @@ use crate::compile::error::{
     DeviceLoweringCandidateFailure, DeviceLoweringDependency, DeviceLoweringFailure,
 };
 use crate::compile::knowledge::{KnowledgeInstructionKey, RuleId, RuleKind, RuleLibrary};
-use crate::device::Device;
+use crate::device::{Device, PhysicalQubit};
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 const MAX_DIAGNOSTIC_CANDIDATES: usize = 16;
 const MAX_FRONTIER_SIZE_PER_STATE: usize = 64;
@@ -36,6 +36,15 @@ const MAX_TOTAL_PLAN_NODES: usize = 100_000;
 const MAX_TOTAL_GENERATED_CANDIDATES: usize = 1_000_000;
 
 type StateId = usize;
+
+// The built-in rule library and direction templates are independent of a
+// concrete device.  SWAP planning used to rebuild this closure for every
+// physical edge.  Keep one role-based graph and bind its two roles to exact
+// physical qargs immediately before solving calibration-dependent costs.
+const SWAP_ROLE_LEFT: PhysicalQubit = PhysicalQubit::new(u32::MAX - 1);
+const SWAP_ROLE_RIGHT: PhysicalQubit = PhysicalQubit::new(u32::MAX);
+static BUILTIN_SWAP_GRAPH: OnceLock<Result<ExpandedPlanningGraph, String>> = OnceLock::new();
+
 #[derive(Debug, Clone, Copy)]
 struct PlannerBudget {
     max_frontier_size_per_state: usize,
@@ -129,6 +138,76 @@ struct HyperEdge {
     stable_name: String,
 }
 
+/// Device-independent closure of states and decomposition hyperedges.
+#[derive(Debug, Clone)]
+struct ExpandedPlanningGraph {
+    states: Vec<DeviceGateState>,
+    state_ids: HashMap<DeviceGateState, StateId>,
+    edges: Arc<[HyperEdge]>,
+}
+
+impl ExpandedPlanningGraph {
+    fn build(
+        library: &RuleLibrary,
+        roots: impl IntoIterator<Item = DeviceGateState>,
+    ) -> Result<Self, String> {
+        let mut builder = GraphBuilder::new(library);
+        for root in roots {
+            builder.intern(root);
+        }
+        builder.expand()?;
+        Ok(Self {
+            states: builder.states,
+            state_ids: builder.state_ids,
+            edges: builder.edges.into(),
+        })
+    }
+
+    fn bind_swap_roles(
+        &self,
+        ordered_qargs: [PhysicalQubit; 2],
+    ) -> Result<Self, DevicePlannerError> {
+        if ordered_qargs[0] == ordered_qargs[1] {
+            return Err(DevicePlannerError::Invariant(format!(
+                "cannot bind SWAP planning roles to duplicate qargs {ordered_qargs:?}"
+            )));
+        }
+        let remap = |qubit| match qubit {
+            SWAP_ROLE_LEFT => Ok(ordered_qargs[0]),
+            SWAP_ROLE_RIGHT => Ok(ordered_qargs[1]),
+            other => Err(DevicePlannerError::Invariant(format!(
+                "symbolic SWAP graph contains unexpected physical role {other:?}"
+            ))),
+        };
+        let states = self
+            .states
+            .iter()
+            .map(|state| {
+                Ok(DeviceGateState {
+                    instruction: state.instruction.clone(),
+                    ordered_qargs: state
+                        .ordered_qargs
+                        .iter()
+                        .copied()
+                        .map(remap)
+                        .collect::<Result<SmallVec<[_; 2]>, _>>()?,
+                })
+            })
+            .collect::<Result<Vec<_>, DevicePlannerError>>()?;
+        let state_ids = states
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(id, state)| (state, id))
+            .collect();
+        Ok(Self {
+            states,
+            state_ids,
+            edges: Arc::clone(&self.edges),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 struct DevicePlanCandidate {
     state: StateId,
@@ -167,7 +246,7 @@ pub(crate) struct DevicePlanner<'a> {
     device: &'a Device,
     states: Vec<DeviceGateState>,
     state_ids: HashMap<DeviceGateState, StateId>,
-    edges: Vec<HyperEdge>,
+    edges: Arc<[HyperEdge]>,
     nodes: Vec<DevicePlanCandidate>,
     frontiers: Vec<Vec<PlanId>>,
     selected: Vec<Option<PlanId>>,
@@ -199,6 +278,37 @@ impl<'a> DevicePlanner<'a> {
         )
     }
 
+    /// Solves one exact SWAP root from the process-wide built-in symbolic
+    /// closure.  Only device capability and calibration evaluation is repeated.
+    pub(crate) fn build_swap_with_estimator(
+        device: &'a Device,
+        library: &RuleLibrary,
+        root: &DeviceGateState,
+        estimator: Arc<CalibrationEstimator>,
+    ) -> Result<Self, DevicePlannerError> {
+        if root.instruction != KnowledgeInstructionKey::Standard(StandardGate::SWAP)
+            || root.ordered_qargs.len() != 2
+        {
+            return Err(DevicePlannerError::Invariant(format!(
+                "symbolic SWAP planner received non-SWAP root {root:?}"
+            )));
+        }
+        let symbolic = BUILTIN_SWAP_GRAPH.get_or_init(|| {
+            ExpandedPlanningGraph::build(
+                library,
+                [DeviceGateState::standard(
+                    StandardGate::SWAP,
+                    SmallVec::from_slice(&[SWAP_ROLE_LEFT, SWAP_ROLE_RIGHT]),
+                )],
+            )
+        });
+        let symbolic = symbolic
+            .as_ref()
+            .map_err(|error| DevicePlannerError::Invariant(error.clone()))?;
+        let graph = symbolic.bind_swap_roles([root.ordered_qargs[0], root.ordered_qargs[1]])?;
+        Self::build_from_graph(device, graph, PlannerBudget::default(), estimator)
+    }
+
     fn build_with_estimator_and_budget(
         device: &'a Device,
         library: &RuleLibrary,
@@ -206,13 +316,18 @@ impl<'a> DevicePlanner<'a> {
         budget: PlannerBudget,
         estimator: Arc<CalibrationEstimator>,
     ) -> Result<Self, DevicePlannerError> {
-        let mut builder = GraphBuilder::new(library);
-        for root in roots {
-            builder.intern(root);
-        }
-        builder.expand().map_err(DevicePlannerError::Invariant)?;
+        let graph =
+            ExpandedPlanningGraph::build(library, roots).map_err(DevicePlannerError::Invariant)?;
+        Self::build_from_graph(device, graph, budget, estimator)
+    }
 
-        let state_count = builder.states.len();
+    fn build_from_graph(
+        device: &'a Device,
+        graph: ExpandedPlanningGraph,
+        budget: PlannerBudget,
+        estimator: Arc<CalibrationEstimator>,
+    ) -> Result<Self, DevicePlannerError> {
+        let state_count = graph.states.len();
         let mut planner = Self {
             device,
             plans: vec![None; state_count],
@@ -220,9 +335,9 @@ impl<'a> DevicePlanner<'a> {
             nodes: Vec::new(),
             frontiers: vec![Vec::new(); state_count],
             selected: vec![None; state_count],
-            states: builder.states,
-            state_ids: builder.state_ids,
-            edges: builder.edges,
+            states: graph.states,
+            state_ids: graph.state_ids,
+            edges: graph.edges,
             estimator,
             budget,
             generated_candidates: 0,
@@ -361,7 +476,7 @@ impl<'a> DevicePlanner<'a> {
         let mut explored = vec![HashSet::<Vec<PlanId>>::new(); self.edges.len()];
         loop {
             let mut changed = false;
-            let edges = self.edges.clone();
+            let edges = Arc::clone(&self.edges);
             for (edge, explored_set) in edges.iter().zip(explored.iter_mut()) {
                 let edge = edge.clone();
                 let child_frontiers = edge
