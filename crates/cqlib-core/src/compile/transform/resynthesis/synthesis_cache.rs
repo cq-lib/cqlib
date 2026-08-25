@@ -27,10 +27,12 @@
 //! are both cached so deterministic negative results do not repeat expensive
 //! work.
 
-use crate::circuit::Qubit;
-use crate::circuit::{Instruction, ValueOperation};
+use crate::circuit::{Instruction, ParameterValue, Qubit, ValueInstruction, ValueOperation};
 use crate::compile::CompilerError;
 use crate::compile::transform::decompose::unitary::unitary_2q::DeviceTwoQubitSynthesisCandidate;
+use crate::compile::transform::decompose::unitary::unitary_2q::{
+    NumericTwoQubitCandidateValidation, check_numeric_2q_candidate,
+};
 use crate::compile::transform::decompose::unitary::{
     DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
 };
@@ -40,6 +42,7 @@ use crate::compile::transform::decompose::unitary::{
 use crate::compile::transform::resynthesis::TwoQubitBlockResynthesisConfig;
 use ndarray::Array2;
 use num_complex::Complex64;
+use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
@@ -49,7 +52,7 @@ use super::commutation::OperationView;
 use super::cost::ResynthesisCost;
 
 pub(super) const RESYNTHESIS_SYNTHESIS_CACHE_BUDGET: usize = 4096;
-const SYNTHESIS_ALGORITHM_REVISION: u32 = 1;
+const SYNTHESIS_ALGORITHM_REVISION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SynthesisCacheNamespace {
@@ -89,6 +92,20 @@ struct ExactKakCacheKey {
 struct ExactTwoQubitSynthesisKey {
     unitary: ExactUnitaryFingerprint,
     ordered_qargs: [Qubit; 2],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ExactCandidateOperationKey {
+    gate: u8,
+    qarg_roles: SmallVec<[u8; 2]>,
+    parameter_bits: SmallVec<[u64; 3]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ExactCandidateValidationKey {
+    unitary: ExactUnitaryFingerprint,
+    operations: SmallVec<[ExactCandidateOperationKey; 16]>,
+    global_phase_bits: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -163,6 +180,66 @@ impl ExactStandardOperationKey {
             qargs: view.operation.qubits.iter().copied().collect(),
             parameter_bits,
             label: view.operation.label.clone(),
+        })
+    }
+}
+
+impl ExactCandidateOperationKey {
+    fn new(operation: &ValueOperation, qubits: [Qubit; 2]) -> Result<Self, CompilerError> {
+        let ValueInstruction::Instruction(Instruction::Standard(gate)) = operation.instruction
+        else {
+            return Err(CompilerError::InvariantViolation(
+                "selected 2q synthesis candidate contains non-standard operation".to_string(),
+            ));
+        };
+        let qarg_roles = operation
+            .qubits
+            .iter()
+            .map(|qubit| {
+                if *qubit == qubits[0] {
+                    Ok(0)
+                } else if *qubit == qubits[1] {
+                    Ok(1)
+                } else {
+                    Err(CompilerError::InvariantViolation(format!(
+                        "selected 2q synthesis candidate references unexpected qubit {qubit}"
+                    )))
+                }
+            })
+            .collect::<Result<SmallVec<_>, CompilerError>>()?;
+        let parameter_bits = operation
+            .params
+            .iter()
+            .map(|parameter| match parameter {
+                ParameterValue::Fixed(value) => Ok(value.to_bits()),
+                ParameterValue::Param(_) => Err(CompilerError::InvariantViolation(
+                    "selected 2q synthesis candidate contains symbolic parameter".to_string(),
+                )),
+            })
+            .collect::<Result<SmallVec<_>, CompilerError>>()?;
+        Ok(Self {
+            gate: gate as u8,
+            qarg_roles,
+            parameter_bits,
+        })
+    }
+}
+
+impl ExactCandidateValidationKey {
+    fn new(
+        matrix: &Array2<Complex64>,
+        qubits: [Qubit; 2],
+        candidate: &TwoQubitSynthesisCandidate,
+    ) -> Result<Self, CompilerError> {
+        let operations = candidate
+            .operations
+            .iter()
+            .map(|operation| ExactCandidateOperationKey::new(operation, qubits))
+            .collect::<Result<SmallVec<_>, CompilerError>>()?;
+        Ok(Self {
+            unitary: ExactUnitaryFingerprint::new(matrix)?,
+            operations,
+            global_phase_bits: candidate.global_phase.to_bits(),
         })
     }
 }
@@ -321,6 +398,11 @@ pub(crate) struct TwoQubitSynthesisCacheStats {
     pub(crate) block_fact_entries: usize,
     pub(crate) terminal_decision_hits: usize,
     pub(crate) terminal_decision_entries: usize,
+    pub(crate) candidate_validation_lookups: usize,
+    pub(crate) candidate_validation_hits: usize,
+    pub(crate) candidate_validation_misses: usize,
+    pub(crate) candidate_validation_entries: usize,
+    pub(crate) candidate_validation_failures: usize,
     pub(crate) selection: ResynthesisSelectionStats,
 }
 
@@ -337,6 +419,7 @@ pub(super) struct TwoQubitSynthesisCache {
     kak: HashMap<ExactKakCacheKey, CachedKakDecomposition>,
     block_facts: HashMap<ExactBlockFactsKey, CachedPlan<Arc<CachedBlockFacts>>>,
     terminal_no_patch: HashSet<ExactTerminalDecisionKey>,
+    candidate_validations: HashMap<ExactCandidateValidationKey, NumericTwoQubitCandidateValidation>,
     stats: TwoQubitSynthesisCacheStats,
     budget: usize,
     namespace: Option<SynthesisCacheNamespace>,
@@ -368,6 +451,7 @@ impl TwoQubitSynthesisCache {
             kak: HashMap::new(),
             block_facts: HashMap::new(),
             terminal_no_patch: HashSet::new(),
+            candidate_validations: HashMap::new(),
             stats: TwoQubitSynthesisCacheStats::default(),
             budget,
             namespace: None,
@@ -410,10 +494,12 @@ impl TwoQubitSynthesisCache {
             self.device.clear();
             self.block_facts.clear();
             self.terminal_no_patch.clear();
+            self.candidate_validations.clear();
             self.stats.generic_entries = 0;
             self.stats.device_entries = 0;
             self.stats.block_fact_entries = 0;
             self.stats.terminal_decision_entries = 0;
+            self.stats.candidate_validation_entries = 0;
             self.stats.namespace_invalidations =
                 self.stats.namespace_invalidations.saturating_add(1);
         }
@@ -422,6 +508,61 @@ impl TwoQubitSynthesisCache {
 
     pub(super) const fn stats(&self) -> TwoQubitSynthesisCacheStats {
         self.stats
+    }
+
+    /// Validates an adopted candidate once per exact semantic construction.
+    /// Qubit labels are normalized to tensor roles so identical candidates on
+    /// different physical or logical pairs share the successful proof.
+    pub(super) fn check_selected_candidate(
+        &mut self,
+        matrix: &Array2<Complex64>,
+        qubits: [Qubit; 2],
+        candidate: &TwoQubitSynthesisCandidate,
+    ) -> Result<NumericTwoQubitCandidateValidation, CompilerError> {
+        self.stats.candidate_validation_lookups =
+            self.stats.candidate_validation_lookups.saturating_add(1);
+        if qubits[0] == qubits[1] {
+            self.stats.candidate_validation_failures =
+                self.stats.candidate_validation_failures.saturating_add(1);
+            return check_numeric_2q_candidate(matrix, qubits, candidate);
+        }
+        let key = match ExactCandidateValidationKey::new(matrix, qubits, candidate) {
+            Ok(key) => key,
+            Err(error) => {
+                self.stats.candidate_validation_failures =
+                    self.stats.candidate_validation_failures.saturating_add(1);
+                return Err(error);
+            }
+        };
+        if let Some(validation) = self.candidate_validations.get(&key).copied() {
+            self.stats.candidate_validation_hits =
+                self.stats.candidate_validation_hits.saturating_add(1);
+            return Ok(validation);
+        }
+        self.stats.candidate_validation_misses =
+            self.stats.candidate_validation_misses.saturating_add(1);
+        let validation = match check_numeric_2q_candidate(matrix, qubits, candidate) {
+            Ok(validation) => validation,
+            Err(error) => {
+                self.stats.candidate_validation_failures =
+                    self.stats.candidate_validation_failures.saturating_add(1);
+                return Err(error);
+            }
+        };
+        if matches!(
+            validation,
+            NumericTwoQubitCandidateValidation::Inexact { .. }
+        ) {
+            self.stats.candidate_validation_failures =
+                self.stats.candidate_validation_failures.saturating_add(1);
+        }
+        if self.candidate_validations.len() < self.budget {
+            self.candidate_validations.insert(key, validation);
+            self.stats.candidate_validation_entries = self.candidate_validations.len();
+        } else {
+            self.stats.capacity_rejections = self.stats.capacity_rejections.saturating_add(1);
+        }
+        Ok(validation)
     }
 
     /// Returns the KAK decomposition for this exact matrix. These entries are

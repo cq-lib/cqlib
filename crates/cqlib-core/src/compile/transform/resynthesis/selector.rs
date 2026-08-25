@@ -32,18 +32,20 @@ use crate::circuit::{Instruction, StandardGate, ValueInstruction, ValueOperation
 #[cfg(any(test, debug_assertions))]
 use crate::circuit::{ParameterValue, Qubit, value_operations_to_matrix};
 use crate::compile::transform::decompose::unitary::unitary_2q::{
-    TwoQubitMatrixOp, plan_numeric_2q_unitary_for_device,
-    plan_numeric_2q_unitary_for_device_from_kak, plan_numeric_2q_unitary_from_kak,
-    two_qubit_operation_matrix_product,
+    NumericTwoQubitCandidateValidation, TwoQubitMatrixOp,
+    plan_cx_family_fallbacks_for_device_from_kak, plan_cx_family_fallbacks_from_kak,
+    plan_numeric_2q_unitary_for_device, plan_numeric_2q_unitary_for_device_from_kak,
+    plan_numeric_2q_unitary_from_kak, plan_pauli_fallback_for_device_from_kak,
+    plan_pauli_fallback_from_kak, two_qubit_operation_matrix_product,
 };
 use crate::compile::transform::decompose::unitary::{
     DeviceContextCostFailure, DevicePhysicalCost, DeviceSynthesisPlacement,
-    DeviceTwoQubitSynthesisContext, TwoQubitSynthesisRequest, plan_numeric_2q_unitary,
+    DeviceTwoQubitSynthesisContext, TwoQubitSynthesisRequest, TwoQubitUnitaryDecomposeBasis,
+    plan_numeric_2q_unitary,
 };
 use crate::compile::{CompilerError, compare_some_first_by};
 use ndarray::Array2;
 use num_complex::Complex64;
-use std::cell::Cell;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::OnceLock;
@@ -703,8 +705,8 @@ fn try_synthesize_block_from_facts(
             selection_rank,
         );
     }
-    let attempt_counts = Cell::new(SelectionAttemptCounts::default());
-    let result = synthesis_cache.with_generic_plan(
+    let mut counts = SelectionAttemptCounts::default();
+    let Some(mut candidates) = synthesis_cache.with_generic_plan(
         matrix,
         block.qubits,
         |cache| {
@@ -731,20 +733,58 @@ fn try_synthesize_block_from_facts(
         },
         |plan| {
             let CachedPlanView::Candidates(candidates) = plan else {
-                let mut counts = attempt_counts.get();
-                counts.plan_failures = counts.plan_failures.saturating_add(1);
-                attempt_counts.set(counts);
-                return Ok(None);
+                return None;
             };
-            let mut counts = attempt_counts.get();
-            counts.candidates_considered = counts
-                .candidates_considered
-                .saturating_add(candidates.len());
-            for candidate in candidates {
-                if candidate.cost >= before_cost {
-                    counts.cost_rejections = counts.cost_rejections.saturating_add(1);
-                    continue;
-                }
+            Some(candidates.to_vec())
+        },
+    )?
+    else {
+        counts.plan_failures = counts.plan_failures.saturating_add(1);
+        record_attempt_counts(synthesis_cache, counts);
+        return Ok(None);
+    };
+    let mut expanded_backends = HashSet::new();
+    let mut pauli_generated = candidates
+        .iter()
+        .any(|candidate| candidate.backend == TwoQubitUnitaryDecomposeBasis::PauliRotations);
+    let mut saw_exact_primary = false;
+    let mut primary_unrankable = false;
+    loop {
+        candidates.sort_by(|left, right| {
+            left.cost
+                .cmp(&right.cost)
+                .then_with(|| left.operations.len().cmp(&right.operations.len()))
+        });
+        let Some(candidate) = candidates.first().cloned() else {
+            if !pauli_generated && !saw_exact_primary && !primary_unrankable {
+                pauli_generated = true;
+                let Some(decomp) = synthesis_cache.kak_decomposition(matrix)? else {
+                    record_attempt_counts(synthesis_cache, counts);
+                    return Ok(None);
+                };
+                candidates.extend(plan_pauli_fallback_from_kak(
+                    TwoQubitSynthesisRequest {
+                        matrix,
+                        qubits: block.qubits,
+                        target: config.two_qubit_target.clone(),
+                    },
+                    &decomp,
+                )?);
+                continue;
+            }
+            record_attempt_counts(synthesis_cache, counts);
+            return Ok(None);
+        };
+        candidates.remove(0);
+        counts.candidates_considered = counts.candidates_considered.saturating_add(1);
+        if candidate.cost >= before_cost {
+            counts.cost_rejections = counts.cost_rejections.saturating_add(1);
+            primary_unrankable = true;
+            continue;
+        }
+        match synthesis_cache.check_selected_candidate(matrix, block.qubits, &candidate)? {
+            NumericTwoQubitCandidateValidation::Exact => {
+                saw_exact_primary = true;
                 if !commutation.replacements_commute_with_crossed(&crossed, &candidate.operations) {
                     counts.crossing_rejections = counts.crossing_rejections.saturating_add(1);
                     continue;
@@ -754,19 +794,18 @@ fn try_synthesize_block_from_facts(
                     counts.replacement_rejections = counts.replacement_rejections.saturating_add(1);
                     continue;
                 }
+                record_attempt_counts(synthesis_cache, counts);
                 validate_patch_with_differential_oracle(
                     block,
                     ops,
                     &candidate.operations,
                     candidate.global_phase,
                 )?;
-
-                attempt_counts.set(counts);
                 return Ok(Some(BlockPatch {
                     first_order: block.first_order(),
                     matched_orders: block.matched_orders.clone(),
                     crossed_orders: block.crossed_orders.clone(),
-                    replacement: candidate.operations.clone(),
+                    replacement: candidate.operations,
                     before_cost,
                     after_cost: candidate.cost,
                     device_after_cost: None,
@@ -774,12 +813,26 @@ fn try_synthesize_block_from_facts(
                     selection_rank,
                 }));
             }
-            attempt_counts.set(counts);
-            Ok(None)
-        },
-    )?;
-    record_attempt_counts(synthesis_cache, attempt_counts.get());
-    result
+            NumericTwoQubitCandidateValidation::Inexact { .. }
+                if expanded_backends.insert(candidate.backend) =>
+            {
+                let Some(decomp) = synthesis_cache.kak_decomposition(matrix)? else {
+                    record_attempt_counts(synthesis_cache, counts);
+                    return Ok(None);
+                };
+                candidates.extend(plan_cx_family_fallbacks_from_kak(
+                    TwoQubitSynthesisRequest {
+                        matrix,
+                        qubits: block.qubits,
+                        target: config.two_qubit_target.clone(),
+                    },
+                    &decomp,
+                    candidate.backend,
+                )?);
+            }
+            NumericTwoQubitCandidateValidation::Inexact { .. } => {}
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -825,8 +878,8 @@ fn try_synthesize_device_block(
             }
         }
     };
-    let attempt_counts = Cell::new(SelectionAttemptCounts::default());
-    let result = synthesis_cache.with_device_plan(
+    let mut counts = SelectionAttemptCounts::default();
+    let Some(mut candidates) = synthesis_cache.with_device_plan(
         matrix,
         block.qubits,
         context.placement(),
@@ -843,55 +896,94 @@ fn try_synthesize_device_block(
         },
         |plan| {
             let CachedPlanView::Candidates(candidates) = plan else {
-                let mut counts = attempt_counts.get();
-                counts.plan_failures = counts.plan_failures.saturating_add(1);
-                attempt_counts.set(counts);
-                return Ok(None);
+                return None;
             };
-            let mut counts = attempt_counts.get();
-            counts.candidates_considered = counts
-                .candidates_considered
-                .saturating_add(candidates.len());
-            let mut viable = Vec::new();
-            for candidate in candidates {
-                let device_after_cost = match context.placement() {
-                    DeviceSynthesisPlacement::PreLayoutEnvelope => {
-                        let Some(source_domain) = source_domain.as_ref() else {
-                            counts.device_cost_rejections =
-                                counts.device_cost_rejections.saturating_add(1);
-                            continue;
-                        };
-                        let Some(evaluation) = candidate.pre_layout.as_ref() else {
-                            counts.device_cost_rejections =
-                                counts.device_cost_rejections.saturating_add(1);
-                            continue;
-                        };
-                        if !source_domain.is_subset(&evaluation.domain) {
-                            counts.device_cost_rejections =
-                                counts.device_cost_rejections.saturating_add(1);
-                            continue;
-                        }
-                        let Some(cost) = evaluation.worst_cost_on_domain(source_domain) else {
-                            counts.device_cost_rejections =
-                                counts.device_cost_rejections.saturating_add(1);
-                            continue;
-                        };
-                        cost
+            Some(candidates.to_vec())
+        },
+    )?
+    else {
+        counts.plan_failures = counts.plan_failures.saturating_add(1);
+        record_attempt_counts(synthesis_cache, counts);
+        return Ok(None);
+    };
+    let mut expanded_backends = HashSet::new();
+    let mut pauli_generated = candidates.iter().any(|candidate| {
+        candidate.candidate.backend
+            == crate::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis::PauliRotations
+    });
+    let mut saw_exact_primary = false;
+    let mut primary_unrankable = false;
+    loop {
+        let mut ranked = Vec::new();
+        for (index, candidate) in candidates.iter().enumerate() {
+            let device_after_cost = match context.placement() {
+                DeviceSynthesisPlacement::PreLayoutEnvelope => {
+                    let Some(source_domain) = source_domain.as_ref() else {
+                        counts.device_cost_rejections =
+                            counts.device_cost_rejections.saturating_add(1);
+                        primary_unrankable = true;
+                        continue;
+                    };
+                    let Some(evaluation) = candidate.pre_layout.as_ref() else {
+                        counts.device_cost_rejections =
+                            counts.device_cost_rejections.saturating_add(1);
+                        primary_unrankable = true;
+                        continue;
+                    };
+                    if !source_domain.is_subset(&evaluation.domain) {
+                        counts.device_cost_rejections =
+                            counts.device_cost_rejections.saturating_add(1);
+                        primary_unrankable = true;
+                        continue;
                     }
-                    DeviceSynthesisPlacement::ExactPhysical => candidate.physical_cost,
+                    let Some(cost) = evaluation.worst_cost_on_domain(source_domain) else {
+                        counts.device_cost_rejections =
+                            counts.device_cost_rejections.saturating_add(1);
+                        primary_unrankable = true;
+                        continue;
+                    };
+                    cost
+                }
+                DeviceSynthesisPlacement::ExactPhysical => candidate.physical_cost,
+            };
+            ranked.push((index, candidate, device_after_cost));
+        }
+        ranked.sort_by(|(_, left, left_cost), (_, right, right_cost)| {
+            left_cost
+                .compare(*right_cost)
+                .then_with(|| left.candidate.cost.cmp(&right.candidate.cost))
+        });
+        let Some((index, _, device_after_cost)) = ranked.first().copied() else {
+            if !pauli_generated && !saw_exact_primary && !primary_unrankable {
+                pauli_generated = true;
+                let Some(decomp) = synthesis_cache.kak_decomposition(matrix)? else {
+                    record_attempt_counts(synthesis_cache, counts);
+                    return Ok(None);
                 };
+                candidates.extend(plan_pauli_fallback_for_device_from_kak(
+                    matrix,
+                    block.qubits,
+                    context,
+                    &decomp,
+                )?);
+                continue;
+            }
+            record_attempt_counts(synthesis_cache, counts);
+            return Ok(None);
+        };
+        let candidate = candidates.remove(index);
+        counts.candidates_considered = counts.candidates_considered.saturating_add(1);
+        match synthesis_cache.check_selected_candidate(
+            matrix,
+            block.qubits,
+            &candidate.candidate,
+        )? {
+            NumericTwoQubitCandidateValidation::Exact => {
+                saw_exact_primary = true;
                 if !device_after_cost.strictly_better_than(device_before_cost) {
                     counts.device_cost_rejections = counts.device_cost_rejections.saturating_add(1);
                     continue;
                 }
-                viable.push((candidate, device_after_cost));
-            }
-            viable.sort_by(|(left, left_cost), (right, right_cost)| {
-                left_cost
-                    .compare(*right_cost)
-                    .then_with(|| left.candidate.cost.cmp(&right.candidate.cost))
-            });
-            for (candidate, device_after_cost) in viable {
                 if !commutation
                     .replacements_commute_with_crossed(crossed, &candidate.candidate.operations)
                 {
@@ -906,18 +998,18 @@ fn try_synthesize_device_block(
                     counts.replacement_rejections = counts.replacement_rejections.saturating_add(1);
                     continue;
                 }
+                record_attempt_counts(synthesis_cache, counts);
                 validate_patch_with_differential_oracle(
                     block,
                     ops,
                     &candidate.candidate.operations,
                     candidate.candidate.global_phase,
                 )?;
-                attempt_counts.set(counts);
                 return Ok(Some(BlockPatch {
                     first_order: block.first_order(),
                     matched_orders: block.matched_orders.clone(),
                     crossed_orders: block.crossed_orders.clone(),
-                    replacement: candidate.candidate.operations.clone(),
+                    replacement: candidate.candidate.operations,
                     before_cost,
                     after_cost: candidate.candidate.cost,
                     device_after_cost: Some(device_after_cost),
@@ -925,12 +1017,26 @@ fn try_synthesize_device_block(
                     selection_rank,
                 }));
             }
-            attempt_counts.set(counts);
-            Ok(None)
-        },
-    )?;
-    record_attempt_counts(synthesis_cache, attempt_counts.get());
-    result
+            NumericTwoQubitCandidateValidation::Inexact { .. }
+                if expanded_backends
+                    .insert((candidate.candidate.backend, candidate.direction_order)) =>
+            {
+                let Some(decomp) = synthesis_cache.kak_decomposition(matrix)? else {
+                    record_attempt_counts(synthesis_cache, counts);
+                    return Ok(None);
+                };
+                candidates.extend(plan_cx_family_fallbacks_for_device_from_kak(
+                    matrix,
+                    block.qubits,
+                    context,
+                    &decomp,
+                    candidate.candidate.backend,
+                    candidate.direction_order,
+                )?);
+            }
+            NumericTwoQubitCandidateValidation::Inexact { .. } => {}
+        }
+    }
 }
 
 // Matrix construction uses the same convention as `circuit_to_matrix`: source

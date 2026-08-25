@@ -24,12 +24,12 @@
 //! interaction rotations are omitted using `ANGLE_EPS`, while their scalar
 //! phases remain accumulated in the returned phase.
 //!
-//! The target-aware planner emits only exact candidates. `PauliRotations`
+//! The target-aware planner emits constructive candidates. `PauliRotations`
 //! emits the Cartan core directly as `RXX`/`RYY`/`RZZ`; `Rzz` emits the same
 //! Cartan core with local basis changes for `XX` and `YY`; `Cx`/`Cy`/`Cz`
-//! select a feasible entangler template and keep only candidates whose
-//! reconstructed matrix matches the input matrix within exact numerical
-//! tolerance.
+//! select the minimum feasible entangler template analytically from the KAK
+//! coordinates. Callers must validate the selected candidate before adopting
+//! it; unselected candidates deliberately avoid full 4x4 reconstruction.
 
 use super::matrix::{c, dagger, mat2};
 use super::two_qubit_kak::{KakDecomposition, kak_decompose};
@@ -236,7 +236,7 @@ pub struct TwoQubitSynthesisRequest<'a> {
     pub target: TwoQubitSynthesisTarget,
 }
 
-/// Target-aware cost used to order exact two-qubit synthesis candidates.
+/// Target-aware cost used to order constructive two-qubit synthesis candidates.
 ///
 /// Costs are ordered lexicographically in the same order as the fields below:
 /// minimize final two-qubit count, final depth, final operation count,
@@ -257,7 +257,10 @@ pub struct TargetAwareSynthesisCost {
     pub backend_order: usize,
 }
 
-/// Exact synthesis candidate emitted by the target-aware planner.
+/// Constructive synthesis candidate emitted by the target-aware planner.
+///
+/// Planner output is not a proof boundary. Call
+/// [`validate_numeric_2q_candidate`] before adopting a selected candidate.
 #[derive(Clone, Debug)]
 pub struct TwoQubitSynthesisCandidate {
     pub backend: TwoQubitUnitaryDecomposeBasis,
@@ -266,13 +269,24 @@ pub struct TwoQubitSynthesisCandidate {
     pub cost: TargetAwareSynthesisCost,
 }
 
+/// Result of reconstructing a constructive candidate at an adoption boundary.
+///
+/// `Inexact` is an expected numeric feasibility outcome near KAK/Weyl branch
+/// boundaries. It is deliberately distinct from malformed candidate errors,
+/// which remain [`CompilerError`]s.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum NumericTwoQubitCandidateValidation {
+    Exact,
+    Inexact { max_error: f64 },
+}
+
 /// Internal device-scored candidate with deterministic direction metadata.
 #[derive(Clone, Debug)]
 pub(crate) struct DeviceTwoQubitSynthesisCandidate {
     pub(crate) candidate: TwoQubitSynthesisCandidate,
     pub(crate) physical_cost: DevicePhysicalCost,
     pub(crate) pre_layout: Option<DevicePreLayoutEvaluation>,
-    direction_order: usize,
+    pub(crate) direction_order: usize,
 }
 
 /// Numeric synthesis result for a two-qubit unitary matrix.
@@ -297,27 +311,38 @@ pub fn synthesize_numeric_2q_unitary(
     basis: TwoQubitUnitaryDecomposeBasis,
 ) -> Result<TwoQubitUnitarySynthesisResult, CompilerError> {
     let target = target_for_single_backend(basis)?;
-    let mut candidates = plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
-        matrix,
-        qubits,
-        target,
+    validate_two_qubit_qargs(qubits)?;
+    let decomp = kak_decompose(matrix)?;
+    let mut candidates = plan_numeric_2q_unitary_from_kak(
+        TwoQubitSynthesisRequest {
+            matrix,
+            qubits,
+            target: target.clone(),
+        },
+        &decomp,
+    )?;
+    candidates.retain(|candidate| candidate.backend == basis);
+    let candidate = select_validated_numeric_2q_candidate_from_kak(
+        matrix, qubits, &target, &decomp, candidates,
+    )?
+    .filter(|candidate| candidate.backend == basis)
+    .ok_or_else(|| CompilerError::TransformFailed {
+        name: "synthesize.numeric_2q_unitary",
+        reason: format!("no exact candidate for {basis:?} backend"),
     })?;
-    let Some(candidate) = candidates
-        .drain(..)
-        .find(|candidate| candidate.backend == basis)
-    else {
-        return Err(CompilerError::TransformFailed {
-            name: "synthesize.numeric_2q_unitary",
-            reason: format!("no exact candidate for {basis:?} backend"),
-        });
-    };
     Ok(TwoQubitUnitarySynthesisResult {
         operations: candidate.operations,
         global_phase: candidate.global_phase,
     })
 }
 
-/// Plans exact two-qubit synthesis candidates for the requested target.
+/// Plans constructive two-qubit synthesis candidates for the requested target.
+///
+/// This function validates the input unitary through KAK decomposition and
+/// uses analytic KAK feasibility for CX-family templates, but intentionally
+/// does not numerically reconstruct every returned candidate. A caller
+/// adopting a candidate must call
+/// [`validate_numeric_2q_candidate`].
 pub fn plan_numeric_2q_unitary(
     request: TwoQubitSynthesisRequest<'_>,
 ) -> Result<Vec<TwoQubitSynthesisCandidate>, CompilerError> {
@@ -326,8 +351,8 @@ pub fn plan_numeric_2q_unitary(
     plan_numeric_2q_unitary_from_kak(request, &decomp)
 }
 
-/// Plans candidates from a KAK decomposition already validated for the exact
-/// request matrix.
+/// Plans constructive candidates from a KAK decomposition already validated
+/// for the request matrix.
 pub(crate) fn plan_numeric_2q_unitary_from_kak(
     request: TwoQubitSynthesisRequest<'_>,
     decomp: &KakDecomposition,
@@ -359,7 +384,6 @@ pub(crate) fn plan_numeric_2q_unitary_from_kak(
             &mut candidates,
             backend,
             CandidateGenerationContext {
-                matrix: request.matrix,
                 decomp,
                 qubits: request.qubits,
                 target: &request.target,
@@ -368,15 +392,19 @@ pub(crate) fn plan_numeric_2q_unitary_from_kak(
         )?;
     }
 
+    sort_generic_candidates(&mut candidates);
+    Ok(candidates)
+}
+
+fn sort_generic_candidates(candidates: &mut [TwoQubitSynthesisCandidate]) {
     candidates.sort_by(|lhs, rhs| {
         lhs.cost
             .cmp(&rhs.cost)
             .then_with(|| lhs.operations.len().cmp(&rhs.operations.len()))
     });
-    Ok(candidates)
 }
 
-/// Plans exact two-qubit candidates against one pass-local device context.
+/// Plans constructive two-qubit candidates against one pass-local device context.
 pub(crate) fn plan_numeric_2q_unitary_for_device(
     matrix: &Array2<Complex64>,
     qubits: [Qubit; 2],
@@ -434,9 +462,10 @@ pub(crate) fn plan_numeric_2q_unitary_for_device_from_kak(
         },
         &reversed_decomp,
     )? {
-        // The candidate was validated against S U S in the reversed tensor
+        // The candidate was constructed for S U S in the reversed tensor
         // frame. Interpreting the same labelled operations in the original
-        // frame applies the second conjugation: S (S U S) S = U.
+        // frame applies the second conjugation: S (S U S) S = U. The selected
+        // candidate is validated against U at its adoption boundary.
         push_device_candidate(&mut oriented, candidate, qubits, 1, context)?;
     }
 
@@ -463,12 +492,11 @@ fn swap_conjugated_matrix(matrix: &Array2<Complex64>) -> Array2<Complex64> {
     })
 }
 
-/// Selects the best unitary decomposition without comparing unlike placement domains.
-pub(crate) fn select_device_unitary_candidate(
-    mut candidates: Vec<DeviceTwoQubitSynthesisCandidate>,
-    _qubits: [Qubit; 2],
+/// Removes the best device candidate without discarding unvalidated alternatives.
+pub(crate) fn take_best_device_unitary_candidate(
+    candidates: &mut Vec<DeviceTwoQubitSynthesisCandidate>,
     context: &DeviceTwoQubitSynthesisContext,
-) -> Option<TwoQubitSynthesisCandidate> {
+) -> Option<DeviceTwoQubitSynthesisCandidate> {
     if candidates.is_empty() {
         return None;
     }
@@ -483,40 +511,167 @@ pub(crate) fn select_device_unitary_candidate(
                 .filter_map(|candidate| candidate.pre_layout.as_ref())
                 .map(|evaluation| evaluation.coverage)
                 .min()?;
-            candidates.retain(|candidate| {
-                candidate
-                    .pre_layout
-                    .as_ref()
-                    .is_some_and(|evaluation| evaluation.coverage == best_coverage)
-            });
+            let eligible_indices = candidates
+                .iter()
+                .enumerate()
+                .filter_map(|(index, candidate)| {
+                    candidate
+                        .pre_layout
+                        .as_ref()
+                        .is_some_and(|evaluation| evaluation.coverage == best_coverage)
+                        .then_some(index)
+                })
+                .collect::<Vec<_>>();
 
-            let mut common_domain = candidates
-                .first()
-                .and_then(|candidate| candidate.pre_layout.as_ref())?
+            let mut common_domain = candidates[*eligible_indices.first()?]
+                .pre_layout
+                .as_ref()?
                 .domain
                 .clone();
-            for candidate in candidates.iter().skip(1) {
-                let domain = &candidate.pre_layout.as_ref()?.domain;
+            for &index in eligible_indices.iter().skip(1) {
+                let domain = &candidates[index].pre_layout.as_ref()?.domain;
                 common_domain.retain(|pair| domain.contains(pair));
             }
 
-            if common_domain.is_empty() {
-                candidates.sort_by(compare_stable_device_candidates);
+            let best_index = if common_domain.is_empty() {
+                eligible_indices.into_iter().min_by(|&left, &right| {
+                    compare_stable_device_candidates(&candidates[left], &candidates[right])
+                })?
             } else {
-                for candidate in &mut candidates {
-                    candidate.physical_cost = candidate
+                for &index in &eligible_indices {
+                    candidates[index].physical_cost = candidates[index]
                         .pre_layout
                         .as_ref()?
                         .worst_cost_on_domain(&common_domain)?;
                 }
-                candidates.sort_by(compare_device_candidates);
-            }
+                eligible_indices.into_iter().min_by(|&left, &right| {
+                    compare_device_candidates(&candidates[left], &candidates[right])
+                })?
+            };
+            return Some(candidates.remove(best_index));
         }
     }
-    candidates
+    (!candidates.is_empty()).then(|| candidates.remove(0))
+}
+
+pub(crate) fn plan_cx_family_fallbacks_for_device_from_kak(
+    matrix: &Array2<Complex64>,
+    qubits: [Qubit; 2],
+    context: &DeviceTwoQubitSynthesisContext,
+    decomp: &KakDecomposition,
+    backend: TwoQubitUnitaryDecomposeBasis,
+    direction_order: usize,
+) -> Result<Vec<DeviceTwoQubitSynthesisCandidate>, CompilerError> {
+    let mut native_2q = context
+        .native_two_qubit_backends(qubits)
         .into_iter()
-        .next()
-        .map(|candidate| candidate.candidate)
+        .collect::<Vec<_>>();
+    native_2q.sort_by_key(|gate| *gate as u8);
+    let target = TwoQubitSynthesisTarget::for_device_backends(native_2q);
+    let (oriented_matrix, oriented_qubits, oriented_decomp) = if direction_order == 0 {
+        (None, qubits, decomp.clone())
+    } else {
+        (
+            Some(swap_conjugated_matrix(matrix)),
+            [qubits[1], qubits[0]],
+            swap_conjugated_kak(decomp),
+        )
+    };
+    let matrix = oriented_matrix.as_ref().unwrap_or(matrix);
+    let generic = plan_cx_family_fallbacks_from_kak(
+        TwoQubitSynthesisRequest {
+            matrix,
+            qubits: oriented_qubits,
+            target,
+        },
+        &oriented_decomp,
+        backend,
+    )?;
+    let mut output = Vec::new();
+    for candidate in generic {
+        push_device_candidate(&mut output, candidate, qubits, direction_order, context)?;
+    }
+    Ok(output)
+}
+
+pub(crate) fn plan_pauli_fallback_for_device_from_kak(
+    matrix: &Array2<Complex64>,
+    qubits: [Qubit; 2],
+    context: &DeviceTwoQubitSynthesisContext,
+    decomp: &KakDecomposition,
+) -> Result<Vec<DeviceTwoQubitSynthesisCandidate>, CompilerError> {
+    let mut native_2q = context
+        .native_two_qubit_backends(qubits)
+        .into_iter()
+        .collect::<Vec<_>>();
+    native_2q.sort_by_key(|gate| *gate as u8);
+    let target = TwoQubitSynthesisTarget::for_device_backends(native_2q);
+    let mut output = Vec::new();
+    for candidate in plan_pauli_fallback_from_kak(
+        TwoQubitSynthesisRequest {
+            matrix,
+            qubits,
+            target: target.clone(),
+        },
+        decomp,
+    )? {
+        push_device_candidate(&mut output, candidate, qubits, 0, context)?;
+    }
+    let reversed_matrix = swap_conjugated_matrix(matrix);
+    let reversed_qubits = [qubits[1], qubits[0]];
+    let reversed_decomp = swap_conjugated_kak(decomp);
+    for candidate in plan_pauli_fallback_from_kak(
+        TwoQubitSynthesisRequest {
+            matrix: &reversed_matrix,
+            qubits: reversed_qubits,
+            target,
+        },
+        &reversed_decomp,
+    )? {
+        push_device_candidate(&mut output, candidate, qubits, 1, context)?;
+    }
+    Ok(output)
+}
+
+pub(crate) fn select_validated_device_unitary_candidate_from_kak(
+    matrix: &Array2<Complex64>,
+    qubits: [Qubit; 2],
+    context: &DeviceTwoQubitSynthesisContext,
+    decomp: &KakDecomposition,
+    mut candidates: Vec<DeviceTwoQubitSynthesisCandidate>,
+) -> Result<Option<TwoQubitSynthesisCandidate>, CompilerError> {
+    let mut expanded = std::collections::HashSet::new();
+    let mut pauli_generated = candidates.iter().any(|candidate| {
+        candidate.candidate.backend == TwoQubitUnitaryDecomposeBasis::PauliRotations
+    });
+    loop {
+        let Some(candidate) = take_best_device_unitary_candidate(&mut candidates, context) else {
+            if pauli_generated {
+                return Ok(None);
+            }
+            pauli_generated = true;
+            candidates.extend(plan_pauli_fallback_for_device_from_kak(
+                matrix, qubits, context, decomp,
+            )?);
+            continue;
+        };
+        match check_numeric_2q_candidate(matrix, qubits, &candidate.candidate)? {
+            NumericTwoQubitCandidateValidation::Exact => return Ok(Some(candidate.candidate)),
+            NumericTwoQubitCandidateValidation::Inexact { .. }
+                if expanded.insert((candidate.candidate.backend, candidate.direction_order)) =>
+            {
+                candidates.extend(plan_cx_family_fallbacks_for_device_from_kak(
+                    matrix,
+                    qubits,
+                    context,
+                    decomp,
+                    candidate.candidate.backend,
+                    candidate.direction_order,
+                )?);
+            }
+            NumericTwoQubitCandidateValidation::Inexact { .. } => {}
+        }
+    }
 }
 
 fn push_device_candidate(
@@ -739,7 +894,6 @@ fn target_for_single_backend(
 }
 
 struct CandidateGenerationContext<'a> {
-    matrix: &'a Array2<Complex64>,
     decomp: &'a KakDecomposition,
     qubits: [Qubit; 2],
     target: &'a TwoQubitSynthesisTarget,
@@ -760,14 +914,7 @@ fn generate_backend_candidates(
                 context.qubits[0],
                 context.qubits[1],
             )?;
-            push_validated_candidate(
-                candidates,
-                backend,
-                builder,
-                context.matrix,
-                context.qubits,
-                context.target,
-            )?;
+            push_scored_candidate(candidates, backend, builder, context.target)?;
         }
         TwoQubitUnitaryDecomposeBasis::Rzz => {
             let mut builder = OperationBuilder::default();
@@ -777,14 +924,7 @@ fn generate_backend_candidates(
                 context.qubits[0],
                 context.qubits[1],
             )?;
-            push_validated_candidate(
-                candidates,
-                backend,
-                builder,
-                context.matrix,
-                context.qubits,
-                context.target,
-            )?;
+            push_scored_candidate(candidates, backend, builder, context.target)?;
         }
         TwoQubitUnitaryDecomposeBasis::Cx
         | TwoQubitUnitaryDecomposeBasis::Cy
@@ -795,51 +935,133 @@ fn generate_backend_candidates(
                 )
             })?;
             let minimum_entanglers = minimum_cx_family_entanglers(context.decomp);
-            for entanglers in minimum_entanglers..=3 {
-                let mut builder = OperationBuilder::default();
-                match backend {
-                    TwoQubitUnitaryDecomposeBasis::Cx => emit_cx_with_count(
-                        &mut builder,
-                        context.decomp,
-                        basis,
-                        context.qubits[0],
-                        context.qubits[1],
-                        entanglers,
-                    )?,
-                    TwoQubitUnitaryDecomposeBasis::Cy => emit_cy_with_count(
-                        &mut builder,
-                        context.decomp,
-                        basis,
-                        context.qubits[0],
-                        context.qubits[1],
-                        entanglers,
-                    )?,
-                    TwoQubitUnitaryDecomposeBasis::Cz => emit_cz_with_count(
-                        &mut builder,
-                        context.decomp,
-                        basis,
-                        context.qubits[0],
-                        context.qubits[1],
-                        entanglers,
-                    )?,
-                    _ => unreachable!(),
-                }
-                if push_validated_candidate(
-                    candidates,
-                    backend,
-                    builder,
-                    context.matrix,
-                    context.qubits,
-                    context.target,
-                )? {
-                    // Additional CX-family gates cannot improve the primary
-                    // target-aware two-qubit cost within the same backend.
-                    break;
-                }
-            }
+            let mut builder = OperationBuilder::default();
+            emit_cx_family_with_count(
+                &mut builder,
+                backend,
+                context.decomp,
+                basis,
+                context.qubits,
+                minimum_entanglers,
+            )?;
+            push_scored_candidate(candidates, backend, builder, context.target)?;
         }
     }
     Ok(())
+}
+
+/// Materializes the more conservative CX-family templates only after the
+/// analytic-minimum template has failed numeric reconstruction.
+pub(crate) fn plan_cx_family_fallbacks_from_kak(
+    request: TwoQubitSynthesisRequest<'_>,
+    decomp: &KakDecomposition,
+    backend: TwoQubitUnitaryDecomposeBasis,
+) -> Result<Vec<TwoQubitSynthesisCandidate>, CompilerError> {
+    if !matches!(
+        backend,
+        TwoQubitUnitaryDecomposeBasis::Cx
+            | TwoQubitUnitaryDecomposeBasis::Cy
+            | TwoQubitUnitaryDecomposeBasis::Cz
+    ) {
+        return Ok(Vec::new());
+    }
+    if !should_generate_backend(backend, &request.target, false) {
+        return Ok(Vec::new());
+    }
+
+    let basis = &*CX_BASIS_DATA;
+    let minimum_entanglers = minimum_cx_family_entanglers(decomp);
+    let mut candidates = Vec::new();
+    for entanglers in minimum_entanglers.saturating_add(1)..=3 {
+        let mut builder = OperationBuilder::default();
+        emit_cx_family_with_count(
+            &mut builder,
+            backend,
+            decomp,
+            basis,
+            request.qubits,
+            entanglers,
+        )?;
+        push_scored_candidate(&mut candidates, backend, builder, &request.target)?;
+    }
+    sort_generic_candidates(&mut candidates);
+    Ok(candidates)
+}
+
+/// Generates the Pauli-rotation safety net after every constructive primary
+/// candidate has proved numerically inexact.
+pub(crate) fn plan_pauli_fallback_from_kak(
+    request: TwoQubitSynthesisRequest<'_>,
+    decomp: &KakDecomposition,
+) -> Result<Vec<TwoQubitSynthesisCandidate>, CompilerError> {
+    if !request.target.fallback_pauli() {
+        return Ok(Vec::new());
+    }
+    let mut candidates = Vec::new();
+    generate_backend_candidates(
+        &mut candidates,
+        TwoQubitUnitaryDecomposeBasis::PauliRotations,
+        CandidateGenerationContext {
+            decomp,
+            qubits: request.qubits,
+            target: &request.target,
+            cx_basis: None,
+        },
+    )?;
+    sort_generic_candidates(&mut candidates);
+    Ok(candidates)
+}
+
+pub(crate) fn select_validated_numeric_2q_candidate_from_kak(
+    matrix: &Array2<Complex64>,
+    qubits: [Qubit; 2],
+    target: &TwoQubitSynthesisTarget,
+    decomp: &KakDecomposition,
+    candidates: Vec<TwoQubitSynthesisCandidate>,
+) -> Result<Option<TwoQubitSynthesisCandidate>, CompilerError> {
+    let mut candidates = candidates;
+    let mut expanded_backends = std::collections::HashSet::new();
+    let mut pauli_generated = candidates
+        .iter()
+        .any(|candidate| candidate.backend == TwoQubitUnitaryDecomposeBasis::PauliRotations);
+    sort_generic_candidates(&mut candidates);
+    loop {
+        if candidates.is_empty() {
+            if pauli_generated {
+                return Ok(None);
+            }
+            pauli_generated = true;
+            candidates.extend(plan_pauli_fallback_from_kak(
+                TwoQubitSynthesisRequest {
+                    matrix,
+                    qubits,
+                    target: target.clone(),
+                },
+                decomp,
+            )?);
+            sort_generic_candidates(&mut candidates);
+            continue;
+        }
+        let candidate = candidates.remove(0);
+        match check_numeric_2q_candidate(matrix, qubits, &candidate)? {
+            NumericTwoQubitCandidateValidation::Exact => return Ok(Some(candidate)),
+            NumericTwoQubitCandidateValidation::Inexact { .. }
+                if expanded_backends.insert(candidate.backend) =>
+            {
+                candidates.extend(plan_cx_family_fallbacks_from_kak(
+                    TwoQubitSynthesisRequest {
+                        matrix,
+                        qubits,
+                        target: target.clone(),
+                    },
+                    decomp,
+                    candidate.backend,
+                )?);
+                sort_generic_candidates(&mut candidates);
+            }
+            NumericTwoQubitCandidateValidation::Inexact { .. } => {}
+        }
+    }
 }
 
 fn minimum_cx_family_entanglers(decomp: &KakDecomposition) -> usize {
@@ -858,24 +1080,43 @@ fn minimum_cx_family_entanglers(decomp: &KakDecomposition) -> usize {
     }
 }
 
-fn push_validated_candidate(
+fn emit_cx_family_with_count(
+    builder: &mut OperationBuilder,
+    backend: TwoQubitUnitaryDecomposeBasis,
+    decomp: &KakDecomposition,
+    basis: &CxBasisData,
+    qubits: [Qubit; 2],
+    entanglers: usize,
+) -> Result<(), CompilerError> {
+    match backend {
+        TwoQubitUnitaryDecomposeBasis::Cx => {
+            emit_cx_with_count(builder, decomp, basis, qubits[0], qubits[1], entanglers)
+        }
+        TwoQubitUnitaryDecomposeBasis::Cy => {
+            emit_cy_with_count(builder, decomp, basis, qubits[0], qubits[1], entanglers)
+        }
+        TwoQubitUnitaryDecomposeBasis::Cz => {
+            emit_cz_with_count(builder, decomp, basis, qubits[0], qubits[1], entanglers)
+        }
+        _ => Err(CompilerError::InvariantViolation(format!(
+            "CX-family template emission requires CX, CY, or CZ, got {backend:?}"
+        ))),
+    }
+}
+
+fn push_scored_candidate(
     candidates: &mut Vec<TwoQubitSynthesisCandidate>,
     backend: TwoQubitUnitaryDecomposeBasis,
     builder: OperationBuilder,
-    matrix: &Array2<Complex64>,
-    qubits: [Qubit; 2],
     target: &TwoQubitSynthesisTarget,
-) -> Result<bool, CompilerError> {
-    if !candidate_matches_matrix(&builder.operations, builder.global_phase, matrix, qubits)? {
-        return Ok(false);
-    }
+) -> Result<(), CompilerError> {
     let cost = match target_aware_cost_of_value_operations(&builder.operations, target, backend) {
         Ok(cost) => cost,
         Err(CompilerError::InvalidInput(_)) => {
             // A candidate that cannot be lowered to the configured physical
-            // target is not a viable exact synthesis option. Other backends
-            // may still be.
-            return Ok(false);
+            // target is not a viable synthesis option. Other backends may
+            // still be.
+            return Ok(());
         }
         Err(error) => return Err(error),
     };
@@ -885,7 +1126,7 @@ fn push_validated_candidate(
         global_phase: builder.global_phase,
         cost,
     });
-    Ok(true)
+    Ok(())
 }
 
 /// Computes target-aware cost for value operations emitted by synthesis.
@@ -1131,17 +1372,78 @@ fn absorb_cx_replacement_locals(
     }
 }
 
-fn candidate_matches_matrix(
-    operations: &[ValueOperation],
-    global_phase: f64,
+/// Verifies one selected constructive candidate against its source unitary.
+///
+/// This is the mandatory correctness boundary for planner consumers. It
+/// reconstructs the selected operation sequence as a 4x4 matrix, includes the
+/// candidate global phase, and compares every element using the synthesis
+/// exactness tolerance.
+///
+/// # Errors
+///
+/// Returns [`CompilerError::InvalidInput`] when `expected` is not a finite 4x4
+/// matrix or `qubits` are not distinct. Returns
+/// [`CompilerError::InvariantViolation`] when the selected candidate is
+/// malformed, non-finite, or does not reconstruct the expected matrix.
+pub fn validate_numeric_2q_candidate(
     expected: &Array2<Complex64>,
     qubits: [Qubit; 2],
-) -> Result<bool, CompilerError> {
-    let actual = value_operations_matrix(operations, global_phase, qubits)?;
-    Ok(actual
+    candidate: &TwoQubitSynthesisCandidate,
+) -> Result<(), CompilerError> {
+    match check_numeric_2q_candidate(expected, qubits, candidate)? {
+        NumericTwoQubitCandidateValidation::Exact => Ok(()),
+        NumericTwoQubitCandidateValidation::Inexact { max_error } => {
+            Err(CompilerError::InvariantViolation(format!(
+                "selected {:?} 2q synthesis candidate failed numeric validation: maximum element error {max_error:e} exceeds tolerance {TWO_QUBIT_EXACT_TOLERANCE:e}",
+                candidate.backend
+            )))
+        }
+    }
+}
+
+pub(crate) fn check_numeric_2q_candidate(
+    expected: &Array2<Complex64>,
+    qubits: [Qubit; 2],
+    candidate: &TwoQubitSynthesisCandidate,
+) -> Result<NumericTwoQubitCandidateValidation, CompilerError> {
+    validate_two_qubit_qargs(qubits)?;
+    if expected.dim() != (4, 4) {
+        return Err(CompilerError::InvalidInput(format!(
+            "2q candidate validation requires a 4x4 matrix, got {}x{}",
+            expected.nrows(),
+            expected.ncols()
+        )));
+    }
+    if expected
         .iter()
-        .zip(expected.iter())
-        .all(|(actual, expected)| (*actual - *expected).norm() <= TWO_QUBIT_EXACT_TOLERANCE))
+        .any(|value| !value.re.is_finite() || !value.im.is_finite())
+    {
+        return Err(CompilerError::InvalidInput(
+            "2q candidate validation requires a finite matrix".to_string(),
+        ));
+    }
+    if !candidate.global_phase.is_finite() {
+        return Err(CompilerError::InvariantViolation(format!(
+            "selected {:?} 2q synthesis candidate has non-finite global phase {}",
+            candidate.backend, candidate.global_phase
+        )));
+    }
+
+    let actual = value_operations_matrix(&candidate.operations, candidate.global_phase, qubits)?;
+    let mut max_error = 0.0_f64;
+    for (actual, expected) in actual.iter().zip(expected.iter()) {
+        if !actual.re.is_finite() || !actual.im.is_finite() {
+            return Err(CompilerError::InvariantViolation(format!(
+                "selected {:?} 2q synthesis candidate reconstructed a non-finite matrix",
+                candidate.backend
+            )));
+        }
+        max_error = max_error.max((*actual - *expected).norm());
+    }
+    if max_error > TWO_QUBIT_EXACT_TOLERANCE {
+        return Ok(NumericTwoQubitCandidateValidation::Inexact { max_error });
+    }
+    Ok(NumericTwoQubitCandidateValidation::Exact)
 }
 
 fn value_operations_matrix(
@@ -1166,7 +1468,12 @@ fn value_operations_matrix(
         }
         for (index, param) in operation.params.iter().enumerate() {
             params[index] = match param {
-                ParameterValue::Fixed(value) => *value,
+                ParameterValue::Fixed(value) if value.is_finite() => *value,
+                ParameterValue::Fixed(value) => {
+                    return Err(CompilerError::InvariantViolation(format!(
+                        "2q synthesis candidate contains non-finite parameter {value}"
+                    )));
+                }
                 ParameterValue::Param(_) => {
                     return Err(CompilerError::InvariantViolation(
                         "2q synthesis candidate contains symbolic parameter".to_string(),

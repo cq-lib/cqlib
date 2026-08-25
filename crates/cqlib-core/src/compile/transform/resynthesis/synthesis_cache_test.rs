@@ -12,11 +12,12 @@
 
 use super::*;
 use crate::circuit::{Circuit, Instruction, StandardGate, ValueInstruction, ValueOperation};
+use crate::compile::test_utils::build_device_synthesis_context;
 use crate::compile::transform::decompose::unitary::unitary_2q::{
     TargetAwareSynthesisCost, plan_numeric_2q_unitary_for_device,
 };
 use crate::compile::transform::decompose::unitary::{
-    DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext, TwoQubitUnitaryDecomposeBasis,
+    DeviceSynthesisPlacement, TwoQubitUnitaryDecomposeBasis,
 };
 use crate::device::Device;
 use smallvec::smallvec;
@@ -258,12 +259,9 @@ fn device_plan_is_cached_for_exact_matrix_and_qargs() {
     let q1 = Qubit::new(1);
     let mut circuit = Circuit::new(2);
     circuit.cx(q0, q1).unwrap();
-    let context = DeviceTwoQubitSynthesisContext::build(
-        &device,
-        &circuit,
-        DeviceSynthesisPlacement::ExactPhysical,
-    )
-    .unwrap();
+    let context =
+        build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
     let matrix = StandardGate::CX.matrix(&[]).unwrap().into_owned();
     let mut cache = TwoQubitSynthesisCache::new(4);
     let mut calls = 0;
@@ -324,7 +322,7 @@ fn pre_layout_device_plan_reuses_canonical_logical_qargs() {
     let q2 = Qubit::new(2);
     let mut circuit = Circuit::new(3);
     circuit.cx(q0, q1).unwrap();
-    let context = DeviceTwoQubitSynthesisContext::build(
+    let context = build_device_synthesis_context(
         &device,
         &circuit,
         DeviceSynthesisPlacement::PreLayoutEnvelope,
@@ -379,19 +377,13 @@ fn namespace_reuses_context_clones_and_invalidates_rebuilds() {
     let q1 = Qubit::new(1);
     let mut circuit = Circuit::new(2);
     circuit.cx(q0, q1).unwrap();
-    let context = DeviceTwoQubitSynthesisContext::build(
-        &device,
-        &circuit,
-        DeviceSynthesisPlacement::ExactPhysical,
-    )
-    .unwrap();
+    let context =
+        build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
     let cloned = context.clone();
-    let rebuilt = DeviceTwoQubitSynthesisContext::build(
-        &device,
-        &circuit,
-        DeviceSynthesisPlacement::ExactPhysical,
-    )
-    .unwrap();
+    let rebuilt =
+        build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
     assert_eq!(context.generation(), cloned.generation());
     assert_ne!(context.generation(), rebuilt.generation());
 
@@ -562,4 +554,65 @@ fn selection_measurements_reset_without_resetting_cache_counters() {
         ResynthesisSelectionStats::default()
     );
     assert_eq!(cache.stats().generic_hits, 3);
+}
+
+#[test]
+fn selected_candidate_validation_is_cached_across_qubit_labels() {
+    let matrix = Array2::eye(4);
+    let candidate_for = |qubit| TwoQubitSynthesisCandidate {
+        backend: TwoQubitUnitaryDecomposeBasis::Cx,
+        operations: vec![
+            ValueOperation::from_standard(StandardGate::X, [qubit], []),
+            ValueOperation::from_standard(StandardGate::X, [qubit], []),
+        ],
+        global_phase: 0.0,
+        cost: TargetAwareSynthesisCost::default(),
+    };
+    let first = candidate_for(Qubit::new(0));
+    let relabeled = candidate_for(Qubit::new(7));
+    let mut cache = TwoQubitSynthesisCache::new(4);
+
+    cache
+        .check_selected_candidate(&matrix, [Qubit::new(0), Qubit::new(1)], &first)
+        .unwrap();
+    cache
+        .check_selected_candidate(&matrix, [Qubit::new(7), Qubit::new(9)], &relabeled)
+        .unwrap();
+
+    let stats = cache.stats();
+    assert_eq!(stats.candidate_validation_lookups, 2);
+    assert_eq!(stats.candidate_validation_misses, 1);
+    assert_eq!(stats.candidate_validation_hits, 1);
+    assert_eq!(stats.candidate_validation_entries, 1);
+    assert_eq!(stats.candidate_validation_failures, 0);
+}
+
+#[test]
+fn inexact_selected_candidate_validation_is_cached() {
+    let matrix = Array2::eye(4);
+    let candidate = TwoQubitSynthesisCandidate {
+        backend: TwoQubitUnitaryDecomposeBasis::Cx,
+        operations: Vec::new(),
+        global_phase: 0.25,
+        cost: TargetAwareSynthesisCost::default(),
+    };
+    let mut cache = TwoQubitSynthesisCache::new(4);
+
+    let first = cache
+        .check_selected_candidate(&matrix, [Qubit::new(0), Qubit::new(1)], &candidate)
+        .unwrap();
+    let second = cache
+        .check_selected_candidate(&matrix, [Qubit::new(0), Qubit::new(1)], &candidate)
+        .unwrap();
+
+    assert!(matches!(
+        first,
+        NumericTwoQubitCandidateValidation::Inexact { .. }
+    ));
+    assert_eq!(first, second);
+    let stats = cache.stats();
+    assert_eq!(stats.candidate_validation_misses, 1);
+    assert_eq!(stats.candidate_validation_hits, 1);
+    assert_eq!(stats.candidate_validation_entries, 1);
+    assert_eq!(stats.candidate_validation_failures, 1);
 }

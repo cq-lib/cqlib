@@ -36,10 +36,12 @@
 //! invalid matrix shapes, and unitary gates acting on three or more qubits.
 
 use super::DeviceTwoQubitSynthesisContext;
+use super::two_qubit_kak::kak_decompose;
 use super::unitary_1q::{OneQubitUnitaryDecomposition, synthesize_numeric_1q_unitary};
 use super::unitary_2q::{
-    TwoQubitSynthesisRequest, TwoQubitSynthesisTarget, plan_numeric_2q_unitary,
-    plan_numeric_2q_unitary_for_device, select_device_unitary_candidate,
+    TwoQubitSynthesisRequest, TwoQubitSynthesisTarget, plan_numeric_2q_unitary_for_device_from_kak,
+    plan_numeric_2q_unitary_from_kak, select_validated_device_unitary_candidate_from_kak,
+    select_validated_numeric_2q_candidate_from_kak,
 };
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, Instruction, Operation, Parameter, ParameterValue,
@@ -517,10 +519,21 @@ impl<'a> UnitaryDecomposer<'a> {
                     if let Some(decomposition) = self.device_cache.get(&cache_key) {
                         return Ok(decomposition.clone());
                     }
-                    let candidates =
-                        plan_numeric_2q_unitary_for_device(matrix.as_ref(), qubits, context)?;
-                    let candidate = select_device_unitary_candidate(candidates, qubits, context)
-                        .ok_or_else(|| CompilerError::TransformFailed {
+                    let decomp = kak_decompose(matrix.as_ref())?;
+                    let candidates = plan_numeric_2q_unitary_for_device_from_kak(
+                        matrix.as_ref(),
+                        qubits,
+                        context,
+                        &decomp,
+                    )?;
+                    let candidate = select_validated_device_unitary_candidate_from_kak(
+                        matrix.as_ref(),
+                        qubits,
+                        context,
+                        &decomp,
+                        candidates,
+                    )?
+                    .ok_or_else(|| CompilerError::TransformFailed {
                             name: SYNTHESIS_NAME,
                             reason: format!(
                                 "no exact device-aware two-qubit synthesis candidate for UnitaryGate '{}'",
@@ -550,23 +563,28 @@ impl<'a> UnitaryDecomposer<'a> {
                         phase_delta,
                     });
                 }
-                let candidate = plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
-                    matrix: matrix.as_ref(),
+                let decomp = kak_decompose(matrix.as_ref())?;
+                let candidates = plan_numeric_2q_unitary_from_kak(
+                    TwoQubitSynthesisRequest {
+                        matrix: matrix.as_ref(),
+                        qubits,
+                        target: self.config.two_qubit_target.clone(),
+                    },
+                    &decomp,
+                )?;
+                let candidate = select_validated_numeric_2q_candidate_from_kak(
+                    matrix.as_ref(),
                     qubits,
-                    target: self.config.two_qubit_target.clone(),
-                })
-                .and_then(|mut candidates| {
-                    if candidates.is_empty() {
-                        Err(CompilerError::TransformFailed {
-                            name: SYNTHESIS_NAME,
-                            reason: format!(
-                                "no exact two-qubit synthesis candidate for UnitaryGate '{}'",
-                                gate.label()
-                            ),
-                        })
-                    } else {
-                        Ok(candidates.remove(0))
-                    }
+                    &self.config.two_qubit_target,
+                    &decomp,
+                    candidates,
+                )?
+                .ok_or_else(|| CompilerError::TransformFailed {
+                    name: SYNTHESIS_NAME,
+                    reason: format!(
+                        "no exact two-qubit synthesis candidate for UnitaryGate '{}'",
+                        gate.label()
+                    ),
                 })?;
                 let crate::compile::transform::decompose::unitary::TwoQubitSynthesisCandidate {
                     operations,
