@@ -34,12 +34,14 @@ use crate::compile::knowledge::rule::{Rule, RuleItem};
 use crate::compile::knowledge::{
     KnowledgeInstructionKey, MatchedReplacement, RuleId, RuleKind, RuleLibrary,
 };
+use crate::compile::transform::analysis::WorkflowCircuitAnalysis;
 use crate::compile::transform::decompose::unitary::euler_1q::{
     Euler1qCandidate, synthesize_euler_1q_candidates,
 };
 use crate::compile::transform::decompose::unitary::synthesize_numeric_1q_unitary;
 use crate::compile::transform::lowering_support::{LoweringTarget, OperationSequenceLowerer};
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
+use crate::compile::transform::transformer::{PassApplicability, WorkflowPass};
 use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, HashSet};
@@ -174,6 +176,23 @@ impl TargetBasisLowerer {
     /// translation because lowering folds them into the enclosing phase.
     pub fn requires_lowering(&self, circuit: &Circuit) -> bool {
         operations_require_lowering(circuit.operations(), self.plans.as_ref())
+    }
+}
+
+impl WorkflowPass for TargetBasisLowerer {
+    fn applicability(&self, analysis: &WorkflowCircuitAnalysis) -> PassApplicability {
+        let requires_lowering = analysis.has_extended_gate_like_operations()
+            || analysis.standard_gates().any(|gate| {
+                gate == StandardGate::GPhase
+                    || !self
+                        .plans
+                        .is_physical(&KnowledgeInstructionKey::Standard(gate))
+            });
+        if requires_lowering {
+            PassApplicability::Run
+        } else {
+            PassApplicability::ProvenNoOp("circuit already satisfies the explicit target basis")
+        }
     }
 }
 

@@ -48,6 +48,7 @@ use crate::compile::CompilerError;
 use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::resource::ResourceLimits;
 use crate::compile::sabre::{RoutingTarget, SabreConfig};
+use crate::compile::transform::analysis::WorkflowCircuitAnalysis;
 use crate::compile::transform::decompose::unitary::{
     DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext, TwoQubitSynthesisTarget,
 };
@@ -60,6 +61,7 @@ use crate::compile::transform::native_optimization::NativeOptimizer;
 use crate::compile::transform::resynthesis::{
     WorkflowResynthesisSession, resynthesize_two_qubit_blocks_workflow,
 };
+use crate::compile::transform::transformer::{PassApplicability, WorkflowPass};
 use crate::compile::transform::{
     CanonicalizeConfig, Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer,
     KnowledgeRewriteDiagnostics, KnowledgeRewriteSession, KnowledgeRewriter, LayoutObjective,
@@ -103,7 +105,7 @@ struct CanonicalizationProof {
 
 struct WorkflowState {
     current: Circuit,
-    analysis: CircuitAnalysis,
+    analysis: Option<WorkflowCircuitAnalysis>,
     circuit_revision: u64,
     canonical_proof: Option<CanonicalizationProof>,
     rewrite_session: KnowledgeRewriteSession,
@@ -214,6 +216,29 @@ impl PreparedCompileTarget {
 }
 
 impl WorkflowState {
+    fn analysis(&mut self) -> &WorkflowCircuitAnalysis {
+        if self.analysis.is_none() {
+            self.analysis = Some(WorkflowCircuitAnalysis::analyze(&self.current));
+        }
+        self.analysis
+            .as_ref()
+            .expect("workflow analysis was initialized above")
+    }
+
+    fn skip_if_proven_noop(
+        &mut self,
+        stage: &'static str,
+        name: &'static str,
+        pass: &impl WorkflowPass,
+    ) -> bool {
+        let applicability = pass.applicability(self.analysis());
+        let PassApplicability::ProvenNoOp(reason) = applicability else {
+            return false;
+        };
+        self.record_skipped(stage, name, reason);
+        true
+    }
+
     fn advance_circuit_revision(&mut self) {
         self.circuit_revision = self.circuit_revision.wrapping_add(1);
         if self.circuit_revision == 0 {
@@ -238,7 +263,7 @@ impl WorkflowState {
                 edits,
             );
         }
-        self.analysis = CircuitAnalysis::analyze(&circuit);
+        self.analysis = None;
         self.current = circuit;
         self.circuit_revision = new_revision;
         self.changed = true;
@@ -268,6 +293,29 @@ impl WorkflowState {
         })
     }
 
+    fn apply_transform_without_analysis_with_edits(
+        &mut self,
+        stage: &'static str,
+        name: &'static str,
+        transform: impl FnOnce(&Circuit) -> Result<(TransformOutcome, RewriteEdits), CompilerError>,
+    ) -> Result<bool, CompilerError> {
+        let changed = match transform(&self.current)? {
+            (TransformOutcome::Unchanged, _) => false,
+            (TransformOutcome::Changed(circuit), edits) => {
+                self.adopt_changed_circuit(circuit, &edits);
+                true
+            }
+        };
+        self.steps.push(WorkflowStepReport {
+            stage,
+            name,
+            changed,
+            skipped: false,
+            reason: None,
+        });
+        Ok(changed)
+    }
+
     fn apply_transform_with_edits(
         &mut self,
         stage: &'static str,
@@ -277,7 +325,15 @@ impl WorkflowState {
             &CircuitAnalysis,
         ) -> Result<(TransformOutcome, RewriteEdits), CompilerError>,
     ) -> Result<bool, CompilerError> {
-        let changed = match transform(&self.current, &self.analysis)? {
+        if self.analysis.is_none() {
+            self.analysis = Some(WorkflowCircuitAnalysis::analyze(&self.current));
+        }
+        let analysis = self
+            .analysis
+            .as_ref()
+            .expect("workflow analysis was initialized above")
+            .public();
+        let changed = match transform(&self.current, analysis)? {
             (TransformOutcome::Unchanged, _) => false,
             (TransformOutcome::Changed(circuit), edits) => {
                 self.adopt_changed_circuit(circuit, &edits);
@@ -313,7 +369,7 @@ impl WorkflowState {
             });
             return Ok(false);
         }
-        let changed = self.apply_transform_with_edits(stage, name, |circuit, _analysis| {
+        let changed = self.apply_transform_without_analysis_with_edits(stage, name, |circuit| {
             canonicalizer.transform_with_rewrite_edits(circuit)
         })?;
         self.canonical_proof = Some(CanonicalizationProof {
@@ -383,7 +439,7 @@ impl WorkflowState {
                     "knowledge rewrite reported a change without an output circuit".to_string(),
                 )
             })?;
-            self.analysis = CircuitAnalysis::analyze(&circuit);
+            self.analysis = None;
             self.current = circuit;
             self.advance_circuit_revision();
             self.changed = true;
@@ -511,10 +567,10 @@ impl CompilerWorkflow {
         collect_rewrite_diagnostics: bool,
     ) -> Result<(CompileResult, KnowledgeRewriteDiagnostics), CompilerError> {
         let prepared_target = self.prepared_target()?;
-        let analysis = CircuitAnalysis::analyze(&circuit);
+        let analysis = WorkflowCircuitAnalysis::analyze(&circuit);
         let mut state = WorkflowState {
             current: circuit,
-            analysis,
+            analysis: Some(analysis),
             circuit_revision: 0,
             canonical_proof: None,
             rewrite_session: KnowledgeRewriteSession::default(),
@@ -589,12 +645,10 @@ impl CompilerWorkflow {
             "canonicalize.after_decomposition",
             &Canonicalizer::production(),
         )?;
-        state.apply_transform_with_edits(
+        state.apply_transform_without_analysis_with_edits(
             "optimization",
             "optimize.commutative_cancellation",
-            |circuit, _analysis| {
-                CommutativeCancellation::new().transform_with_rewrite_edits(circuit)
-            },
+            |circuit| CommutativeCancellation::new().transform_with_rewrite_edits(circuit),
         )?;
         self.apply_virtual_permutation_elision(state)?;
         self.apply_two_qubit_resynthesis(
@@ -717,10 +771,10 @@ impl CompilerWorkflow {
         } else {
             DeviceLowerer::new(&target.device)
         };
-        state.apply_transform(
+        state.apply_transform_without_analysis_with_edits(
             "translation",
             "lower.device_instructions",
-            |circuit, analysis| lowerer.transform(circuit, Some(analysis)),
+            |circuit| Ok((lowerer.transform(circuit, None)?, RewriteEdits::Unknown)),
         )?;
         Ok(())
     }
@@ -784,7 +838,7 @@ impl CompilerWorkflow {
             optimizer.run(&state.current)?
         };
         if result.changed {
-            state.analysis = CircuitAnalysis::analyze(&result.circuit);
+            state.analysis = None;
             state.advance_circuit_revision();
         }
         state.current = result.circuit;
@@ -918,18 +972,23 @@ impl CompilerWorkflow {
         &self,
         state: &mut WorkflowState,
     ) -> Result<(), CompilerError> {
+        let decomposer = DecomposeDefinitions;
+        if state.skip_if_proven_noop("init", "decompose.definitions", &decomposer) {
+            return Ok(());
+        }
         state.apply_transform("init", "decompose.definitions", |circuit, analysis| {
-            DecomposeDefinitions.transform(circuit, Some(analysis))
+            decomposer.transform(circuit, Some(analysis))
         })?;
         Ok(())
     }
 
     fn apply_unitary_decomposition(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let config = self.unitary_decompose_config_for_state(state);
-        let decomposer = if let Some(target) = self
-            .strict_device_target()
-            .filter(|_| state.analysis.has_unitary_gates)
-        {
+        let scheduling_decomposer = DecomposeUnitaries::new(config.clone());
+        if state.skip_if_proven_noop("translation", "decompose.unitary", &scheduling_decomposer) {
+            return Ok(());
+        }
+        let decomposer = if let Some(target) = self.strict_device_target() {
             let planning_session = state.planning_session.clone().ok_or_else(|| {
                 CompilerError::InvariantViolation(
                     "strict device workflow has no planning session".to_string(),
@@ -960,8 +1019,12 @@ impl CompilerWorkflow {
 
     fn apply_mc_gate_decomposition(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let config = self.mc_gate_decompose_config();
+        let decomposer = DecomposeMcGates::new(config);
+        if state.skip_if_proven_noop("translation", "decompose.mc_gates", &decomposer) {
+            return Ok(());
+        }
         state.apply_transform("translation", "decompose.mc_gates", |circuit, analysis| {
-            DecomposeMcGates::new(config).transform(circuit, Some(analysis))
+            decomposer.transform(circuit, Some(analysis))
         })?;
         Ok(())
     }
@@ -994,7 +1057,7 @@ impl CompilerWorkflow {
             None
         };
         let mut session = std::mem::take(&mut state.resynthesis_session);
-        let result = state.apply_transform_with_edits(stage, name, |circuit, _analysis| {
+        let result = state.apply_transform_without_analysis_with_edits(stage, name, |circuit| {
             resynthesize_two_qubit_blocks_workflow(circuit, config, device_context, &mut session)
         });
         state.resynthesis_session = session;
@@ -1046,6 +1109,14 @@ impl CompilerWorkflow {
                 "decompose.routing_basis",
                 "no target device configured",
             );
+            return Ok(());
+        }
+
+        if state.skip_if_proven_noop(
+            "translation",
+            "decompose.routing_basis",
+            &LowerToRoutingBasis::default(),
+        ) {
             return Ok(());
         }
 
@@ -1339,7 +1410,7 @@ impl CompilerWorkflow {
         state: &mut WorkflowState,
         name: &'static str,
     ) -> Result<bool, CompilerError> {
-        state.apply_transform_with_edits("optimization", name, |circuit, _analysis| {
+        state.apply_transform_without_analysis_with_edits("optimization", name, |circuit| {
             CommutativeCancellation::new().transform_with_rewrite_edits(circuit)
         })
     }
@@ -1358,7 +1429,7 @@ impl CompilerWorkflow {
             return Ok(false);
         };
         let result =
-            state.apply_transform_with_edits("optimization", name, |circuit, _analysis| {
+            state.apply_transform_without_analysis_with_edits("optimization", name, |circuit| {
                 optimizer.transform_with_rewrite_edits(circuit)
             });
         state.one_qubit_optimizer = Some(optimizer);
@@ -1446,12 +1517,7 @@ impl CompilerWorkflow {
         };
         let lowerer = Arc::clone(&prepared.lowerer);
 
-        if !lowerer.requires_lowering(&state.current) {
-            state.record_skipped(
-                "translation",
-                name,
-                "circuit already satisfies the explicit target basis",
-            );
+        if state.skip_if_proven_noop("translation", name, lowerer.as_ref()) {
             return Ok(());
         }
 

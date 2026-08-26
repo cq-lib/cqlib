@@ -12,7 +12,26 @@
 
 use crate::circuit::Circuit;
 use crate::compile::CompilerError;
-use crate::compile::transform::analysis::CircuitAnalysis;
+use crate::compile::transform::analysis::{CircuitAnalysis, WorkflowCircuitAnalysis};
+
+/// Conservative workflow scheduling decision for one compiler pass.
+///
+/// `ProvenNoOp` is stronger than ordinary inapplicability: executing the pass
+/// on the exact analyzed circuit revision must return `TransformOutcome::Unchanged`
+/// and must not suppress an error that the pass would otherwise report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PassApplicability {
+    Run,
+    ProvenNoOp(&'static str),
+}
+
+/// Workflow-only precondition declaration.
+///
+/// This remains separate from the public [`Transformer`] contract so adding
+/// scheduling facts does not expand the Rust or Python API surface.
+pub(crate) trait WorkflowPass {
+    fn applicability(&self, analysis: &WorkflowCircuitAnalysis) -> PassApplicability;
+}
 
 /// Outcome of applying a compiler transform to a circuit.
 ///
@@ -106,21 +125,5 @@ pub(crate) trait TransformerTestExt: Transformer {
 impl<T: Transformer + ?Sized> TransformerTestExt for T {}
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn outcome_reports_change_and_resolves_owned_circuit() {
-        let original = Circuit::new(1);
-        assert!(!TransformOutcome::Unchanged.changed());
-        assert_eq!(
-            TransformOutcome::Unchanged.into_circuit(&original),
-            original
-        );
-
-        let changed = Circuit::new(2);
-        let outcome = TransformOutcome::Changed(changed.clone());
-        assert!(outcome.changed());
-        assert_eq!(outcome.into_circuit(&original), changed);
-    }
-}
+#[path = "./transformer_test.rs"]
+mod transformer_test;

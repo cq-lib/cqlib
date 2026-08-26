@@ -26,12 +26,13 @@ use crate::compile::sabre::RoutingTarget;
 use crate::compile::test_utils::{
     assert_compiled_circuit_equivalent, contains_high_level_gate, standard_ops, two_qubit_device,
 };
+use crate::compile::transform::analysis::WorkflowCircuitAnalysis;
 use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
 use crate::compile::transform::layout::PhysicalLayoutGraph;
 use crate::compile::transform::{
-    CanonicalizeConfig, Canonicalizer, CircuitAnalysis, KnowledgeRewriteDiagnostics,
-    KnowledgeRewriteSession, KnowledgeRewriter, OperationReplacement, OptimizeOneQubitRuns,
-    RewriteConfig, RewriteEdits, TransformOutcome, route_with_layout_tracked_on_topology,
+    CanonicalizeConfig, Canonicalizer, KnowledgeRewriteDiagnostics, KnowledgeRewriteSession,
+    KnowledgeRewriter, OperationReplacement, OptimizeOneQubitRuns, RewriteConfig, RewriteEdits,
+    TransformOutcome, route_with_layout_tracked_on_topology,
 };
 use crate::compile::{
     CompileConfig, CompileMode, CompileTarget, CompilerError, DeviceCompileTarget,
@@ -52,6 +53,10 @@ fn compile_config(mode: CompileMode) -> CompileConfig {
     }
 }
 
+fn workflow_analysis(circuit: &Circuit) -> Option<WorkflowCircuitAnalysis> {
+    Some(WorkflowCircuitAnalysis::analyze(circuit))
+}
+
 fn run_workflow(circuit: &Circuit, mode: CompileMode) -> super::CompileResult {
     CompilerWorkflow::new(compile_config(mode))
         .run(circuit)
@@ -67,7 +72,7 @@ fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowS
         &prepared_target_basis.cost_model,
     )));
     WorkflowState {
-        analysis: CircuitAnalysis::analyze(&current),
+        analysis: workflow_analysis(&current),
         current,
         circuit_revision: 0,
         canonical_proof: None,
@@ -92,7 +97,7 @@ fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowS
 fn workflow_state_without_target_basis() -> WorkflowState {
     let current = Circuit::new(1);
     WorkflowState {
-        analysis: CircuitAnalysis::analyze(&current),
+        analysis: workflow_analysis(&current),
         current,
         circuit_revision: 0,
         canonical_proof: None,
@@ -165,7 +170,7 @@ fn workflow_rewrite_diagnostics_are_opt_in_and_semantics_neutral() {
 fn apply_transform_preserves_current_storage_on_unchanged() {
     let mut state = workflow_state_without_target_basis();
     state.current.h(Qubit::new(0)).unwrap();
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
     let operation_ptr = state.current.operations().as_ptr();
     let analysis = state.analysis.clone();
 
@@ -184,7 +189,7 @@ fn apply_transform_preserves_current_storage_on_unchanged() {
 }
 
 #[test]
-fn apply_transform_adopts_changed_circuit_and_refreshes_analysis() {
+fn apply_transform_adopts_changed_circuit_and_invalidates_analysis() {
     let mut state = workflow_state_without_target_basis();
     let mut replacement = Circuit::new(1);
     replacement.measure_bits([Qubit::new(0)]).unwrap();
@@ -197,7 +202,8 @@ fn apply_transform_adopts_changed_circuit_and_refreshes_analysis() {
 
     assert!(changed);
     assert!(state.changed);
-    assert!(state.analysis.has_measurement);
+    assert!(state.analysis.is_none());
+    assert!(state.analysis().public().has_measurement);
     assert!(state.steps[0].changed);
 }
 
@@ -205,7 +211,7 @@ fn apply_transform_adopts_changed_circuit_and_refreshes_analysis() {
 fn apply_transform_error_leaves_workflow_state_untouched() {
     let mut state = workflow_state_without_target_basis();
     state.current.h(Qubit::new(0)).unwrap();
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
     let operation_ptr = state.current.operations().as_ptr();
     let analysis = state.analysis.clone();
 
@@ -231,7 +237,7 @@ fn rewrite_session_reuses_fixpoint_after_only_unchanged_steps() {
     let mut state = workflow_state_without_target_basis();
     state.current.h(q0).unwrap();
     state.current.h(q0).unwrap();
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
 
     assert!(
         state
@@ -269,7 +275,7 @@ fn workflow_post_decomposition_reuses_pre_decomposition_fixpoint() {
     let mut state = workflow_state_without_target_basis();
     state.current.h(q0).unwrap();
     state.current.h(q0).unwrap();
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
 
     workflow.lower_init(&mut state).unwrap();
     workflow.lower_decompose(&mut state).unwrap();
@@ -298,7 +304,7 @@ fn target_cleanup_reuses_target_unaware_proof_when_circuit_is_already_physical()
     });
     let mut state = workflow_state_with_target_basis(target_basis.clone());
     state.current.rz(Qubit::new(0), 0.25).unwrap();
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
     let proof_config = workflow
         .rewrite_config(RewritePhase::PostDecomposition)
         .unwrap();
@@ -343,7 +349,7 @@ fn target_translation_keeps_cleanup_rewrite_local() {
             state.current.x(Qubit::new(index)).unwrap();
         }
     }
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
     let proof_config = workflow
         .rewrite_config(RewritePhase::PostDecomposition)
         .unwrap();
@@ -376,7 +382,7 @@ fn target_cleanup_full_scans_when_target_cost_could_admit_new_candidates() {
         .unwrap();
     let mut state = workflow_state_without_target_basis();
     state.current.h(q0).unwrap();
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
     state
         .apply_knowledge_rewrite("test", "rewrite.proof", proof_config)
         .unwrap();
@@ -501,7 +507,7 @@ fn rewrite_session_edit_reconciliation_matches_full_scan() {
     assert!(proof_reach > requested_reach);
     let mut state = workflow_state_without_target_basis();
     state.current = large_flat_rewrite_circuit(false);
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
     assert!(
         !state
             .apply_knowledge_rewrite("test", "rewrite.proof", proof_config)
@@ -577,7 +583,7 @@ fn one_qubit_optimization_edits_preserve_incremental_rewrite_results() {
             )
             .unwrap();
     }
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
     assert!(
         !state
             .apply_knowledge_rewrite("test", "rewrite.proof", config.clone())
@@ -608,7 +614,7 @@ fn rewrite_session_unknown_edits_force_a_full_scan() {
         .with_max_window_ops(16);
     let mut state = workflow_state_without_target_basis();
     state.current = large_flat_rewrite_circuit(false);
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
     state
         .apply_knowledge_rewrite("test", "rewrite.proof", config.clone())
         .unwrap();
@@ -638,7 +644,7 @@ fn rewrite_session_composes_multiple_exact_transform_edits() {
         .with_max_window_ops(16);
     let mut state = workflow_state_without_target_basis();
     state.current = large_flat_rewrite_circuit(false);
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
     state
         .apply_knowledge_rewrite("test", "rewrite.proof", config.clone())
         .unwrap();
@@ -697,7 +703,7 @@ fn sabre_route_provenance_limits_post_routing_rewrite_work() {
         .with_max_window_ops(16);
     let mut state = workflow_state_without_target_basis();
     state.current = source;
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
     state
         .apply_knowledge_rewrite("test", "rewrite.pre_route", config.clone())
         .unwrap();
@@ -748,7 +754,7 @@ fn sabre_pure_layout_relabel_reuses_rewrite_proof_in_constant_time() {
         .with_max_window_ops(16);
     let mut state = workflow_state_without_target_basis();
     state.current = large_flat_rewrite_circuit(false);
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
     state
         .apply_knowledge_rewrite("test", "rewrite.pre_route", config.clone())
         .unwrap();
@@ -800,7 +806,7 @@ fn rewrite_session_does_not_certify_a_round_limited_mutation() {
     let mut state = workflow_state_without_target_basis();
     state.current.h(q0).unwrap();
     state.current.h(q0).unwrap();
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
 
     assert!(
         state
@@ -839,7 +845,7 @@ fn run_edit_session_in_pool(threads: usize) -> Circuit {
                 .with_max_window_ops(16);
             let mut state = workflow_state_without_target_basis();
             state.current = large_flat_rewrite_circuit(false);
-            state.analysis = CircuitAnalysis::analyze(&state.current);
+            state.analysis = workflow_analysis(&state.current);
             state
                 .apply_knowledge_rewrite("test", "rewrite.proof", config.clone())
                 .unwrap();
@@ -885,7 +891,7 @@ fn target_translation_skips_circuit_already_in_explicit_basis() {
         let mut state =
             workflow_state_with_target_basis(vec![Instruction::Standard(StandardGate::X)]);
         state.current.x(q0).unwrap();
-        state.analysis = CircuitAnalysis::analyze(&state.current);
+        state.analysis = workflow_analysis(&state.current);
         let operations = state.current.operations().as_ptr();
 
         workflow
@@ -916,7 +922,7 @@ fn target_translation_still_runs_for_gate_outside_explicit_basis() {
     ]);
     state.current = Circuit::new(2);
     state.current.cx(q0, q1).unwrap();
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
 
     workflow.apply_target_translation(&mut state).unwrap();
 
@@ -946,7 +952,7 @@ fn target_translation_does_not_skip_explicit_gphase() {
             None,
         )
         .unwrap();
-    state.analysis = CircuitAnalysis::analyze(&state.current);
+    state.analysis = workflow_analysis(&state.current);
 
     workflow.apply_target_translation(&mut state).unwrap();
 
@@ -966,7 +972,7 @@ fn two_qubit_resynthesis_returns_the_recorded_changed_status() {
     let mut stable_state = workflow_state_without_target_basis();
     stable_state.current = Circuit::new(2);
     stable_state.current.h(q0).unwrap();
-    stable_state.analysis = CircuitAnalysis::analyze(&stable_state.current);
+    stable_state.analysis = workflow_analysis(&stable_state.current);
 
     let stable_changed = workflow
         .apply_two_qubit_resynthesis(
@@ -987,7 +993,7 @@ fn two_qubit_resynthesis_returns_the_recorded_changed_status() {
     changed_state.current = Circuit::new(2);
     changed_state.current.cx(q0, q1).unwrap();
     changed_state.current.cx(q0, q1).unwrap();
-    changed_state.analysis = CircuitAnalysis::analyze(&changed_state.current);
+    changed_state.analysis = workflow_analysis(&changed_state.current);
 
     let resynthesis_changed = workflow
         .apply_two_qubit_resynthesis(
@@ -1084,11 +1090,12 @@ fn normal_workflow_keeps_measurement_circuit_through_definition_stage() {
         result.circuit.classical_values(),
         circuit.classical_values()
     );
-    assert!(
-        result
-            .steps
-            .iter()
-            .any(|step| step.name == "decompose.definitions" && !step.changed)
+    let definitions = result.step("decompose.definitions").unwrap();
+    assert!(definitions.skipped);
+    assert!(!definitions.changed);
+    assert_eq!(
+        definitions.reason.as_deref(),
+        Some("circuit contains no unexpanded gate definitions")
     );
 }
 
@@ -1137,6 +1144,9 @@ fn normal_workflow_reports_staged_order() {
         ]
     );
     for name in [
+        "decompose.definitions",
+        "decompose.unitary",
+        "decompose.mc_gates",
         "decompose.routing_basis",
         "optimize.virtual_permutation",
         "route.sabre",
@@ -1323,6 +1333,64 @@ fn workflow_expands_circuit_gate_definitions_before_optimization() {
 }
 
 #[test]
+fn definition_expansion_invalidates_analysis_before_unitary_decomposition() {
+    let q0 = Qubit::new(0);
+    let matrix = array![
+        [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)],
+        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+    ];
+    let unitary = UnitaryGate::new("DEFINED_X", 1, 0)
+        .with_matrix(matrix)
+        .unwrap();
+    let mut definition = Circuit::new(1);
+    definition.unitary(unitary, vec![q0]).unwrap();
+    let gate = CircuitGate::new("UNITARY_DEF", FrozenCircuit::new(definition)).unwrap();
+
+    let mut circuit = Circuit::new(1);
+    circuit
+        .circuit_gate(gate, vec![q0], Vec::<ParameterValue>::new())
+        .unwrap();
+
+    let result = run_workflow(&circuit, CompileMode::Normal);
+
+    assert!(result.step_changed("decompose.definitions"));
+    let unitary_step = result.step("decompose.unitary").unwrap();
+    assert!(!unitary_step.skipped);
+    assert!(unitary_step.changed);
+    assert!(!contains_high_level_gate(&result.circuit));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
+fn definition_expansion_invalidates_analysis_before_mc_decomposition() {
+    let qubits = (0..4).map(Qubit::new).collect::<Vec<_>>();
+    let mut definition = Circuit::new(4);
+    definition
+        .append(
+            Instruction::McGate(Box::new(MCGate::new(3, StandardGate::X))),
+            qubits.clone(),
+            Vec::<ParameterValue>::new(),
+            None,
+        )
+        .unwrap();
+    let gate = CircuitGate::new("MCX_DEF", FrozenCircuit::new(definition)).unwrap();
+
+    let mut circuit = Circuit::new(4);
+    circuit
+        .circuit_gate(gate, qubits, Vec::<ParameterValue>::new())
+        .unwrap();
+
+    let result = run_workflow(&circuit, CompileMode::Normal);
+
+    assert!(result.step_changed("decompose.definitions"));
+    let mc_step = result.step("decompose.mc_gates").unwrap();
+    assert!(!mc_step.skipped);
+    assert!(mc_step.changed);
+    assert!(!contains_high_level_gate(&result.circuit));
+    assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+#[test]
 fn workflow_synthesizes_matrix_backed_unitary_gates() {
     let q0 = Qubit::new(0);
     let matrix = array![
@@ -1340,6 +1408,23 @@ fn workflow_synthesizes_matrix_backed_unitary_gates() {
     assert!(result.step_changed("decompose.unitary"));
     assert!(!contains_high_level_gate(&result.circuit));
     assert!(!result.circuit.operations().is_empty());
+}
+
+#[test]
+fn workflow_does_not_skip_unitary_validation_when_matrix_is_missing() {
+    let mut circuit = Circuit::new(1);
+    circuit
+        .unitary(
+            UnitaryGate::new("MISSING_MATRIX", 1, 0),
+            vec![Qubit::new(0)],
+        )
+        .unwrap();
+
+    let error = CompilerWorkflow::new(compile_config(CompileMode::Normal))
+        .run(&circuit)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("no matrix representation"));
 }
 
 #[test]
@@ -2822,8 +2907,12 @@ fn routed_swaps_are_lowered_to_qcis_native_subset() {
         .iter()
         .find(|step| step.name == "decompose.routing_basis")
         .expect("workflow should report routing-basis decomposition");
-    assert!(!routing_basis_step.skipped);
+    assert!(routing_basis_step.skipped);
     assert!(!routing_basis_step.changed);
+    assert_eq!(
+        routing_basis_step.reason.as_deref(),
+        Some("circuit contains no gate-like operation over more than two qubits")
+    );
     assert!(result.step_changed("route.sabre"));
     assert!(result.step_changed("lower.device_instructions"));
     assert!(standard_ops(&result.circuit).iter().all(|gate| matches!(
@@ -3097,7 +3186,7 @@ fn fixpoint_loop_reruns_cancellation_after_stable_resynthesis() {
         Instruction::Standard(StandardGate::X2P),
     ];
     let mut state = workflow_state_with_target_basis(target_basis);
-    state.analysis = CircuitAnalysis::analyze(&circuit);
+    state.analysis = workflow_analysis(&circuit);
     state.current = circuit;
 
     let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
@@ -3279,7 +3368,7 @@ fn post_routing_cleanup_does_not_collapse_bridge() {
     });
 
     let mut state = workflow_state_without_target_basis();
-    state.analysis = CircuitAnalysis::analyze(&circuit);
+    state.analysis = workflow_analysis(&circuit);
     state.current = circuit;
 
     workflow.apply_post_routing_cleanup(&mut state).unwrap();
@@ -3315,7 +3404,7 @@ fn validate_topology_target_rejects_non_topological_two_qubit_gate() {
     });
 
     let mut state = workflow_state_without_target_basis();
-    state.analysis = CircuitAnalysis::analyze(&circuit);
+    state.analysis = workflow_analysis(&circuit);
     state.current = circuit;
 
     assert!(workflow.validate_topology_target(&mut state).is_err());
@@ -3344,7 +3433,7 @@ fn validate_topology_target_accepts_topological_circuit() {
     });
 
     let mut state = workflow_state_without_target_basis();
-    state.analysis = CircuitAnalysis::analyze(&circuit);
+    state.analysis = workflow_analysis(&circuit);
     state.current = circuit;
 
     workflow.validate_topology_target(&mut state).unwrap();

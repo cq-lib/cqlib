@@ -22,7 +22,9 @@ use crate::circuit::{
     Circuit, ClassicalControlOp, Instruction, Operation, StandardGate, ValueOperation,
 };
 use crate::compile::CompilerError;
+use crate::compile::transform::analysis::WorkflowCircuitAnalysis;
 use crate::compile::transform::rebuild::CircuitRebuildContext;
+use crate::compile::transform::transformer::{PassApplicability, WorkflowPass};
 use crate::compile::transform::{
     CircuitAnalysis, KnowledgeRewriter, RewriteConfig, TransformOutcome, Transformer,
 };
@@ -85,6 +87,18 @@ impl LowerToRoutingBasis {
         }
 
         StandardGate::CX
+    }
+}
+
+impl WorkflowPass for LowerToRoutingBasis {
+    fn applicability(&self, analysis: &WorkflowCircuitAnalysis) -> PassApplicability {
+        if analysis.has_gate_like_operation_over_two_qubits() {
+            PassApplicability::Run
+        } else {
+            PassApplicability::ProvenNoOp(
+                "circuit contains no gate-like operation over more than two qubits",
+            )
+        }
     }
 }
 

@@ -49,11 +49,13 @@ use crate::circuit::{
     ValueOperation, ValueSwitchCase,
 };
 use crate::compile::CompilerError;
+use crate::compile::transform::analysis::WorkflowCircuitAnalysis;
 use crate::compile::transform::decompose::rule::{
     DecompositionRuleCache, DecompositionRuleStats, NumericUnitaryRuleRequest,
     NumericUnitarySynthesisKey,
 };
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
+use crate::compile::transform::transformer::{PassApplicability, WorkflowPass};
 use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use ndarray::Array2;
 use num_complex::Complex64;
@@ -115,6 +117,16 @@ impl DecomposeUnitaries {
 impl Default for DecomposeUnitaries {
     fn default() -> Self {
         Self::new(UnitaryDecomposeConfig::default())
+    }
+}
+
+impl WorkflowPass for DecomposeUnitaries {
+    fn applicability(&self, analysis: &WorkflowCircuitAnalysis) -> PassApplicability {
+        if analysis.has_unitary_gates() {
+            PassApplicability::Run
+        } else {
+            PassApplicability::ProvenNoOp("circuit contains no unitary operations")
+        }
     }
 }
 

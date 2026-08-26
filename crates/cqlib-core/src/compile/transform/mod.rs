@@ -24,10 +24,12 @@
 //! Circuit-to-circuit passes implement [`Transformer`]. A transformer takes an
 //! immutable circuit reference and returns a [`TransformOutcome`].
 //! [`TransformOutcome::Unchanged`] retains the input IR exactly as-is, while
-//! [`TransformOutcome::Changed`] carries its replacement. Callers should not
-//! pre-scan a circuit to infer whether a transform should run; the transform
-//! itself owns traversal of any operation forms it supports, including
-//! structured classical-control bodies.
+//! [`TransformOutcome::Changed`] carries its replacement. Standalone callers
+//! do not need to pre-scan a circuit: every transform still owns a complete
+//! correctness check over all operation forms it supports. The compiler
+//! workflow may additionally use revision-scoped structural facts to avoid
+//! invoking a transform when those facts prove it cannot change or reject the
+//! current circuit.
 //!
 //! Layout and routing algorithms expose richer result types because they
 //! return placement scores, final layouts, SWAP counts, and routing

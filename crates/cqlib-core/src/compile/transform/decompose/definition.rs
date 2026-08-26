@@ -22,7 +22,9 @@ use crate::circuit::{
     ValueOperation, ValueSwitchCase,
 };
 use crate::compile::CompilerError;
+use crate::compile::transform::analysis::WorkflowCircuitAnalysis;
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
+use crate::compile::transform::transformer::{PassApplicability, WorkflowPass};
 use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, HashSet};
@@ -34,6 +36,16 @@ const MAX_DEFINITION_DEPTH: usize = 64;
 /// Parameter-free — definition expansion never needs configuration.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DecomposeDefinitions;
+
+impl WorkflowPass for DecomposeDefinitions {
+    fn applicability(&self, analysis: &WorkflowCircuitAnalysis) -> PassApplicability {
+        if analysis.has_unexpanded_definitions() {
+            PassApplicability::Run
+        } else {
+            PassApplicability::ProvenNoOp("circuit contains no unexpanded gate definitions")
+        }
+    }
+}
 
 impl Transformer for DecomposeDefinitions {
     fn name(&self) -> &'static str {
