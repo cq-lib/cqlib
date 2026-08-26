@@ -13,8 +13,9 @@
 use super::{
     AnchorScanner, BlockContext, BlockMatchCache, CandidatePositions, CompiledConditions,
     CompiledRuleSet, ExactCommutationCache, ExactCommutationMemo, LocalExactCommutationCache,
-    PatchPlanStep, ReplacementItem, RewritePatch, operations_commute, patch_application_plan,
-    scan_anchors, select_candidate_patches, select_rewrites_for_anchor_ranges,
+    ParallelismThresholds, PatchPlanStep, ReplacementItem, RewritePatch, operations_commute,
+    patch_application_plan, scan_anchors, select_candidate_patches,
+    select_rewrites_for_anchor_ranges,
 };
 use crate::circuit::{Circuit, Instruction, Parameter, ParameterValue, Qubit, StandardGate};
 use crate::compile::knowledge::matcher::conditions_hold as knowledge_conditions_hold;
@@ -571,7 +572,7 @@ fn serial_and_parallel_anchor_scans_select_identical_patches() {
         &serial_active_rules,
         &config,
         None,
-        usize::MAX,
+        ParallelismThresholds::new(usize::MAX, usize::MAX, usize::MAX),
     )
     .unwrap();
     let serial_patches =
@@ -584,7 +585,7 @@ fn serial_and_parallel_anchor_scans_select_identical_patches() {
         &parallel_active_rules,
         &config,
         None,
-        0,
+        ParallelismThresholds::new(0, 0, 0),
     )
     .unwrap();
     let parallel_patches =

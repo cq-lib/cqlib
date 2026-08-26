@@ -55,6 +55,7 @@ use crate::compile::knowledge::matcher::{
     match_rule_item_with_keys as knowledge_match_rule_item_with_keys,
 };
 use crate::compile::knowledge::rule::{Condition, Rule, RuleItem};
+use crate::compile::parallelism::{ParallelismThresholds, parallel_chunk_size};
 use crate::compile::transform::rewrite::basis::TargetContext;
 use crate::compile::transform::rewrite::config::{GPhaseCost, LocalRewriteCost, RewriteConfig};
 use crate::compile::transform::rewrite::diagnostics::MatcherDiagnostics;
@@ -68,14 +69,15 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use symb_anafis::CompiledEvaluator;
 
-/// Anchor count above which candidate generation switches to rayon.
-///
-/// Below this threshold, thread-pool dispatch costs more than the matching
-/// work it saves. This knob is independent of
-/// `SMALL_CIRCUIT_FULL_SCAN_THRESHOLD` in `rewriter.rs` (which selects the
-/// incremental engines); the two intentionally live in separate files next to
-/// the code they tune, so adjust each only against its own measurements.
-const PARALLEL_ANCHOR_THRESHOLD: usize = 4_096;
+/// Estimated-work boundaries for exposing two or four matcher groups.
+/// This knob is independent of `SMALL_CIRCUIT_FULL_SCAN_THRESHOLD` in
+/// `rewriter.rs` (which selects the incremental engines); adjust each only
+/// against measurements of its own phase. Candidate-aware work lets expensive
+/// matching reach four groups sooner than candidate-free scans. Matcher scans
+/// stop scaling before eight groups because their shared-index reads and final
+/// reduction become memory-bandwidth bound.
+const MATCHER_PARALLELISM_THRESHOLDS: ParallelismThresholds =
+    ParallelismThresholds::up_to_four(4_096, 16_384);
 /// Dirty-to-eligible anchor percentage at which a block rescan falls back to
 /// a full scan. Past this point the restricted scan touches most of the block
 /// anyway, and full scans have cheaper per-anchor bookkeeping.
@@ -1450,7 +1452,7 @@ pub(super) fn select_rewrites_for_anchor_ranges(
         &active_rules,
         config,
         target_context,
-        PARALLEL_ANCHOR_THRESHOLD,
+        MATCHER_PARALLELISM_THRESHOLDS,
     )?;
 
     select_candidate_patches(candidates, block.len(), target_context)
@@ -1480,7 +1482,7 @@ fn scan_anchors(
     active_rules: &BlockActiveRuleSet,
     config: &RewriteConfig,
     target_context: Option<&TargetContext>,
-    parallel_threshold: usize,
+    parallelism_thresholds: ParallelismThresholds,
 ) -> Result<Vec<CandidatePatch>, CompilerError> {
     let scanner = AnchorScanner {
         block,
@@ -1489,7 +1491,9 @@ fn scan_anchors(
         config,
         target_context,
     };
-    if anchors.len() < parallel_threshold {
+    let work_units = estimated_anchor_scan_work(block, anchors, rules, active_rules);
+    let Some(chunk_size) = parallel_chunk_size(anchors.len(), work_units, parallelism_thresholds)
+    else {
         let commutation_cache =
             LocalExactCommutationCache::new(block.cache.commutation_memo.as_ref());
         let mut bindings = MatchBindings::new();
@@ -1498,15 +1502,15 @@ fn scan_anchors(
             scanner.scan_anchor_into(anchor, &commutation_cache, &mut bindings, &mut candidates)?;
         }
         return Ok(candidates);
-    }
+    };
 
     use rayon::prelude::*;
     let memo = block.cache.commutation_memo.as_ref();
     let state = anchors
-        .par_iter()
-        .fold(
-            || AnchorScanWorker::new(memo),
-            |mut worker, &anchor| {
+        .par_chunks(chunk_size)
+        .map(|chunk| {
+            let mut worker = AnchorScanWorker::new(memo);
+            for &anchor in chunk {
                 if worker.error.is_none()
                     && let Err(error) = scanner.scan_anchor_into(
                         anchor,
@@ -1517,9 +1521,9 @@ fn scan_anchors(
                 {
                     worker.error = Some((anchor, error));
                 }
-                worker
-            },
-        )
+            }
+            worker
+        })
         .reduce(
             || AnchorScanWorker::new(memo),
             |mut left, mut right| {
@@ -1532,6 +1536,58 @@ fn scan_anchors(
         Some((_, error)) => Err(error),
         None => Ok(state.candidates),
     }
+}
+
+/// Estimates matcher work without rescanning every operation.
+///
+/// The block cache already groups positions by instruction key. Candidate
+/// positions across distinct keys are disjoint, so visiting only keys that
+/// start an active rule is bounded by the number of potentially useful
+/// anchors. Rule match length is a conservative proxy for the additional
+/// binding and commutation work beyond the base first-key lookup.
+fn estimated_anchor_scan_work(
+    block: &BlockContext<'_>,
+    anchors: &[usize],
+    rules: &CompiledRuleSet,
+    active_rules: &BlockActiveRuleSet,
+) -> usize {
+    let full_scan = anchors.len() == block.len()
+        && anchors.first().copied().unwrap_or(0) == 0
+        && anchors.last().copied().unwrap_or(0).saturating_add(1) == block.len();
+    let match_work_by_key = rules
+        .first_key_map
+        .iter()
+        .filter_map(|(key, rule_indices)| {
+            let match_work = rule_indices
+                .iter()
+                .copied()
+                .filter(|&index| active_rules.contains(index))
+                .map(|index| rules.get(index).match_len)
+                .sum::<usize>();
+            (match_work != 0).then_some((key, match_work))
+        })
+        .collect::<HashMap<_, _>>();
+
+    if full_scan {
+        return match_work_by_key
+            .iter()
+            .fold(anchors.len(), |work, (key, &match_work)| {
+                let candidate_anchors = block
+                    .cache
+                    .instruction_positions
+                    .get(*key)
+                    .map_or(0, Vec::len);
+                work.saturating_add(candidate_anchors.saturating_mul(match_work))
+            });
+    }
+
+    anchors.iter().fold(anchors.len(), |work, &anchor| {
+        let match_work = match_work_by_key
+            .get(block.key(anchor))
+            .copied()
+            .unwrap_or(0);
+        work.saturating_add(match_work)
+    })
 }
 
 struct AnchorScanWorker<'a> {

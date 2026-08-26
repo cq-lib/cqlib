@@ -30,6 +30,7 @@ use super::{
 };
 use crate::circuit::Circuit;
 use crate::compile::device_planning::DevicePlanningSession;
+use crate::compile::parallelism::{ParallelismThresholds, parallel_chunk_size};
 use crate::compile::sabre::{
     ComponentAssignmentSearch, InteractionReachability, PreparedRouteMetadata, RankedTrial,
     RequirementReachabilityFailure, RoutingTarget, SabreConfig, SabreDag, TrialResult,
@@ -45,6 +46,12 @@ use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+
+/// Approximate routed-DAG visits needed before candidate-level scheduling
+/// amortizes Rayon dispatch. Higher tiers require proportionally more work so
+/// short searches do not spread a few candidates across an oversized pool.
+const LAYOUT_PARALLELISM_THRESHOLDS: ParallelismThresholds =
+    ParallelismThresholds::new(2_048, 8_192, 32_768);
 
 /// Circuit-side data prepared once for repeated SABRE layout selection.
 ///
@@ -421,28 +428,50 @@ pub(crate) fn sabre_route_selection_prepared(
                 base_seed,
             })
             .collect::<Vec<_>>();
-        let search = trials
-            .into_par_iter()
-            .try_fold(CandidateSearch::default, |search, trial| {
-                let outcome = evaluate_candidate(
-                    sabre,
-                    forwards,
-                    backwards,
-                    target,
-                    prepared_target,
-                    analysis,
-                    physical,
-                    objective,
-                    config,
-                    refinement_iterations,
-                    trial,
-                    config.routing_trials,
-                )?;
-                search.merge(CandidateSearch::from_outcome(outcome), target)
-            })
-            .try_reduce(CandidateSearch::default, |left, right| {
-                left.merge(right, target)
-            })?;
+        let work_units = trials
+            .len()
+            .saturating_mul(
+                refinement_iterations
+                    .saturating_mul(2)
+                    .saturating_add(config.routing_trials),
+            )
+            .saturating_mul(sabre.graph.node_count());
+        let evaluate = |search: CandidateSearch, trial: CandidateTrial| {
+            let outcome = evaluate_candidate(
+                sabre,
+                forwards,
+                backwards,
+                target,
+                prepared_target,
+                analysis,
+                physical,
+                objective,
+                config,
+                refinement_iterations,
+                trial,
+                config.routing_trials,
+            )?;
+            search.merge(CandidateSearch::from_outcome(outcome), target)
+        };
+        let search = if let Some(chunk_size) =
+            parallel_chunk_size(trials.len(), work_units, LAYOUT_PARALLELISM_THRESHOLDS)
+        {
+            trials
+                .into_par_iter()
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    chunk
+                        .into_iter()
+                        .try_fold(CandidateSearch::default(), &evaluate)
+                })
+                .try_reduce(CandidateSearch::default, |left, right| {
+                    left.merge(right, target)
+                })?
+        } else {
+            trials
+                .into_iter()
+                .try_fold(CandidateSearch::default(), evaluate)?
+        };
         (search, generated_candidates)
     };
 

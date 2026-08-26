@@ -716,15 +716,16 @@ fn fixed_seed_is_independent_of_rayon_thread_count() {
     };
 
     let single_threaded = route_in_pool(1);
-    let four_threaded = route_in_pool(4);
-
-    assert_eq!(single_threaded.swap_count, four_threaded.swap_count);
-    assert_eq!(
-        single_threaded.final_layout.l2p_map(),
-        four_threaded.final_layout.l2p_map()
-    );
-    assert_eq!(single_threaded.diagnostics, four_threaded.diagnostics);
-    assert_eq!(single_threaded.circuit, four_threaded.circuit);
+    for threads in [2, 4, 8] {
+        let parallel = route_in_pool(threads);
+        assert_eq!(single_threaded.swap_count, parallel.swap_count);
+        assert_eq!(
+            single_threaded.final_layout.l2p_map(),
+            parallel.final_layout.l2p_map()
+        );
+        assert_eq!(single_threaded.diagnostics, parallel.diagnostics);
+        assert_eq!(single_threaded.circuit, parallel.circuit);
+    }
 
     let lowered = DeviceLowerer::new(&device)
         .transform_resolved(&single_threaded.circuit, None)

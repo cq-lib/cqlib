@@ -253,6 +253,7 @@ pub mod compiler;
 pub(crate) mod device_planning;
 pub mod error;
 pub mod knowledge;
+pub(crate) mod parallelism;
 pub mod physical_target;
 pub mod resource;
 pub mod sabre;

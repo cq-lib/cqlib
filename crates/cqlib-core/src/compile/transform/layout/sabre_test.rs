@@ -22,6 +22,7 @@ use crate::compile::{CompilerError, SabreRoutingFailure};
 use crate::device::{
     Device, EdgeProp, InstructionProp, LogicalQubit, PhysicalQubit, QubitProp, Topology,
 };
+use rayon::ThreadPoolBuilder;
 use std::collections::HashSet;
 
 fn sabre_layout_device(
@@ -154,6 +155,43 @@ fn sabre_layout_is_reproducible_for_same_seed() {
         first.score.as_ref().map(|score| score.total),
         second.score.as_ref().map(|score| score.total)
     );
+}
+
+#[test]
+fn seeded_layout_search_is_identical_across_thread_counts() {
+    let qubit_count = 24;
+    let mut circuit = Circuit::new(qubit_count);
+    for right in 1..qubit_count {
+        for left in 0..right {
+            circuit
+                .cx(Qubit::new(left as u32), Qubit::new(right as u32))
+                .unwrap();
+        }
+    }
+    let device = Device::grid("layout-thread-determinism", 5, 5).unwrap();
+    let prepared = prepare_sabre_circuit(&circuit).unwrap();
+    let target = prepare_sabre_topology_target(&prepared, &device).unwrap();
+    let config = SabreConfig {
+        layout_trials: 24,
+        refinement_iterations: 2,
+        routing_trials: 2,
+        vf2_prepass: None,
+        ..SabreConfig::deterministic_seeded(91)
+    };
+    let objective = LayoutObjective::topology_only();
+    let run = |threads| {
+        ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| sabre_layout_prepared(&prepared, &target, &objective, &config))
+            .unwrap()
+    };
+
+    let serial = run(1);
+    for threads in [2, 4, 8] {
+        assert_eq!(serial, run(threads));
+    }
 }
 
 #[test]

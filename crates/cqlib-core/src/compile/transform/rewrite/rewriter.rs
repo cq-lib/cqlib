@@ -50,7 +50,7 @@ static BUILTIN_COMPILED_RULES: OnceLock<Result<Arc<CompiledRuleSet>, String>> = 
 /// bookkeeping (match-cache construction, dirty-range tracking) costs more
 /// than it saves. This intentionally deviates from an "incremental by
 /// default" policy to protect small-circuit latency. The knob is independent
-/// of `PARALLEL_ANCHOR_THRESHOLD` in `matcher.rs`, which controls rayon
+/// of the workload thresholds in `matcher.rs`, which control rayon
 /// parallelism once a scan happens; adjust each only against its own
 /// measurements.
 pub(super) const SMALL_CIRCUIT_FULL_SCAN_THRESHOLD: usize = 4_096;

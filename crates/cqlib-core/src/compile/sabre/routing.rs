@@ -26,6 +26,7 @@ use crate::compile::device_planning::{
 };
 use crate::compile::error::DeviceLoweringFailure;
 use crate::compile::knowledge::KnowledgeInstructionKey;
+use crate::compile::parallelism::{ParallelismThresholds, parallel_chunk_size};
 use crate::compile::physical_target::PhysicalLayoutGraph;
 use crate::compile::{CompilerError, SabreRoutingFailure, compare_some_first_by};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
@@ -50,6 +51,10 @@ const LAZY_PAIR_CACHE_BUDGET: usize = 100_000;
 const TRIAL_PAIR_CACHE_BUDGET: usize = 4_096;
 const HIGH_PAIR_REUSE_FACTOR: usize = 16;
 const WIDE_FRONT_FRACTION: usize = 8;
+/// Approximate routed-DAG visits required to expose fixed-layout trial groups.
+/// Trial counts below two and small circuits stay on the direct serial path.
+const ROUTING_PARALLELISM_THRESHOLDS: ParallelismThresholds =
+    ParallelismThresholds::new(256, 2_048, 32_768);
 
 /// Routed circuit and layout metadata produced by [`sabre_route`].
 #[derive(Debug, Clone)]
@@ -590,28 +595,35 @@ fn sabre_route_prepared_impl(
     // Trials share the normalized layout and DAG but use independent seeds for
     // tie-breaking. Selection stays deterministic for a configured seed because
     // result comparison falls back to the trial index.
-    let (best_index, best) = trial_seeds(config.seed, config.routing_trials)
-        .into_par_iter()
-        .enumerate()
-        .try_fold(
-            || None,
-            |best, (index, seed)| {
-                let trial = route_ranked_trial_with_metadata(
-                    sabre,
-                    target,
-                    metadata,
-                    &initial_layout,
-                    &config.heuristic,
-                    seed,
-                )?;
-                select_ranked_trial(best, Some((index, trial)), target)
-            },
-        )
-        .try_reduce(
-            || None,
-            |left, right| select_ranked_trial(left, right, target),
-        )?
-        .expect("routing_trials is validated to be non-zero");
+    let seeds = trial_seeds(config.seed, config.routing_trials);
+    let work_units = seeds.len().saturating_mul(sabre.graph.node_count());
+    let evaluate = |best, (index, seed)| {
+        let trial = route_ranked_trial_with_metadata(
+            sabre,
+            target,
+            metadata,
+            &initial_layout,
+            &config.heuristic,
+            seed,
+        )?;
+        select_ranked_trial(best, Some((index, trial)), target)
+    };
+    let best = if let Some(chunk_size) =
+        parallel_chunk_size(seeds.len(), work_units, ROUTING_PARALLELISM_THRESHOLDS)
+    {
+        seeds
+            .into_par_iter()
+            .enumerate()
+            .chunks(chunk_size)
+            .map(|chunk| chunk.into_iter().try_fold(None, &evaluate))
+            .try_reduce(
+                || None,
+                |left, right| select_ranked_trial(left, right, target),
+            )?
+    } else {
+        seeds.into_iter().enumerate().try_fold(None, evaluate)?
+    };
+    let (best_index, best) = best.expect("routing_trials is validated to be non-zero");
 
     let best = if retain_provenance {
         best.finish(target)?

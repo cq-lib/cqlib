@@ -1258,18 +1258,20 @@ fn parallel_incremental_matches_full_scan_on_large_block() {
                 .run(&circuit)
                 .unwrap()
         });
-    let four_threads = rayon::ThreadPoolBuilder::new()
-        .num_threads(4)
-        .build()
-        .unwrap()
-        .install(|| {
-            KnowledgeRewriter::new(config)
-                .force_incremental()
-                .run(&circuit)
-                .unwrap()
-        });
-    assert_eq!(single_thread.circuit, four_threads.circuit);
-    assert_eq!(single_thread.stats, four_threads.stats);
+    for threads in [2, 4, 8] {
+        let parallel = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                KnowledgeRewriter::new(config.clone())
+                    .force_incremental()
+                    .run(&circuit)
+                    .unwrap()
+            });
+        assert_eq!(single_thread.circuit, parallel.circuit);
+        assert_eq!(single_thread.stats, parallel.stats);
+    }
 }
 
 #[test]
