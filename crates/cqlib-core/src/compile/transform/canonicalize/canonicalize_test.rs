@@ -1023,6 +1023,26 @@ fn canonical_transform_reports_stable_input_without_an_output_circuit() {
 }
 
 #[test]
+fn canonicalize_phase_fast_path_does_not_accept_negative_zero() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    circuit.set_global_phase(Parameter::from(-0.0));
+    circuit.i(q0).unwrap();
+
+    let result = Canonicalizer::production().run(&circuit).unwrap();
+    assert!(result.changed);
+    assert_eq!(
+        result
+            .circuit
+            .global_phase()
+            .evaluate(&None)
+            .unwrap()
+            .to_bits(),
+        0.0_f64.to_bits()
+    );
+}
+
+#[test]
 fn canonical_transform_normalizes_global_phase_accumulator_residue() {
     let mut circuit = Circuit::new(1);
     circuit.set_global_phase(Parameter::from(-3.330_669_073_875_469_6e-16));

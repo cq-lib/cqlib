@@ -10,8 +10,13 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 use super::*;
-use crate::circuit::{CircuitParam, Operation, Parameter, Qubit, StandardGate};
+use crate::circuit::{
+    Circuit, CircuitParam, Instruction, Operation, Parameter, Qubit, StandardGate,
+};
+use crate::compile::test_utils::build_device_synthesis_context;
+use crate::compile::transform::decompose::unitary::DeviceSynthesisPlacement;
 use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
+use crate::device::Device;
 use ndarray::Array2;
 use ndarray::linalg::kron;
 
@@ -35,6 +40,15 @@ fn standard_op(gate: StandardGate, qubits: &[Qubit]) -> Operation {
         instruction: Instruction::Standard(gate),
         qubits: qubits.iter().copied().collect(),
         params: Default::default(),
+        label: None,
+    }
+}
+
+fn rotation_op(gate: StandardGate, qubits: &[Qubit], angle: f64) -> Operation {
+    Operation {
+        instruction: Instruction::Standard(gate),
+        qubits: qubits.iter().copied().collect(),
+        params: smallvec::smallvec![CircuitParam::Fixed(angle)],
         label: None,
     }
 }
@@ -416,6 +430,170 @@ fn generic_best_first_matches_eager_reference_and_prunes_matrix_synthesis() {
     assert_eq!(patches[0].after_cost, eager[0].after_cost);
     assert_eq!(cache.stats().selection.matrix_attempts, 1);
     assert_eq!(cache.stats().selection.lower_bound_pruned, 1);
+}
+
+#[test]
+fn generic_best_first_prunes_full_validation_for_nonempty_replacement() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let operations = (0..6)
+        .map(|_| standard_op(StandardGate::CX, &[q0, q1]))
+        .collect::<Vec<_>>();
+    let ops = operations
+        .iter()
+        .enumerate()
+        .map(|(order, operation)| view(order, operation))
+        .collect::<Vec<_>>();
+    let config = cx_config();
+    let commutation = CachedCommutation::new(config.commutation.clone());
+    let eager = select_patches(
+        vec![
+            block([q0, q1], (0..5).collect(), 0, 5),
+            block([q0, q1], (1..6).collect(), 0, 5),
+        ],
+        &ops,
+        &commutation,
+        &config,
+    )
+    .unwrap();
+    let mut cache = TwoQubitSynthesisCache::default();
+    let patches = select_patches_with_device(
+        vec![
+            dag_block([q0, q1], (0..5).collect()),
+            dag_block([q0, q1], (1..6).collect()),
+        ],
+        &ops,
+        &commutation,
+        &config,
+        None,
+        &mut cache,
+    )
+    .unwrap();
+
+    assert_eq!(patches.len(), 1);
+    assert!(!patches[0].replacement.is_empty());
+    assert_eq!(patches[0].matched_orders, eager[0].matched_orders);
+    assert_eq!(patches[0].replacement, eager[0].replacement);
+    assert_eq!(cache.stats().selection.synthesis_attempts, 1);
+    assert_eq!(cache.stats().selection.lower_bound_pruned, 1);
+}
+
+#[test]
+fn analytic_bound_prunes_before_candidate_planning() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let operations = [
+        rotation_op(StandardGate::RXX, &[q0, q1], 0.1),
+        rotation_op(StandardGate::RXX, &[q0, q1], 0.1),
+        rotation_op(StandardGate::RXX, &[q0, q1], 0.1),
+        rotation_op(StandardGate::RXX, &[q0, q1], 0.1),
+        rotation_op(StandardGate::RXX, &[q0, q1], 0.1),
+        rotation_op(StandardGate::RYY, &[q0, q1], 0.2),
+        rotation_op(StandardGate::RZZ, &[q0, q1], 0.3),
+        rotation_op(StandardGate::RXX, &[q0, q1], 0.15),
+        rotation_op(StandardGate::RYY, &[q0, q1], 0.1),
+    ];
+    let ops = operations
+        .iter()
+        .enumerate()
+        .map(|(order, operation)| view(order, operation))
+        .collect::<Vec<_>>();
+    let config = TwoQubitBlockResynthesisConfig::normal(TwoQubitSynthesisTarget::unconstrained());
+    let commutation = CachedCommutation::new(config.commutation.clone());
+    let mut cache = TwoQubitSynthesisCache::default();
+
+    let patches = select_patches_with_device(
+        vec![
+            dag_block([q0, q1], (0..5).collect()),
+            dag_block([q0, q1], (4..9).collect()),
+        ],
+        &ops,
+        &commutation,
+        &config,
+        None,
+        &mut cache,
+    )
+    .unwrap();
+
+    assert_eq!(patches.len(), 1);
+    assert_eq!(patches[0].matched_orders, (0..5).collect::<Vec<_>>());
+    assert_eq!(cache.stats().generic_entries, 1);
+    assert_eq!(cache.stats().selection.synthesis_attempts, 1);
+    assert_eq!(cache.stats().selection.lower_bound_pruned, 1);
+}
+
+#[test]
+fn device_best_first_matches_eager_reference_and_prunes_full_validation() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    for _ in 0..6 {
+        circuit.cx(q0, q1).unwrap();
+    }
+    let ops = circuit
+        .operations()
+        .iter()
+        .enumerate()
+        .map(|(order, operation)| view(order, operation))
+        .collect::<Vec<_>>();
+    let device = Device::line("selector-best-first", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let context =
+        build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
+    let config = cx_config();
+    let commutation = CachedCommutation::new(config.commutation.clone());
+    let source_blocks = || vec![(0..5).collect::<Vec<_>>(), (1..6).collect::<Vec<_>>()];
+
+    let mut eager_cache = TwoQubitSynthesisCache::default();
+    eager_cache.ensure_namespace(&config, Some(&context));
+    let eager = select_patches_with_device(
+        source_blocks()
+            .into_iter()
+            .map(|orders| block([q0, q1], orders, 0, 5))
+            .collect(),
+        &ops,
+        &commutation,
+        &config,
+        Some(&context),
+        &mut eager_cache,
+    )
+    .unwrap();
+
+    let mut bounded_cache = TwoQubitSynthesisCache::default();
+    bounded_cache.ensure_namespace(&config, Some(&context));
+    let bounded = select_patches_with_device(
+        source_blocks()
+            .into_iter()
+            .map(|orders| dag_block([q0, q1], orders))
+            .collect(),
+        &ops,
+        &commutation,
+        &config,
+        Some(&context),
+        &mut bounded_cache,
+    )
+    .unwrap();
+
+    assert_eq!(bounded.len(), 1);
+    assert_eq!(bounded[0].matched_orders, eager[0].matched_orders);
+    assert_eq!(bounded[0].replacement, eager[0].replacement);
+    assert_eq!(bounded[0].after_cost, eager[0].after_cost);
+    assert_eq!(
+        bounded[0]
+            .device_after_cost
+            .unwrap()
+            .compare(eager[0].device_after_cost.unwrap()),
+        std::cmp::Ordering::Equal
+    );
+    assert_eq!(bounded_cache.stats().selection.synthesis_attempts, 1);
+    assert_eq!(bounded_cache.stats().selection.lower_bound_pruned, 1);
+    assert_eq!(eager_cache.stats().selection.synthesis_attempts, 2);
 }
 
 #[test]

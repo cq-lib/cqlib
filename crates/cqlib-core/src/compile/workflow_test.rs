@@ -27,9 +27,9 @@ use crate::compile::test_utils::{
 };
 use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
 use crate::compile::transform::{
-    CircuitAnalysis, KnowledgeRewriteDiagnostics, KnowledgeRewriteSession, KnowledgeRewriter,
-    OperationReplacement, OptimizeOneQubitRuns, RewriteConfig, RewriteEdits, TransformOutcome,
-    route_with_layout_tracked,
+    CanonicalizeConfig, Canonicalizer, CircuitAnalysis, KnowledgeRewriteDiagnostics,
+    KnowledgeRewriteSession, KnowledgeRewriter, OperationReplacement, OptimizeOneQubitRuns,
+    RewriteConfig, RewriteEdits, TransformOutcome, route_with_layout_tracked,
 };
 use crate::compile::{
     CompileConfig, CompileMode, CompileTarget, CompilerError, DeviceCompileTarget,
@@ -68,6 +68,7 @@ fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowS
         analysis: CircuitAnalysis::analyze(&current),
         current,
         circuit_revision: 0,
+        canonical_proof: None,
         rewrite_session: KnowledgeRewriteSession::default(),
         rewrite_diagnostics: KnowledgeRewriteDiagnostics::default(),
         collect_rewrite_diagnostics: true,
@@ -90,6 +91,7 @@ fn workflow_state_without_target_basis() -> WorkflowState {
         analysis: CircuitAnalysis::analyze(&current),
         current,
         circuit_revision: 0,
+        canonical_proof: None,
         rewrite_session: KnowledgeRewriteSession::default(),
         rewrite_diagnostics: KnowledgeRewriteDiagnostics::default(),
         collect_rewrite_diagnostics: true,
@@ -104,6 +106,35 @@ fn workflow_state_without_target_basis() -> WorkflowState {
         resynthesis_session: WorkflowResynthesisSession::default(),
         planning_session: None,
     }
+}
+
+#[test]
+fn canonical_proof_is_config_exact_and_revision_scoped() {
+    let q0 = Qubit::new(0);
+    let canonicalizer = Canonicalizer::production();
+    let mut state = workflow_state_without_target_basis();
+
+    assert!(!state.has_canonical_proof(canonicalizer.config()));
+    state
+        .apply_canonicalize("test", "canonicalize.first", &canonicalizer)
+        .unwrap();
+    assert!(state.has_canonical_proof(canonicalizer.config()));
+    assert!(!state.has_canonical_proof(&CanonicalizeConfig::new().fold_gphase(false)));
+
+    state
+        .apply_canonicalize("test", "canonicalize.reused", &canonicalizer)
+        .unwrap();
+    assert_eq!(state.steps.len(), 2);
+    assert!(!state.steps[1].changed);
+
+    state
+        .apply_transform("test", "mutate", |circuit, _analysis| {
+            let mut changed = circuit.clone();
+            changed.x(q0)?;
+            Ok(TransformOutcome::Changed(changed))
+        })
+        .unwrap();
+    assert!(!state.has_canonical_proof(canonicalizer.config()));
 }
 
 #[test]

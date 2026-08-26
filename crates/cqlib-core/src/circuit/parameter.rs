@@ -342,6 +342,17 @@ impl Parameter {
         }
     }
 
+    /// Returns whether this is already the canonical numeric `+0.0` node.
+    ///
+    /// Unlike [`Parameter::is_exact_zero`], this does not evaluate constant
+    /// expressions and deliberately rejects `-0.0`. Compiler hot paths use it
+    /// only to skip work that is provably an exact representation no-op.
+    pub(crate) fn is_canonical_positive_zero(&self) -> bool {
+        self.expr
+            .as_number()
+            .is_some_and(|value| value.to_bits() == 0.0_f64.to_bits())
+    }
+
     /// Computes the symbolic partial derivative of this expression with
     /// respect to the variable `var`.
     ///

@@ -303,6 +303,21 @@ pub(crate) struct DevicePhysicalCost {
 }
 
 impl DevicePhysicalCost {
+    /// Builds a fictional best-case cost with a proven two-qubit interaction
+    /// floor. Every secondary field is the best representable value, making
+    /// this suitable only as an admissible selection bound.
+    pub(crate) fn optimistic_entangler_lower_bound(native_two_qubit_ops: u32) -> Self {
+        Self {
+            native_two_qubit_ops,
+            native_two_qubit_depth: native_two_qubit_ops,
+            error: MetricAvailability::Available(RobustErrorKey::default()),
+            total_native_depth: native_two_qubit_ops,
+            native_total_ops: native_two_qubit_ops,
+            duration: MetricAvailability::Available(RobustDurationKey::default()),
+            makespan: MetricAvailability::Available(0.0),
+        }
+    }
+
     /// Orders the default production objective. Lower is better.
     pub(crate) fn compare(self, other: Self) -> Ordering {
         self.native_two_qubit_ops

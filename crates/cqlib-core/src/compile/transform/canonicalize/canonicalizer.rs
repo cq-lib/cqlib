@@ -266,7 +266,16 @@ impl<'a> CanonicalizeRound<'a> {
     }
 
     fn run(mut self) -> Result<(Circuit, Vec<Option<usize>>), CompilerError> {
-        self.top_phase = compiler_parameter(self.top_phase.canonicalized())?;
+        self.top_phase = self.canonicalize_parameter(self.top_phase.clone())?;
+        if !self.source.operations().is_empty() && !self.top_phase.is_canonical_positive_zero() {
+            // The previous operation loop normalized `current + 0` once for
+            // every source operation, including operations with no phase
+            // contribution. Preserve that representation for tiny numeric
+            // residues with one up-front normalization instead of repeating
+            // the same symbolic work for every operation.
+            self.top_phase =
+                self.canonicalize_parameter(self.top_phase.clone() + Parameter::from(0.0))?;
+        }
         let mut top_level = Vec::with_capacity(self.source.operations().len());
         let mut provenance = Vec::with_capacity(self.source.operations().len());
 
@@ -276,8 +285,7 @@ impl<'a> CanonicalizeRound<'a> {
         for (source_order, operation) in self.source.operations().iter().enumerate() {
             let rewritten = self.rewrite_operation(operation, ScopeKind::TopLevel)?;
             let preserves_source = rewritten.preserves_source;
-            self.top_phase =
-                compiler_parameter((self.top_phase + rewritten.phase).canonicalized())?;
+            self.top_phase = self.accumulate_phase(self.top_phase.clone(), rewritten.phase)?;
             for operation in rewritten.operations {
                 let old_len = top_level.len();
                 push_operation(&mut top_level, operation, self.config);
@@ -299,7 +307,7 @@ impl<'a> CanonicalizeRound<'a> {
             }
         }
 
-        let phase = compiler_parameter(self.top_phase.canonicalized())?;
+        let phase = self.canonicalize_parameter(self.top_phase.clone())?;
         let operations = top_level
             .into_iter()
             .map(|operation| self.value_operation(operation))
@@ -319,13 +327,13 @@ impl<'a> CanonicalizeRound<'a> {
         // The canonical body representation keeps it as one leading `GPhase`.
         for operation in body {
             let rewritten = self.rewrite_operation(operation, ScopeKind::ControlFlowBody)?;
-            body_phase = compiler_parameter((body_phase + rewritten.phase).canonicalized())?;
+            body_phase = self.accumulate_phase(body_phase, rewritten.phase)?;
             for operation in rewritten.operations {
                 push_operation(&mut out, operation, self.config);
             }
         }
 
-        body_phase = compiler_parameter(body_phase.canonicalized())?;
+        body_phase = self.canonicalize_parameter(body_phase)?;
         if !compiler_parameter(body_phase.is_exact_zero())? {
             let param = self.intern_parameter(body_phase)?;
             out.insert(
@@ -340,6 +348,24 @@ impl<'a> CanonicalizeRound<'a> {
         }
 
         Ok(out)
+    }
+
+    fn canonicalize_parameter(&mut self, parameter: Parameter) -> Result<Parameter, CompilerError> {
+        if parameter.is_canonical_positive_zero() {
+            return Ok(parameter);
+        }
+        compiler_parameter(parameter.canonicalized())
+    }
+
+    fn accumulate_phase(
+        &mut self,
+        current: Parameter,
+        contribution: Parameter,
+    ) -> Result<Parameter, CompilerError> {
+        if contribution.is_canonical_positive_zero() {
+            return Ok(current);
+        }
+        self.canonicalize_parameter(current + contribution)
     }
 
     fn rewrite_operation(

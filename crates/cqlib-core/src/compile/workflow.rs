@@ -60,7 +60,7 @@ use crate::compile::transform::resynthesis::{
     WorkflowResynthesisSession, resynthesize_two_qubit_blocks_workflow,
 };
 use crate::compile::transform::{
-    Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer,
+    CanonicalizeConfig, Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer,
     KnowledgeRewriteDiagnostics, KnowledgeRewriteSession, KnowledgeRewriter, LayoutObjective,
     LowerToRoutingBasis, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks, RewriteConfig,
     RewriteEdits, RewriteExecutionRecord, TargetBasisCostModel, TargetBasisLowerer,
@@ -93,10 +93,20 @@ pub struct WorkflowStepReport {
     pub reason: Option<String>,
 }
 
+/// Evidence that one exact circuit revision satisfies one canonicalization
+/// configuration. Any circuit mutation invalidates the evidence implicitly by
+/// advancing the revision.
+#[derive(Debug, Clone)]
+struct CanonicalizationProof {
+    circuit_revision: u64,
+    config: CanonicalizeConfig,
+}
+
 struct WorkflowState {
     current: Circuit,
     analysis: CircuitAnalysis,
     circuit_revision: u64,
+    canonical_proof: Option<CanonicalizationProof>,
     rewrite_session: KnowledgeRewriteSession,
     rewrite_diagnostics: KnowledgeRewriteDiagnostics,
     collect_rewrite_diagnostics: bool,
@@ -139,6 +149,7 @@ impl WorkflowState {
         if self.circuit_revision == 0 {
             // Prevent a wrapped revision from aliasing an ancient proof.
             self.rewrite_session.invalidate();
+            self.canonical_proof = None;
         }
     }
 
@@ -147,6 +158,7 @@ impl WorkflowState {
         let new_revision = old_revision.wrapping_add(1);
         if new_revision == 0 {
             self.rewrite_session.invalidate();
+            self.canonical_proof = None;
         } else {
             self.rewrite_session.apply_rewrite_edits(
                 old_revision,
@@ -210,6 +222,41 @@ impl WorkflowState {
             reason: None,
         });
         Ok(changed)
+    }
+
+    fn apply_canonicalize(
+        &mut self,
+        stage: &'static str,
+        name: &'static str,
+        canonicalizer: &Canonicalizer,
+    ) -> Result<bool, CompilerError> {
+        if self.has_canonical_proof(canonicalizer.config()) {
+            // Proof reuse is an executed no-op, rather than a skipped workflow
+            // stage: the same postcondition is established without rerunning
+            // the canonicalizer.
+            self.steps.push(WorkflowStepReport {
+                stage,
+                name,
+                changed: false,
+                skipped: false,
+                reason: None,
+            });
+            return Ok(false);
+        }
+        let changed = self.apply_transform_with_edits(stage, name, |circuit, _analysis| {
+            canonicalizer.transform_with_rewrite_edits(circuit)
+        })?;
+        self.canonical_proof = Some(CanonicalizationProof {
+            circuit_revision: self.circuit_revision,
+            config: canonicalizer.config().clone(),
+        });
+        Ok(changed)
+    }
+
+    fn has_canonical_proof(&self, config: &CanonicalizeConfig) -> bool {
+        self.canonical_proof.as_ref().is_some_and(|proof| {
+            proof.circuit_revision == self.circuit_revision && &proof.config == config
+        })
     }
 
     fn apply_knowledge_rewrite(
@@ -401,6 +448,7 @@ impl CompilerWorkflow {
             current: circuit,
             analysis,
             circuit_revision: 0,
+            canonical_proof: None,
             rewrite_session: KnowledgeRewriteSession::default(),
             rewrite_diagnostics: KnowledgeRewriteDiagnostics::default(),
             collect_rewrite_diagnostics,
@@ -450,9 +498,7 @@ impl CompilerWorkflow {
     /// Definition expansion precedes the first rewrite pass so knowledge rules
     /// see the operations contained by user-defined gates.
     fn lower_init(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        state.apply_transform_with_edits("init", "canonicalize.input", |circuit, _analysis| {
-            Canonicalizer::production().transform_with_rewrite_edits(circuit)
-        })?;
+        state.apply_canonicalize("init", "canonicalize.input", &Canonicalizer::production())?;
         self.apply_definition_decomposition(state)?;
         let rewrite_config = self.rewrite_config(RewritePhase::PreDecomposition)?;
         state.apply_knowledge_rewrite(
@@ -470,10 +516,10 @@ impl CompilerWorkflow {
     fn lower_decompose(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         self.apply_unitary_decomposition(state)?;
         self.apply_mc_gate_decomposition(state)?;
-        state.apply_transform_with_edits(
+        state.apply_canonicalize(
             "optimization",
             "canonicalize.after_decomposition",
-            |circuit, _analysis| Canonicalizer::production().transform_with_rewrite_edits(circuit),
+            &Canonicalizer::production(),
         )?;
         state.apply_transform_with_edits(
             "optimization",
@@ -580,10 +626,10 @@ impl CompilerWorkflow {
     }
 
     fn lower_output(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        state.apply_transform_with_edits(
+        state.apply_canonicalize(
             "output",
             "canonicalize.output",
-            |circuit, _analysis| Canonicalizer::production().transform_with_rewrite_edits(circuit),
+            &Canonicalizer::production(),
         )?;
         Ok(())
     }
@@ -620,13 +666,14 @@ impl CompilerWorkflow {
             );
             return Ok(());
         }
-        // The native optimizer canonicalizes its input on entry (paired with
-        // its entry device validation), so a separate workflow pass here would
-        // be an immediately duplicated full-circuit pass.
+        // The native optimizer owns this entry postcondition: it reuses an
+        // exact workflow proof for the current revision, or canonicalizes the
+        // input itself when device lowering invalidated that proof. A separate
+        // workflow pass here would duplicate one of those paths.
         state.record_skipped(
             "optimization",
             "canonicalize.native_input",
-            "native optimizer canonicalizes its input on entry",
+            "native optimizer establishes canonical input on entry",
         );
         Ok(())
     }
@@ -656,7 +703,12 @@ impl CompilerWorkflow {
             max_stale_rounds,
             planning_session,
         );
-        let result = optimizer.run(&state.current)?;
+        let input_is_canonical = state.has_canonical_proof(Canonicalizer::production().config());
+        let result = if input_is_canonical {
+            optimizer.run_with_proven_canonical_input(&state.current)?
+        } else {
+            optimizer.run(&state.current)?
+        };
         if result.changed {
             state.analysis = CircuitAnalysis::analyze(&result.circuit);
             state.advance_circuit_revision();

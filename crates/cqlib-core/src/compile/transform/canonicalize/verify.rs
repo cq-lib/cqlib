@@ -77,7 +77,7 @@ pub fn verify_circuit(circuit: &Circuit, mode: VerifyMode<'_>) -> Result<(), Com
         // a tiny numeric residue while constructing that sum even when the
         // residue alone is already a canonical numeric parameter. Reject that
         // representation here so the verified fast path is a true fixed point.
-        if !circuit.operations().is_empty() {
+        if !circuit.operations().is_empty() && !global_phase.is_canonical_positive_zero() {
             let accumulated = (global_phase.clone() + Parameter::from(0.0))
                 .canonicalized()
                 .map_err(|error| {

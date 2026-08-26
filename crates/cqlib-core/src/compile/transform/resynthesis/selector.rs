@@ -12,11 +12,17 @@
 
 //! Candidate synthesis and selection for two-qubit resynthesis.
 //!
-//! Selection has two stages. First, syntactically duplicate blocks are removed
-//! and promising blocks are synthesized in a deterministic priority order.
-//! Second, accepted patches are greedily filtered so no two selected patches
-//! rewrite the same source operation.
+//! Syntactically duplicate blocks are removed first. Bounded blocks are then
+//! partitioned into overlap components, assigned admissible planning bounds,
+//! and fully validated only while they can still outrank the component winner.
+//! Finally, accepted patches are filtered so no two selected patches rewrite
+//! the same source operation. Maximal unbounded runs retain the eager path.
 
+mod planning_bound;
+
+use self::planning_bound::{
+    BlockPriorityBound, estimate_block_priority_bound, plan_block_priority_bound,
+};
 use super::collector::{
     BlockOrigin, TwoQubitNumericBlock, is_fixed_numeric_standard, is_hard_boundary,
 };
@@ -136,21 +142,12 @@ pub(crate) fn select_patches_with_device(
     if bounded {
         let stats = synthesis_cache.selection_stats_mut();
         stats.bounded_blocks = stats.bounded_blocks.saturating_add(blocks.len());
-        if let Some(device_context) = device_context {
-            return select_device_bounded_by_component(
-                blocks,
-                ops,
-                commutation,
-                config,
-                device_context,
-                synthesis_cache,
-            );
-        }
-        return select_generic_bounded_best_first(
+        return select_bounded_best_first(
             blocks,
             ops,
             commutation,
             config,
+            device_context,
             synthesis_cache,
         );
     }
@@ -202,65 +199,6 @@ pub(crate) fn select_patches_with_device(
     Ok(selected)
 }
 
-fn select_device_bounded_by_component(
-    blocks: Vec<ValidatedBlock>,
-    ops: &[OperationView<'_>],
-    commutation: &CachedCommutation,
-    config: &TwoQubitBlockResynthesisConfig,
-    device_context: &DeviceTwoQubitSynthesisContext,
-    synthesis_cache: &mut TwoQubitSynthesisCache,
-) -> Result<Vec<BlockPatch>, CompilerError> {
-    let components =
-        conflict_components_by_orders(blocks.len(), |index| &blocks[index].matched_orders);
-    let stats = synthesis_cache.selection_stats_mut();
-    stats.conflict_components = stats.conflict_components.saturating_add(components.len());
-    let mut selected = Vec::new();
-    for component in components {
-        let mut patches = Vec::new();
-        for index in component {
-            let block = &blocks[index];
-            if synthesis_cache.has_terminal_no_patch(block, ops) {
-                continue;
-            }
-            let patch = try_synthesize_block(
-                block,
-                ops,
-                commutation,
-                config,
-                Some(device_context),
-                synthesis_cache,
-                index,
-            )?;
-            if let Some(patch) = patch {
-                let stats = synthesis_cache.selection_stats_mut();
-                stats.patches_produced = stats.patches_produced.saturating_add(1);
-                patches.push(patch);
-            } else {
-                synthesis_cache.record_terminal_no_patch(block, ops);
-            }
-        }
-        patches.sort_by(compare_patches);
-        let mut covered = HashSet::new();
-        for patch in patches {
-            if patch
-                .matched_orders
-                .iter()
-                .any(|order| covered.contains(order))
-            {
-                let stats = synthesis_cache.selection_stats_mut();
-                stats.overlap_rejections = stats.overlap_rejections.saturating_add(1);
-                continue;
-            }
-            covered.extend(patch.matched_orders.iter().copied());
-            selected.push(patch);
-        }
-    }
-    selected.sort_by_key(|patch| patch.first_order);
-    let stats = synthesis_cache.selection_stats_mut();
-    stats.selected_patches = stats.selected_patches.saturating_add(selected.len());
-    Ok(selected)
-}
-
 struct PreparedBlock {
     block: ValidatedBlock,
     facts: CachedBlockFactsHandle,
@@ -298,11 +236,12 @@ fn record_attempt_counts(
         .saturating_add(counts.replacement_rejections);
 }
 
-fn select_generic_bounded_best_first(
+fn select_bounded_best_first(
     blocks: Vec<ValidatedBlock>,
     ops: &[OperationView<'_>],
     commutation: &CachedCommutation,
     config: &TwoQubitBlockResynthesisConfig,
+    device_context: Option<&DeviceTwoQubitSynthesisContext>,
     synthesis_cache: &mut TwoQubitSynthesisCache,
 ) -> Result<Vec<BlockPatch>, CompilerError> {
     let mut prepared = Vec::new();
@@ -328,16 +267,19 @@ fn select_generic_bounded_best_first(
     stats.conflict_components = stats.conflict_components.saturating_add(components.len());
     let mut selected = Vec::new();
     let mut states = vec![PreparedBlockState::Pending; prepared.len()];
+    let mut bounds = vec![None; prepared.len()];
     let mut synthesized_patches = (0..prepared.len()).map(|_| None).collect::<Vec<_>>();
     for component in components {
-        select_generic_component_best_first(
+        select_component_best_first(
             component,
             &prepared,
             &mut states,
+            &mut bounds,
             &mut synthesized_patches,
             ops,
             commutation,
             config,
+            device_context,
             synthesis_cache,
             &mut selected,
         )?;
@@ -351,52 +293,74 @@ fn select_generic_bounded_best_first(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PreparedBlockState {
     Pending,
+    Estimated,
+    Planned,
     Synthesized,
     Inactive,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn select_generic_component_best_first(
+fn select_component_best_first(
     mut pending: Vec<usize>,
     prepared: &[PreparedBlock],
     states: &mut [PreparedBlockState],
+    bounds: &mut [Option<PatchPriority>],
     patches: &mut [Option<BlockPatch>],
     ops: &[OperationView<'_>],
     commutation: &CachedCommutation,
     config: &TwoQubitBlockResynthesisConfig,
+    device_context: Option<&DeviceTwoQubitSynthesisContext>,
     synthesis_cache: &mut TwoQubitSynthesisCache,
     selected: &mut Vec<BlockPatch>,
 ) -> Result<(), CompilerError> {
-    // Static bounds use a cursor; synthesized candidates use a heap; and the
-    // per-order adjacency table invalidates only actual conflicts. This avoids
-    // repeatedly sorting and removing the first element from growing vectors.
-    pending.sort_by(|left, right| compare_optimistic_blocks(&prepared[*left], &prepared[*right]));
+    let mut pending_blocks = BinaryHeap::new();
+    for &index in &pending {
+        pending_blocks.push(Reverse((
+            OptimisticPriority::Static(static_priority(&prepared[index])),
+            index,
+        )));
+    }
     let mut candidates = BinaryHeap::new();
     let mut blocks_by_order = HashMap::<usize, Vec<usize>>::new();
-    for &index in &pending {
+    for index in pending.drain(..) {
         for &order in &prepared[index].block.matched_orders {
             blocks_by_order.entry(order).or_default().push(index);
         }
     }
-    let mut cursor = 0;
 
     loop {
-        while cursor < pending.len()
-            && matches!(states[pending[cursor]], PreparedBlockState::Inactive)
-        {
-            cursor += 1;
-        }
         while candidates
             .peek()
-            .is_some_and(|entry: &Reverse<(GenericPatchPriority, usize)>| {
+            .is_some_and(|entry: &Reverse<(PatchPriority, usize)>| {
                 matches!(states[entry.0.1], PreparedBlockState::Inactive)
             })
         {
             candidates.pop();
         }
+        while pending_blocks
+            .peek()
+            .is_some_and(|entry: &Reverse<(OptimisticPriority, usize)>| {
+                let (priority, index) = entry.0;
+                match states[index] {
+                    PreparedBlockState::Pending => {
+                        !matches!(priority, OptimisticPriority::Static(_))
+                    }
+                    PreparedBlockState::Estimated | PreparedBlockState::Planned => {
+                        priority
+                            != OptimisticPriority::Refined(
+                                bounds[index],
+                                static_priority(&prepared[index]),
+                            )
+                    }
+                    PreparedBlockState::Synthesized | PreparedBlockState::Inactive => true,
+                }
+            })
+        {
+            pending_blocks.pop();
+        }
 
         let best_index = candidates.peek().map(|entry| entry.0.1);
-        let next_index = pending.get(cursor).copied();
+        let next_index = pending_blocks.peek().map(|entry| entry.0.1);
         let can_finalize = best_index.is_some_and(|best_index| {
             next_index.is_none_or(|next_index| {
                 compare_patch_to_optimistic_bound(
@@ -404,6 +368,7 @@ fn select_generic_component_best_first(
                         .as_ref()
                         .expect("active candidate has a synthesized patch"),
                     &prepared[next_index],
+                    bounds[next_index],
                 ) != Ordering::Greater
             })
         });
@@ -425,7 +390,9 @@ fn select_generic_component_best_first(
                         continue;
                     }
                     match states[index] {
-                        PreparedBlockState::Pending => pruned = pruned.saturating_add(1),
+                        PreparedBlockState::Pending
+                        | PreparedBlockState::Estimated
+                        | PreparedBlockState::Planned => pruned = pruned.saturating_add(1),
                         PreparedBlockState::Synthesized => rejected = rejected.saturating_add(1),
                         PreparedBlockState::Inactive => unreachable!(),
                     }
@@ -443,22 +410,89 @@ fn select_generic_component_best_first(
         let Some(index) = next_index else {
             break;
         };
-        cursor += 1;
+        pending_blocks.pop();
         let prepared_block = &prepared[index];
+        if matches!(states[index], PreparedBlockState::Pending) {
+            match estimate_block_priority_bound(
+                prepared_block,
+                ops,
+                config,
+                device_context,
+                synthesis_cache,
+            )? {
+                BlockPriorityBound::Known(bound) => {
+                    bounds[index] = Some(bound);
+                    states[index] = PreparedBlockState::Estimated;
+                    pending_blocks.push(Reverse((
+                        OptimisticPriority::Refined(Some(bound), static_priority(prepared_block)),
+                        index,
+                    )));
+                }
+                BlockPriorityBound::Impossible => {
+                    states[index] = PreparedBlockState::Inactive;
+                    synthesis_cache.record_terminal_no_patch(&prepared_block.block, ops);
+                }
+                BlockPriorityBound::Unknown => {
+                    states[index] = PreparedBlockState::Estimated;
+                    pending_blocks.push(Reverse((
+                        OptimisticPriority::Refined(None, static_priority(prepared_block)),
+                        index,
+                    )));
+                }
+            }
+            continue;
+        }
+        if matches!(states[index], PreparedBlockState::Estimated) {
+            match plan_block_priority_bound(
+                prepared_block,
+                ops,
+                config,
+                device_context,
+                synthesis_cache,
+            )? {
+                BlockPriorityBound::Known(bound) => {
+                    bounds[index] = Some(bound);
+                    states[index] = PreparedBlockState::Planned;
+                    pending_blocks.push(Reverse((
+                        OptimisticPriority::Refined(Some(bound), static_priority(prepared_block)),
+                        index,
+                    )));
+                }
+                BlockPriorityBound::Impossible => {
+                    states[index] = PreparedBlockState::Inactive;
+                    synthesis_cache.record_terminal_no_patch(&prepared_block.block, ops);
+                }
+                BlockPriorityBound::Unknown => {
+                    states[index] = PreparedBlockState::Planned;
+                    pending_blocks.push(Reverse((
+                        OptimisticPriority::Refined(None, static_priority(prepared_block)),
+                        index,
+                    )));
+                }
+            }
+            continue;
+        }
+        debug_assert!(matches!(states[index], PreparedBlockState::Planned));
         let patch = try_synthesize_block_from_facts(
             &prepared_block.block,
             ops,
             commutation,
             config,
-            None,
+            device_context,
             synthesis_cache,
             &prepared_block.facts,
             prepared_block.selection_rank,
         )?;
         if let Some(patch) = patch {
+            if let Some(bound) = bounds[index] {
+                debug_assert!(
+                    patch_priority(&patch) >= bound,
+                    "validated patch outranked its admissible planning bound"
+                );
+            }
             let stats = synthesis_cache.selection_stats_mut();
             stats.patches_produced = stats.patches_produced.saturating_add(1);
-            candidates.push(Reverse((generic_patch_priority(&patch), index)));
+            candidates.push(Reverse((patch_priority(&patch), index)));
             patches[index] = Some(patch);
             states[index] = PreparedBlockState::Synthesized;
         } else {
@@ -469,63 +503,136 @@ fn select_generic_component_best_first(
     Ok(())
 }
 
-type GenericPatchPriority = (
-    ResynthesisCost,
-    Reverse<usize>,
-    Reverse<usize>,
-    usize,
-    usize,
-);
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PatchPriority {
+    device_after_cost: Option<DevicePhysicalCost>,
+    after_cost: ResynthesisCost,
+    reduction: usize,
+    matched_orders: usize,
+    first_order: usize,
+    selection_rank: usize,
+}
 
-fn generic_patch_priority(patch: &BlockPatch) -> GenericPatchPriority {
+impl Eq for PatchPriority {}
+
+impl PartialOrd for PatchPriority {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PatchPriority {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_some_first_by(
+            self.device_after_cost,
+            other.device_after_cost,
+            |left, right| left.compare(right),
+        )
+        .then_with(|| self.after_cost.cmp(&other.after_cost))
+        .then_with(|| other.reduction.cmp(&self.reduction))
+        .then_with(|| Reverse(self.matched_orders).cmp(&Reverse(other.matched_orders)))
+        .then_with(|| self.first_order.cmp(&other.first_order))
+        .then_with(|| self.selection_rank.cmp(&other.selection_rank))
+    }
+}
+
+fn patch_priority(patch: &BlockPatch) -> PatchPriority {
     let reduction = patch
         .before_cost
         .lowered_two_qubit_ops
         .saturating_sub(patch.after_cost.lowered_two_qubit_ops);
-    (
-        patch.after_cost,
-        Reverse(reduction),
-        Reverse(patch.matched_orders.len()),
-        patch.first_order,
-        patch.selection_rank,
-    )
+    PatchPriority {
+        device_after_cost: patch.device_after_cost,
+        after_cost: patch.after_cost,
+        reduction,
+        matched_orders: patch.matched_orders.len(),
+        first_order: patch.first_order,
+        selection_rank: patch.selection_rank,
+    }
 }
 
-fn compare_optimistic_blocks(lhs: &PreparedBlock, rhs: &PreparedBlock) -> Ordering {
-    rhs.facts
-        .source_cost
-        .lowered_two_qubit_ops
-        .cmp(&lhs.facts.source_cost.lowered_two_qubit_ops)
-        .then_with(|| {
-            Reverse(lhs.block.matched_orders.len()).cmp(&Reverse(rhs.block.matched_orders.len()))
-        })
-        .then_with(|| lhs.block.first_order().cmp(&rhs.block.first_order()))
-        .then_with(|| lhs.selection_rank.cmp(&rhs.selection_rank))
+type StaticPriority = PatchPriority;
+
+fn static_priority(block: &PreparedBlock) -> StaticPriority {
+    // This universal bound is only the initial heap key. Every live block is
+    // refined through KAK coordinates before it can reach full synthesis.
+    PatchPriority {
+        device_after_cost: None,
+        after_cost: ResynthesisCost::default(),
+        reduction: block.facts.source_cost.lowered_two_qubit_ops,
+        matched_orders: block.block.matched_orders.len(),
+        first_order: block.block.first_order(),
+        selection_rank: block.selection_rank,
+    }
 }
 
-fn compare_patch_to_optimistic_bound(patch: &BlockPatch, bound: &PreparedBlock) -> Ordering {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OptimisticPriority {
+    Static(StaticPriority),
+    Refined(Option<PatchPriority>, StaticPriority),
+}
+
+impl OptimisticPriority {
+    fn parts(self) -> (Option<PatchPriority>, StaticPriority) {
+        match self {
+            Self::Static(fallback) => (None, fallback),
+            Self::Refined(bound, fallback) => (bound, fallback),
+        }
+    }
+}
+
+impl PartialOrd for OptimisticPriority {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OptimisticPriority {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let (left, left_fallback) = self.parts();
+        let (right, right_fallback) = other.parts();
+        match (left, right) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            // An unrefined or unknown bound retains the universal zero-cost
+            // lower bound. A generic zero-cost plan can still prove it wins
+            // against that exact static priority; physical plans cannot make
+            // such a claim without a device-derived bound.
+            (None, Some(right)) if right.device_after_cost.is_none() => left_fallback.cmp(&right),
+            (Some(left), None) if left.device_after_cost.is_none() => left.cmp(&right_fallback),
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+            (None, None) => left_fallback.cmp(&right_fallback),
+        }
+    }
+}
+
+fn compare_patch_to_optimistic_bound(
+    patch: &BlockPatch,
+    block: &PreparedBlock,
+    bound: Option<PatchPriority>,
+) -> Ordering {
+    if let Some(bound) = bound {
+        return patch_priority(patch).cmp(&bound);
+    }
     let patch_reduction = patch
         .before_cost
         .lowered_two_qubit_ops
         .saturating_sub(patch.after_cost.lowered_two_qubit_ops);
-    // Zero is the universally admissible replacement-cost lower bound. It is
-    // deliberately conservative: a better target-specific bound may prune
-    // more work later, but must never change the established greedy winner.
     patch
         .after_cost
         .cmp(&ResynthesisCost::default())
         .then_with(|| {
-            bound
+            block
                 .facts
                 .source_cost
                 .lowered_two_qubit_ops
                 .cmp(&patch_reduction)
         })
         .then_with(|| {
-            Reverse(patch.matched_orders.len()).cmp(&Reverse(bound.block.matched_orders.len()))
+            Reverse(patch.matched_orders.len()).cmp(&Reverse(block.block.matched_orders.len()))
         })
-        .then_with(|| patch.first_order.cmp(&bound.block.first_order()))
-        .then_with(|| patch.selection_rank.cmp(&bound.selection_rank))
+        .then_with(|| patch.first_order.cmp(&block.block.first_order()))
+        .then_with(|| patch.selection_rank.cmp(&block.selection_rank))
 }
 
 fn conflict_components_by_orders<'a>(

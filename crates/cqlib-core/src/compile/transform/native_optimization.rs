@@ -113,6 +113,22 @@ impl<'a> NativeOptimizer<'a> {
             .map(|(result, _)| result)
     }
 
+    /// Runs without repeating the entry canonicalization pass.
+    ///
+    /// Callers must hold a proof for the exact input circuit revision and the
+    /// production canonicalization configuration.
+    pub(crate) fn run_with_proven_canonical_input(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<NativeOptimizationResult, CompilerError> {
+        self.run_canonicalized(
+            circuit,
+            circuit.clone(),
+            NativeResynthesisPolicy::Incremental,
+        )
+        .map(|(result, _)| result)
+    }
+
     pub(crate) fn run_with_policy(
         &self,
         circuit: &Circuit,
@@ -121,6 +137,17 @@ impl<'a> NativeOptimizer<'a> {
         let initial = Canonicalizer::production()
             .transform(circuit, None)?
             .into_circuit(circuit);
+        self.run_canonicalized(circuit, initial, policy)
+    }
+
+    /// Runs from an input whose production-canonical postcondition has already
+    /// been established by this optimizer or its workflow caller.
+    fn run_canonicalized(
+        &self,
+        source: &Circuit,
+        initial: Circuit,
+        policy: NativeResynthesisPolicy,
+    ) -> Result<(NativeOptimizationResult, NativeWorksetStats), CompilerError> {
         self.device.validate_circuit(&initial)?;
         // Native rounds can carry very large circuits. Share immutable round
         // states so `current`, `best`, and the exact cycle detector do not each
@@ -265,7 +292,7 @@ impl<'a> NativeOptimizer<'a> {
         drop(seen_states);
         let best = Arc::try_unwrap(best).unwrap_or_else(|shared| shared.as_ref().clone());
         let result = NativeOptimizationResult {
-            changed: best != *circuit,
+            changed: best != *source,
             circuit: best,
             rounds,
             restored_best,

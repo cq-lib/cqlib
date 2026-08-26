@@ -1064,6 +1064,43 @@ pub(crate) fn select_validated_numeric_2q_candidate_from_kak(
     }
 }
 
+/// Returns a lower bound on the number of logical two-qubit interactions in
+/// every candidate reachable by the configured planner.
+///
+/// This inspects only the KAK coordinates and enabled backend families. It
+/// deliberately does not construct local factors or score operation lists, so
+/// selectors can use it before deciding whether full candidate planning is
+/// worthwhile. `None` means that no backend family can be generated.
+pub(crate) fn minimum_constructive_entanglers(
+    decomp: &KakDecomposition,
+    native_two_qubit_gates: &[StandardGate],
+    fallback_pauli: bool,
+) -> Option<usize> {
+    let mut minimum = None;
+    if native_two_qubit_gates
+        .iter()
+        .any(|gate| matches!(gate, StandardGate::CX | StandardGate::CY | StandardGate::CZ))
+    {
+        minimum = Some(minimum_cx_family_entanglers(decomp));
+    }
+
+    let has_full_pauli = [StandardGate::RXX, StandardGate::RYY, StandardGate::RZZ]
+        .iter()
+        .all(|gate| native_two_qubit_gates.contains(gate));
+    if native_two_qubit_gates.contains(&StandardGate::RZZ) || has_full_pauli || fallback_pauli {
+        let pauli_minimum = minimum_pauli_entanglers(decomp);
+        minimum = Some(minimum.map_or(pauli_minimum, |current| current.min(pauli_minimum)));
+    }
+    minimum
+}
+
+fn minimum_pauli_entanglers(decomp: &KakDecomposition) -> usize {
+    [decomp.a, decomp.b, decomp.c]
+        .into_iter()
+        .filter(|value| value.abs() > TWO_QUBIT_EXACT_TOLERANCE)
+        .count()
+}
+
 fn minimum_cx_family_entanglers(decomp: &KakDecomposition) -> usize {
     let near_zero = |value: f64| value.abs() <= TWO_QUBIT_EXACT_TOLERANCE;
     if near_zero(decomp.a) && near_zero(decomp.b) && near_zero(decomp.c) {
