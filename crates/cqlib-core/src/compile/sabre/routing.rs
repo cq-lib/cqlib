@@ -491,7 +491,7 @@ pub fn sabre_route(
     initial_layout: &Layout,
     config: &SabreConfig,
 ) -> Result<SabreRoutingResult, CompilerError> {
-    sabre_route_with_tracking(circuit, device, initial_layout, config, false, None)
+    sabre_route_topology_with_tracking(circuit, device, initial_layout, config, false)
         .map(|result| result.routing)
 }
 
@@ -501,7 +501,7 @@ pub(crate) fn sabre_route_with_provenance(
     initial_layout: &Layout,
     config: &SabreConfig,
 ) -> Result<TrackedSabreRoutingResult, CompilerError> {
-    sabre_route_with_tracking(circuit, device, initial_layout, config, true, None)
+    sabre_route_topology_with_tracking(circuit, device, initial_layout, config, true)
 }
 
 pub(crate) fn sabre_route_with_provenance_and_session(
@@ -511,23 +511,20 @@ pub(crate) fn sabre_route_with_provenance_and_session(
     config: &SabreConfig,
     planning_session: &DevicePlanningSession,
 ) -> Result<TrackedSabreRoutingResult, CompilerError> {
-    sabre_route_with_tracking(
-        circuit,
-        device,
-        initial_layout,
-        config,
-        true,
-        Some(planning_session),
-    )
+    config.validate()?;
+    let physical = PhysicalLayoutGraph::from_device(device)?;
+    let sabre = SabreDag::from_operations(circuit.operations())?;
+    let target =
+        RoutingTarget::from_device_with_session(device, &physical, &sabre, planning_session)?;
+    sabre_route_with_prepared_target(circuit, &sabre, &target, initial_layout, config, true)
 }
 
-fn sabre_route_with_tracking(
+fn sabre_route_topology_with_tracking(
     circuit: &Circuit,
     device: &Device,
     initial_layout: &Layout,
     config: &SabreConfig,
     retain_provenance: bool,
-    planning_session: Option<&DevicePlanningSession>,
 ) -> Result<TrackedSabreRoutingResult, CompilerError> {
     config.validate()?;
     // Build a dense, reusable view of the physical topology once. The routing
@@ -535,16 +532,30 @@ fn sabre_route_with_tracking(
     // deterministic candidate ordering.
     let physical = PhysicalLayoutGraph::from_device(device)?;
     let sabre = SabreDag::from_operations(circuit.operations())?;
-    let target = if let Some(session) = planning_session {
-        RoutingTarget::from_device_with_session(device, &physical, &sabre, session)?
-    } else {
-        RoutingTarget::from_device(device, &physical, &sabre)?
-    };
-    let metadata = PreparedRouteMetadata::new(&sabre, &target)?;
-    sabre_route_prepared_impl(
+    let target = RoutingTarget::from_physical(&physical)?;
+    sabre_route_with_prepared_target(
         circuit,
         &sabre,
         &target,
+        initial_layout,
+        config,
+        retain_provenance,
+    )
+}
+
+fn sabre_route_with_prepared_target(
+    circuit: &Circuit,
+    sabre: &SabreDag,
+    target: &RoutingTarget,
+    initial_layout: &Layout,
+    config: &SabreConfig,
+    retain_provenance: bool,
+) -> Result<TrackedSabreRoutingResult, CompilerError> {
+    let metadata = PreparedRouteMetadata::new(sabre, target)?;
+    sabre_route_prepared_impl(
+        circuit,
+        sabre,
+        target,
         &metadata,
         initial_layout,
         config,
@@ -561,7 +572,6 @@ fn sabre_route_prepared_impl(
     config: &SabreConfig,
     retain_provenance: bool,
 ) -> Result<TrackedSabreRoutingResult, CompilerError> {
-    config.validate()?;
     let logical_qubits = circuit
         .qubits()
         .into_iter()
@@ -1007,7 +1017,7 @@ pub fn validate_reachable_interactions(
 ) -> Result<(), CompilerError> {
     let physical = PhysicalLayoutGraph::from_device(device)?;
     let sabre = SabreDag::from_operations(circuit.operations())?;
-    let target = RoutingTarget::from_device(device, &physical, &sabre)?;
+    let target = RoutingTarget::from_physical(&physical)?;
     let logical_qubits = circuit
         .qubits()
         .into_iter()
@@ -1026,6 +1036,8 @@ struct InteractionOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum InteractionSignature {
+    /// Topology-only routing model for arbitrary one-qubit operations.
+    GenericUnary,
     /// Layout refinement DAGs deliberately omit concrete operations.
     GenericPair,
     Unary(Vec<InteractionOperation>),
@@ -1327,6 +1339,7 @@ impl RoutingTarget {
     /// Dense indices make layer scoring cheap; semantic ids keep diagnostics
     /// and emitted SWAP operations stable.
     pub(crate) fn from_physical(physical: &PhysicalLayoutGraph) -> Result<Self, CompilerError> {
+        let count = physical.physical_qubits().len();
         let edges = undirected_topology_edges(physical);
         let movement_edges = edges
             .iter()
@@ -1339,20 +1352,34 @@ impl RoutingTarget {
                 },
             })
             .collect::<Vec<_>>();
-        let mut generic_terminals = BTreeMap::new();
+        let unary_terminals = vec![Some(NativePlanCost::default()); count];
+        let unary_lower_bounds = unary_route_lower_bounds(
+            &movement_adjacency(count, &movement_edges),
+            &unary_terminals,
+        );
+        let mut pair_terminals = BTreeMap::new();
         for &(left, right) in &edges {
-            generic_terminals.insert([left, right], NativePlanCost::default());
-            generic_terminals.insert([right, left], NativePlanCost::default());
+            pair_terminals.insert([left, right], NativePlanCost::default());
+            pair_terminals.insert([right, left], NativePlanCost::default());
         }
         Self::from_prepared_parts(
             physical,
             PreparedRoutingParts {
                 movement_edges,
-                interaction_ids: HashMap::from([(InteractionSignature::GenericPair, 0)]),
-                requirements: vec![RequirementTable::Pair {
-                    lower_bounds: None,
-                    terminals: generic_terminals,
-                }],
+                interaction_ids: HashMap::from([
+                    (InteractionSignature::GenericUnary, 0),
+                    (InteractionSignature::GenericPair, 1),
+                ]),
+                requirements: vec![
+                    RequirementTable::Unary {
+                        terminals: unary_terminals,
+                        lower_bounds: unary_lower_bounds,
+                    },
+                    RequirementTable::Pair {
+                        lower_bounds: None,
+                        terminals: pair_terminals,
+                    },
+                ],
                 native_plans: HashMap::new(),
                 native_unsupported: HashMap::new(),
                 native_cost_enabled: false,
@@ -1362,14 +1389,6 @@ impl RoutingTarget {
 
     /// Builds a device-aware target whose movement edges are exactly those on
     /// which the final device lowerer can realize an emitted SWAP.
-    pub(crate) fn from_device(
-        device: &Device,
-        physical: &PhysicalLayoutGraph,
-        sabre: &SabreDag,
-    ) -> Result<Self, CompilerError> {
-        Self::from_device_with_pair_state_budget(device, physical, sabre, EAGER_PAIR_STATE_BUDGET)
-    }
-
     pub(crate) fn from_device_with_session(
         device: &Device,
         physical: &PhysicalLayoutGraph,
@@ -1385,22 +1404,6 @@ impl RoutingTarget {
         )
     }
 
-    fn from_device_with_pair_state_budget(
-        device: &Device,
-        physical: &PhysicalLayoutGraph,
-        sabre: &SabreDag,
-        pair_state_budget: usize,
-    ) -> Result<Self, CompilerError> {
-        let session = DevicePlanningSession::new(device);
-        Self::from_device_with_pair_state_budget_and_session(
-            device,
-            physical,
-            sabre,
-            pair_state_budget,
-            &session,
-        )
-    }
-
     fn from_device_with_pair_state_budget_and_session(
         device: &Device,
         physical: &PhysicalLayoutGraph,
@@ -1410,7 +1413,12 @@ impl RoutingTarget {
     ) -> Result<Self, CompilerError> {
         let topology_edges = undirected_topology_edges(physical);
         let physical_qubits = physical.physical_qubits();
-        let native_mode = device_declares_routing_capability(device, physical_qubits);
+        if !device_declares_routing_capability(device, physical_qubits) {
+            return Err(CompilerError::InvalidInput(format!(
+                "exact device-native SABRE routing requires native capabilities on device '{}'",
+                device.name()
+            )));
+        }
         let mut pair_state_budget = pair_state_budget;
         let signatures = sabre.ordered_interaction_signatures()?;
         let interaction_ids = signatures
@@ -1419,19 +1427,6 @@ impl RoutingTarget {
             .enumerate()
             .map(|(index, signature)| (signature, index))
             .collect::<HashMap<_, _>>();
-
-        if !native_mode {
-            return Self::from_prepared_parts(
-                physical,
-                prepare_topology_only_parts(
-                    physical_qubits.len(),
-                    topology_edges,
-                    interaction_ids,
-                    &signatures,
-                    &mut pair_state_budget,
-                ),
-            );
-        }
 
         let roots = collect_device_plan_roots(physical_qubits, &topology_edges, &signatures);
 
@@ -1812,9 +1807,13 @@ impl RoutingTarget {
             .get(&signature)
             .copied()
             .or_else(|| {
-                self.interaction_ids
-                    .get(&InteractionSignature::GenericPair)
-                    .copied()
+                let generic = match &sabre.graph[node].kind {
+                    SabreNodeKind::Unary(_) => InteractionSignature::GenericUnary,
+                    SabreNodeKind::TwoQ(_)
+                    | SabreNodeKind::Synchronize
+                    | SabreNodeKind::ControlFlow(_) => InteractionSignature::GenericPair,
+                };
+                self.interaction_ids.get(&generic).copied()
             })
             .ok_or_else(|| {
                 CompilerError::InvariantViolation(
@@ -1940,7 +1939,12 @@ impl SabreNode {
             }
         };
         if self.operations.is_empty() {
-            return Ok(InteractionSignature::GenericPair);
+            return Ok(match &self.kind {
+                SabreNodeKind::Unary(_) => InteractionSignature::GenericUnary,
+                SabreNodeKind::TwoQ(_)
+                | SabreNodeKind::Synchronize
+                | SabreNodeKind::ControlFlow(_) => InteractionSignature::GenericPair,
+            });
         }
 
         let mut operations = Vec::new();
@@ -1981,7 +1985,12 @@ impl SabreNode {
             });
         }
         if operations.is_empty() {
-            Ok(InteractionSignature::GenericPair)
+            Ok(match &self.kind {
+                SabreNodeKind::Unary(_) => InteractionSignature::GenericUnary,
+                SabreNodeKind::TwoQ(_)
+                | SabreNodeKind::Synchronize
+                | SabreNodeKind::ControlFlow(_) => InteractionSignature::GenericPair,
+            })
         } else {
             match logicals.len() {
                 1 => Ok(InteractionSignature::Unary(operations)),
@@ -2032,16 +2041,13 @@ impl SabreDag {
     }
 
     fn ordered_interaction_signatures(&self) -> Result<Vec<InteractionSignature>, CompilerError> {
-        let mut signatures = HashSet::from([InteractionSignature::GenericPair]);
+        let mut signatures = HashSet::from([
+            InteractionSignature::GenericUnary,
+            InteractionSignature::GenericPair,
+        ]);
         self.collect_interaction_signatures(&mut signatures)?;
         let mut signatures = signatures.into_iter().collect::<Vec<_>>();
         signatures.sort();
-        if let Some(position) = signatures
-            .iter()
-            .position(|signature| matches!(signature, InteractionSignature::GenericPair))
-        {
-            signatures.swap(0, position);
-        }
         Ok(signatures)
     }
 }
@@ -2076,64 +2082,6 @@ fn combined_catalog_cost(
     Some(cost.unwrap_or_default())
 }
 
-fn prepare_topology_only_parts(
-    count: usize,
-    topology_edges: Vec<(usize, usize)>,
-    interaction_ids: HashMap<InteractionSignature, usize>,
-    signatures: &[InteractionSignature],
-    _pair_state_budget: &mut usize,
-) -> PreparedRoutingParts {
-    let movement_edges = topology_edges
-        .iter()
-        .copied()
-        .map(|(left, right)| MovementEdge {
-            endpoints: [left, right],
-            swap: VerifiedSwap {
-                emitted_indices: [left, right],
-                cost: NativePlanCost::default(),
-            },
-        })
-        .collect::<Vec<_>>();
-    let neighbors = movement_adjacency(count, &movement_edges);
-    let mut requirements = Vec::with_capacity(signatures.len());
-    let mut build_order = (0..signatures.len()).collect::<Vec<_>>();
-    build_order
-        .sort_by_key(|index| matches!(signatures[*index], InteractionSignature::GenericPair));
-    let mut by_index = BTreeMap::new();
-    for index in build_order {
-        let requirement = match &signatures[index] {
-            InteractionSignature::Unary(_) => {
-                let terminals = vec![Some(NativePlanCost::default()); count];
-                RequirementTable::Unary {
-                    lower_bounds: unary_route_lower_bounds(&neighbors, &terminals),
-                    terminals,
-                }
-            }
-            InteractionSignature::GenericPair | InteractionSignature::Pair(_) => {
-                let mut terminals = BTreeMap::new();
-                for &(left, right) in &topology_edges {
-                    terminals.insert([left, right], NativePlanCost::default());
-                    terminals.insert([right, left], NativePlanCost::default());
-                }
-                RequirementTable::Pair {
-                    lower_bounds: None,
-                    terminals,
-                }
-            }
-        };
-        by_index.insert(index, requirement);
-    }
-    requirements.extend(by_index.into_values());
-    PreparedRoutingParts {
-        movement_edges,
-        interaction_ids,
-        requirements,
-        native_plans: HashMap::new(),
-        native_unsupported: HashMap::new(),
-        native_cost_enabled: false,
-    }
-}
-
 fn collect_device_plan_roots(
     physical_qubits: &[PhysicalQubit],
     topology_edges: &[(usize, usize)],
@@ -2141,10 +2089,15 @@ fn collect_device_plan_roots(
 ) -> Vec<DeviceGateState> {
     let mut roots = Vec::new();
     for signature in signatures {
-        if let InteractionSignature::Unary(operations) = signature {
-            for &physical in physical_qubits {
-                roots.extend(states_for_requirement(operations, &[physical]));
+        match signature {
+            InteractionSignature::Unary(operations) => {
+                for &physical in physical_qubits {
+                    roots.extend(states_for_requirement(operations, &[physical]));
+                }
             }
+            InteractionSignature::GenericUnary
+            | InteractionSignature::GenericPair
+            | InteractionSignature::Pair(_) => {}
         }
     }
     for &(left_index, right_index) in topology_edges {
@@ -2199,6 +2152,9 @@ fn build_device_requirement_tables(
     let mut prepared = signatures
         .iter()
         .map(|signature| match signature {
+            InteractionSignature::GenericUnary => {
+                PreparedRequirementTerminals::Unary(vec![Some(native_identity); count])
+            }
             InteractionSignature::GenericPair => {
                 let mut terminals = BTreeMap::new();
                 for edge in movement_edges {
@@ -2240,16 +2196,22 @@ fn build_device_requirement_tables(
     // final terminal set before building any lower-bound table, so the generic
     // table is built once. Exact source signatures receive eager-state budget
     // first; the generic refinement table uses only the remaining budget.
-    if prepared.len() > 1 {
-        let generic_terminals = prepared[1..]
+    if let Some(generic_index) = signatures
+        .iter()
+        .position(|signature| matches!(signature, InteractionSignature::GenericPair))
+    {
+        let generic_terminals = prepared
             .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != generic_index)
+            .map(|(_, requirement)| requirement)
             .filter_map(|requirement| match requirement {
                 PreparedRequirementTerminals::Pair(terminals) => Some(terminals.keys().copied()),
                 PreparedRequirementTerminals::Unary(_) => None,
             })
             .flatten()
             .collect::<BTreeSet<_>>();
-        if let PreparedRequirementTerminals::Pair(terminals) = &mut prepared[0] {
+        if let PreparedRequirementTerminals::Pair(terminals) = &mut prepared[generic_index] {
             terminals.extend(
                 generic_terminals
                     .into_iter()

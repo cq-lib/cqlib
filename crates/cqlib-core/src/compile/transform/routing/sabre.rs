@@ -34,8 +34,8 @@ use crate::compile::sabre::{
     sabre_route_with_provenance_and_session,
 };
 use crate::compile::transform::layout::{
-    LayoutDiagnostics, LayoutObjective, LayoutScore, prepare_sabre_circuit,
-    prepare_sabre_device_target, prepare_sabre_device_target_with_session,
+    LayoutDiagnostics, LayoutObjective, LayoutScore, PreparedSabreCircuit, PreparedSabreTarget,
+    prepare_sabre_circuit, prepare_sabre_device_target_with_session, prepare_sabre_topology_target,
     sabre_route_selection_prepared,
 };
 use crate::compile::transform::{QubitBijection, RewriteEdits};
@@ -281,8 +281,9 @@ impl SabreRouteResult {
 
     /// Observed score of the selected initial layout, when available.
     ///
-    /// SABRE selects the winner by predicted native route quality; this score
-    /// is diagnostic and is not the route-selection key.
+    /// SABRE selects the winner by predicted route quality under the prepared
+    /// routing cost model; this score is diagnostic and is not the
+    /// route-selection key.
     pub fn layout_score(&self) -> Option<&LayoutScore> {
         self.layout_score.as_ref()
     }
@@ -339,7 +340,16 @@ fn sabre_layout_and_route(
     config: &SabreConfig,
     retain_provenance: bool,
 ) -> Result<SabreRoutingResultWithScore, CompilerError> {
-    sabre_layout_and_route_with_session(circuit, device, objective, config, retain_provenance, None)
+    let prepared = prepare_sabre_circuit(circuit)?;
+    let prepared_target = prepare_sabre_topology_target(&prepared, device)?;
+    finish_sabre_layout_and_route(
+        circuit,
+        &prepared,
+        &prepared_target,
+        objective,
+        config,
+        retain_provenance,
+    )
 }
 
 fn sabre_layout_and_route_with_session(
@@ -348,17 +358,32 @@ fn sabre_layout_and_route_with_session(
     objective: &LayoutObjective,
     config: &SabreConfig,
     retain_provenance: bool,
-    planning_session: Option<&DevicePlanningSession>,
+    planning_session: &DevicePlanningSession,
 ) -> Result<SabreRoutingResultWithScore, CompilerError> {
     let prepared = prepare_sabre_circuit(circuit)?;
-    let prepared_target = if let Some(session) = planning_session {
-        prepare_sabre_device_target_with_session(&prepared, device, session)?
-    } else {
-        prepare_sabre_device_target(&prepared, device)?
-    };
-    let selection = sabre_route_selection_prepared(
+    let prepared_target =
+        prepare_sabre_device_target_with_session(&prepared, device, planning_session)?;
+    finish_sabre_layout_and_route(
+        circuit,
         &prepared,
         &prepared_target,
+        objective,
+        config,
+        retain_provenance,
+    )
+}
+
+fn finish_sabre_layout_and_route(
+    circuit: &Circuit,
+    prepared: &PreparedSabreCircuit,
+    prepared_target: &PreparedSabreTarget,
+    objective: &LayoutObjective,
+    config: &SabreConfig,
+    retain_provenance: bool,
+) -> Result<SabreRoutingResultWithScore, CompilerError> {
+    let selection = sabre_route_selection_prepared(
+        prepared,
+        prepared_target,
         objective,
         config,
         retain_provenance,
@@ -465,18 +490,20 @@ pub(crate) fn route_with_layout_tracked_with_session(
 ///
 /// # Limitations
 ///
-/// This transform checks exact-qargs native-plan feasibility while routing, but
-/// it does not emit those native plans or perform target-basis lowering. It also
-/// does not select a compiler workflow. Callers should run required
-/// decomposition, device lowering, and basis translation passes explicitly.
+/// This public transform routes against usable physical connectivity. It does
+/// not enforce native-operation direction or implementation feasibility, emit
+/// native plans, or perform target-basis lowering. Callers that require an
+/// exact device contract should use the compiler workflow; otherwise they
+/// should run the required decomposition and basis translation passes
+/// explicitly.
 ///
 /// # Errors
 ///
 /// Returns [`CompilerError::InvalidInput`] for invalid SABRE configuration,
 /// insufficient usable physical qubits, unreachable routing requirements, or
 /// unsupported circuit operations such as undecomposed gates that touch more
-/// than two qubits. Bounded layout-search and native-feasibility failures are
-/// returned as [`CompilerError::SabreRoutingFailed`].
+/// than two qubits. Bounded layout-search failures are returned as
+/// [`CompilerError::SabreRoutingFailed`].
 pub fn route_sabre(
     circuit: &Circuit,
     device: &Device,
@@ -530,7 +557,7 @@ pub(crate) fn route_sabre_tracked_with_session(
         objective,
         config,
         true,
-        Some(planning_session),
+        planning_session,
     )?;
     Ok(TrackedRoutedCircuit {
         routed: RoutedCircuit {

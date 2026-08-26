@@ -82,10 +82,11 @@ pub use commutative_cancellation::CommutativeCancellation;
 pub use device_lowering::DeviceLowerer;
 pub use layout::{
     CircuitLayoutAnalysis, Interaction, InteractionGraph, LayoutDiagnostics, LayoutObjective,
-    LayoutResult, LayoutScore, PreparedSabreCircuit, PreparedSabreDeviceTarget, Vf2EdgeRequirement,
+    LayoutResult, LayoutScore, PreparedSabreCircuit, PreparedSabreTarget, Vf2EdgeRequirement,
     Vf2LayoutConfig, analyze_circuit_for_layout, greedy_layout, greedy_layout_prepared,
-    prepare_sabre_circuit, prepare_sabre_device_target, sabre_layout, sabre_layout_prepared,
-    trivial_layout, trivial_layout_prepared, vf2_perfect_layout, vf2_perfect_layout_prepared,
+    prepare_sabre_circuit, prepare_sabre_device_target, prepare_sabre_topology_target,
+    sabre_layout, sabre_layout_prepared, trivial_layout, trivial_layout_prepared,
+    vf2_perfect_layout, vf2_perfect_layout_prepared,
 };
 pub use native_optimization::{
     NativeOptimizationResult, NativeOptimizationSummary, NativeOptimizer,

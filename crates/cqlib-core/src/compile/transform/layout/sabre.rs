@@ -62,12 +62,12 @@ pub struct PreparedSabreCircuit {
 /// Device-side SABRE data prepared for one circuit's interaction signatures.
 ///
 /// The physical graph remains the layout/scoring view. The routing target owns
-/// exact native-plan summaries, SWAP-feasible connectivity, and terminal costs.
-/// Route metadata for the original and bidirectional refinement DAGs is stored
-/// alongside it so fused candidate refinement and routing reuse the same
-/// preparation.
+/// the connectivity, feasibility model, and costs chosen by the preparation
+/// function. Route metadata for the original and bidirectional refinement DAGs
+/// is stored alongside it so fused candidate refinement and routing reuse the
+/// same preparation.
 #[derive(Debug, Clone)]
-pub struct PreparedSabreDeviceTarget {
+pub struct PreparedSabreTarget {
     physical: PhysicalLayoutGraph,
     routing: RoutingTarget,
     routing_metadata: PreparedRouteMetadata,
@@ -75,7 +75,7 @@ pub struct PreparedSabreDeviceTarget {
     backward_refinement_metadata: PreparedRouteMetadata,
 }
 
-impl PreparedSabreDeviceTarget {
+impl PreparedSabreTarget {
     /// Returns the physical graph used by layout objective scoring.
     pub fn physical(&self) -> &PhysicalLayoutGraph {
         &self.physical
@@ -122,11 +122,29 @@ pub fn prepare_sabre_circuit(circuit: &Circuit) -> Result<PreparedSabreCircuit, 
     })
 }
 
-/// Prepares exact device-native SABRE data for a prepared circuit.
+/// Prepares topology-only SABRE data for a circuit.
+///
+/// This path considers usable physical qubits and undirected connectivity. It
+/// does not construct a device-planning session or native implementation
+/// catalog.
+pub fn prepare_sabre_topology_target(
+    prepared: &PreparedSabreCircuit,
+    device: &Device,
+) -> Result<PreparedSabreTarget, CompilerError> {
+    let physical = PhysicalLayoutGraph::from_device(device)?;
+    let routing = RoutingTarget::from_physical(&physical)?;
+    finish_sabre_target_preparation(prepared, physical, routing)
+}
+
+/// Prepares exact device-native SABRE data for a circuit.
+///
+/// This path includes native operation feasibility, direction, and
+/// implementation costs. Use it when the result will be compiled against the
+/// exact device contract rather than a topology-and-basis target.
 pub fn prepare_sabre_device_target(
     prepared: &PreparedSabreCircuit,
     device: &Device,
-) -> Result<PreparedSabreDeviceTarget, CompilerError> {
+) -> Result<PreparedSabreTarget, CompilerError> {
     let planning_session = DevicePlanningSession::new(device);
     prepare_sabre_device_target_with_session(prepared, device, &planning_session)
 }
@@ -135,7 +153,7 @@ pub(crate) fn prepare_sabre_device_target_with_session(
     prepared: &PreparedSabreCircuit,
     device: &Device,
     planning_session: &DevicePlanningSession,
-) -> Result<PreparedSabreDeviceTarget, CompilerError> {
+) -> Result<PreparedSabreTarget, CompilerError> {
     let physical = PhysicalLayoutGraph::from_device(device)?;
     let routing = RoutingTarget::from_device_with_session(
         device,
@@ -143,11 +161,19 @@ pub(crate) fn prepare_sabre_device_target_with_session(
         &prepared.routing_dag,
         planning_session,
     )?;
+    finish_sabre_target_preparation(prepared, physical, routing)
+}
+
+fn finish_sabre_target_preparation(
+    prepared: &PreparedSabreCircuit,
+    physical: PhysicalLayoutGraph,
+    routing: RoutingTarget,
+) -> Result<PreparedSabreTarget, CompilerError> {
     let routing_metadata = PreparedRouteMetadata::new(&prepared.routing_dag, &routing)?;
     let refinement_metadata = PreparedRouteMetadata::new(&prepared.refinement_dag, &routing)?;
     let backward_refinement_metadata =
         PreparedRouteMetadata::new(&prepared.backward_refinement_dag, &routing)?;
-    Ok(PreparedSabreDeviceTarget {
+    Ok(PreparedSabreTarget {
         physical,
         routing,
         routing_metadata,
@@ -207,7 +233,7 @@ pub fn sabre_layout(
     config: &SabreConfig,
 ) -> Result<LayoutResult, CompilerError> {
     let prepared = prepare_sabre_circuit(circuit)?;
-    let target = prepare_sabre_device_target(&prepared, device)?;
+    let target = prepare_sabre_topology_target(&prepared, device)?;
     sabre_layout_prepared(&prepared, &target, objective, config)
 }
 
@@ -233,7 +259,7 @@ pub fn sabre_layout(
 /// use cqlib_core::circuit::{Circuit, Qubit};
 /// use cqlib_core::compile::sabre::SabreConfig;
 /// use cqlib_core::compile::transform::{
-///     LayoutObjective, prepare_sabre_circuit, prepare_sabre_device_target,
+///     LayoutObjective, prepare_sabre_circuit, prepare_sabre_topology_target,
 ///     sabre_layout_prepared,
 /// };
 /// use cqlib_core::device::Device;
@@ -241,7 +267,7 @@ pub fn sabre_layout(
 /// let mut circuit = Circuit::new(3);
 /// circuit.cx(Qubit::new(0), Qubit::new(2))?;
 /// let prepared = prepare_sabre_circuit(&circuit)?;
-/// let target = prepare_sabre_device_target(&prepared, &Device::line("line-3", 3)?)?;
+/// let target = prepare_sabre_topology_target(&prepared, &Device::line("line-3", 3)?)?;
 ///
 /// let result = sabre_layout_prepared(
 ///     &prepared,
@@ -254,7 +280,7 @@ pub fn sabre_layout(
 /// ```
 pub fn sabre_layout_prepared(
     prepared: &PreparedSabreCircuit,
-    prepared_target: &PreparedSabreDeviceTarget,
+    prepared_target: &PreparedSabreTarget,
     objective: &LayoutObjective,
     config: &SabreConfig,
 ) -> Result<LayoutResult, CompilerError> {
@@ -278,7 +304,7 @@ pub(crate) struct PreparedSabreRouteSelection {
 
 pub(crate) fn sabre_route_selection_prepared(
     prepared: &PreparedSabreCircuit,
-    prepared_target: &PreparedSabreDeviceTarget,
+    prepared_target: &PreparedSabreTarget,
     objective: &LayoutObjective,
     config: &SabreConfig,
     retain_provenance: bool,
@@ -442,7 +468,7 @@ fn evaluate_candidate(
     forwards: &SabreDag,
     backwards: &SabreDag,
     target: &RoutingTarget,
-    prepared_target: &PreparedSabreDeviceTarget,
+    prepared_target: &PreparedSabreTarget,
     analysis: &CircuitLayoutAnalysis,
     physical: &PhysicalLayoutGraph,
     objective: &LayoutObjective,
@@ -864,7 +890,7 @@ struct InitialLayoutCandidates {
 /// layouts from different sources are evaluated once.
 fn initial_layout_candidates(
     prepared: &PreparedSabreCircuit,
-    prepared_target: &PreparedSabreDeviceTarget,
+    prepared_target: &PreparedSabreTarget,
     objective: &LayoutObjective,
     config: &SabreConfig,
     rng: &mut StdRng,

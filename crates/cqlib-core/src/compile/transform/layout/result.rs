@@ -32,8 +32,8 @@ pub struct LayoutResult {
     /// Optional observed score for this layout under the requested objective.
     ///
     /// Individual algorithms may use a different selection key. In
-    /// particular, SABRE selects its winner by predicted native route quality
-    /// and reports this score for diagnostics.
+    /// particular, SABRE selects its winner by predicted route quality under
+    /// the prepared routing cost model and reports this score for diagnostics.
     pub score: Option<LayoutScore>,
     /// Diagnostics describing search and scoring behavior.
     pub diagnostics: LayoutDiagnostics,

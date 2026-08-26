@@ -13,13 +13,44 @@
 use super::sabre::dense_interaction_path_skips_refinement;
 use super::*;
 use crate::circuit::{Circuit, ClassicalExpr, Instruction, Qubit, StandardGate};
-use crate::compile::sabre::{SabreConfig, sabre_route};
+use crate::compile::device_planning::DevicePlanningSession;
+use crate::compile::sabre::{
+    SabreConfig, SabreRoutingResult, sabre_route_with_provenance_and_session,
+};
 use crate::compile::transform::route_sabre;
 use crate::compile::{CompilerError, SabreRoutingFailure};
 use crate::device::{
     Device, EdgeProp, InstructionProp, LogicalQubit, PhysicalQubit, QubitProp, Topology,
 };
 use std::collections::HashSet;
+
+fn sabre_layout_device(
+    circuit: &Circuit,
+    device: &Device,
+    objective: &LayoutObjective,
+    config: &SabreConfig,
+) -> Result<LayoutResult, CompilerError> {
+    let prepared = prepare_sabre_circuit(circuit)?;
+    let target = prepare_sabre_device_target(&prepared, device)?;
+    sabre_layout_prepared(&prepared, &target, objective, config)
+}
+
+fn sabre_route_device(
+    circuit: &Circuit,
+    device: &Device,
+    initial_layout: &crate::device::Layout,
+    config: &SabreConfig,
+) -> Result<SabreRoutingResult, CompilerError> {
+    let planning_session = DevicePlanningSession::new(device);
+    sabre_route_with_provenance_and_session(
+        circuit,
+        device,
+        initial_layout,
+        config,
+        &planning_session,
+    )
+    .map(|result| result.routing)
+}
 
 fn disconnected_device(name: &str, component_ids: &[&[u32]]) -> Device {
     let qubits = component_ids
@@ -133,7 +164,7 @@ fn sabre_layout_prepared_matches_top_level_entry() {
     circuit.cx(Qubit::new(1), Qubit::new(2)).unwrap();
 
     let prepared_circuit = prepare_sabre_circuit(&circuit).unwrap();
-    let prepared_target = prepare_sabre_device_target(&prepared_circuit, &device).unwrap();
+    let prepared_target = prepare_sabre_topology_target(&prepared_circuit, &device).unwrap();
     let top_level = sabre_layout(&circuit, &device, &objective, &config).unwrap();
     let prepared =
         sabre_layout_prepared(&prepared_circuit, &prepared_target, &objective, &config).unwrap();
@@ -153,9 +184,9 @@ fn prepared_sabre_circuit_can_be_reused_across_targets_and_configs() {
     let prepared = prepare_sabre_circuit(&circuit).unwrap();
 
     let line3 =
-        prepare_sabre_device_target(&prepared, &Device::line("line-3", 3).unwrap()).unwrap();
+        prepare_sabre_topology_target(&prepared, &Device::line("line-3", 3).unwrap()).unwrap();
     let line4 =
-        prepare_sabre_device_target(&prepared, &Device::line("line-4", 4).unwrap()).unwrap();
+        prepare_sabre_topology_target(&prepared, &Device::line("line-4", 4).unwrap()).unwrap();
     let first = sabre_layout_prepared(
         &prepared,
         &line3,
@@ -336,14 +367,14 @@ fn topology_connected_movement_components_find_cross_component_terminal_layout()
     let mut circuit = Circuit::new(2);
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
 
-    let result = sabre_layout(
+    let result = sabre_layout_device(
         &circuit,
         &device,
         &LayoutObjective::topology_only(),
         &SabreConfig::deterministic_seeded(0),
     )
     .unwrap();
-    let routed = sabre_route(
+    let routed = sabre_route_device(
         &circuit,
         &device,
         &result.layout,
@@ -386,7 +417,7 @@ fn local_unary_capability_selects_the_feasible_layout_candidate() {
     let mut circuit = Circuit::new(1);
     circuit.h(Qubit::new(0)).unwrap();
 
-    let result = sabre_layout(
+    let result = sabre_layout_device(
         &circuit,
         &device,
         &LayoutObjective::topology_only(),

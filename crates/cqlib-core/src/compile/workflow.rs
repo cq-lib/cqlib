@@ -69,8 +69,6 @@ use crate::compile::transform::{
     route_sabre_tracked_with_session, route_with_layout_tracked,
     route_with_layout_tracked_with_session,
 };
-use crate::device::{Device, Topology};
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use super::{
@@ -771,19 +769,27 @@ impl CompilerWorkflow {
 
     /// Validates the final circuit against a topology-basis target.
     ///
-    /// Topology-basis compilation routes onto a physical coupling graph but
-    /// does not lower to exact ordered device capabilities, so the strict
-    /// device validator does not apply. Instead, the loose-topology device
-    /// built for routing approximates this contract: `Device::validate_circuit`
-    /// is a full device validator, and here it is configured with bidirectional
-    /// coupling edges and the explicit basis as native gates, so the check
-    /// covers valid qubits, undirected connectivity, and basis membership.
+    /// This validator is deliberately independent from SABRE target
+    /// preparation. It checks usable physical qubits, undirected connectivity,
+    /// and the explicit output basis without constructing a planning session or
+    /// native-plan catalog.
     fn validate_topology_target(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        let CompileTarget::TopologyBasis { device_target, .. } = &self.config.target else {
+        let CompileTarget::TopologyBasis {
+            device_target,
+            basis,
+        } = &self.config.target
+        else {
             return Ok(());
         };
-        let device = self.routing_device(device_target)?;
-        device.validate_circuit(&state.current)?;
+        let allowed = basis
+            .iter()
+            .filter_map(|instruction| match instruction {
+                Instruction::Standard(gate) => Some(*gate),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        validate_operations_in_target_basis(state.current.operations(), &allowed)?;
+        validate_operations_on_topology(state.current.operations(), &device_target.device)?;
         state.steps.push(WorkflowStepReport {
             stage: "validation",
             name: "validate.topology",
@@ -1045,8 +1051,7 @@ impl CompilerWorkflow {
             )
         })?;
 
-        let routing_device = self.routing_device(target)?;
-        let device = routing_device.as_ref();
+        let device = &target.device;
         let config = sabre_config_for_mode(self.config.mode, target.seed);
         let (
             routed_circuit,
@@ -1435,62 +1440,6 @@ impl CompilerWorkflow {
             "no target device configured"
         }
     }
-
-    fn routing_device<'target>(
-        &self,
-        target: &'target DeviceCompileTarget,
-    ) -> Result<Cow<'target, Device>, CompilerError> {
-        if matches!(self.config.target, CompileTarget::Device(_)) {
-            return Ok(Cow::Borrowed(&target.device));
-        }
-
-        let qubits = target.device.qubits().collect::<Vec<_>>();
-        let couplings = target
-            .device
-            .topology()
-            .undirected_edges()
-            .flat_map(|(a, b)| {
-                [
-                    (a, b, "loose-topology".to_string()),
-                    (b, a, "loose-topology".to_string()),
-                ]
-            })
-            .collect::<Vec<_>>();
-        let topology = Topology::new(qubits.clone(), couplings).map_err(|error| {
-            CompilerError::InvariantViolation(format!(
-                "failed to construct loose routing topology: {error}"
-            ))
-        })?;
-        let mut device = Device::new(
-            format!("{} (loose topology)", target.device.name()),
-            qubits.into_iter().collect(),
-            topology,
-        )
-        .map_err(|error| {
-            CompilerError::InvariantViolation(format!(
-                "failed to construct loose routing device: {error}"
-            ))
-        })?;
-        device
-            .set_invalid_qubits(target.device.invalid_qubits().collect())
-            .map_err(|error| {
-                CompilerError::InvariantViolation(format!(
-                    "failed to copy loose routing availability: {error}"
-                ))
-            })?;
-        let gates = match &self.config.target {
-            CompileTarget::TopologyBasis { basis, .. } => basis.clone(),
-            CompileTarget::Logical | CompileTarget::Basis(_) | CompileTarget::Device(_) => {
-                unreachable!("strict and non-routing targets returned before loose device setup")
-            }
-        };
-        device.set_native_gates(gates).map_err(|error| {
-            CompilerError::InvariantViolation(format!(
-                "failed to configure loose routing instructions: {error}"
-            ))
-        })?;
-        Ok(Cow::Owned(device))
-    }
 }
 
 fn sabre_config_for_mode(mode: CompileMode, seed: Option<u32>) -> SabreConfig {
@@ -1578,6 +1527,83 @@ fn validate_operations_in_target_basis(
                 )));
             }
             _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_operations_on_topology(
+    operations: &[Operation],
+    device: &crate::device::Device,
+) -> Result<(), CompilerError> {
+    use crate::device::PhysicalQubit;
+
+    for operation in operations {
+        for qubit in operation.qubits.iter().copied() {
+            let physical = PhysicalQubit::from_qubit(qubit);
+            if !device.is_usable_qubit(physical) {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "topology-basis output references unusable physical qubit {physical}"
+                )));
+            }
+        }
+        match &operation.instruction {
+            Instruction::Standard(gate) if gate.num_qubits() == 2 => {
+                let [left, right] = operation.qubits.as_slice() else {
+                    return Err(CompilerError::InvariantViolation(format!(
+                        "two-qubit gate {gate:?} has {} physical arguments",
+                        operation.qubits.len()
+                    )));
+                };
+                let left = PhysicalQubit::from_qubit(*left);
+                let right = PhysicalQubit::from_qubit(*right);
+                if !device
+                    .topology()
+                    .supports_coupling_either_direction(left, right)
+                {
+                    return Err(CompilerError::InvariantViolation(format!(
+                        "topology-basis output gate {gate:?} uses non-adjacent physical qubits {left} and {right}"
+                    )));
+                }
+            }
+            Instruction::Standard(gate) if gate.num_qubits() > 2 => {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "topology-basis output contains undecomposed gate {gate:?}"
+                )));
+            }
+            Instruction::ClassicalControl(control) => match control {
+                ClassicalControlOp::If(op) => {
+                    validate_operations_on_topology(op.then_body().operations(), device)?;
+                    if let Some(body) = op.else_body() {
+                        validate_operations_on_topology(body.operations(), device)?;
+                    }
+                }
+                ClassicalControlOp::While(op) => {
+                    validate_operations_on_topology(op.body().operations(), device)?;
+                }
+                ClassicalControlOp::For(op) => {
+                    validate_operations_on_topology(op.body().operations(), device)?;
+                }
+                ClassicalControlOp::Switch(op) => {
+                    for case in op.cases() {
+                        validate_operations_on_topology(case.body().operations(), device)?;
+                    }
+                    if let Some(body) = op.default() {
+                        validate_operations_on_topology(body.operations(), device)?;
+                    }
+                }
+                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+            },
+            Instruction::McGate(_) | Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "topology-basis output contains undecomposed instruction {}",
+                    operation.instruction
+                )));
+            }
+            Instruction::Standard(_)
+            | Instruction::Directive(_)
+            | Instruction::ClassicalData(_)
+            | Instruction::Delay => {}
         }
     }
     Ok(())

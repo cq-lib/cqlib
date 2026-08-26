@@ -58,7 +58,7 @@ from .layout import LayoutResult as LayoutResult
 from .layout import LayoutScore as LayoutScore
 from .layout import PhysicalLayoutGraph as PhysicalLayoutGraph
 from .layout import PreparedSabreCircuit as PreparedSabreCircuit
-from .layout import PreparedSabreDeviceTarget as PreparedSabreDeviceTarget
+from .layout import PreparedSabreTarget as PreparedSabreTarget
 from .layout import Vf2EdgeRequirement as Vf2EdgeRequirement
 from .layout import Vf2LayoutConfig as Vf2LayoutConfig
 from .layout import analyze_circuit_for_layout as analyze_circuit_for_layout
@@ -66,6 +66,7 @@ from .layout import greedy_layout as greedy_layout
 from .layout import greedy_layout_prepared as greedy_layout_prepared
 from .layout import prepare_sabre_circuit as prepare_sabre_circuit
 from .layout import prepare_sabre_device_target as prepare_sabre_device_target
+from .layout import prepare_sabre_topology_target as prepare_sabre_topology_target
 from .layout import sabre_layout as sabre_layout
 from .layout import sabre_layout_prepared as sabre_layout_prepared
 from .layout import trivial_layout as trivial_layout
@@ -131,7 +132,7 @@ __all__ = [
     "DistanceTable",
     "PhysicalLayoutGraph",
     "PreparedSabreCircuit",
-    "PreparedSabreDeviceTarget",
+    "PreparedSabreTarget",
     "LayoutScore",
     "LayoutDiagnostics",
     "LayoutResult",
@@ -141,6 +142,7 @@ __all__ = [
     "trivial_layout_prepared",
     "analyze_circuit_for_layout",
     "prepare_sabre_circuit",
+    "prepare_sabre_topology_target",
     "prepare_sabre_device_target",
     "greedy_layout",
     "greedy_layout_prepared",

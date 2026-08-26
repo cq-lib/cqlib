@@ -28,9 +28,10 @@ CircuitLayoutAnalysis = _layout_module.CircuitLayoutAnalysis
 DistanceTable = _layout_module.DistanceTable
 PhysicalLayoutGraph = _layout_module.PhysicalLayoutGraph
 PreparedSabreCircuit = _layout_module.PreparedSabreCircuit
-PreparedSabreDeviceTarget = _layout_module.PreparedSabreDeviceTarget
+PreparedSabreTarget = _layout_module.PreparedSabreTarget
 analyze_circuit_for_layout = _layout_module.analyze_circuit_for_layout
 prepare_sabre_circuit = _layout_module.prepare_sabre_circuit
+prepare_sabre_topology_target = _layout_module.prepare_sabre_topology_target
 prepare_sabre_device_target = _layout_module.prepare_sabre_device_target
 sabre_layout_prepared = _layout_module.sabre_layout_prepared
 trivial_layout_prepared = _layout_module.trivial_layout_prepared
@@ -54,9 +55,10 @@ __all__ = [
     "DistanceTable",
     "PhysicalLayoutGraph",
     "PreparedSabreCircuit",
-    "PreparedSabreDeviceTarget",
+    "PreparedSabreTarget",
     "analyze_circuit_for_layout",
     "prepare_sabre_circuit",
+    "prepare_sabre_topology_target",
     "prepare_sabre_device_target",
     "sabre_layout_prepared",
     "trivial_layout_prepared",

@@ -13,6 +13,7 @@
 
 use super::*;
 use crate::circuit::{Circuit, ClassicalExpr, ClassicalType, Qubit};
+use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::sabre::cost::{MetricAvailability, RobustDurationKey, RobustErrorKey};
 use crate::device::{EdgeProp, InstructionProp, PhysicalQubit, Topology};
 use rayon::ThreadPoolBuilder;
@@ -20,6 +21,15 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Barrier, mpsc};
 use std::thread;
 use std::time::Duration;
+
+fn routing_target_from_device(
+    device: &Device,
+    physical: &PhysicalLayoutGraph,
+    sabre: &SabreDag,
+) -> Result<RoutingTarget, CompilerError> {
+    let planning_session = DevicePlanningSession::new(device);
+    RoutingTarget::from_device_with_session(device, physical, sabre, &planning_session)
+}
 
 fn route_trial_for_test(
     sabre: &SabreDag,
@@ -47,7 +57,7 @@ fn prepared_metadata_distinguishes_high_pair_reuse() {
         repeated.h(Qubit::new(2)).unwrap();
     }
     let repeated_dag = SabreDag::from_operations(repeated.operations()).unwrap();
-    let repeated_target = RoutingTarget::from_device(&device, &physical, &repeated_dag).unwrap();
+    let repeated_target = RoutingTarget::from_physical(&physical).unwrap();
     let repeated_metadata = PreparedRouteMetadata::new(&repeated_dag, &repeated_target).unwrap();
     assert!(repeated_metadata.high_pair_reuse);
 
@@ -56,7 +66,7 @@ fn prepared_metadata_distinguishes_high_pair_reuse() {
     sparse.cx(Qubit::new(0), Qubit::new(2)).unwrap();
     sparse.cx(Qubit::new(0), Qubit::new(3)).unwrap();
     let sparse_dag = SabreDag::from_operations(sparse.operations()).unwrap();
-    let sparse_target = RoutingTarget::from_device(&device, &physical, &sparse_dag).unwrap();
+    let sparse_target = RoutingTarget::from_physical(&physical).unwrap();
     let sparse_metadata = PreparedRouteMetadata::new(&sparse_dag, &sparse_target).unwrap();
     assert!(!sparse_metadata.high_pair_reuse);
 }
@@ -69,7 +79,7 @@ fn layout_only_refinement_matches_full_output_final_layout() {
     circuit.cx(Qubit::new(1), Qubit::new(2)).unwrap();
     let sabre = SabreDag::refinement_workload(circuit.operations()).unwrap();
     let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
-    let target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
+    let target = RoutingTarget::from_physical(&physical).unwrap();
     let metadata = PreparedRouteMetadata::new(&sabre, &target).unwrap();
     let initial = Layout::from_pairs(&[(0, 0), (1, 1), (2, 3)], 4).unwrap();
     let heuristic = SabreConfig::deterministic_seeded(17).heuristic;
@@ -94,7 +104,7 @@ fn layout_only_control_flow_routing_matches_full_output_restoration() {
         .unwrap();
     let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
     let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
-    let target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
+    let target = RoutingTarget::from_physical(&physical).unwrap();
     let metadata = PreparedRouteMetadata::new(&sabre, &target).unwrap();
     let initial = Layout::from_pairs(&[(0, 0), (1, 1), (2, 2)], 3).unwrap();
     let heuristic = SabreConfig::deterministic_seeded(31).heuristic;
@@ -123,7 +133,7 @@ fn compact_route_plan_matches_materialized_incremental_quality() {
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
     let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
-    let target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
+    let target = routing_target_from_device(&device, &physical, &sabre).unwrap();
     let metadata = PreparedRouteMetadata::new(&sabre, &target).unwrap();
     let initial = Layout::from_pairs(&[(0, 0), (1, 2)], 3).unwrap();
     let heuristic = SabreConfig::deterministic_seeded(41).heuristic;
@@ -152,7 +162,7 @@ fn topology_route_plan_defers_ordinary_operation_materialization() {
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
     let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
-    let target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
+    let target = RoutingTarget::from_physical(&physical).unwrap();
     let metadata = PreparedRouteMetadata::new(&sabre, &target).unwrap();
     let initial = Layout::from_pairs(&[(0, 1), (1, 0)], 2).unwrap();
     let heuristic = SabreConfig::deterministic_seeded(45).heuristic;
@@ -186,7 +196,7 @@ fn topology_lookahead_skips_unary_work_but_keeps_future_two_qubit_requirements()
     circuit.h(Qubit::new(0)).unwrap();
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
-    let target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
+    let target = RoutingTarget::from_physical(&physical).unwrap();
     assert!(!target.native_cost_enabled);
     let metadata = PreparedRouteMetadata::new(&sabre, &target).unwrap();
     let initial = Layout::from_pairs(&[(0, 0), (1, 1), (2, 2), (3, 3)], 4).unwrap();
@@ -234,7 +244,7 @@ fn device_lookahead_keeps_placement_sensitive_unary_requirements() {
     circuit.h(Qubit::new(0)).unwrap();
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
-    let target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
+    let target = routing_target_from_device(&device, &physical, &sabre).unwrap();
     assert!(target.native_cost_enabled);
     let metadata = PreparedRouteMetadata::new(&sabre, &target).unwrap();
     let initial = Layout::from_pairs(&[(0, 0), (1, 1), (2, 2), (3, 3)], 4).unwrap();
@@ -646,8 +656,7 @@ fn topology_only_routing_uses_compact_distances_without_pair_caches() {
     let mut circuit = Circuit::new(2);
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
-    let target =
-        RoutingTarget::from_device_with_pair_state_budget(&device, &physical, &sabre, 0).unwrap();
+    let target = RoutingTarget::from_physical(&physical).unwrap();
     let layout = Layout::from_pairs(&[(0, 0), (1, 3)], 4).unwrap();
     let requirement = target
         .interaction_id_for_node(&sabre, sabre.first_layer[0])
@@ -689,8 +698,7 @@ fn trial_pair_cache_avoids_repeating_shared_lazy_searches() {
     let mut circuit = Circuit::new(2);
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
-    let mut target =
-        RoutingTarget::from_device_with_pair_state_budget(&device, &physical, &sabre, 0).unwrap();
+    let mut target = RoutingTarget::from_physical(&physical).unwrap();
     target.native_cost_enabled = true;
     let requirement = target
         .interaction_id_for_node(&sabre, sabre.first_layer[0])
@@ -834,9 +842,7 @@ fn lazy_pair_cache_does_not_change_seeded_results_across_thread_counts() {
         ..SabreHeuristicConfig::default()
     };
     let route_in_pool = |threads| {
-        let target =
-            RoutingTarget::from_device_with_pair_state_budget(&device, &physical, &sabre, 0)
-                .unwrap();
+        let target = RoutingTarget::from_physical(&physical).unwrap();
         ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
@@ -914,8 +920,15 @@ fn component_relations_come_from_terminals_without_lazy_pair_search() {
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
     let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
-    let target =
-        RoutingTarget::from_device_with_pair_state_budget(&device, &physical, &sabre, 0).unwrap();
+    let planning_session = DevicePlanningSession::new(&device);
+    let target = RoutingTarget::from_device_with_pair_state_budget_and_session(
+        &device,
+        &physical,
+        &sabre,
+        0,
+        &planning_session,
+    )
+    .unwrap();
 
     let assignment = movement_component_assignment(
         &sabre,
@@ -954,7 +967,7 @@ fn structural_native_scoring_descends_into_control_flow() {
         .unwrap();
     let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
     let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
-    let mut target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
+    let mut target = routing_target_from_device(&device, &physical, &sabre).unwrap();
     target
         .native_plans
         .remove(&DeviceGateState::standard(StandardGate::H, smallvec![p0]));
@@ -1293,7 +1306,7 @@ fn device_target_prepares_both_orderings_of_emitted_swap() {
     let mut circuit = Circuit::new(2);
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     let sabre = SabreDag::from_operations(circuit.operations()).unwrap();
-    let target = RoutingTarget::from_device(&device, &physical, &sabre).unwrap();
+    let target = routing_target_from_device(&device, &physical, &sabre).unwrap();
     let reversed = DeviceGateState::standard(
         StandardGate::SWAP,
         smallvec![PhysicalQubit::new(1), PhysicalQubit::new(0)],

@@ -1348,7 +1348,7 @@ fn workflow_uses_three_native_cx_for_device_targeted_swap_unitary() {
 }
 
 #[test]
-fn routing_device_borrows_strict_device_in_normal_and_enhanced_modes() {
+fn strict_device_exposes_exact_device_planning_target() {
     for mode in [CompileMode::Normal, CompileMode::Enhanced] {
         let workflow = CompilerWorkflow::new(CompileConfig {
             mode,
@@ -1359,16 +1359,12 @@ fn routing_device_borrows_strict_device_in_normal_and_enhanced_modes() {
             }),
             resource_policy: ResourcePolicy::default(),
         });
-        let target = workflow.routing_device_target().unwrap();
-        let routing_device = workflow.routing_device(target).unwrap();
-
-        assert!(matches!(&routing_device, std::borrow::Cow::Borrowed(_)));
-        assert!(std::ptr::eq(routing_device.as_ref(), &target.device));
+        assert!(workflow.strict_device_target().is_some());
     }
 }
 
 #[test]
-fn routing_device_owns_loose_topology_basis_device() {
+fn topology_basis_selects_topology_only_without_mutating_device_capabilities() {
     let offline = PhysicalQubit::new(1);
     let device = Device::line("owned-routing-device", 2)
         .unwrap()
@@ -1390,22 +1386,15 @@ fn routing_device_owns_loose_topology_basis_device() {
         resource_policy: ResourcePolicy::default(),
     });
     let target = workflow.routing_device_target().unwrap();
-    let routing_device = workflow.routing_device(target).unwrap();
 
-    assert!(matches!(&routing_device, std::borrow::Cow::Owned(_)));
-    assert_eq!(routing_device.qubits().count(), 2);
+    assert!(workflow.strict_device_target().is_none());
+    assert_eq!(target.device.qubits().count(), 2);
     assert_eq!(
-        routing_device.invalid_qubits().collect::<Vec<_>>(),
+        target.device.invalid_qubits().collect::<Vec<_>>(),
         vec![offline]
     );
-    assert_eq!(routing_device.topology().undirected_edges().count(), 1);
-    assert!(matches!(
-        routing_device.native_gates(),
-        [
-            Instruction::Standard(StandardGate::H),
-            Instruction::Standard(StandardGate::CZ)
-        ]
-    ));
+    assert_eq!(target.device.topology().undirected_edges().count(), 1);
+    assert!(target.device.native_gates().is_empty());
 }
 
 #[test]
