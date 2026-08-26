@@ -688,8 +688,14 @@ impl CompilerWorkflow {
             return Ok(());
         };
         let (max_rounds, max_stale_rounds) = match self.config.mode {
-            CompileMode::Normal => (2, 1),
-            CompileMode::Enhanced => (8, 3),
+            CompileMode::Normal => (
+                NativeOptimizer::NORMAL_MAX_ROUNDS,
+                NativeOptimizer::NORMAL_MAX_STALE_ROUNDS,
+            ),
+            CompileMode::Enhanced => (
+                NativeOptimizer::ENHANCED_MAX_ROUNDS,
+                NativeOptimizer::ENHANCED_MAX_STALE_ROUNDS,
+            ),
         };
         let planning_session = state.planning_session.clone().ok_or_else(|| {
             CompilerError::InvariantViolation(

@@ -31,11 +31,16 @@ use crate::circuit::{
     ValueSwitchCase,
 };
 use crate::compile::CompilerError;
-use crate::compile::transform::decompose::unitary::DeviceTwoQubitSynthesisContext;
+use crate::compile::device_planning::DevicePlanningSession;
+use crate::compile::transform::decompose::unitary::{
+    DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
+};
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::{CircuitAnalysis, RewriteEdits, TransformOutcome, Transformer};
+use crate::device::Device;
 use smallvec::smallvec;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 const TRANSFORM_NAME: &str = "resynthesize.two_qubit_blocks";
 const PHASE_EPS: f64 = 1e-12;
@@ -125,6 +130,49 @@ pub fn resynthesize_two_qubit_blocks(
     config: TwoQubitBlockResynthesisConfig,
 ) -> Result<TransformOutcome, CompilerError> {
     resynthesize_two_qubit_blocks_with_device(circuit, config, None)
+}
+
+/// Interpretation of circuit qubits for device-aware two-qubit resynthesis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceResynthesisPlacement {
+    /// Circuit qubits are logical and candidates must work across placement domains.
+    PreLayoutEnvelope,
+    /// Circuit qubits are routed physical identifiers on exact device locations.
+    ExactPhysical,
+}
+
+impl From<DeviceResynthesisPlacement> for DeviceSynthesisPlacement {
+    fn from(value: DeviceResynthesisPlacement) -> Self {
+        match value {
+            DeviceResynthesisPlacement::PreLayoutEnvelope => Self::PreLayoutEnvelope,
+            DeviceResynthesisPlacement::ExactPhysical => Self::ExactPhysical,
+        }
+    }
+}
+
+/// Runs one device-aware numeric resynthesis pass on `circuit`.
+///
+/// This explicit diagnostic/custom-pipeline entry point builds a run-local
+/// immutable planning session. The production compiler workflow instead
+/// shares its planning session across phases; both paths use the same device
+/// cost model and strict-improvement policy.
+pub fn resynthesize_two_qubit_blocks_for_device(
+    circuit: &Circuit,
+    device: &Device,
+    placement: DeviceResynthesisPlacement,
+    config: TwoQubitBlockResynthesisConfig,
+) -> Result<TransformOutcome, CompilerError> {
+    if !ResynthesizeTwoQubitBlocks::is_applicable(circuit) {
+        return Ok(TransformOutcome::Unchanged);
+    }
+    let planning_session = Arc::new(DevicePlanningSession::new(device));
+    let device_context = DeviceTwoQubitSynthesisContext::build_with_session(
+        device,
+        circuit,
+        placement.into(),
+        planning_session,
+    )?;
+    resynthesize_two_qubit_blocks_with_device(circuit, config, Some(device_context))
 }
 
 /// Workflow-scoped synthesis artifacts shared by ordinary resynthesis passes.

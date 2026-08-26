@@ -55,6 +55,7 @@ use crate::device::Device;
 use ndarray::Array2;
 use num_complex::Complex64;
 use smallvec::{SmallVec, smallvec};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
 use std::sync::Arc;
@@ -62,29 +63,47 @@ use std::sync::Arc;
 const PHASE_EPS: f64 = 1e-12;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct NativeOptimizationSummary {
-    pub(crate) native_two_qubit_ops: u64,
-    pub(crate) native_two_qubit_depth: u64,
-    pub(crate) total_native_depth: u64,
-    pub(crate) native_total_ops: u64,
-    pub(crate) predicted_log_error: Option<f64>,
-    pub(crate) unavailable_error_count: u64,
-    pub(crate) imputed_error_count: u64,
+pub struct NativeOptimizationSummary {
+    /// Number of native two-qubit operations across all control-flow scopes.
+    pub native_two_qubit_ops: u64,
+    /// Sum of native two-qubit depth across all control-flow scopes.
+    pub native_two_qubit_depth: u64,
+    /// Sum of total native depth across all control-flow scopes.
+    pub total_native_depth: u64,
+    /// Number of native operations across all control-flow scopes.
+    pub native_total_ops: u64,
+    /// Summed predicted log error, or `None` when calibration is unavailable.
+    pub predicted_log_error: Option<f64>,
+    /// Number of operations whose error metric was unavailable.
+    pub unavailable_error_count: u64,
+    /// Number of operations whose error metric was imputed.
+    pub imputed_error_count: u64,
 }
 
+/// Result of one bounded exact-physical native optimization run.
 #[derive(Debug, Clone)]
-pub(crate) struct NativeOptimizationResult {
-    pub(crate) circuit: Circuit,
-    pub(crate) changed: bool,
-    pub(crate) rounds: u8,
-    pub(crate) restored_best: bool,
-    pub(crate) before: NativeOptimizationSummary,
-    pub(crate) after: NativeOptimizationSummary,
+pub struct NativeOptimizationResult {
+    /// Best whole-circuit point accepted by the optimizer.
+    pub circuit: Circuit,
+    /// Whether the returned circuit differs from the supplied input.
+    pub changed: bool,
+    /// Number of optimization rounds entered, including a terminal stable round.
+    pub rounds: u8,
+    /// Whether the last explored candidate was discarded in favor of an earlier best point.
+    pub restored_best: bool,
+    /// Exact physical cost summary at optimizer entry.
+    pub before: NativeOptimizationSummary,
+    /// Exact physical cost summary for the returned circuit.
+    pub after: NativeOptimizationSummary,
 }
 
 /// Bounded native optimization loop with minimum-point restoration.
-pub(crate) struct NativeOptimizer<'a> {
-    device: &'a Device,
+///
+/// Inputs must already be routed and lowered to exact native instructions for
+/// `device`. Most callers should use the compiler workflow; this lower-level
+/// entry point is intended for diagnostics and custom physical pipelines.
+pub struct NativeOptimizer<'a> {
+    device: Cow<'a, Device>,
     planning_session: Arc<DevicePlanningSession>,
     resynthesis: TwoQubitBlockResynthesisConfig,
     max_rounds: u8,
@@ -92,6 +111,96 @@ pub(crate) struct NativeOptimizer<'a> {
 }
 
 impl<'a> NativeOptimizer<'a> {
+    /// Production native-loop budget used by normal compilation.
+    pub const NORMAL_MAX_ROUNDS: u8 = 2;
+    /// Production stale-round budget used by normal compilation.
+    pub const NORMAL_MAX_STALE_ROUNDS: u8 = 1;
+    /// Production native-loop budget used by enhanced compilation.
+    pub const ENHANCED_MAX_ROUNDS: u8 = 8;
+    /// Production stale-round budget used by enhanced compilation.
+    pub const ENHANCED_MAX_STALE_ROUNDS: u8 = 3;
+
+    /// Creates a reusable optimizer borrowing `device`.
+    pub fn new(
+        device: &'a Device,
+        resynthesis: TwoQubitBlockResynthesisConfig,
+        max_rounds: u8,
+        max_stale_rounds: u8,
+    ) -> Result<Self, CompilerError> {
+        validate_native_optimization_budgets(max_rounds, max_stale_rounds)?;
+        Ok(Self {
+            device: Cow::Borrowed(device),
+            planning_session: Arc::new(DevicePlanningSession::new(device)),
+            resynthesis,
+            max_rounds,
+            max_stale_rounds,
+        })
+    }
+
+    /// Creates a reusable optimizer owning an immutable device snapshot.
+    ///
+    /// This is useful for language bindings and long-lived optimizer objects:
+    /// repeated runs reuse the same run-local planning cache without requiring
+    /// a self-referential wrapper.
+    pub fn new_owned(
+        device: Device,
+        resynthesis: TwoQubitBlockResynthesisConfig,
+        max_rounds: u8,
+        max_stale_rounds: u8,
+    ) -> Result<NativeOptimizer<'static>, CompilerError> {
+        validate_native_optimization_budgets(max_rounds, max_stale_rounds)?;
+        let planning_session = Arc::new(DevicePlanningSession::new(&device));
+        Ok(NativeOptimizer {
+            device: Cow::Owned(device),
+            planning_session,
+            resynthesis,
+            max_rounds,
+            max_stale_rounds,
+        })
+    }
+
+    /// Creates an optimizer with the exact budget used by normal compilation.
+    pub fn normal(device: &'a Device) -> Self {
+        Self::new(
+            device,
+            TwoQubitBlockResynthesisConfig::normal(Default::default()),
+            Self::NORMAL_MAX_ROUNDS,
+            Self::NORMAL_MAX_STALE_ROUNDS,
+        )
+        .expect("production native optimization budgets must be valid")
+    }
+
+    /// Creates an optimizer with the exact budget used by enhanced compilation.
+    pub fn enhanced(device: &'a Device) -> Self {
+        Self::new(
+            device,
+            TwoQubitBlockResynthesisConfig::enhanced(Default::default()),
+            Self::ENHANCED_MAX_ROUNDS,
+            Self::ENHANCED_MAX_STALE_ROUNDS,
+        )
+        .expect("production native optimization budgets must be valid")
+    }
+
+    /// Device snapshot costed and validated by this optimizer.
+    pub fn device(&self) -> &Device {
+        self.device.as_ref()
+    }
+
+    /// Two-qubit resynthesis configuration used in every round.
+    pub fn resynthesis(&self) -> &TwoQubitBlockResynthesisConfig {
+        &self.resynthesis
+    }
+
+    /// Maximum number of rounds entered by one run.
+    pub const fn max_rounds(&self) -> u8 {
+        self.max_rounds
+    }
+
+    /// Number of consecutive non-improving rounds allowed before stopping.
+    pub const fn max_stale_rounds(&self) -> u8 {
+        self.max_stale_rounds
+    }
+
     pub(crate) fn with_session(
         device: &'a Device,
         resynthesis: TwoQubitBlockResynthesisConfig,
@@ -99,8 +208,10 @@ impl<'a> NativeOptimizer<'a> {
         max_stale_rounds: u8,
         planning_session: Arc<DevicePlanningSession>,
     ) -> Self {
+        debug_assert!(max_rounds > 0);
+        debug_assert!(max_stale_rounds > 0);
         Self {
-            device,
+            device: Cow::Borrowed(device),
             planning_session,
             resynthesis,
             max_rounds,
@@ -108,7 +219,7 @@ impl<'a> NativeOptimizer<'a> {
         }
     }
 
-    pub(crate) fn run(&self, circuit: &Circuit) -> Result<NativeOptimizationResult, CompilerError> {
+    pub fn run(&self, circuit: &Circuit) -> Result<NativeOptimizationResult, CompilerError> {
         self.run_with_policy(circuit, NativeResynthesisPolicy::Incremental)
             .map(|(result, _)| result)
     }
@@ -148,7 +259,7 @@ impl<'a> NativeOptimizer<'a> {
         initial: Circuit,
         policy: NativeResynthesisPolicy,
     ) -> Result<(NativeOptimizationResult, NativeWorksetStats), CompilerError> {
-        self.device.validate_circuit(&initial)?;
+        self.device().validate_circuit(&initial)?;
         // Native rounds can carry very large circuits. Share immutable round
         // states so `current`, `best`, and the exact cycle detector do not each
         // deep-clone every operation and nested control-flow body.
@@ -158,7 +269,7 @@ impl<'a> NativeOptimizer<'a> {
         // This exact-physical context is immutable and run-scoped. All consumers
         // share its Arc-backed catalog until a candidate exposes missing coverage.
         let mut context = DeviceTwoQubitSynthesisContext::build_with_session(
-            self.device,
+            self.device(),
             &best,
             DeviceSynthesisPlacement::ExactPhysical,
             Arc::clone(&self.planning_session),
@@ -198,7 +309,7 @@ impl<'a> NativeOptimizer<'a> {
             }
             let legalized = match local_outcome {
                 TransformOutcome::Changed(locally_optimized) => {
-                    match DeviceLowerer::with_session(self.device, &self.planning_session)
+                    match DeviceLowerer::with_session(self.device(), &self.planning_session)
                         .transform(&locally_optimized, None)
                     {
                         Ok(TransformOutcome::Unchanged) => locally_optimized,
@@ -212,7 +323,7 @@ impl<'a> NativeOptimizer<'a> {
                                 TransformOutcome::Unchanged => current.as_ref(),
                                 TransformOutcome::Changed(circuit) => circuit,
                             };
-                            match DeviceLowerer::with_session(self.device, &self.planning_session)
+                            match DeviceLowerer::with_session(self.device(), &self.planning_session)
                                 .transform(fallback, None)?
                             {
                                 TransformOutcome::Changed(legalized) => legalized,
@@ -232,7 +343,7 @@ impl<'a> NativeOptimizer<'a> {
                             "a stable native optimization round exits before legalization"
                         ),
                     };
-                    match DeviceLowerer::with_session(self.device, &self.planning_session)
+                    match DeviceLowerer::with_session(self.device(), &self.planning_session)
                         .transform(&resynthesized, None)?
                     {
                         TransformOutcome::Unchanged => resynthesized,
@@ -250,7 +361,7 @@ impl<'a> NativeOptimizer<'a> {
             // safety boundary either way.
             let validate_every_round = cfg!(debug_assertions);
             if validate_every_round {
-                self.device.validate_circuit(&candidate)?;
+                self.device().validate_circuit(&candidate)?;
             }
 
             if candidate == *current {
@@ -269,7 +380,7 @@ impl<'a> NativeOptimizer<'a> {
             let candidate = Arc::new(candidate);
             if scope_costs_dominate(&candidate_costs, &best_costs) {
                 if !validate_every_round {
-                    self.device.validate_circuit(&candidate)?;
+                    self.device().validate_circuit(&candidate)?;
                 }
                 best = candidate.clone();
                 best_costs = candidate_costs;
@@ -314,7 +425,7 @@ impl<'a> NativeOptimizer<'a> {
             Ok(costs) => Ok(costs),
             Err(ScopeCostError::Context(DeviceContextCostFailure::Unprepared(_))) => {
                 let rebuilt = DeviceTwoQubitSynthesisContext::build_with_session(
-                    self.device,
+                    self.device(),
                     candidate,
                     DeviceSynthesisPlacement::ExactPhysical,
                     Arc::clone(&self.planning_session),
@@ -334,6 +445,23 @@ impl<'a> NativeOptimizer<'a> {
             Err(error) => Err(scope_cost_error(error)),
         }
     }
+}
+
+fn validate_native_optimization_budgets(
+    max_rounds: u8,
+    max_stale_rounds: u8,
+) -> Result<(), CompilerError> {
+    if max_rounds == 0 {
+        return Err(CompilerError::InvalidInput(
+            "native optimizer max_rounds must be greater than zero".to_string(),
+        ));
+    }
+    if max_stale_rounds == 0 {
+        return Err(CompilerError::InvalidInput(
+            "native optimizer max_stale_rounds must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

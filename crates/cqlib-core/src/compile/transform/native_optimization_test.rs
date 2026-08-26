@@ -53,11 +53,11 @@ fn run_rebuild_every_use(
     let initial = Canonicalizer::production()
         .transform_resolved(circuit, None)?
         .circuit;
-    optimizer.device.validate_circuit(&initial)?;
+    optimizer.device().validate_circuit(&initial)?;
     let mut current = initial.clone();
     let mut best = initial;
     let initial_context = build_device_synthesis_context(
-        optimizer.device,
+        optimizer.device(),
         &best,
         DeviceSynthesisPlacement::ExactPhysical,
     )?;
@@ -70,7 +70,7 @@ fn run_rebuild_every_use(
     while rounds < optimizer.max_rounds && stale < optimizer.max_stale_rounds {
         rounds += 1;
         let resynthesis_context = build_device_synthesis_context(
-            optimizer.device,
+            optimizer.device(),
             &current,
             DeviceSynthesisPlacement::ExactPhysical,
         )?;
@@ -81,19 +81,19 @@ fn run_rebuild_every_use(
         .transform_resolved(&current, None)?
         .circuit;
         let local_context = build_device_synthesis_context(
-            optimizer.device,
+            optimizer.device(),
             &resynthesized,
             DeviceSynthesisPlacement::ExactPhysical,
         )?;
         let locally_optimized = OptimizeNativeLocalGates::new(local_context)
             .transform_resolved(&resynthesized, None)?
             .circuit;
-        let legalized = match DeviceLowerer::new(optimizer.device)
+        let legalized = match DeviceLowerer::new(optimizer.device())
             .transform_resolved(&locally_optimized, None)
         {
             Ok(result) => result.circuit,
             Err(CompilerError::DeviceLoweringFailed(_)) => {
-                DeviceLowerer::new(optimizer.device)
+                DeviceLowerer::new(optimizer.device())
                     .transform_resolved(&resynthesized, None)?
                     .circuit
             }
@@ -102,14 +102,14 @@ fn run_rebuild_every_use(
         let candidate = Canonicalizer::production()
             .transform_resolved(&legalized, None)?
             .circuit;
-        optimizer.device.validate_circuit(&candidate)?;
+        optimizer.device().validate_circuit(&candidate)?;
         if candidate == current {
             current = candidate;
             break;
         }
 
         let candidate_context = build_device_synthesis_context(
-            optimizer.device,
+            optimizer.device(),
             &candidate,
             DeviceSynthesisPlacement::ExactPhysical,
         )?;
