@@ -32,7 +32,7 @@ Example::
         circuit,
         device,
         layout,
-        SabreConfig(routing_trials=1, seed=7),
+        config=SabreConfig(routing_trials=1, seed=7),
     )
     assert result.swap_count == 1
     print(result.final_layout)

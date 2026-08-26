@@ -29,14 +29,14 @@ from cqlib.compile.transform.layout import (
     LayoutScore,
     PhysicalLayoutGraph,
     PreparedSabreCircuit,
-    PreparedSabreDeviceTarget,
+    PreparedSabreTarget,
     Vf2EdgeRequirement,
     Vf2LayoutConfig,
     analyze_circuit_for_layout,
     greedy_layout,
     greedy_layout_prepared,
     prepare_sabre_circuit,
-    prepare_sabre_device_target,
+    prepare_sabre_topology_target,
     sabre_layout,
     sabre_layout_prepared,
     trivial_layout,
@@ -62,7 +62,7 @@ def test_layout_module_and_public_types_are_registered() -> None:
         DistanceTable,
         PhysicalLayoutGraph,
         PreparedSabreCircuit,
-        PreparedSabreDeviceTarget,
+        PreparedSabreTarget,
     ):
         assert public_type.__module__ == "cqlib.compile.transform.layout"
 
@@ -182,7 +182,7 @@ def test_prepared_sabre_layout_matches_direct_entry_point() -> None:
     config = SabreConfig.deterministic_seeded(17)
 
     prepared = prepare_sabre_circuit(circuit)
-    prepared_target = prepare_sabre_device_target(prepared, device)
+    prepared_target = prepare_sabre_topology_target(prepared, device)
     direct = sabre_layout(circuit, device, config=config)
     reused = sabre_layout_prepared(prepared, prepared_target, config=config)
 
