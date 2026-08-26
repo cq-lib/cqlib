@@ -767,7 +767,7 @@ impl PyCompilerWorkflow {
             None => build_compile_config(None, None, None)?,
         };
         Ok(Self {
-            inner: CompilerWorkflow::new(config),
+            inner: CompilerWorkflow::try_new(config).map_err(compiler_error_to_py_err)?,
         })
     }
 

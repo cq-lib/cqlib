@@ -44,6 +44,7 @@ use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// Circuit-side data prepared once for repeated SABRE layout selection.
 ///
@@ -68,8 +69,8 @@ pub struct PreparedSabreCircuit {
 /// same preparation.
 #[derive(Debug, Clone)]
 pub struct PreparedSabreTarget {
-    physical: PhysicalLayoutGraph,
-    routing: RoutingTarget,
+    physical: Arc<PhysicalLayoutGraph>,
+    routing: Arc<RoutingTarget>,
     routing_metadata: PreparedRouteMetadata,
     refinement_metadata: PreparedRouteMetadata,
     backward_refinement_metadata: PreparedRouteMetadata,
@@ -131,8 +132,16 @@ pub fn prepare_sabre_topology_target(
     prepared: &PreparedSabreCircuit,
     device: &Device,
 ) -> Result<PreparedSabreTarget, CompilerError> {
-    let physical = PhysicalLayoutGraph::from_device(device)?;
-    let routing = RoutingTarget::from_physical(&physical)?;
+    let physical = Arc::new(PhysicalLayoutGraph::from_device(device)?);
+    let routing = Arc::new(RoutingTarget::from_physical(&physical)?);
+    prepare_sabre_topology_target_with_prepared(prepared, physical, routing)
+}
+
+pub(crate) fn prepare_sabre_topology_target_with_prepared(
+    prepared: &PreparedSabreCircuit,
+    physical: Arc<PhysicalLayoutGraph>,
+    routing: Arc<RoutingTarget>,
+) -> Result<PreparedSabreTarget, CompilerError> {
     finish_sabre_target_preparation(prepared, physical, routing)
 }
 
@@ -154,20 +163,34 @@ pub(crate) fn prepare_sabre_device_target_with_session(
     device: &Device,
     planning_session: &DevicePlanningSession,
 ) -> Result<PreparedSabreTarget, CompilerError> {
-    let physical = PhysicalLayoutGraph::from_device(device)?;
-    let routing = RoutingTarget::from_device_with_session(
+    let physical = Arc::new(PhysicalLayoutGraph::from_device(device)?);
+    prepare_sabre_device_target_with_session_and_physical(
+        prepared,
+        device,
+        physical,
+        planning_session,
+    )
+}
+
+pub(crate) fn prepare_sabre_device_target_with_session_and_physical(
+    prepared: &PreparedSabreCircuit,
+    device: &Device,
+    physical: Arc<PhysicalLayoutGraph>,
+    planning_session: &DevicePlanningSession,
+) -> Result<PreparedSabreTarget, CompilerError> {
+    let routing = Arc::new(RoutingTarget::from_device_with_session(
         device,
         &physical,
         &prepared.routing_dag,
         planning_session,
-    )?;
+    )?);
     finish_sabre_target_preparation(prepared, physical, routing)
 }
 
 fn finish_sabre_target_preparation(
     prepared: &PreparedSabreCircuit,
-    physical: PhysicalLayoutGraph,
-    routing: RoutingTarget,
+    physical: Arc<PhysicalLayoutGraph>,
+    routing: Arc<RoutingTarget>,
 ) -> Result<PreparedSabreTarget, CompilerError> {
     let routing_metadata = PreparedRouteMetadata::new(&prepared.routing_dag, &routing)?;
     let refinement_metadata = PreparedRouteMetadata::new(&prepared.refinement_dag, &routing)?;

@@ -14,7 +14,7 @@ use super::*;
 use crate::circuit::{Circuit, Instruction, Qubit, StandardGate};
 use crate::compile::CompilerError;
 use crate::compile::device_planning::DevicePlanningSession;
-use crate::compile::sabre::SabreConfig;
+use crate::compile::sabre::{RoutingTarget, SabreConfig};
 use crate::compile::test_utils::{
     assert_two_qubit_operations_supported_by_topology, generated_small_routable_circuit,
 };
@@ -63,11 +63,15 @@ fn shared_planning_session_preserves_seeded_routing_output() {
     )
     .unwrap();
 
-    let standalone = route_with_layout_tracked(&circuit, &device, &layout, &config).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
+    let routing_target = RoutingTarget::from_physical(&physical).unwrap();
+    let standalone =
+        route_with_layout_tracked_on_topology(&circuit, &routing_target, &layout, &config).unwrap();
     let session = DevicePlanningSession::new(&device);
-    let shared =
-        route_with_layout_tracked_with_session(&circuit, &device, &layout, &config, &session)
-            .unwrap();
+    let shared = route_with_layout_tracked_with_session_on_physical(
+        &circuit, &device, &physical, &layout, &config, &session,
+    )
+    .unwrap();
 
     assert_eq!(standalone.routed().circuit(), shared.routed().circuit());
     assert_eq!(

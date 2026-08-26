@@ -495,28 +495,30 @@ pub fn sabre_route(
         .map(|result| result.routing)
 }
 
-pub(crate) fn sabre_route_with_provenance(
+pub(crate) fn sabre_route_with_provenance_and_session_on_physical(
     circuit: &Circuit,
     device: &Device,
-    initial_layout: &Layout,
-    config: &SabreConfig,
-) -> Result<TrackedSabreRoutingResult, CompilerError> {
-    sabre_route_topology_with_tracking(circuit, device, initial_layout, config, true)
-}
-
-pub(crate) fn sabre_route_with_provenance_and_session(
-    circuit: &Circuit,
-    device: &Device,
+    physical: &PhysicalLayoutGraph,
     initial_layout: &Layout,
     config: &SabreConfig,
     planning_session: &DevicePlanningSession,
 ) -> Result<TrackedSabreRoutingResult, CompilerError> {
     config.validate()?;
-    let physical = PhysicalLayoutGraph::from_device(device)?;
     let sabre = SabreDag::from_operations(circuit.operations())?;
     let target =
-        RoutingTarget::from_device_with_session(device, &physical, &sabre, planning_session)?;
+        RoutingTarget::from_device_with_session(device, physical, &sabre, planning_session)?;
     sabre_route_with_prepared_target(circuit, &sabre, &target, initial_layout, config, true)
+}
+
+pub(crate) fn sabre_route_with_provenance_on_target(
+    circuit: &Circuit,
+    target: &RoutingTarget,
+    initial_layout: &Layout,
+    config: &SabreConfig,
+) -> Result<TrackedSabreRoutingResult, CompilerError> {
+    config.validate()?;
+    let sabre = SabreDag::from_operations(circuit.operations())?;
+    sabre_route_with_prepared_target(circuit, &sabre, target, initial_layout, config, true)
 }
 
 fn sabre_route_topology_with_tracking(

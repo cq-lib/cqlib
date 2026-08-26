@@ -15,7 +15,7 @@ use super::*;
 use crate::circuit::{Circuit, ClassicalExpr, Instruction, Qubit, StandardGate};
 use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::sabre::{
-    SabreConfig, SabreRoutingResult, sabre_route_with_provenance_and_session,
+    SabreConfig, SabreRoutingResult, sabre_route_with_provenance_and_session_on_physical,
 };
 use crate::compile::transform::route_sabre;
 use crate::compile::{CompilerError, SabreRoutingFailure};
@@ -42,9 +42,11 @@ fn sabre_route_device(
     config: &SabreConfig,
 ) -> Result<SabreRoutingResult, CompilerError> {
     let planning_session = DevicePlanningSession::new(device);
-    sabre_route_with_provenance_and_session(
+    let physical = PhysicalLayoutGraph::from_device(device)?;
+    sabre_route_with_provenance_and_session_on_physical(
         circuit,
         device,
+        &physical,
         initial_layout,
         config,
         &planning_session,

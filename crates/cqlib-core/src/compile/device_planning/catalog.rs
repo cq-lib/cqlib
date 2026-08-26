@@ -33,10 +33,10 @@ impl NativePlanCatalog {
         let mut roots = roots.into_iter().collect::<Vec<_>>();
         roots.sort();
         roots.dedup();
-        session.prepare(roots.iter().cloned())?;
+        let snapshot = session.prepare(roots.iter().cloned())?;
         let mut availability = HashMap::with_capacity(roots.len());
         for root in roots {
-            let planned = session.availability(&root).ok_or_else(|| {
+            let planned = snapshot.availability(&root).ok_or_else(|| {
                 CompilerError::InvariantViolation(format!(
                     "device planning session did not retain requested root {root:?}"
                 ))

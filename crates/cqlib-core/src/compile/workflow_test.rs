@@ -22,14 +22,16 @@ use crate::circuit::{
 };
 use crate::compile::knowledge::library::RuleKind;
 use crate::compile::resource::ResourcePolicy;
+use crate::compile::sabre::RoutingTarget;
 use crate::compile::test_utils::{
     assert_compiled_circuit_equivalent, contains_high_level_gate, standard_ops, two_qubit_device,
 };
 use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
+use crate::compile::transform::layout::PhysicalLayoutGraph;
 use crate::compile::transform::{
     CanonicalizeConfig, Canonicalizer, CircuitAnalysis, KnowledgeRewriteDiagnostics,
     KnowledgeRewriteSession, KnowledgeRewriter, OperationReplacement, OptimizeOneQubitRuns,
-    RewriteConfig, RewriteEdits, TransformOutcome, route_with_layout_tracked,
+    RewriteConfig, RewriteEdits, TransformOutcome, route_with_layout_tracked_on_topology,
 };
 use crate::compile::{
     CompileConfig, CompileMode, CompileTarget, CompilerError, DeviceCompileTarget,
@@ -40,7 +42,7 @@ use ndarray::array;
 use num_complex::Complex64;
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 
 fn compile_config(mode: CompileMode) -> CompileConfig {
     CompileConfig {
@@ -74,13 +76,15 @@ fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowS
         collect_rewrite_diagnostics: true,
         changed: false,
         steps: Vec::new(),
-        prepared_target_basis: Some(prepared_target_basis),
+        prepared_target_basis: Some(Arc::new(prepared_target_basis)),
         two_qubit_target,
         virtual_permutation: None,
         device_metadata: None,
         one_qubit_optimizer,
         pending_one_qubit_resynthesis: false,
         resynthesis_session: WorkflowResynthesisSession::default(),
+        routing_physical: None,
+        topology_routing_target: None,
         planning_session: None,
     }
 }
@@ -104,6 +108,8 @@ fn workflow_state_without_target_basis() -> WorkflowState {
         one_qubit_optimizer: Some(OptimizeOneQubitRuns::logical()),
         pending_one_qubit_resynthesis: false,
         resynthesis_session: WorkflowResynthesisSession::default(),
+        routing_physical: None,
+        topology_routing_target: None,
         planning_session: None,
     }
 }
@@ -648,9 +654,11 @@ fn sabre_route_provenance_limits_post_routing_rewrite_work() {
         ])
         .unwrap();
     let layout = Layout::from_pairs(&[(0, 0), (1, 1), (2, 2)], 3).unwrap();
-    let routed = route_with_layout_tracked(
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
+    let routing_target = RoutingTarget::from_physical(&physical).unwrap();
+    let routed = route_with_layout_tracked_on_topology(
         &state.current,
-        &device,
+        &routing_target,
         &layout,
         &sabre_config_for_mode(CompileMode::Enhanced, Some(7)),
     )
@@ -695,9 +703,11 @@ fn sabre_pure_layout_relabel_reuses_rewrite_proof_in_constant_time() {
         ])
         .unwrap();
     let layout = Layout::from_pairs(&[(0, 2)], 3).unwrap();
-    let routed = route_with_layout_tracked(
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
+    let routing_target = RoutingTarget::from_physical(&physical).unwrap();
+    let routed = route_with_layout_tracked_on_topology(
         &state.current,
-        &device,
+        &routing_target,
         &layout,
         &sabre_config_for_mode(CompileMode::Enhanced, Some(11)),
     )
@@ -3279,4 +3289,182 @@ fn validate_topology_target_accepts_topological_circuit() {
     state.current = circuit;
 
     workflow.validate_topology_target(&mut state).unwrap();
+}
+
+#[test]
+fn try_new_reports_invalid_target_basis_during_construction() {
+    let workflow = CompilerWorkflow::try_new(CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Basis(vec![Instruction::McGate(Box::new(MCGate::new(
+            1,
+            StandardGate::X,
+        )))]),
+        resource_policy: ResourcePolicy::default(),
+    });
+
+    assert!(matches!(workflow, Err(CompilerError::InvalidInput(_))));
+}
+
+#[test]
+fn topology_basis_workflow_reuses_prepared_target_across_mixed_runs() {
+    let config = CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::TopologyBasis {
+            device_target: DeviceCompileTarget {
+                device: Device::bidirectional_line("cached-topology-target", 3).unwrap(),
+                initial_layout: None,
+                seed: Some(101),
+            },
+            basis: vec![
+                Instruction::Standard(StandardGate::H),
+                Instruction::Standard(StandardGate::CZ),
+            ],
+        },
+        resource_policy: ResourcePolicy::default(),
+    };
+    let workflow = CompilerWorkflow::try_new(config.clone()).unwrap();
+    let prepared = workflow.prepared_target().unwrap();
+    let basis = Arc::clone(prepared.target_basis.as_ref().unwrap());
+    let physical = Arc::clone(prepared.routing_physical.as_ref().unwrap());
+    let routing = Arc::clone(prepared.topology_routing_target.as_ref().unwrap());
+
+    let mut first_circuit = Circuit::new(3);
+    first_circuit.h(Qubit::new(0)).unwrap();
+    first_circuit.cx(Qubit::new(0), Qubit::new(2)).unwrap();
+    let mut second_circuit = Circuit::new(3);
+    second_circuit.h(Qubit::new(1)).unwrap();
+    second_circuit.cx(Qubit::new(1), Qubit::new(2)).unwrap();
+
+    let first = workflow.run(&first_circuit).unwrap();
+    let repeated = workflow.run(&first_circuit).unwrap();
+    let second = workflow.run(&second_circuit).unwrap();
+    let fresh_second = CompilerWorkflow::try_new(config)
+        .unwrap()
+        .run(&second_circuit)
+        .unwrap();
+
+    assert_eq!(first, repeated);
+    assert_eq!(second, fresh_second);
+    let prepared = workflow.prepared_target().unwrap();
+    assert!(Arc::ptr_eq(&basis, prepared.target_basis.as_ref().unwrap()));
+    assert!(Arc::ptr_eq(
+        &physical,
+        prepared.routing_physical.as_ref().unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        &routing,
+        prepared.topology_routing_target.as_ref().unwrap()
+    ));
+}
+
+#[test]
+fn device_workflow_reuses_prepared_target_across_mixed_runs() {
+    let device = Device::bidirectional_line("cached-device-target", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let config = CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device: device.clone(),
+            initial_layout: None,
+            seed: Some(103),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    };
+    let workflow = CompilerWorkflow::try_new(config.clone()).unwrap();
+    let prepared = workflow.prepared_target().unwrap();
+    let physical = Arc::clone(prepared.routing_physical.as_ref().unwrap());
+    let planning_session = Arc::clone(prepared.planning_session.as_ref().unwrap());
+
+    let mut first_circuit = Circuit::new(3);
+    first_circuit.h(Qubit::new(0)).unwrap();
+    first_circuit.cx(Qubit::new(0), Qubit::new(2)).unwrap();
+    let mut second_circuit = Circuit::new(3);
+    second_circuit.h(Qubit::new(2)).unwrap();
+    second_circuit.cx(Qubit::new(1), Qubit::new(2)).unwrap();
+
+    let first = workflow.run(&first_circuit).unwrap();
+    let repeated = workflow.run(&first_circuit).unwrap();
+    let second = workflow.run(&second_circuit).unwrap();
+    let fresh_second = CompilerWorkflow::try_new(config)
+        .unwrap()
+        .run(&second_circuit)
+        .unwrap();
+
+    assert_eq!(first, repeated);
+    assert_eq!(second, fresh_second);
+    device.validate_circuit(&first.circuit).unwrap();
+    device.validate_circuit(&second.circuit).unwrap();
+    let prepared = workflow.prepared_target().unwrap();
+    assert!(Arc::ptr_eq(
+        &physical,
+        prepared.routing_physical.as_ref().unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        &planning_session,
+        prepared.planning_session.as_ref().unwrap()
+    ));
+}
+
+#[test]
+fn shared_device_workflow_supports_concurrent_mixed_runs() {
+    const WORKERS: usize = 4;
+    let device = Device::bidirectional_line("concurrent-cached-device-target", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let config = CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Device(DeviceCompileTarget {
+            device,
+            initial_layout: None,
+            seed: Some(107),
+        }),
+        resource_policy: ResourcePolicy::default(),
+    };
+    let mut first_circuit = Circuit::new(3);
+    first_circuit.h(Qubit::new(0)).unwrap();
+    first_circuit.cx(Qubit::new(0), Qubit::new(2)).unwrap();
+    let mut second_circuit = Circuit::new(3);
+    second_circuit.h(Qubit::new(2)).unwrap();
+    second_circuit.cx(Qubit::new(1), Qubit::new(2)).unwrap();
+    let circuits = Arc::new([first_circuit, second_circuit]);
+    let expected = circuits
+        .iter()
+        .map(|circuit| {
+            CompilerWorkflow::try_new(config.clone())
+                .unwrap()
+                .run(circuit)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let expected = Arc::new(expected);
+    let workflow = Arc::new(CompilerWorkflow::try_new(config).unwrap());
+    let barrier = Arc::new(Barrier::new(WORKERS));
+
+    let handles = (0..WORKERS)
+        .map(|worker| {
+            let circuits = Arc::clone(&circuits);
+            let expected = Arc::clone(&expected);
+            let workflow = Arc::clone(&workflow);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let circuit_index = worker % circuits.len();
+                barrier.wait();
+                let result = workflow.run(&circuits[circuit_index]).unwrap();
+                assert_eq!(result, expected[circuit_index]);
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
 }

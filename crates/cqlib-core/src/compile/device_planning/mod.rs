@@ -27,7 +27,9 @@ pub(crate) use cost::{
     CalibrationEstimator, DevicePhysicalCost, NativePlanCost, NativePlanLeaf, NativePlanSummary,
 };
 pub(crate) use planner::{DevicePlanner, DevicePlannerError, PlanChoice, PlanId, PlanTemplate};
-pub(crate) use session::{DevicePlanningSession, NativePlanAvailability, SelectedNativePlan};
+pub(crate) use session::{
+    DevicePlanSnapshot, DevicePlanningSession, NativePlanAvailability, SelectedNativePlan,
+};
 pub(crate) use state::DeviceGateState;
 pub(crate) use templates::DirectionTemplate;
 

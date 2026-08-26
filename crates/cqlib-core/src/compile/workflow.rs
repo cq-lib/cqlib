@@ -47,7 +47,7 @@ use crate::circuit::{Circuit, ClassicalControlOp, Instruction, Operation, Standa
 use crate::compile::CompilerError;
 use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::resource::ResourceLimits;
-use crate::compile::sabre::SabreConfig;
+use crate::compile::sabre::{RoutingTarget, SabreConfig};
 use crate::compile::transform::decompose::unitary::{
     DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext, TwoQubitSynthesisTarget,
 };
@@ -55,6 +55,7 @@ use crate::compile::transform::decompose::{
     DecomposeDefinitions, DecomposeMcGates, DecomposeUnitaries, McGateDecomposeConfig,
     UnitaryDecomposeConfig,
 };
+use crate::compile::transform::layout::PhysicalLayoutGraph;
 use crate::compile::transform::native_optimization::NativeOptimizer;
 use crate::compile::transform::resynthesis::{
     WorkflowResynthesisSession, resynthesize_two_qubit_blocks_workflow,
@@ -65,11 +66,11 @@ use crate::compile::transform::{
     LowerToRoutingBasis, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks, RewriteConfig,
     RewriteEdits, RewriteExecutionRecord, TargetBasisCostModel, TargetBasisLowerer,
     TransformOutcome, Transformer, TwoQubitBlockResynthesisConfig, VirtualPermutation,
-    VirtualPermutationElisionStatus, elide_virtual_permutations, route_sabre_tracked,
-    route_sabre_tracked_with_session, route_with_layout_tracked,
-    route_with_layout_tracked_with_session,
+    VirtualPermutationElisionStatus, elide_virtual_permutations, route_sabre_tracked_on_topology,
+    route_sabre_tracked_with_session_on_physical, route_with_layout_tracked_on_topology,
+    route_with_layout_tracked_with_session_on_physical,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::{
     CompileConfig, CompileMode, CompileResult, CompileTarget, DeviceCompilationMetadata,
@@ -110,13 +111,15 @@ struct WorkflowState {
     collect_rewrite_diagnostics: bool,
     changed: bool,
     steps: Vec<WorkflowStepReport>,
-    prepared_target_basis: Option<PreparedTargetBasis>,
+    prepared_target_basis: Option<Arc<PreparedTargetBasis>>,
     two_qubit_target: TwoQubitSynthesisTarget,
     virtual_permutation: Option<VirtualPermutation>,
     device_metadata: Option<DeviceCompilationMetadata>,
     one_qubit_optimizer: Option<OptimizeOneQubitRuns>,
     pending_one_qubit_resynthesis: bool,
     resynthesis_session: WorkflowResynthesisSession,
+    routing_physical: Option<Arc<PhysicalLayoutGraph>>,
+    topology_routing_target: Option<Arc<RoutingTarget>>,
     planning_session: Option<Arc<DevicePlanningSession>>,
 }
 
@@ -137,6 +140,75 @@ impl PreparedTargetBasis {
             instructions,
             lowerer,
             cost_model,
+        })
+    }
+}
+
+/// Target-derived data shared by every run of one compiler workflow.
+///
+/// Circuit analysis, SABRE DAGs, interaction requirements, and route metadata
+/// deliberately remain in [`WorkflowState`] or the routing call that owns them.
+struct PreparedCompileTarget {
+    target_basis: Option<Arc<PreparedTargetBasis>>,
+    one_qubit_optimizer: Option<OptimizeOneQubitRuns>,
+    two_qubit_target: TwoQubitSynthesisTarget,
+    routing_physical: Option<Arc<PhysicalLayoutGraph>>,
+    topology_routing_target: Option<Arc<RoutingTarget>>,
+    planning_session: Option<Arc<DevicePlanningSession>>,
+}
+
+impl PreparedCompileTarget {
+    fn new(config: &CompileConfig) -> Result<Self, CompilerError> {
+        let target_basis = match &config.target {
+            CompileTarget::Basis(target_basis)
+            | CompileTarget::TopologyBasis {
+                basis: target_basis,
+                ..
+            } => {
+                validate_workflow_target_basis_config(target_basis)?;
+                Some(Arc::new(PreparedTargetBasis::new(target_basis.to_vec())?))
+            }
+            CompileTarget::Logical | CompileTarget::Device(_) => None,
+        };
+        let one_qubit_optimizer = match &config.target {
+            CompileTarget::Logical => Some(OptimizeOneQubitRuns::logical()),
+            CompileTarget::Basis(_) | CompileTarget::TopologyBasis { .. } => {
+                let prepared = target_basis.as_ref().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "explicit target basis was not prepared".to_string(),
+                    )
+                })?;
+                Some(OptimizeOneQubitRuns::basis_with_cost_model(Arc::clone(
+                    &prepared.cost_model,
+                )))
+            }
+            CompileTarget::Device(_) => None,
+        };
+        let two_qubit_target = target_basis
+            .as_ref()
+            .map_or_else(TwoQubitSynthesisTarget::unconstrained, |prepared| {
+                TwoQubitSynthesisTarget::from_cost_model(Arc::clone(&prepared.cost_model))
+            });
+        let (routing_physical, topology_routing_target, planning_session) = match &config.target {
+            CompileTarget::TopologyBasis { device_target, .. } => {
+                let physical = Arc::new(PhysicalLayoutGraph::from_device(&device_target.device)?);
+                let routing = Arc::new(RoutingTarget::from_physical(&physical)?);
+                (Some(physical), Some(routing), None)
+            }
+            CompileTarget::Device(target) => {
+                let physical = Arc::new(PhysicalLayoutGraph::from_device(&target.device)?);
+                let session = Arc::new(DevicePlanningSession::new(&target.device));
+                (Some(physical), None, Some(session))
+            }
+            CompileTarget::Logical | CompileTarget::Basis(_) => (None, None, None),
+        };
+        Ok(Self {
+            target_basis,
+            one_qubit_optimizer,
+            two_qubit_target,
+            routing_physical,
+            topology_routing_target,
+            planning_session,
         })
     }
 }
@@ -364,12 +436,29 @@ enum RewritePhase {
 /// Compiler optimization workflow built from completed compiler transforms.
 pub struct CompilerWorkflow {
     config: CompileConfig,
+    prepared_target: OnceLock<Arc<PreparedCompileTarget>>,
+    prepare_lock: Mutex<()>,
 }
 
 impl CompilerWorkflow {
     /// Creates a compiler workflow from a complete configuration.
+    ///
+    /// Target preparation is deferred until the first run. Use
+    /// [`Self::try_new`] when construction should validate and prepare the
+    /// complete target eagerly.
     pub const fn new(config: CompileConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            prepared_target: OnceLock::new(),
+            prepare_lock: Mutex::new(()),
+        }
+    }
+
+    /// Creates a workflow and eagerly prepares all target-derived invariants.
+    pub fn try_new(config: CompileConfig) -> Result<Self, CompilerError> {
+        let workflow = Self::new(config);
+        workflow.prepared_target()?;
+        Ok(workflow)
     }
 
     /// Returns the workflow configuration.
@@ -421,26 +510,7 @@ impl CompilerWorkflow {
         circuit: Circuit,
         collect_rewrite_diagnostics: bool,
     ) -> Result<(CompileResult, KnowledgeRewriteDiagnostics), CompilerError> {
-        let prepared_target_basis = self.prepare_target_basis()?;
-        let one_qubit_optimizer = match &self.config.target {
-            CompileTarget::Logical => Some(OptimizeOneQubitRuns::logical()),
-            CompileTarget::Basis(_) | CompileTarget::TopologyBasis { .. } => {
-                let prepared = prepared_target_basis.as_ref().ok_or_else(|| {
-                    CompilerError::InvariantViolation(
-                        "explicit target basis was not prepared".to_string(),
-                    )
-                })?;
-                Some(OptimizeOneQubitRuns::basis_with_cost_model(Arc::clone(
-                    &prepared.cost_model,
-                )))
-            }
-            CompileTarget::Device(_) => None,
-        };
-        let two_qubit_target = prepared_target_basis
-            .as_ref()
-            .map_or_else(TwoQubitSynthesisTarget::unconstrained, |prepared| {
-                TwoQubitSynthesisTarget::from_cost_model(Arc::clone(&prepared.cost_model))
-            });
+        let prepared_target = self.prepared_target()?;
         let analysis = CircuitAnalysis::analyze(&circuit);
         let mut state = WorkflowState {
             current: circuit,
@@ -452,16 +522,16 @@ impl CompilerWorkflow {
             collect_rewrite_diagnostics,
             changed: false,
             steps: Vec::new(),
-            prepared_target_basis,
-            two_qubit_target,
+            prepared_target_basis: prepared_target.target_basis.clone(),
+            two_qubit_target: prepared_target.two_qubit_target.clone(),
             virtual_permutation: None,
             device_metadata: None,
-            one_qubit_optimizer,
+            one_qubit_optimizer: prepared_target.one_qubit_optimizer.clone(),
             pending_one_qubit_resynthesis: false,
             resynthesis_session: WorkflowResynthesisSession::default(),
-            planning_session: self
-                .strict_device_target()
-                .map(|target| Arc::new(DevicePlanningSession::new(&target.device))),
+            routing_physical: prepared_target.routing_physical.clone(),
+            topology_routing_target: prepared_target.topology_routing_target.clone(),
+            planning_session: prepared_target.planning_session.clone(),
         };
 
         self.record_pre_init(&mut state);
@@ -1062,15 +1132,31 @@ impl CompilerWorkflow {
             supplied_layout,
         ) = if let Some(initial_layout) = target.initial_layout.as_ref() {
             let routed = if let Some(session) = state.planning_session.as_deref() {
-                route_with_layout_tracked_with_session(
+                let physical = state.routing_physical.as_deref().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "strict-device routing has no prepared physical graph".to_string(),
+                    )
+                })?;
+                route_with_layout_tracked_with_session_on_physical(
                     &state.current,
                     device,
+                    physical,
                     initial_layout,
                     &config,
                     session,
                 )?
             } else {
-                route_with_layout_tracked(&state.current, device, initial_layout, &config)?
+                let routing = state.topology_routing_target.as_deref().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "topology routing has no prepared routing target".to_string(),
+                    )
+                })?;
+                route_with_layout_tracked_on_topology(
+                    &state.current,
+                    routing,
+                    initial_layout,
+                    &config,
+                )?
             };
             let route_changed = routed.routed().changed(&state.current);
             let swap_count = routed.routed().swap_count();
@@ -1094,15 +1180,37 @@ impl CompilerWorkflow {
         } else {
             let objective = LayoutObjective::topology_only();
             let routed = if let Some(session) = state.planning_session.as_deref() {
-                route_sabre_tracked_with_session(
+                let physical = state.routing_physical.clone().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "strict-device routing has no prepared physical graph".to_string(),
+                    )
+                })?;
+                route_sabre_tracked_with_session_on_physical(
                     &state.current,
                     device,
                     &objective,
                     &config,
+                    physical,
                     session,
                 )?
             } else {
-                route_sabre_tracked(&state.current, device, &objective, &config)?
+                let physical = state.routing_physical.clone().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "topology routing has no prepared physical graph".to_string(),
+                    )
+                })?;
+                let routing = state.topology_routing_target.clone().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "topology routing has no prepared routing target".to_string(),
+                    )
+                })?;
+                route_sabre_tracked_on_topology(
+                    &state.current,
+                    &objective,
+                    &config,
+                    physical,
+                    routing,
+                )?
             };
             let route_changed = routed.routed().changed(&state.current);
             let swap_count = routed.routed().swap_count();
@@ -1370,24 +1478,29 @@ impl CompilerWorkflow {
         validate_operations_in_target_basis(state.current.operations(), &allowed)
     }
 
-    /// Prepares one shared explicit-basis planning graph for this workflow run.
-    ///
-    /// Device capabilities are local and ordered, so they are handled by the
-    /// exact device-lowering stage.
-    fn prepare_target_basis(&self) -> Result<Option<PreparedTargetBasis>, CompilerError> {
-        let target_basis = match &self.config.target {
-            CompileTarget::Basis(target_basis)
-            | CompileTarget::TopologyBasis {
-                basis: target_basis,
-                ..
-            } => Some(target_basis),
-            CompileTarget::Logical | CompileTarget::Device(_) => None,
-        };
-        let Some(target_basis) = target_basis else {
-            return Ok(None);
-        };
-        validate_workflow_target_basis_config(target_basis)?;
-        PreparedTargetBasis::new(target_basis.to_vec()).map(Some)
+    fn prepared_target(&self) -> Result<&PreparedCompileTarget, CompilerError> {
+        if let Some(prepared) = self.prepared_target.get() {
+            return Ok(prepared);
+        }
+        let _guard = self
+            .prepare_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(prepared) = self.prepared_target.get() {
+            return Ok(prepared);
+        }
+        let prepared = Arc::new(PreparedCompileTarget::new(&self.config)?);
+        self.prepared_target.set(prepared).map_err(|_| {
+            CompilerError::InvariantViolation(
+                "compiler target was initialized concurrently while holding its preparation lock"
+                    .to_string(),
+            )
+        })?;
+        self.prepared_target.get().map(Arc::as_ref).ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "compiler target preparation completed without publishing its result".to_string(),
+            )
+        })
     }
 
     fn record_pre_init(&self, state: &mut WorkflowState) {

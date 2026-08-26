@@ -182,7 +182,7 @@ impl CompileResult {
 /// assert_eq!(result.circuit.qubits().len(), 2);
 /// ```
 pub fn compile(circuit: &Circuit, config: CompileConfig) -> Result<CompileResult, CompilerError> {
-    CompilerWorkflow::new(config).run(circuit)
+    CompilerWorkflow::try_new(config)?.run(circuit)
 }
 
 /// Runs the configured compiler workflow by consuming `circuit`.
@@ -193,7 +193,7 @@ pub fn compile_owned(
     circuit: Circuit,
     config: CompileConfig,
 ) -> Result<CompileResult, CompilerError> {
-    CompilerWorkflow::new(config).run_owned(circuit)
+    CompilerWorkflow::try_new(config)?.run_owned(circuit)
 }
 
 #[cfg(test)]

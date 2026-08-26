@@ -113,7 +113,8 @@ fn pre_layout_evaluation_derives_all_fields_from_one_pair_scan() {
         .iter()
         .filter_map(|pair| {
             context
-                .cost_on_pair(&operations, [q0, q1], *pair)
+                .cost_on_pair_diagnostic(&operations, [q0, q1], *pair, None)
+                .ok()
                 .map(|cost| (*pair, cost))
         })
         .collect::<BTreeMap<_, _>>();
@@ -328,7 +329,7 @@ fn exact_context_prepares_mc_gate_source_root() {
 }
 
 #[test]
-fn pre_layout_context_prepares_only_movement_roots_and_reuses_them() {
+fn pre_layout_context_reuses_movement_plan_batches() {
     let device = Device::line("sparse-pre-layout-catalog", 128)
         .unwrap()
         .with_native_gates(vec![Instruction::Standard(StandardGate::SWAP)])
@@ -347,12 +348,13 @@ fn pre_layout_context_prepares_only_movement_roots_and_reuses_them() {
         StandardGate::SWAP,
         smallvec![PhysicalQubit::new(126), PhysicalQubit::new(127)],
     );
-    let first = session.selected_plan(&movement).unwrap();
+    let first_plans = session.prepare([movement.clone()]).unwrap();
+    let first = first_plans.selected_plan(&movement).unwrap();
     let unrelated = DeviceGateState::standard(
         StandardGate::RXX,
         smallvec![PhysicalQubit::new(126), PhysicalQubit::new(127)],
     );
-    assert!(session.availability(&unrelated).is_none());
+    assert!(first_plans.availability(&unrelated).is_none());
 
     DeviceTwoQubitSynthesisContext::build_with_session(
         &device,
@@ -361,12 +363,16 @@ fn pre_layout_context_prepares_only_movement_roots_and_reuses_them() {
         Arc::clone(&session),
     )
     .unwrap();
-    let second = session.selected_plan(&movement).unwrap();
+    let second = session
+        .prepare([movement.clone()])
+        .unwrap()
+        .selected_plan(&movement)
+        .unwrap();
     assert!(Arc::ptr_eq(&first, &second));
 }
 
 #[test]
-fn exact_context_planning_scales_with_circuit_roots_not_device_width() {
+fn exact_context_plans_sparse_circuit_roots_on_a_wide_device() {
     let device = Device::line("sparse-exact-catalog", 128)
         .unwrap()
         .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
@@ -375,7 +381,7 @@ fn exact_context_planning_scales_with_circuit_roots_not_device_width() {
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     let session = Arc::new(DevicePlanningSession::new(&device));
 
-    DeviceTwoQubitSynthesisContext::build_with_session(
+    let context = DeviceTwoQubitSynthesisContext::build_with_session(
         &device,
         &circuit,
         DeviceSynthesisPlacement::ExactPhysical,
@@ -383,14 +389,11 @@ fn exact_context_planning_scales_with_circuit_roots_not_device_width() {
     )
     .unwrap();
 
-    let used = DeviceGateState::standard(
-        StandardGate::CX,
-        smallvec![PhysicalQubit::new(0), PhysicalQubit::new(1)],
-    );
-    let unused = DeviceGateState::standard(
-        StandardGate::CX,
-        smallvec![PhysicalQubit::new(126), PhysicalQubit::new(127)],
-    );
-    assert!(session.availability(&used).is_some());
-    assert!(session.availability(&unused).is_none());
+    let operation = ValueOperation {
+        instruction: ValueInstruction::from_instruction(Instruction::Standard(StandardGate::CX)),
+        qubits: smallvec![Qubit::new(0), Qubit::new(1)],
+        params: smallvec![],
+        label: None,
+    };
+    assert!(context.exact_sequence_cost_diagnostic(&[operation]).is_ok());
 }

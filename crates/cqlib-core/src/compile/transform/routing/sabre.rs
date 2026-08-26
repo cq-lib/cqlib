@@ -29,19 +29,21 @@ use crate::circuit::{Circuit, CircuitParam, Parameter, Qubit};
 use crate::compile::CompilerError;
 use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::sabre::{
-    RouteOperationProvenance, SabreConfig, SabreRoutingDiagnostics, SabreRoutingResult,
-    finish_sabre_route, sabre_route as sabre_route_core, sabre_route_with_provenance,
-    sabre_route_with_provenance_and_session,
+    RouteOperationProvenance, RoutingTarget, SabreConfig, SabreRoutingDiagnostics,
+    SabreRoutingResult, finish_sabre_route, sabre_route as sabre_route_core,
+    sabre_route_with_provenance_and_session_on_physical, sabre_route_with_provenance_on_target,
 };
 use crate::compile::transform::layout::{
-    LayoutDiagnostics, LayoutObjective, LayoutScore, PreparedSabreCircuit, PreparedSabreTarget,
-    prepare_sabre_circuit, prepare_sabre_device_target_with_session, prepare_sabre_topology_target,
-    sabre_route_selection_prepared,
+    LayoutDiagnostics, LayoutObjective, LayoutScore, PhysicalLayoutGraph, PreparedSabreCircuit,
+    PreparedSabreTarget, prepare_sabre_circuit,
+    prepare_sabre_device_target_with_session_and_physical, prepare_sabre_topology_target,
+    prepare_sabre_topology_target_with_prepared, sabre_route_selection_prepared,
 };
 use crate::compile::transform::{QubitBijection, RewriteEdits};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 /// A physical circuit produced by routing, plus routing metadata.
 ///
@@ -352,17 +354,43 @@ fn sabre_layout_and_route(
     )
 }
 
-fn sabre_layout_and_route_with_session(
+fn sabre_layout_and_route_on_topology(
+    circuit: &Circuit,
+    objective: &LayoutObjective,
+    config: &SabreConfig,
+    retain_provenance: bool,
+    physical: Arc<PhysicalLayoutGraph>,
+    routing: Arc<RoutingTarget>,
+) -> Result<SabreRoutingResultWithScore, CompilerError> {
+    let prepared = prepare_sabre_circuit(circuit)?;
+    let prepared_target =
+        prepare_sabre_topology_target_with_prepared(&prepared, physical, routing)?;
+    finish_sabre_layout_and_route(
+        circuit,
+        &prepared,
+        &prepared_target,
+        objective,
+        config,
+        retain_provenance,
+    )
+}
+
+fn sabre_layout_and_route_with_session_on_physical(
     circuit: &Circuit,
     device: &Device,
     objective: &LayoutObjective,
     config: &SabreConfig,
     retain_provenance: bool,
+    physical: Arc<PhysicalLayoutGraph>,
     planning_session: &DevicePlanningSession,
 ) -> Result<SabreRoutingResultWithScore, CompilerError> {
     let prepared = prepare_sabre_circuit(circuit)?;
-    let prepared_target =
-        prepare_sabre_device_target_with_session(&prepared, device, planning_session)?;
+    let prepared_target = prepare_sabre_device_target_with_session_and_physical(
+        &prepared,
+        device,
+        physical,
+        planning_session,
+    )?;
     finish_sabre_layout_and_route(
         circuit,
         &prepared,
@@ -427,42 +455,40 @@ pub fn route_with_layout(
     })
 }
 
-pub(crate) fn route_with_layout_tracked(
+pub(crate) fn route_with_layout_tracked_on_topology(
     circuit: &Circuit,
-    device: &Device,
+    target: &RoutingTarget,
     initial_layout: &Layout,
     config: &SabreConfig,
 ) -> Result<TrackedRoutedCircuit, CompilerError> {
-    let result = sabre_route_with_provenance(circuit, device, initial_layout, config)?;
-    let routing = result.routing;
-    Ok(TrackedRoutedCircuit {
-        routed: RoutedCircuit {
-            circuit: routing.circuit,
-            initial_layout: routing.initial_layout,
-            final_layout: routing.final_layout,
-            swap_count: routing.swap_count,
-            diagnostics: routing.diagnostics,
-        },
-        provenance: result.provenance,
-    })
+    let result = sabre_route_with_provenance_on_target(circuit, target, initial_layout, config)?;
+    Ok(tracked_routed_circuit(result))
 }
 
-pub(crate) fn route_with_layout_tracked_with_session(
+pub(crate) fn route_with_layout_tracked_with_session_on_physical(
     circuit: &Circuit,
     device: &Device,
+    physical: &PhysicalLayoutGraph,
     initial_layout: &Layout,
     config: &SabreConfig,
     planning_session: &DevicePlanningSession,
 ) -> Result<TrackedRoutedCircuit, CompilerError> {
-    let result = sabre_route_with_provenance_and_session(
+    let result = sabre_route_with_provenance_and_session_on_physical(
         circuit,
         device,
+        physical,
         initial_layout,
         config,
         planning_session,
     )?;
+    Ok(tracked_routed_circuit(result))
+}
+
+fn tracked_routed_circuit(
+    result: crate::compile::sabre::TrackedSabreRoutingResult,
+) -> TrackedRoutedCircuit {
     let routing = result.routing;
-    Ok(TrackedRoutedCircuit {
+    TrackedRoutedCircuit {
         routed: RoutedCircuit {
             circuit: routing.circuit,
             initial_layout: routing.initial_layout,
@@ -471,7 +497,7 @@ pub(crate) fn route_with_layout_tracked_with_session(
             diagnostics: routing.diagnostics,
         },
         provenance: result.provenance,
-    })
+    }
 }
 
 /// Selects a SABRE initial layout and routes `circuit` for `device`.
@@ -525,13 +551,15 @@ pub fn route_sabre(
     })
 }
 
-pub(crate) fn route_sabre_tracked(
+pub(crate) fn route_sabre_tracked_on_topology(
     circuit: &Circuit,
-    device: &Device,
     objective: &LayoutObjective,
     config: &SabreConfig,
+    physical: Arc<PhysicalLayoutGraph>,
+    routing: Arc<RoutingTarget>,
 ) -> Result<TrackedRoutedCircuit, CompilerError> {
-    let result = sabre_layout_and_route(circuit, device, objective, config, true)?;
+    let result =
+        sabre_layout_and_route_on_topology(circuit, objective, config, true, physical, routing)?;
     Ok(TrackedRoutedCircuit {
         routed: RoutedCircuit {
             circuit: result.routing.circuit,
@@ -544,19 +572,21 @@ pub(crate) fn route_sabre_tracked(
     })
 }
 
-pub(crate) fn route_sabre_tracked_with_session(
+pub(crate) fn route_sabre_tracked_with_session_on_physical(
     circuit: &Circuit,
     device: &Device,
     objective: &LayoutObjective,
     config: &SabreConfig,
+    physical: Arc<PhysicalLayoutGraph>,
     planning_session: &DevicePlanningSession,
 ) -> Result<TrackedRoutedCircuit, CompilerError> {
-    let result = sabre_layout_and_route_with_session(
+    let result = sabre_layout_and_route_with_session_on_physical(
         circuit,
         device,
         objective,
         config,
         true,
+        physical,
         planning_session,
     )?;
     Ok(TrackedRoutedCircuit {

@@ -34,8 +34,9 @@ use crate::circuit::{
 };
 use crate::compile::CompilerError;
 use crate::compile::device_planning::{
-    DeviceGateState, DevicePhysicalCost, DevicePlanningSession, DirectionTemplate,
-    NativePlanAvailability, NativePlanLeaf, PlanChoice, PlanTemplate, SelectedNativePlan,
+    DeviceGateState, DevicePhysicalCost, DevicePlanSnapshot, DevicePlanningSession,
+    DirectionTemplate, NativePlanAvailability, NativePlanLeaf, PlanChoice, PlanTemplate,
+    SelectedNativePlan,
 };
 use crate::compile::knowledge::{
     ConcreteOperationView, KnowledgeInstructionKey, RuleLibrary, instantiate_target,
@@ -142,7 +143,7 @@ impl Transformer for DeviceLowerer<'_> {
             owned_session = DevicePlanningSession::new(self.device);
             &owned_session
         };
-        planning_session.prepare(planner_roots.iter().cloned())?;
+        let plans = planning_session.prepare(planner_roots.iter().cloned())?;
         // Fast path: when no phase folding is pending, the planner selects the
         // native leaf for every circuit root state, and no potentially
         // fusible one-qubit run exists, lowering (and fused emission) is a
@@ -151,16 +152,14 @@ impl Transformer for DeviceLowerer<'_> {
         // further when a cheaper direction or template realization exists.
         let all_roots_native = roots.iter().all(|state| {
             matches!(
-                planning_session
-                    .selected_plan(state)
-                    .map(|plan| plan.choice),
+                plans.selected_plan(state).map(|plan| plan.choice),
                 Some(PlanChoice::Native)
             )
         });
         if !scan.has_gphase && all_roots_native && !has_fusible_one_qubit_run(circuit) {
             return Ok(TransformOutcome::Unchanged);
         }
-        DeviceCircuitLowerer::run(circuit, self.device, library, planning_session)
+        DeviceCircuitLowerer::run(circuit, self.device, library, &plans)
     }
 }
 
@@ -168,7 +167,7 @@ struct DeviceCircuitLowerer<'a> {
     source: &'a Circuit,
     device: &'a Device,
     library: &'a RuleLibrary,
-    planning_session: &'a DevicePlanningSession,
+    plans: &'a DevicePlanSnapshot,
     rebuild: CircuitRebuildContext,
     changed: bool,
     /// Pending native one-qubit leaves buffered per qubit for run fusion.
@@ -183,7 +182,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
         source: &'a Circuit,
         device: &'a Device,
         library: &'a RuleLibrary,
-        planning_session: &'a DevicePlanningSession,
+        plans: &'a DevicePlanSnapshot,
     ) -> Result<TransformOutcome, CompilerError> {
         let rebuild = CircuitRebuildContext::new(source);
         let root_classical = rebuild.root_classical().clone();
@@ -191,7 +190,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
             source,
             device,
             library,
-            planning_session,
+            plans,
             rebuild,
             changed: false,
             pending: BTreeMap::new(),
@@ -299,8 +298,8 @@ impl<'a> DeviceCircuitLowerer<'a> {
                     operation.instruction
                 ))
             })?;
-        let Some(plan) = self.planning_session.selected_plan(&state) else {
-            return match self.planning_session.availability(&state) {
+        let Some(plan) = self.plans.selected_plan(&state) else {
+            return match self.plans.availability(&state) {
                 Some(NativePlanAvailability::Unsupported(failure)) => {
                     Err(CompilerError::DeviceLoweringFailed(failure))
                 }
@@ -691,7 +690,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
             .into_iter()
             .map(|operation| self.native_leaf(operation))
             .collect::<Option<Vec<_>>>()?;
-        Some(self.planning_session.leaves_physical_cost(&leaves))
+        Some(self.plans.leaves_physical_cost(&leaves))
     }
 
     /// Selects the shortest exact fused form for one buffered run, or `None`
@@ -759,7 +758,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
     fn plan_info(&self, gate: StandardGate, physical: PhysicalQubit) -> Option<FusionPlanInfo> {
         let state =
             DeviceGateState::from_instruction(&Instruction::Standard(gate), smallvec![physical])?;
-        let plan = self.planning_session.selected_plan(&state)?;
+        let plan = self.plans.selected_plan(&state)?;
         let cost = plan.physical_cost;
         let leaf_count = plan.summary.leaves.len();
         Some(FusionPlanInfo {
@@ -775,7 +774,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
             .iter()
             .map(|operation| self.native_leaf(operation))
             .collect::<Option<Vec<_>>>()?;
-        Some(self.planning_session.leaves_physical_cost(&leaves))
+        Some(self.plans.leaves_physical_cost(&leaves))
     }
 
     /// Builds the native plan leaf for one buffered operation, including its

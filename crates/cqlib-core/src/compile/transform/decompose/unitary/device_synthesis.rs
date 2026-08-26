@@ -29,8 +29,8 @@
 use crate::circuit::{Circuit, Instruction, Qubit, StandardGate, ValueInstruction, ValueOperation};
 use crate::compile::CompilerError;
 use crate::compile::device_planning::{
-    CalibrationEstimator, DeviceGateState, DevicePlanningSession, NativePlanAvailability,
-    NativePlanCatalog, NativePlanCost, NativePlanLeaf, NativePlanSummary,
+    CalibrationEstimator, DeviceGateState, DevicePlanSnapshot, DevicePlanningSession,
+    NativePlanAvailability, NativePlanCatalog, NativePlanCost, NativePlanLeaf, NativePlanSummary,
 };
 use crate::compile::error::DeviceLoweringFailure;
 use crate::device::{Device, PhysicalQubit};
@@ -260,23 +260,22 @@ impl DeviceTwoQubitSynthesisContext {
         if self.data.placement != DeviceSynthesisPlacement::PreLayoutEnvelope {
             return None;
         }
-        // Prepare this candidate's exact roots as one deterministic batch.
-        // The following scan then performs only cache lookups.
+        // Prepare this candidate's roots as one deterministic batch. The
+        // session can then serve each pair lookup from the bounded snapshot.
         let roots = self
             .data
             .eligible_pairs
             .iter()
             .flat_map(|pair| states_on_pair(operations, logical_qubits, *pair).unwrap_or_default())
             .collect::<Vec<_>>();
-        if self.data.planning_session.prepare(roots).is_err() {
-            return None;
-        }
+        let plans = self.data.planning_session.prepare(roots).ok()?;
         let pair_costs = self
             .data
             .eligible_pairs
             .iter()
             .filter_map(|pair| {
-                self.cost_on_pair(operations, logical_qubits, *pair)
+                self.cost_on_pair_diagnostic(operations, logical_qubits, *pair, Some(&plans))
+                    .ok()
                     .map(|cost| (*pair, cost))
             })
             .collect::<Vec<_>>();
@@ -306,7 +305,7 @@ impl DeviceTwoQubitSynthesisContext {
             return Err(DeviceContextCostFailure::WrongPlacement);
         }
         let pair = physical_qubits.map(PhysicalQubit::from_qubit);
-        self.cost_on_pair_diagnostic(operations, physical_qubits, pair)
+        self.cost_on_pair_diagnostic(operations, physical_qubits, pair, None)
     }
 
     /// Costs one flat operation sequence on the physical qargs carried by the
@@ -375,21 +374,12 @@ impl DeviceTwoQubitSynthesisContext {
         }
     }
 
-    fn cost_on_pair(
-        &self,
-        operations: &[ValueOperation],
-        circuit_qubits: [Qubit; 2],
-        physical_pair: [PhysicalQubit; 2],
-    ) -> Option<DevicePhysicalCost> {
-        self.cost_on_pair_diagnostic(operations, circuit_qubits, physical_pair)
-            .ok()
-    }
-
     fn cost_on_pair_diagnostic(
         &self,
         operations: &[ValueOperation],
         circuit_qubits: [Qubit; 2],
         physical_pair: [PhysicalQubit; 2],
+        plans: Option<&DevicePlanSnapshot>,
     ) -> Result<DevicePhysicalCost, DeviceContextCostFailure> {
         let mut cacheable = true;
         let mut states = Vec::with_capacity(operations.len());
@@ -452,7 +442,7 @@ impl DeviceTwoQubitSynthesisContext {
             }
         }
 
-        let result = self.compute_physical_sequence_cost(&key);
+        let result = self.compute_physical_sequence_cost(&key, plans);
         if cacheable {
             let mut cache = self
                 .data
@@ -469,6 +459,7 @@ impl DeviceTwoQubitSynthesisContext {
     fn compute_physical_sequence_cost(
         &self,
         key: &PhysicalSequenceCostKey,
+        plans: Option<&DevicePlanSnapshot>,
     ) -> Result<DevicePhysicalCost, DeviceContextCostFailure> {
         let mut scheduler = self
             .data
@@ -476,7 +467,7 @@ impl DeviceTwoQubitSynthesisContext {
             .two_qubit_cost_accumulator(key.ordered_pair);
         let mut aggregate = self.data.estimator.identity_cost();
         for state in &key.states {
-            let summary = self.catalog_summary(state)?;
+            let summary = self.catalog_summary(state, plans)?;
             aggregate = aggregate.combine(self.data.estimator.cost(&summary));
             scheduler.add_leaves(&summary.leaves).map_err(|reason| {
                 DeviceContextCostFailure::InvalidOperation(format!(
@@ -490,16 +481,24 @@ impl DeviceTwoQubitSynthesisContext {
     fn catalog_summary(
         &self,
         state: &DeviceGateState,
+        plans: Option<&DevicePlanSnapshot>,
     ) -> Result<NativePlanSummary, DeviceContextCostFailure> {
-        self.data
-            .planning_session
-            .prepare([state.clone()])
-            .map_err(|error| {
-                DeviceContextCostFailure::InvalidOperation(format!(
-                    "exact device planning failed: {error}"
-                ))
-            })?;
-        match self.data.planning_session.availability(state) {
+        let prepared;
+        let plans = if let Some(plans) = plans {
+            plans
+        } else {
+            prepared = self
+                .data
+                .planning_session
+                .prepare([state.clone()])
+                .map_err(|error| {
+                    DeviceContextCostFailure::InvalidOperation(format!(
+                        "exact device planning failed: {error}"
+                    ))
+                })?;
+            &prepared
+        };
+        match plans.availability(state) {
             Some(NativePlanAvailability::Feasible(summary)) => Ok(summary),
             Some(NativePlanAvailability::Unsupported(failure)) => {
                 Err(DeviceContextCostFailure::Unsupported(failure))
@@ -583,7 +582,7 @@ impl ExactSequenceCostAccumulator<'_> {
                     "missing device-planning key for {instruction}"
                 ))
             })?;
-        let summary = self.context.catalog_summary(&state)?;
+        let summary = self.context.catalog_summary(&state, None)?;
         self.aggregate = self
             .aggregate
             .combine(self.context.data.estimator.cost(&summary));

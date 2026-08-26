@@ -150,9 +150,96 @@ fn planning_session_reuses_prepared_roots_across_catalog_views() {
 
     assert!(first.summary(&root).is_some());
     assert!(second.summary(&root).is_some());
-    let first_plan = session.selected_plan(&root).unwrap();
-    let second_plan = session.selected_plan(&root).unwrap();
+    let first_plan = session
+        .prepare([root.clone()])
+        .unwrap()
+        .selected_plan(&root)
+        .unwrap();
+    let second_plan = session
+        .prepare([root.clone()])
+        .unwrap()
+        .selected_plan(&root)
+        .unwrap();
     assert!(Arc::ptr_eq(&first_plan, &second_plan));
+}
+
+#[test]
+fn planning_session_serves_subset_requests_from_a_prepared_batch() {
+    let device = Device::line("native-plan-subset", 2)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::H)])
+        .unwrap();
+    let first = DeviceGateState::standard(StandardGate::H, smallvec![PhysicalQubit::new(0)]);
+    let second = DeviceGateState::standard(StandardGate::H, smallvec![PhysicalQubit::new(1)]);
+    let session = DevicePlanningSession::new(&device);
+
+    let batch = session.prepare([first.clone(), second]).unwrap();
+    let subset = session.prepare([first.clone()]).unwrap();
+
+    assert!(Arc::ptr_eq(
+        &batch.selected_plan(&first).unwrap(),
+        &subset.selected_plan(&first).unwrap()
+    ));
+}
+
+#[test]
+fn planning_session_evicts_old_circuit_specific_batches() {
+    let device = Device::line("native-plan-bounded-cache", 24)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::H)])
+        .unwrap();
+    let first_root = DeviceGateState::standard(StandardGate::H, smallvec![PhysicalQubit::new(0)]);
+    let session = DevicePlanningSession::new(&device);
+    let first = session
+        .prepare([first_root.clone()])
+        .unwrap()
+        .selected_plan(&first_root)
+        .unwrap();
+
+    for index in 1..24 {
+        let root = DeviceGateState::standard(StandardGate::H, smallvec![PhysicalQubit::new(index)]);
+        session.prepare([root]).unwrap();
+    }
+
+    let reloaded = session
+        .prepare([first_root.clone()])
+        .unwrap()
+        .selected_plan(&first_root)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&first, &reloaded));
+}
+
+#[test]
+fn concurrent_requests_share_one_session_local_batch() {
+    const WORKERS: usize = 8;
+    let device = Device::line("concurrent-local-session", 1)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::H)])
+        .unwrap();
+    let session = Arc::new(DevicePlanningSession::new(&device));
+    let barrier = Arc::new(Barrier::new(WORKERS));
+    let handles = (0..WORKERS)
+        .map(|_| {
+            let session = Arc::clone(&session);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let root =
+                    DeviceGateState::standard(StandardGate::H, smallvec![PhysicalQubit::new(0)]);
+                barrier.wait();
+                session
+                    .prepare([root.clone()])
+                    .unwrap()
+                    .selected_plan(&root)
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    let plans = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(plans[1..].iter().all(|plan| Arc::ptr_eq(&plans[0], plan)));
 }
 
 #[test]
@@ -170,8 +257,8 @@ fn process_registry_reuses_semantically_identical_devices_and_invalidates_change
     };
     let root = swap(0, 1);
     let first = DevicePlanningSession::new(&build("registry-first-name", 0.212));
-    first.prepare([root.clone()]).unwrap();
-    let first_plan = first.selected_plan(&root).unwrap();
+    let first_plans = first.prepare([root.clone()]).unwrap();
+    let first_plan = first_plans.selected_plan(&root).unwrap();
 
     // Device identity and descriptive metadata are intentionally irrelevant.
     let renamed_device = build("registry-second-name", 0.212);
@@ -180,8 +267,8 @@ fn process_registry_reuses_semantically_identical_devices_and_invalidates_change
         DevicePlanningNamespace::from_device(&renamed_device)
     );
     let renamed = DevicePlanningSession::new(&renamed_device);
-    renamed.prepare([root.clone()]).unwrap();
-    let renamed_plan = renamed.selected_plan(&root).unwrap();
+    let renamed_plans = renamed.prepare([root.clone()]).unwrap();
+    let renamed_plan = renamed_plans.selected_plan(&root).unwrap();
     assert_eq!(
         summary_projection(&first_plan.summary),
         summary_projection(&renamed_plan.summary)
@@ -207,8 +294,8 @@ fn process_registry_reuses_semantically_identical_devices_and_invalidates_change
         DevicePlanningNamespace::from_device(&directional_device)
     );
     let recalibrated = DevicePlanningSession::new(&recalibrated_device);
-    recalibrated.prepare([root.clone()]).unwrap();
-    let recalibrated_plan = recalibrated.selected_plan(&root).unwrap();
+    let recalibrated_plans = recalibrated.prepare([root.clone()]).unwrap();
+    let recalibrated_plan = recalibrated_plans.selected_plan(&root).unwrap();
     assert!(!Arc::ptr_eq(&first_plan, &recalibrated_plan));
     assert_ne!(
         summary_projection(&first_plan.summary),
@@ -226,12 +313,12 @@ fn circuit_specific_roots_remain_session_local() {
     let root = DeviceGateState::standard(StandardGate::H, smallvec![PhysicalQubit::new(0)]);
     let first = DevicePlanningSession::new(&device);
     let second = DevicePlanningSession::new(&device);
-    first.prepare([root.clone()]).unwrap();
-    second.prepare([root.clone()]).unwrap();
+    let first_plans = first.prepare([root.clone()]).unwrap();
+    let second_plans = second.prepare([root.clone()]).unwrap();
 
     assert!(!Arc::ptr_eq(
-        &first.selected_plan(&root).unwrap(),
-        &second.selected_plan(&root).unwrap()
+        &first_plans.selected_plan(&root).unwrap(),
+        &second_plans.selected_plan(&root).unwrap()
     ));
 }
 
@@ -251,7 +338,7 @@ fn equivalent_swap_plans_match_the_original_batch_planner_exactly() {
         .collect::<Vec<_>>();
 
     let session = DevicePlanningSession::new(&device);
-    session.prepare(roots.iter().cloned()).unwrap();
+    let plans = session.prepare(roots.iter().cloned()).unwrap();
 
     let physical_qubits = device.usable_qubits().collect::<Vec<_>>();
     let estimator = Arc::new(CalibrationEstimator::from_device(&device, &physical_qubits));
@@ -264,7 +351,7 @@ fn equivalent_swap_plans_match_the_original_batch_planner_exactly() {
     .unwrap();
 
     for root in roots {
-        let optimized = session.selected_plan(&root).unwrap();
+        let optimized = plans.selected_plan(&root).unwrap();
         let baseline_id = planner.selected_plan_for(&root).unwrap();
         assert_eq!(
             optimized.choice,
@@ -326,8 +413,11 @@ fn concurrent_sessions_singleflight_a_common_swap() {
                 let root = swap(0, 1);
                 barrier.wait();
                 let session = DevicePlanningSession::new(&device);
-                session.prepare([root.clone()]).unwrap();
-                session.selected_plan(&root).unwrap()
+                session
+                    .prepare([root.clone()])
+                    .unwrap()
+                    .selected_plan(&root)
+                    .unwrap()
             })
         })
         .collect::<Vec<_>>();
@@ -353,17 +443,17 @@ fn process_registry_evicts_the_least_recently_used_device() {
         .collect::<Vec<_>>();
 
     let first_session = DevicePlanningSession::new(&devices[0]);
-    first_session.prepare([root.clone()]).unwrap();
-    let first_plan = first_session.selected_plan(&root).unwrap();
+    let first_plans = first_session.prepare([root.clone()]).unwrap();
+    let first_plan = first_plans.selected_plan(&root).unwrap();
     for device in &devices[1..] {
         let session = DevicePlanningSession::new(device);
         session.prepare([root.clone()]).unwrap();
     }
 
     let reloaded = DevicePlanningSession::new(&devices[0]);
-    reloaded.prepare([root.clone()]).unwrap();
+    let reloaded_plans = reloaded.prepare([root.clone()]).unwrap();
     assert!(!Arc::ptr_eq(
         &first_plan,
-        &reloaded.selected_plan(&root).unwrap()
+        &reloaded_plans.selected_plan(&root).unwrap()
     ));
 }

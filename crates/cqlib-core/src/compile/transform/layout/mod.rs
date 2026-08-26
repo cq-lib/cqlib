@@ -70,7 +70,10 @@ pub use sabre::{
     PreparedSabreCircuit, PreparedSabreTarget, prepare_sabre_circuit, prepare_sabre_device_target,
     prepare_sabre_topology_target, sabre_layout, sabre_layout_prepared,
 };
-pub(crate) use sabre::{prepare_sabre_device_target_with_session, sabre_route_selection_prepared};
+pub(crate) use sabre::{
+    prepare_sabre_device_target_with_session_and_physical,
+    prepare_sabre_topology_target_with_prepared, sabre_route_selection_prepared,
+};
 pub use trivial::{trivial_layout, trivial_layout_prepared};
 pub use vf2::{
     Vf2EdgeRequirement, Vf2LayoutConfig, vf2_perfect_layout, vf2_perfect_layout_prepared,
