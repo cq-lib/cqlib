@@ -44,12 +44,13 @@ pub(crate) struct NativePlanSummary {
 #[derive(Debug, Clone, PartialEq)]
 struct MaxPlusProfile {
     dimension: usize,
-    entries: Vec<f64>,
+    entries: SmallVec<[f64; 4]>,
 }
 
 impl MaxPlusProfile {
     fn identity(dimension: usize) -> Self {
-        let mut entries = vec![f64::NEG_INFINITY; dimension * dimension];
+        let mut entries = SmallVec::<[f64; 4]>::new();
+        entries.resize(dimension * dimension, f64::NEG_INFINITY);
         for index in 0..dimension {
             entries[index * dimension + index] = 0.0;
         }
@@ -74,6 +75,49 @@ impl MaxPlusProfile {
             self.entries[qarg * self.dimension..(qarg + 1) * self.dimension]
                 .copy_from_slice(&merged);
         }
+    }
+
+    /// Appends `next` to this transition.
+    fn append(&mut self, next: &Self) {
+        debug_assert_eq!(self.dimension, next.dimension);
+        let dimension = self.dimension;
+        let mut entries = SmallVec::<[f64; 4]>::new();
+        entries.resize(dimension * dimension, f64::NEG_INFINITY);
+        for row in 0..dimension {
+            for column in 0..dimension {
+                let mut value = f64::NEG_INFINITY;
+                for middle in 0..dimension {
+                    value = value.max(
+                        next.entries[row * dimension + middle]
+                            + self.entries[middle * dimension + column],
+                    );
+                }
+                entries[row * dimension + column] = value;
+            }
+        }
+        self.entries = entries;
+    }
+
+    fn embedded(&self, dimension: usize, positions: &[usize]) -> Self {
+        debug_assert_eq!(self.dimension, positions.len());
+        let mut embedded = Self::identity(dimension);
+        for &row in positions {
+            embedded.entries[row * dimension..(row + 1) * dimension].fill(f64::NEG_INFINITY);
+        }
+        for (source_row, &target_row) in positions.iter().enumerate() {
+            for (source_column, &target_column) in positions.iter().enumerate() {
+                embedded.entries[target_row * dimension + target_column] =
+                    self.entries[source_row * self.dimension + source_column];
+            }
+        }
+        embedded
+    }
+
+    fn output_maximum(&self) -> f64 {
+        self.entries
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max)
     }
 
     /// Returns whether `self` is no worse for every possible input readiness,
@@ -110,6 +154,81 @@ pub(crate) struct DeviceScheduleProfile {
 }
 
 impl DeviceScheduleProfile {
+    /// Appends a child transition after the current sequence, preserving the
+    /// child's ordered roles inside the parent's exact qargs.
+    pub(crate) fn append_child(
+        &mut self,
+        child: &Self,
+        child_qargs: &[PhysicalQubit],
+        parent_qargs: &[PhysicalQubit],
+    ) -> Result<(), String> {
+        if child_qargs.len() != child.total_depth.dimension {
+            return Err(format!(
+                "device schedule profile dimension does not match child qargs {child_qargs:?}"
+            ));
+        }
+        let positions = child_qargs
+            .iter()
+            .map(|child| {
+                parent_qargs
+                    .iter()
+                    .position(|parent| parent == child)
+                    .ok_or_else(|| {
+                        format!(
+                            "child schedule qarg {child:?} is outside parent qargs {parent_qargs:?}"
+                        )
+                    })
+            })
+            .collect::<Result<SmallVec<[usize; 2]>, _>>()?;
+        if positions
+            .iter()
+            .enumerate()
+            .any(|(index, position)| positions[..index].contains(position))
+        {
+            return Err(format!(
+                "child schedule has duplicate qargs {child_qargs:?} inside {parent_qargs:?}"
+            ));
+        }
+
+        self.total_depth
+            .append(&child.total_depth.embedded(parent_qargs.len(), &positions));
+        self.two_qubit_depth.append(
+            &child
+                .two_qubit_depth
+                .embedded(parent_qargs.len(), &positions),
+        );
+        self.makespan = match (&self.makespan, &child.makespan) {
+            (ScheduleAvailability::Disabled, ScheduleAvailability::Disabled) => {
+                ScheduleAvailability::Disabled
+            }
+            (ScheduleAvailability::Available(current), ScheduleAvailability::Available(next)) => {
+                let mut current = current.clone();
+                current.append(&next.embedded(parent_qargs.len(), &positions));
+                ScheduleAvailability::Available(current)
+            }
+            _ => ScheduleAvailability::Inconsistent,
+        };
+        Ok(())
+    }
+
+    pub(crate) fn physical_cost(&self, aggregate: NativePlanCost) -> DevicePhysicalCost {
+        DevicePhysicalCost {
+            native_two_qubit_ops: aggregate.native_two_qubit_ops,
+            native_two_qubit_depth: self.two_qubit_depth.output_maximum() as u32,
+            error: aggregate.error,
+            total_native_depth: self.total_depth.output_maximum() as u32,
+            native_total_ops: aggregate.native_total_ops,
+            duration: aggregate.duration,
+            makespan: match &self.makespan {
+                ScheduleAvailability::Disabled => MetricAvailability::Disabled,
+                ScheduleAvailability::Available(profile) => {
+                    MetricAvailability::Available(profile.output_maximum())
+                }
+                ScheduleAvailability::Inconsistent => MetricAvailability::Inconsistent,
+            },
+        }
+    }
+
     /// Returns whether `self` is no worse under every prefix readiness, and
     /// whether at least one scheduling component is strictly better.
     pub(crate) fn dominance(&self, other: &Self) -> Option<bool> {
@@ -591,13 +710,11 @@ impl CalibrationEstimator {
         leaves: &[NativePlanLeaf],
         ordered_qargs: &[PhysicalQubit],
     ) -> Result<DeviceScheduleProfile, String> {
-        let qarg_indices = ordered_qargs
+        if ordered_qargs
             .iter()
-            .copied()
             .enumerate()
-            .map(|(index, qubit)| (qubit, index))
-            .collect::<HashMap<_, _>>();
-        if qarg_indices.len() != ordered_qargs.len() {
+            .any(|(index, qarg)| ordered_qargs[..index].contains(qarg))
+        {
             return Err(format!(
                 "device schedule profile has duplicate qargs {ordered_qargs:?}"
             ));
@@ -616,7 +733,7 @@ impl CalibrationEstimator {
                 .ordered_qargs
                 .iter()
                 .map(|qubit| {
-                    qarg_indices.get(qubit).copied().ok_or_else(|| {
+                    ordered_qargs.iter().position(|qarg| qarg == qubit).ok_or_else(|| {
                         format!(
                             "native leaf {} uses {qubit:?} outside planned qargs {ordered_qargs:?}",
                             leaf.instruction
@@ -916,5 +1033,70 @@ mod two_qubit_scheduler_tests {
         let mut fixed = estimator.two_qubit_cost_accumulator(pair);
 
         assert!(fixed.add_leaves(&[leaf]).is_err());
+    }
+
+    #[test]
+    fn composed_schedule_profiles_match_leaf_replay() {
+        let pair = [PhysicalQubit::new(0), PhysicalQubit::new(1)];
+        let estimator = CalibrationEstimator {
+            error_enabled: true,
+            duration_enabled: true,
+            ..CalibrationEstimator::default()
+        };
+        let children = [
+            vec![NativePlanLeaf {
+                instruction: Instruction::Standard(StandardGate::H),
+                ordered_qargs: smallvec![pair[0]],
+                error_rate: Some(0.001),
+                duration: Some(2.0),
+            }],
+            vec![NativePlanLeaf {
+                instruction: Instruction::Standard(StandardGate::X),
+                ordered_qargs: smallvec![pair[1]],
+                error_rate: Some(0.002),
+                duration: Some(3.0),
+            }],
+            vec![
+                NativePlanLeaf {
+                    instruction: Instruction::Standard(StandardGate::CX),
+                    ordered_qargs: smallvec![pair[0], pair[1]],
+                    error_rate: Some(0.01),
+                    duration: Some(5.0),
+                },
+                NativePlanLeaf {
+                    instruction: Instruction::Standard(StandardGate::H),
+                    ordered_qargs: smallvec![pair[0]],
+                    error_rate: Some(0.001),
+                    duration: Some(7.0),
+                },
+            ],
+        ];
+        let mut combined_profile = estimator.schedule_profile(&[], &pair).unwrap();
+        let mut combined_cost = estimator.cost_for_leaves(&[]);
+        let mut leaves = Vec::new();
+        for child in &children {
+            let child_qargs = child
+                .iter()
+                .flat_map(|leaf| leaf.ordered_qargs.iter().copied())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let child_qargs = pair
+                .iter()
+                .copied()
+                .filter(|qarg| child_qargs.contains(qarg))
+                .collect::<Vec<_>>();
+            let child_profile = estimator.schedule_profile(child, &child_qargs).unwrap();
+            combined_profile
+                .append_child(&child_profile, &child_qargs, &pair)
+                .unwrap();
+            combined_cost = combined_cost.combine(estimator.cost_for_leaves(child));
+            leaves.extend(child.iter().cloned());
+        }
+
+        assert_eq!(
+            combined_profile.physical_cost(combined_cost),
+            estimator.physical_cost(&leaves)
+        );
     }
 }

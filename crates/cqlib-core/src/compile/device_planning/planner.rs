@@ -15,8 +15,8 @@
 
 use super::DeviceGateState;
 use super::cost::{
-    CalibrationEstimator, DevicePhysicalCost, DeviceScheduleProfile, NativePlanLeaf,
-    NativePlanSummary,
+    CalibrationEstimator, DevicePhysicalCost, DeviceScheduleProfile, NativePlanCost,
+    NativePlanLeaf, NativePlanSummary,
 };
 use super::templates::{self, DirectionTemplate};
 use crate::circuit::{Instruction, ParameterValue, StandardGate};
@@ -213,7 +213,8 @@ struct DevicePlanCandidate {
     state: StateId,
     choice: PlanChoice,
     children: Vec<PlanId>,
-    leaves: Vec<NativePlanLeaf>,
+    native_leaf: Option<NativePlanLeaf>,
+    native_cost: NativePlanCost,
     physical_cost: DevicePhysicalCost,
     schedule_profile: DeviceScheduleProfile,
     derivation_steps: u32,
@@ -374,16 +375,31 @@ impl<'a> DevicePlanner<'a> {
         let node = self.nodes.get(plan.0).ok_or_else(|| {
             DevicePlannerError::Invariant(format!("unknown device plan id {plan:?}"))
         })?;
-        let leaves = node.leaves.clone();
-        let native_two_qubit_ops = leaves
-            .iter()
-            .filter(|leaf| leaf.ordered_qargs.len() == 2)
-            .count() as u32;
+        let mut leaves = Vec::with_capacity(node.physical_cost.native_total_ops as usize);
+        self.collect_plan_leaves(plan, &mut leaves)?;
         Ok(NativePlanSummary {
-            native_two_qubit_ops,
-            native_total_ops: leaves.len() as u32,
+            native_two_qubit_ops: node.physical_cost.native_two_qubit_ops,
+            native_total_ops: node.physical_cost.native_total_ops,
             leaves,
         })
+    }
+
+    fn collect_plan_leaves(
+        &self,
+        plan: PlanId,
+        leaves: &mut Vec<NativePlanLeaf>,
+    ) -> Result<(), DevicePlannerError> {
+        let node = self.nodes.get(plan.0).ok_or_else(|| {
+            DevicePlannerError::Invariant(format!("unknown device plan id {plan:?}"))
+        })?;
+        if let Some(leaf) = &node.native_leaf {
+            leaves.push(leaf.clone());
+            return Ok(());
+        }
+        for child in &node.children {
+            self.collect_plan_leaves(*child, leaves)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn failure_for(&self, state: &DeviceGateState) -> DeviceLoweringFailure {
@@ -453,19 +469,21 @@ impl<'a> DevicePlanner<'a> {
                     error_rate: calibration.error_rate,
                     duration: calibration.duration,
                 };
-                let leaves = vec![leaf];
+                let native_cost = self.estimator.cost_for_leaves(std::slice::from_ref(&leaf));
+                let schedule_profile = self
+                    .estimator
+                    .schedule_profile(std::slice::from_ref(&leaf), &state.ordered_qargs)
+                    .map_err(DevicePlannerError::Invariant)?;
                 let mut ancestry = HashSet::new();
                 ancestry.insert(state_id);
                 self.insert_candidate(DevicePlanCandidate {
                     state: state_id,
                     choice: PlanChoice::Native,
                     children: Vec::new(),
-                    physical_cost: self.estimator.physical_cost(&leaves),
-                    schedule_profile: self
-                        .estimator
-                        .schedule_profile(&leaves, &state.ordered_qargs)
-                        .map_err(DevicePlannerError::Invariant)?,
-                    leaves,
+                    native_leaf: Some(leaf),
+                    native_cost,
+                    physical_cost: schedule_profile.physical_cost(native_cost),
+                    schedule_profile,
                     derivation_steps: 0,
                     stable_key: "native".to_string(),
                     ancestry,
@@ -501,7 +519,12 @@ impl<'a> DevicePlanner<'a> {
                     }
 
                     let mut ancestry = HashSet::new();
-                    let mut leaves = Vec::new();
+                    let parent_qargs = &self.states[edge.parent].ordered_qargs;
+                    let mut native_cost = self.estimator.cost_for_leaves(&[]);
+                    let mut schedule_profile = self
+                        .estimator
+                        .schedule_profile(&[], parent_qargs)
+                        .map_err(DevicePlannerError::Invariant)?;
                     let mut derivation_steps = 1_u32;
                     let mut child_keys = Vec::with_capacity(children.len());
                     let mut cyclic = false;
@@ -512,7 +535,14 @@ impl<'a> DevicePlanner<'a> {
                             break;
                         }
                         ancestry.extend(node.ancestry.iter().copied());
-                        leaves.extend(node.leaves.iter().cloned());
+                        native_cost = native_cost.combine(node.native_cost);
+                        schedule_profile
+                            .append_child(
+                                &node.schedule_profile,
+                                &self.states[node.state].ordered_qargs,
+                                parent_qargs,
+                            )
+                            .map_err(DevicePlannerError::Invariant)?;
                         derivation_steps = derivation_steps.saturating_add(node.derivation_steps);
                         child_keys.push(node.stable_key.as_str());
                     }
@@ -521,16 +551,13 @@ impl<'a> DevicePlanner<'a> {
                     }
                     ancestry.insert(edge.parent);
                     let stable_key = format!("{}({})", edge.stable_name, child_keys.join(","));
-                    let physical_cost = self.estimator.physical_cost(&leaves);
-                    let schedule_profile = self
-                        .estimator
-                        .schedule_profile(&leaves, &self.states[edge.parent].ordered_qargs)
-                        .map_err(DevicePlannerError::Invariant)?;
+                    let physical_cost = schedule_profile.physical_cost(native_cost);
                     changed |= self.insert_candidate(DevicePlanCandidate {
                         state: edge.parent,
                         choice: PlanChoice::Template(edge.template),
                         children,
-                        leaves,
+                        native_leaf: None,
+                        native_cost,
                         physical_cost,
                         schedule_profile,
                         derivation_steps,

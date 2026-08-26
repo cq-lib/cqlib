@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 // changes. Bump the algorithm revision for graph expansion, feasibility,
 // physical-cost, or selection-order changes.
 const DEVICE_PLANNING_RULESET_REVISION: u32 = 1;
-const DEVICE_PLANNING_ALGORITHM_REVISION: u32 = 1;
+const DEVICE_PLANNING_ALGORITHM_REVISION: u32 = 2;
 const DEVICE_PLANNING_REGISTRY_MAX_ENTRIES: usize = 8;
 const DEVICE_PLANNING_REGISTRY_MAX_BYTES: usize = 256 * 1024 * 1024;
 

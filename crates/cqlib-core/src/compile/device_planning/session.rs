@@ -12,6 +12,7 @@
 // that they have been altered from the originals.
 
 use super::registry::{DevicePlanningKnowledge, shared_knowledge};
+use super::swap_equivalence::prepare_equivalent_local_roots;
 use super::{
     CalibrationEstimator, DeviceGateState, DevicePhysicalCost, DevicePlanner, DevicePlannerError,
     NativePlanLeaf, NativePlanSummary, PlanChoice, PlanId,
@@ -31,9 +32,9 @@ const SESSION_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub(crate) enum NativePlanAvailability {
     /// The root has a selected exact-qargs native lowering plan.
-    Feasible(NativePlanSummary),
+    Feasible(Arc<NativePlanSummary>),
     /// The root was requested, but no native lowering plan exists.
-    Unsupported(DeviceLoweringFailure),
+    Unsupported(Arc<DeviceLoweringFailure>),
 }
 
 #[derive(Debug, Default)]
@@ -75,7 +76,7 @@ pub(crate) struct SelectedNativePlan {
     pub(crate) choice: PlanChoice,
     pub(crate) children: Arc<[Arc<SelectedNativePlan>]>,
     pub(crate) physical_cost: DevicePhysicalCost,
-    pub(crate) summary: NativePlanSummary,
+    pub(crate) summary: Arc<NativePlanSummary>,
 }
 
 /// Immutable plans pinned for one planning request.
@@ -153,6 +154,49 @@ impl DevicePlanningSessionState {
         let batch = self.batches.get_mut(&cached_roots)?;
         batch.last_used = last_used;
         Some(Arc::clone(&batch.snapshot))
+    }
+
+    fn reusable_roots(&mut self, roots: &[DeviceGateState]) -> DevicePlanningSessionCache {
+        let mut batches = self
+            .batches
+            .iter()
+            .filter(|(_, batch)| {
+                roots
+                    .iter()
+                    .any(|root| batch.snapshot.local.availability.contains_key(root))
+            })
+            .map(|(cached_roots, batch)| (cached_roots.clone(), batch.last_used))
+            .collect::<Vec<_>>();
+        batches.sort_by_key(|(_, last_used)| std::cmp::Reverse(*last_used));
+
+        let mut reusable = DevicePlanningSessionCache::default();
+        for (cached_roots, _) in batches {
+            let Some(batch) = self.batches.get(&cached_roots) else {
+                continue;
+            };
+            for root in roots {
+                if reusable.availability.contains_key(root) {
+                    continue;
+                }
+                if let Some(availability) = batch.snapshot.local.availability.get(root) {
+                    reusable
+                        .availability
+                        .insert(root.clone(), availability.clone());
+                    if let Some(selected) = batch.snapshot.local.selected_plans.get(root) {
+                        reusable
+                            .selected_plans
+                            .insert(root.clone(), Arc::clone(selected));
+                    }
+                }
+            }
+        }
+        reusable
+    }
+
+    fn overlaps_flight(&self, roots: &[DeviceGateState]) -> bool {
+        self.flights
+            .iter()
+            .any(|flight| roots.iter().any(|root| flight.binary_search(root).is_ok()))
     }
 
     fn insert(
@@ -257,7 +301,7 @@ impl DevicePlanningSession {
         if roots.is_empty() {
             return Ok(Arc::clone(&self.empty_snapshot));
         }
-        loop {
+        let (mut local, missing) = loop {
             let mut state = self
                 .state
                 .lock()
@@ -265,32 +309,60 @@ impl DevicePlanningSession {
             if let Some(snapshot) = state.cached(&roots) {
                 return Ok(snapshot);
             }
-            if state.flights.insert(roots.clone()) {
-                break;
+            let reusable = state.reusable_roots(&roots);
+            let missing = roots
+                .iter()
+                .filter(|root| !reusable.availability.contains_key(*root))
+                .cloned()
+                .collect::<Vec<_>>();
+            if missing.is_empty() {
+                let estimated_bytes = reusable.estimated_bytes();
+                let snapshot = Arc::new(DevicePlanSnapshot {
+                    knowledge: Arc::clone(&self.knowledge),
+                    local: Arc::new(reusable),
+                });
+                state.insert(roots, Arc::clone(&snapshot), estimated_bytes);
+                return Ok(snapshot);
+            }
+            if !state.overlaps_flight(&missing) {
+                state.flights.insert(missing.clone());
+                break (reusable, missing);
             }
             drop(
                 self.ready
                     .wait(state)
                     .unwrap_or_else(|poisoned| poisoned.into_inner()),
             );
-        }
-        let mut local = DevicePlanningSessionCache::default();
+        };
         let result = RuleLibrary::builtin_rules()
             .map_err(|error| CompilerError::InvariantViolation(error.to_string()))
             .and_then(|library| {
-                prepare_cache_baseline(
+                let mut staged = DevicePlanningSessionCache::default();
+                match prepare_equivalent_local_roots(
                     &self.knowledge.device,
                     library,
-                    roots.iter().cloned(),
+                    &missing,
                     Arc::clone(&self.knowledge.estimator),
-                    &mut local,
-                )
+                    &mut staged,
+                ) {
+                    Ok(_) => {
+                        local.merge(staged);
+                        Ok(())
+                    }
+                    Err(_) => prepare_cache_baseline(
+                        &self.knowledge.device,
+                        library,
+                        missing.iter().cloned(),
+                        Arc::clone(&self.knowledge.estimator),
+                        &mut local,
+                    ),
+                }
             });
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.flights.remove(&roots);
+        state.flights.remove(&missing);
         let prepared = result.map(|()| {
             let estimated_bytes = local.estimated_bytes();
             let snapshot = Arc::new(DevicePlanSnapshot {
@@ -323,11 +395,11 @@ pub(super) fn prepare_cache_baseline(
     for root in roots {
         let planned = if let Some(plan) = planner.selected_plan_for(&root) {
             let selected = own_selected_plan(&planner, plan, &mut plan_memo)?;
-            let summary = selected.summary.clone();
+            let summary = Arc::clone(&selected.summary);
             cache.selected_plans.insert(root.clone(), selected);
             NativePlanAvailability::Feasible(summary)
         } else {
-            NativePlanAvailability::Unsupported(planner.failure_for(&root))
+            NativePlanAvailability::Unsupported(Arc::new(planner.failure_for(&root)))
         };
         cache.availability.insert(root, planned);
     }
@@ -343,7 +415,7 @@ pub(super) fn retain_selected_dependencies(
         cache
             .availability
             .entry(selected.state.clone())
-            .or_insert_with(|| NativePlanAvailability::Feasible(selected.summary.clone()));
+            .or_insert_with(|| NativePlanAvailability::Feasible(Arc::clone(&selected.summary)));
         cache
             .selected_plans
             .entry(selected.state.clone())
@@ -376,9 +448,11 @@ pub(super) fn own_selected_plan(
     let physical_cost = planner.cost_for_plan(plan).ok_or_else(|| {
         CompilerError::InvariantViolation(format!("device plan {plan:?} has no physical cost"))
     })?;
-    let summary = planner
-        .summary_for_plan(plan)
-        .map_err(DevicePlannerError::into_compiler_error)?;
+    let summary = Arc::new(
+        planner
+            .summary_for_plan(plan)
+            .map_err(DevicePlannerError::into_compiler_error)?,
+    );
     let selected = Arc::new(SelectedNativePlan {
         state,
         choice,

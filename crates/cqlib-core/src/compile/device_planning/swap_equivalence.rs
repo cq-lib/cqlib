@@ -35,6 +35,184 @@ struct SwapPlanningSignature {
     native_calibrations: Vec<Option<CalibrationFingerprint>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct LocalPlanningSignature {
+    instruction: KnowledgeInstructionKey,
+    environment: Arc<LocalEnvironmentSignature>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct LocalEnvironmentSignature {
+    directed_coupling: [bool; 2],
+    native_calibrations: Vec<Option<CalibrationFingerprint>>,
+}
+
+impl LocalPlanningSignature {
+    fn for_root(
+        device: &Device,
+        root: &DeviceGateState,
+        environments: &mut HashMap<SmallVec<[PhysicalQubit; 2]>, Arc<LocalEnvironmentSignature>>,
+    ) -> Result<Self, String> {
+        if !matches!(root.instruction, KnowledgeInstructionKey::Standard(_))
+            || !(1..=2).contains(&root.ordered_qargs.len())
+            || root
+                .ordered_qargs
+                .iter()
+                .any(|qarg| !device.is_usable_qubit(*qarg))
+            || (root.ordered_qargs.len() == 2 && root.ordered_qargs[0] == root.ordered_qargs[1])
+        {
+            return Err(format!(
+                "local equivalence planner received unsupported root {root:?}"
+            ));
+        }
+
+        let environment = if let Some(environment) = environments.get(&root.ordered_qargs) {
+            Arc::clone(environment)
+        } else {
+            let environment = Arc::new(LocalEnvironmentSignature::for_qargs(
+                device,
+                &root.ordered_qargs,
+            ));
+            environments.insert(root.ordered_qargs.clone(), Arc::clone(&environment));
+            environment
+        };
+        Ok(Self {
+            instruction: root.instruction.clone(),
+            environment,
+        })
+    }
+}
+
+impl LocalEnvironmentSignature {
+    fn for_qargs(device: &Device, ordered_qargs: &[PhysicalQubit]) -> Self {
+        let directed_coupling = if ordered_qargs.len() == 2 {
+            [
+                device
+                    .topology()
+                    .supports_directed_coupling(ordered_qargs[0], ordered_qargs[1]),
+                device
+                    .topology()
+                    .supports_directed_coupling(ordered_qargs[1], ordered_qargs[0]),
+            ]
+        } else {
+            [false; 2]
+        };
+        let mut native_calibrations = Vec::new();
+        for gate in StandardGate::all().iter().copied() {
+            let instruction = Instruction::Standard(gate);
+            match gate.num_qubits() {
+                1 => {
+                    for &qarg in ordered_qargs {
+                        native_calibrations.push(calibration_fingerprint(
+                            device,
+                            &instruction,
+                            &[qarg],
+                        ));
+                    }
+                }
+                2 if ordered_qargs.len() == 2 => {
+                    native_calibrations.push(calibration_fingerprint(
+                        device,
+                        &instruction,
+                        ordered_qargs,
+                    ));
+                    native_calibrations.push(calibration_fingerprint(
+                        device,
+                        &instruction,
+                        &[ordered_qargs[1], ordered_qargs[0]],
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Self {
+            directed_coupling,
+            native_calibrations,
+        }
+    }
+}
+
+/// Plans one representative for each role-preserving local device class.
+/// Any unsupported state shape or remapping failure aborts the optimization so
+/// the caller can retry the complete exact-root batch.
+pub(super) fn prepare_equivalent_local_roots(
+    device: &Device,
+    library: &RuleLibrary,
+    roots: &[DeviceGateState],
+    estimator: Arc<CalibrationEstimator>,
+    cache: &mut DevicePlanningSessionCache,
+) -> Result<usize, String> {
+    let mut groups = BTreeMap::<LocalPlanningSignature, Vec<DeviceGateState>>::new();
+    let mut environments = HashMap::new();
+    for root in roots {
+        groups
+            .entry(LocalPlanningSignature::for_root(
+                device,
+                root,
+                &mut environments,
+            )?)
+            .or_default()
+            .push(root.clone());
+    }
+    let representatives = groups
+        .values()
+        .filter_map(|members| members.first().cloned())
+        .collect::<Vec<_>>();
+    let planner = DevicePlanner::build_with_estimator(
+        device,
+        library,
+        representatives.iter().cloned(),
+        estimator,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut owned_memo = HashMap::new();
+
+    for members in groups.into_values() {
+        let representative = members
+            .first()
+            .cloned()
+            .ok_or_else(|| "empty local planning equivalence class".to_string())?;
+        if let Some(plan) = planner.selected_plan_for(&representative) {
+            let representative_selected = own_selected_plan(&planner, plan, &mut owned_memo)
+                .map_err(|error| error.to_string())?;
+            for member in members {
+                let selected = if member.ordered_qargs == representative.ordered_qargs {
+                    Arc::clone(&representative_selected)
+                } else {
+                    let mut remap_memo = HashMap::new();
+                    let selected = remap_selected_plan(
+                        &representative_selected,
+                        &representative.ordered_qargs,
+                        &member.ordered_qargs,
+                        &mut remap_memo,
+                    )?;
+                    retain_selected_dependencies(cache, remap_memo.into_values());
+                    selected
+                };
+                cache.availability.insert(
+                    member.clone(),
+                    NativePlanAvailability::Feasible(Arc::clone(&selected.summary)),
+                );
+                cache.selected_plans.insert(member, selected);
+            }
+        } else {
+            let failure = planner.failure_for(&representative);
+            for member in members {
+                cache.availability.insert(
+                    member.clone(),
+                    NativePlanAvailability::Unsupported(Arc::new(remap_failure(
+                        &failure,
+                        &representative.ordered_qargs,
+                        &member.ordered_qargs,
+                    )?)),
+                );
+            }
+        }
+    }
+    retain_selected_dependencies(cache, owned_memo.into_values());
+    Ok(representatives.len())
+}
+
 impl SwapPlanningSignature {
     fn for_pair(device: &Device, pair: [PhysicalQubit; 2]) -> Self {
         let directed_coupling = [
@@ -140,8 +318,8 @@ pub(super) fn prepare_equivalent_swaps(
                     let mut remap_memo = HashMap::new();
                     let selected = remap_selected_plan(
                         &representative_selected,
-                        representative_pair,
-                        member_pair,
+                        &representative_pair,
+                        &member_pair,
                         &mut remap_memo,
                     )?;
                     retain_selected_dependencies(cache, remap_memo.into_values());
@@ -149,7 +327,7 @@ pub(super) fn prepare_equivalent_swaps(
                 };
                 cache.availability.insert(
                     member.clone(),
-                    NativePlanAvailability::Feasible(selected.summary.clone()),
+                    NativePlanAvailability::Feasible(Arc::clone(&selected.summary)),
                 );
                 cache.selected_plans.insert(member, selected);
             }
@@ -159,11 +337,11 @@ pub(super) fn prepare_equivalent_swaps(
                 let member_pair = [member.ordered_qargs[0], member.ordered_qargs[1]];
                 cache.availability.insert(
                     member,
-                    NativePlanAvailability::Unsupported(remap_failure(
+                    NativePlanAvailability::Unsupported(Arc::new(remap_failure(
                         &failure,
-                        representative_pair,
-                        member_pair,
-                    )?),
+                        &representative_pair,
+                        &member_pair,
+                    )?)),
                 );
             }
         }
@@ -173,8 +351,8 @@ pub(super) fn prepare_equivalent_swaps(
 
 fn remap_selected_plan(
     selected: &Arc<SelectedNativePlan>,
-    from: [PhysicalQubit; 2],
-    to: [PhysicalQubit; 2],
+    from: &[PhysicalQubit],
+    to: &[PhysicalQubit],
     memo: &mut HashMap<DeviceGateState, Arc<SelectedNativePlan>>,
 ) -> Result<Arc<SelectedNativePlan>, String> {
     if let Some(remapped) = memo.get(&selected.state) {
@@ -186,7 +364,7 @@ fn remap_selected_plan(
         .iter()
         .map(|child| remap_selected_plan(child, from, to, memo))
         .collect::<Result<Vec<_>, _>>()?;
-    let summary = NativePlanSummary {
+    let summary = Arc::new(NativePlanSummary {
         native_two_qubit_ops: selected.summary.native_two_qubit_ops,
         native_total_ops: selected.summary.native_total_ops,
         leaves: selected
@@ -202,7 +380,7 @@ fn remap_selected_plan(
                 })
             })
             .collect::<Result<Vec<_>, String>>()?,
-    };
+    });
     let remapped = Arc::new(SelectedNativePlan {
         state: state.clone(),
         choice: selected.choice,
@@ -216,8 +394,8 @@ fn remap_selected_plan(
 
 fn remap_state(
     state: &DeviceGateState,
-    from: [PhysicalQubit; 2],
-    to: [PhysicalQubit; 2],
+    from: &[PhysicalQubit],
+    to: &[PhysicalQubit],
 ) -> Result<DeviceGateState, String> {
     Ok(DeviceGateState {
         instruction: state.instruction.clone(),
@@ -227,8 +405,8 @@ fn remap_state(
 
 fn remap_small_qargs(
     qargs: &[PhysicalQubit],
-    from: [PhysicalQubit; 2],
-    to: [PhysicalQubit; 2],
+    from: &[PhysicalQubit],
+    to: &[PhysicalQubit],
 ) -> Result<SmallVec<[PhysicalQubit; 2]>, String> {
     qargs
         .iter()
@@ -239,8 +417,8 @@ fn remap_small_qargs(
 
 fn remap_vec_qargs(
     qargs: &[PhysicalQubit],
-    from: [PhysicalQubit; 2],
-    to: [PhysicalQubit; 2],
+    from: &[PhysicalQubit],
+    to: &[PhysicalQubit],
 ) -> Result<Vec<PhysicalQubit>, String> {
     qargs
         .iter()
@@ -251,24 +429,21 @@ fn remap_vec_qargs(
 
 fn remap_qubit(
     qubit: PhysicalQubit,
-    from: [PhysicalQubit; 2],
-    to: [PhysicalQubit; 2],
+    from: &[PhysicalQubit],
+    to: &[PhysicalQubit],
 ) -> Result<PhysicalQubit, String> {
-    if qubit == from[0] {
-        Ok(to[0])
-    } else if qubit == from[1] {
-        Ok(to[1])
-    } else {
-        Err(format!(
-            "selected SWAP plan contains qarg {qubit:?} outside representative pair {from:?}"
-        ))
-    }
+    from.iter()
+        .position(|candidate| *candidate == qubit)
+        .and_then(|index| to.get(index).copied())
+        .ok_or_else(|| {
+            format!("selected plan contains qarg {qubit:?} outside representative roles {from:?}")
+        })
 }
 
 fn remap_failure(
     failure: &DeviceLoweringFailure,
-    from: [PhysicalQubit; 2],
-    to: [PhysicalQubit; 2],
+    from: &[PhysicalQubit],
+    to: &[PhysicalQubit],
 ) -> Result<DeviceLoweringFailure, String> {
     Ok(DeviceLoweringFailure {
         instruction: failure.instruction.clone(),

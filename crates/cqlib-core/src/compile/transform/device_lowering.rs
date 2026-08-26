@@ -300,9 +300,9 @@ impl<'a> DeviceCircuitLowerer<'a> {
             })?;
         let Some(plan) = self.plans.selected_plan(&state) else {
             return match self.plans.availability(&state) {
-                Some(NativePlanAvailability::Unsupported(failure)) => {
-                    Err(CompilerError::DeviceLoweringFailed(failure))
-                }
+                Some(NativePlanAvailability::Unsupported(failure)) => Err(
+                    CompilerError::DeviceLoweringFailed(failure.as_ref().clone()),
+                ),
                 _ => Err(CompilerError::InvariantViolation(format!(
                     "prepared device state has no selected plan or failure: {state:?}"
                 ))),

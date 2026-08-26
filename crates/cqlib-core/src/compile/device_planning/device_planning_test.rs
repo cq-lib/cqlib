@@ -183,6 +183,28 @@ fn planning_session_serves_subset_requests_from_a_prepared_batch() {
 }
 
 #[test]
+fn planning_session_reuses_overlap_and_plans_only_missing_roots() {
+    let device = Device::line("native-plan-overlap", 3)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::H)])
+        .unwrap();
+    let first = DeviceGateState::standard(StandardGate::H, smallvec![PhysicalQubit::new(0)]);
+    let shared = DeviceGateState::standard(StandardGate::H, smallvec![PhysicalQubit::new(1)]);
+    let last = DeviceGateState::standard(StandardGate::H, smallvec![PhysicalQubit::new(2)]);
+    let session = DevicePlanningSession::new(&device);
+
+    let initial = session.prepare([first, shared.clone()]).unwrap();
+    let shared_plan = initial.selected_plan(&shared).unwrap();
+    let overlapping = session.prepare([shared.clone(), last.clone()]).unwrap();
+
+    assert!(Arc::ptr_eq(
+        &shared_plan,
+        &overlapping.selected_plan(&shared).unwrap()
+    ));
+    assert!(overlapping.selected_plan(&last).is_some());
+}
+
+#[test]
 fn planning_session_evicts_old_circuit_specific_batches() {
     let device = Device::line("native-plan-bounded-cache", 24)
         .unwrap()
@@ -364,6 +386,62 @@ fn equivalent_swap_plans_match_the_original_batch_planner_exactly() {
         assert_eq!(
             summary_projection(&optimized.summary),
             summary_projection(&planner.summary_for_plan(baseline_id).unwrap())
+        );
+    }
+}
+
+#[test]
+fn equivalent_local_plans_match_the_original_batch_planner_exactly() {
+    let device = Device::bidirectional_line("equivalent-local-baseline", 4)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap()
+        .with_default_single_qubit_error(0.231)
+        .with_default_two_qubit_error(0.232);
+    let mut roots = (0..4)
+        .map(|qarg| DeviceGateState::standard(StandardGate::H, smallvec![PhysicalQubit::new(qarg)]))
+        .collect::<Vec<_>>();
+    roots.extend((0..3).flat_map(|left| {
+        [
+            DeviceGateState::standard(
+                StandardGate::CZ,
+                smallvec![PhysicalQubit::new(left), PhysicalQubit::new(left + 1)],
+            ),
+            DeviceGateState::standard(
+                StandardGate::CZ,
+                smallvec![PhysicalQubit::new(left + 1), PhysicalQubit::new(left)],
+            ),
+        ]
+    }));
+
+    let session = DevicePlanningSession::new(&device);
+    let optimized = session.prepare(roots.iter().cloned()).unwrap();
+    let physical_qubits = device.usable_qubits().collect::<Vec<_>>();
+    let baseline = DevicePlanner::build_with_estimator(
+        &device,
+        RuleLibrary::builtin_rules().unwrap(),
+        roots.iter().cloned(),
+        Arc::new(CalibrationEstimator::from_device(&device, &physical_qubits)),
+    )
+    .unwrap();
+
+    for root in roots {
+        let optimized = optimized.selected_plan(&root).unwrap();
+        let baseline_id = baseline.selected_plan_for(&root).unwrap();
+        assert_eq!(
+            optimized.choice,
+            baseline.choice_for_plan(baseline_id).unwrap()
+        );
+        assert_eq!(
+            optimized.physical_cost,
+            baseline.cost_for_plan(baseline_id).unwrap()
+        );
+        assert_eq!(
+            summary_projection(&optimized.summary),
+            summary_projection(&baseline.summary_for_plan(baseline_id).unwrap())
         );
     }
 }

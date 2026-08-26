@@ -52,7 +52,7 @@ impl NativePlanCatalog {
 
     pub(crate) fn summary(&self, state: &DeviceGateState) -> Option<&NativePlanSummary> {
         match self.availability(state) {
-            Some(NativePlanAvailability::Feasible(summary)) => Some(summary),
+            Some(NativePlanAvailability::Feasible(summary)) => Some(summary.as_ref()),
             Some(NativePlanAvailability::Unsupported(_)) | None => None,
         }
     }
@@ -64,7 +64,7 @@ impl NativePlanCatalog {
                 let NativePlanAvailability::Feasible(summary) = availability else {
                     return None;
                 };
-                Some((state, summary))
+                Some((state, summary.as_ref()))
             })
     }
 

@@ -1444,7 +1444,7 @@ impl RoutingTarget {
                 let NativePlanAvailability::Unsupported(failure) = availability else {
                     return None;
                 };
-                Some((state.clone(), failure.clone()))
+                Some((state.clone(), failure.as_ref().clone()))
             })
             .collect();
         let count = physical_qubits.len();

@@ -482,7 +482,7 @@ impl DeviceTwoQubitSynthesisContext {
         &self,
         state: &DeviceGateState,
         plans: Option<&DevicePlanSnapshot>,
-    ) -> Result<NativePlanSummary, DeviceContextCostFailure> {
+    ) -> Result<Arc<NativePlanSummary>, DeviceContextCostFailure> {
         let prepared;
         let plans = if let Some(plans) = plans {
             plans
@@ -501,7 +501,7 @@ impl DeviceTwoQubitSynthesisContext {
         match plans.availability(state) {
             Some(NativePlanAvailability::Feasible(summary)) => Ok(summary),
             Some(NativePlanAvailability::Unsupported(failure)) => {
-                Err(DeviceContextCostFailure::Unsupported(failure))
+                Err(DeviceContextCostFailure::Unsupported((*failure).clone()))
             }
             None => Err(DeviceContextCostFailure::Unprepared(state.clone())),
         }
