@@ -60,6 +60,59 @@ pub(crate) struct NativeWorksetStats {
     pub(crate) synthesis_cache: TwoQubitSynthesisCacheStats,
 }
 
+impl NativeWorksetStats {
+    /// Adds diagnostics from an independent branch workset. The synthesis
+    /// cache is deliberately excluded: NativeOptimizer keeps one exact cache
+    /// in a designated session and moves it between branch-local worksets.
+    pub(crate) fn merge_workset_from(&mut self, other: Self) {
+        self.scopes_total = self.scopes_total.saturating_add(other.scopes_total);
+        self.scopes_unchanged = self.scopes_unchanged.saturating_add(other.scopes_unchanged);
+        self.scopes_full_scan = self.scopes_full_scan.saturating_add(other.scopes_full_scan);
+        self.anchors_total = self.anchors_total.saturating_add(other.anchors_total);
+        self.anchors_reused = self.anchors_reused.saturating_add(other.anchors_reused);
+        self.anchors_recomputed = self
+            .anchors_recomputed
+            .saturating_add(other.anchors_recomputed);
+        self.dependency_failures = self
+            .dependency_failures
+            .saturating_add(other.dependency_failures);
+        self.cache_rejections = self.cache_rejections.saturating_add(other.cache_rejections);
+        self.maximal_blocks_total = self
+            .maximal_blocks_total
+            .saturating_add(other.maximal_blocks_total);
+        self.maximal_blocks_reused = self
+            .maximal_blocks_reused
+            .saturating_add(other.maximal_blocks_reused);
+        self.maximal_blocks_recomputed = self
+            .maximal_blocks_recomputed
+            .saturating_add(other.maximal_blocks_recomputed);
+        self.cycle_early_exits = self
+            .cycle_early_exits
+            .saturating_add(other.cycle_early_exits);
+        self.quality_scope_shape_rejections = self
+            .quality_scope_shape_rejections
+            .saturating_add(other.quality_scope_shape_rejections);
+        self.quality_two_qubit_ops_rejections = self
+            .quality_two_qubit_ops_rejections
+            .saturating_add(other.quality_two_qubit_ops_rejections);
+        self.quality_two_qubit_depth_rejections = self
+            .quality_two_qubit_depth_rejections
+            .saturating_add(other.quality_two_qubit_depth_rejections);
+        self.quality_total_depth_rejections = self
+            .quality_total_depth_rejections
+            .saturating_add(other.quality_total_depth_rejections);
+        self.quality_error_rejections = self
+            .quality_error_rejections
+            .saturating_add(other.quality_error_rejections);
+        self.quality_makespan_rejections = self
+            .quality_makespan_rejections
+            .saturating_add(other.quality_makespan_rejections);
+        self.quality_rank_rejections = self
+            .quality_rank_rejections
+            .saturating_add(other.quality_rank_rejections);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum NativeScopeSegment {
     IfThen(u64),
@@ -427,6 +480,13 @@ impl NativeResynthesisSession {
             stats: NativeWorksetStats::default(),
             synthesis_cache: TwoQubitSynthesisCache::new_native_session(),
         }
+    }
+
+    /// Moves exact synthesis artifacts between independent incremental branch
+    /// worksets. Cache keys include their full synthesis namespace, so the
+    /// artifacts are reusable even though operation identities are not.
+    pub(crate) fn swap_synthesis_cache(&mut self, other: &mut Self) {
+        std::mem::swap(&mut self.synthesis_cache, &mut other.synthesis_cache);
     }
 
     pub(crate) fn begin_round(&mut self, config: &TwoQubitBlockResynthesisConfig) {

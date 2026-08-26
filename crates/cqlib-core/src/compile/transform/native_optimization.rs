@@ -12,19 +12,23 @@
 
 //! Exact physical optimization after device instruction lowering.
 //!
-//! [`NativeOptimizer`] closes a bounded loop over exact-physical two-qubit
-//! resynthesis, local phase/frame optimization, device re-legalization, and
-//! canonicalization. Every transform recursively visits structured control-flow
-//! bodies, while the loop itself advances all scopes synchronously.
+//! [`NativeOptimizer`] closes a bounded loop over independent stage branches.
+//! Every round evaluates `baseline -> A`, `baseline -> B -> C`, and
+//! `A -> B -> C`, where A/C are local one-qubit optimization and B is
+//! exact-physical two-qubit resynthesis. Each legalized stage is a returnable
+//! quality checkpoint. A non-improving intermediate may feed its dependent
+//! stage inside one branch, but it cannot replace the round cursor or suppress
+//! a sibling branch. Every transform recursively visits structured
+//! control-flow bodies.
 //!
 //! Candidate circuits are accepted under a Native-only quality policy. The
 //! balanced policy first protects the immutable entry circuit's entangler
 //! count/depth, total depth, calibrated error, and makespan in every
 //! control-flow scope; candidates inside that envelope are then ranked against
-//! the best accepted circuit. This avoids assigning arbitrary execution counts
-//! to conditional or loop bodies. The optimizer restores the best whole-circuit
-//! point seen; it does not splice independently optimal bodies from different
-//! rounds.
+//! the best returnable circuit. This avoids assigning arbitrary execution
+//! counts to conditional or loop bodies. The optimizer restores the best whole
+//! circuit seen; independently optimal control-flow bodies are never spliced
+//! together.
 //!
 //! One immutable exact-physical synthesis context is shared by resynthesis,
 //! local optimization, and scope costing for the lifetime of a single run. The
@@ -66,6 +70,25 @@ use std::sync::Arc;
 
 const PHASE_EPS: f64 = 1e-12;
 
+struct NativeStageCandidate {
+    circuit: Arc<Circuit>,
+    costs: Vec<NativeQualityVector>,
+    context: DeviceTwoQubitSynthesisContext,
+    improves_best: bool,
+}
+
+enum NativeStageOutcome {
+    Unchanged,
+    Unavailable,
+    Candidate(NativeStageCandidate),
+}
+
+struct NativeBestCheckpoint<'a> {
+    circuit: &'a mut Arc<Circuit>,
+    costs: &'a mut Vec<NativeQualityVector>,
+    context: &'a mut DeviceTwoQubitSynthesisContext,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NativeOptimizationSummary {
     /// Number of native two-qubit operations across all control-flow scopes.
@@ -93,7 +116,8 @@ pub struct NativeOptimizationResult {
     pub changed: bool,
     /// Number of optimization rounds entered, including a terminal stable round.
     pub rounds: u8,
-    /// Whether the last explored candidate was discarded in favor of an earlier best point.
+    /// Whether the last explored state was discarded in favor of an earlier
+    /// best returnable point.
     pub restored_best: bool,
     /// Exact physical cost summary at optimizer entry.
     pub before: NativeOptimizationSummary,
@@ -286,154 +310,137 @@ impl<'a> NativeOptimizer<'a> {
         policy: NativeResynthesisPolicy,
     ) -> Result<(NativeOptimizationResult, NativeWorksetStats), CompilerError> {
         self.device().validate_circuit(&initial)?;
-        // Native rounds can carry very large circuits. Share immutable round
-        // states so `current`, `best`, and the exact cycle detector do not each
-        // deep-clone every operation and nested control-flow body.
+        // Native rounds can carry very large circuits. Share immutable states
+        // between the exploration cursor, the best returnable checkpoint, and
+        // the exact round-boundary cycle detector.
         let initial = Arc::new(initial);
         let mut current = initial.clone();
         let mut best = initial;
         // This exact-physical context is immutable and run-scoped. All consumers
-        // share its Arc-backed catalog until a candidate exposes missing coverage.
+        // on the exploration path share its Arc-backed catalog until a candidate
+        // exposes missing coverage.
         let mut context = DeviceTwoQubitSynthesisContext::build_with_session(
             self.device(),
-            &best,
+            &current,
             DeviceSynthesisPlacement::ExactPhysical,
             Arc::clone(&self.planning_session),
         )?;
+        let mut best_context = context.clone();
         let mut best_costs = scope_costs_with_context(&best, &context).map_err(scope_cost_error)?;
         let entry_costs = best_costs.clone();
         let before = summarize_scope_costs(&best_costs);
         let mut rounds = 0;
-        let mut stale = 0;
-        let mut restored_best = false;
-        let mut resynthesis_session = NativeResynthesisSession::new(policy);
+        let mut stale = 0_u8;
+        // Incremental operation identity is branch-local. Exact synthesis
+        // artifacts remain run-scoped and are moved between these sessions
+        // immediately around the A->B call.
+        let mut baseline_session = NativeResynthesisSession::new(policy);
+        let mut after_local_session = NativeResynthesisSession::new(policy);
         let mut seen_states = vec![current.clone()];
 
         'optimization: while rounds < self.max_rounds && stale < self.max_stale_rounds {
             rounds += 1;
-            let resynthesis_outcome = resynthesize_two_qubit_blocks_incremental(
-                &current,
-                self.resynthesis.clone(),
-                context.clone(),
-                &mut resynthesis_session,
-                self.quality_policy,
-            )?;
-            let resynthesis_changed = resynthesis_outcome.changed();
-            let resynthesized = match &resynthesis_outcome {
-                TransformOutcome::Unchanged => current.as_ref(),
-                TransformOutcome::Changed(circuit) => circuit,
-            };
-            let local_outcome =
-                OptimizeNativeLocalGates::with_quality_policy(context.clone(), self.quality_policy)
-                    .transform(resynthesized, None)?;
-            let local_changed = local_outcome.changed();
-            // A fully stable round makes the remaining passes deterministic
-            // no-ops: lowering and canonicalization reproduce `current` (the
-            // entry point already validated it as exact-native), so this is
-            // the `candidate == current` break below without paying for the
-            // full-circuit lowering, canonicalization, validation, and cost
-            // evaluation in between.
-            if !resynthesis_changed && !local_changed {
-                break;
-            }
-            let legalized = match local_outcome {
-                TransformOutcome::Changed(locally_optimized) => {
-                    match DeviceLowerer::with_session(self.device(), &self.planning_session)
-                        .transform(&locally_optimized, None)
-                    {
-                        Ok(TransformOutcome::Unchanged) => locally_optimized,
-                        Ok(TransformOutcome::Changed(legalized)) => legalized,
-                        // Frame propagation is speculative: materializing a combined
-                        // phase as RZ may be impossible on devices whose discrete
-                        // phase gates cannot synthesize arbitrary RZ. Discard only
-                        // that local candidate and retain this round's 2Q result.
-                        Err(CompilerError::DeviceLoweringFailed(_)) => {
-                            let fallback = match &resynthesis_outcome {
-                                TransformOutcome::Unchanged => current.as_ref(),
-                                TransformOutcome::Changed(circuit) => circuit,
-                            };
-                            match DeviceLowerer::with_session(self.device(), &self.planning_session)
-                                .transform(fallback, None)?
-                            {
-                                TransformOutcome::Changed(legalized) => legalized,
-                                TransformOutcome::Unchanged => match resynthesis_outcome {
-                                    TransformOutcome::Changed(resynthesized) => resynthesized,
-                                    TransformOutcome::Unchanged => break 'optimization,
-                                },
-                            }
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                TransformOutcome::Unchanged => {
-                    let resynthesized = match resynthesis_outcome {
-                        TransformOutcome::Changed(circuit) => circuit,
-                        TransformOutcome::Unchanged => unreachable!(
-                            "a stable native optimization round exits before legalization"
-                        ),
-                    };
-                    match DeviceLowerer::with_session(self.device(), &self.planning_session)
-                        .transform(&resynthesized, None)?
-                    {
-                        TransformOutcome::Unchanged => resynthesized,
-                        TransformOutcome::Changed(legalized) => legalized,
-                    }
-                }
-            };
-            let candidate = match Canonicalizer::production().transform(&legalized, None)? {
-                TransformOutcome::Unchanged => legalized,
-                TransformOutcome::Changed(candidate) => candidate,
-            };
-            // Debug builds validate every round to keep the safety net tight
-            // while developing; release builds validate only accepted
-            // candidates. The terminal workflow validation remains the final
-            // safety boundary either way.
-            let validate_every_round = cfg!(debug_assertions);
-            if validate_every_round {
-                self.device().validate_circuit(&candidate)?;
-            }
+            let round_start = current.clone();
+            let round_context = context.clone();
+            let mut improved_in_round = false;
 
-            if candidate == *current {
-                break;
-            }
-            // Every stage in a native round is deterministic for a fixed
-            // context and configuration. Re-entering any exact prior circuit
-            // therefore proves a cycle; further stale rounds can only replay
-            // states already compared against `best`.
-            if let Some(seen) = seen_states.iter().find(|seen| seen.as_ref() == &candidate) {
-                current = seen.clone();
-                resynthesis_session.record_cycle_early_exit();
-                break;
-            }
-            let candidate_costs = self.candidate_costs_with_reuse(&candidate, &mut context)?;
-            let candidate = Arc::new(candidate);
-            if let Err(violation) = scope_quality_decision(
-                &candidate_costs,
-                &best_costs,
+            // A is generated from the immutable round baseline. Its legal
+            // result remains available to the dependent A->B->C branch even
+            // when the standalone A checkpoint is rejected.
+            let phase_a_branch = match OptimizeNativeLocalGates::with_quality_policy(
+                round_context.clone(),
+                self.quality_policy,
+            )
+            .transform(&round_start, None)?
+            {
+                TransformOutcome::Unchanged => None,
+                TransformOutcome::Changed(candidate) => match self.evaluate_stage_candidate(
+                    &round_start,
+                    Arc::new(candidate),
+                    &best_costs,
+                    &entry_costs,
+                    &round_context,
+                    &mut after_local_session,
+                )? {
+                    NativeStageOutcome::Candidate(candidate) => {
+                        let branch = (candidate.circuit.clone(), candidate.context.clone());
+                        improved_in_round |= install_best_checkpoint(
+                            &candidate,
+                            &mut best,
+                            &mut best_costs,
+                            &mut best_context,
+                        );
+                        Some(branch)
+                    }
+                    NativeStageOutcome::Unchanged | NativeStageOutcome::Unavailable => None,
+                },
+            };
+
+            // B/C from the immutable baseline is a sibling search path. It is
+            // deliberately evaluated even when A produced a legal candidate.
+            improved_in_round |= self.explore_resynthesis_branch(
+                &round_start,
+                &round_context,
+                NativeBestCheckpoint {
+                    circuit: &mut best,
+                    costs: &mut best_costs,
+                    context: &mut best_context,
+                },
                 &entry_costs,
-                self.quality_policy,
-            ) {
-                resynthesis_session.record_quality_rejection(violation);
-                stale = stale.saturating_add(1);
-            } else {
-                if !validate_every_round {
-                    self.device().validate_circuit(&candidate)?;
-                }
-                best = candidate.clone();
-                best_costs = candidate_costs;
-                stale = 0;
+                &mut baseline_session,
+            )?;
+
+            if let Some((phase_a, phase_a_context)) = phase_a_branch {
+                // Only exact synthesis artifacts cross the branch boundary;
+                // incremental operation IDs, diffs, and worksets stay local.
+                baseline_session.swap_synthesis_cache(&mut after_local_session);
+                let branch_result = self.explore_resynthesis_branch(
+                    &phase_a,
+                    &phase_a_context,
+                    NativeBestCheckpoint {
+                        circuit: &mut best,
+                        costs: &mut best_costs,
+                        context: &mut best_context,
+                    },
+                    &entry_costs,
+                    &mut after_local_session,
+                );
+                baseline_session.swap_synthesis_cache(&mut after_local_session);
+                improved_in_round |= branch_result?;
             }
-            seen_states.push(candidate.clone());
-            current = candidate;
+
+            // Only a quality-accepted whole-circuit checkpoint may seed the
+            // next round. Rejected A/B/C states have already served their
+            // bounded dependent edge and cannot contaminate later rounds.
+            current = best.clone();
+            context = best_context.clone();
+
+            if current.as_ref() == round_start.as_ref() {
+                break;
+            }
+
+            // Only round-boundary exploration states participate in cycle
+            // detection. The same circuit at different A/B/C phase positions
+            // does not imply the same remaining deterministic transition.
+            if let Some(seen) = seen_states
+                .iter()
+                .find(|seen| seen.as_ref() == current.as_ref())
+            {
+                current = seen.clone();
+                baseline_session.record_cycle_early_exit();
+                break 'optimization;
+            }
+            seen_states.push(current.clone());
+
+            if improved_in_round {
+                stale = 0;
+            } else {
+                stale = stale.saturating_add(1);
+            }
         }
 
-        if current.as_ref() != best.as_ref() {
-            restored_best = true;
-        }
+        let restored_best = current.as_ref() != best.as_ref();
         let after = summarize_scope_costs(&best_costs);
-        // Drop the other shared handles before recovering the owned result.
-        // `try_unwrap` is therefore the normal path and preserves the previous
-        // API without a final full-circuit clone.
         drop(current);
         drop(seen_states);
         let best = Arc::try_unwrap(best).unwrap_or_else(|shared| shared.as_ref().clone());
@@ -445,7 +452,132 @@ impl<'a> NativeOptimizer<'a> {
             before,
             after,
         };
-        Ok((result, resynthesis_session.stats()))
+        let mut stats = baseline_session.stats();
+        stats.merge_workset_from(after_local_session.stats());
+        Ok((result, stats))
+    }
+
+    /// Evaluates one detached `B -> C` branch. B and C are separate returnable
+    /// checkpoints, while raw B remains available to C even when B itself is
+    /// not lowerable or does not improve the whole-circuit quality point.
+    fn explore_resynthesis_branch(
+        &self,
+        branch_start: &Arc<Circuit>,
+        branch_context: &DeviceTwoQubitSynthesisContext,
+        best: NativeBestCheckpoint<'_>,
+        entry_costs: &[NativeQualityVector],
+        session: &mut NativeResynthesisSession,
+    ) -> Result<bool, CompilerError> {
+        let resynthesis_outcome = resynthesize_two_qubit_blocks_incremental(
+            branch_start,
+            self.resynthesis.clone(),
+            branch_context.clone(),
+            session,
+            self.quality_policy,
+        )?;
+        let TransformOutcome::Changed(raw_phase_b) = resynthesis_outcome else {
+            return Ok(false);
+        };
+        let raw_phase_b = Arc::new(raw_phase_b);
+        let phase_b_outcome = self.evaluate_stage_candidate(
+            branch_start,
+            raw_phase_b.clone(),
+            best.costs,
+            entry_costs,
+            branch_context,
+            session,
+        )?;
+        let cleanup_context = match phase_b_outcome {
+            NativeStageOutcome::Candidate(candidate) => {
+                let context = candidate.context.clone();
+                let improved =
+                    install_best_checkpoint(&candidate, best.circuit, best.costs, best.context);
+                (context, improved)
+            }
+            NativeStageOutcome::Unchanged | NativeStageOutcome::Unavailable => {
+                (branch_context.clone(), false)
+            }
+        };
+        let (cleanup_context, mut improved) = cleanup_context;
+
+        // C follows generated B, not accepted B. This preserves the useful
+        // coupled edge without binding B's acceptance to C's acceptance.
+        if let TransformOutcome::Changed(cleaned) =
+            OptimizeNativeLocalGates::with_quality_policy(cleanup_context, self.quality_policy)
+                .transform(&raw_phase_b, None)?
+        {
+            if let NativeStageOutcome::Candidate(candidate) = self.evaluate_stage_candidate(
+                branch_start,
+                Arc::new(cleaned),
+                best.costs,
+                entry_costs,
+                branch_context,
+                session,
+            )? {
+                improved |=
+                    install_best_checkpoint(&candidate, best.circuit, best.costs, best.context);
+            }
+        }
+        Ok(improved)
+    }
+
+    /// Legalizes, canonicalizes, validates, and scores one detached stage
+    /// candidate. A quality failure prevents only installation as `best`; the
+    /// legal candidate and its costing context remain available for bounded
+    /// exploration by a dependent stage.
+    fn evaluate_stage_candidate(
+        &self,
+        baseline: &Arc<Circuit>,
+        generated: Arc<Circuit>,
+        best_costs: &[NativeQualityVector],
+        entry_costs: &[NativeQualityVector],
+        context: &DeviceTwoQubitSynthesisContext,
+        resynthesis_session: &mut NativeResynthesisSession,
+    ) -> Result<NativeStageOutcome, CompilerError> {
+        let legalized = match DeviceLowerer::with_session(self.device(), &self.planning_session)
+            .transform(&generated, None)
+        {
+            Ok(TransformOutcome::Unchanged) => generated,
+            Ok(TransformOutcome::Changed(legalized)) => Arc::new(legalized),
+            // A standalone checkpoint may be unavailable even though a later
+            // cleanup of the raw generated circuit can still be lowerable.
+            Err(CompilerError::DeviceLoweringFailed(_)) => {
+                return Ok(NativeStageOutcome::Unavailable);
+            }
+            Err(error) => return Err(error),
+        };
+        let candidate = match Canonicalizer::production().transform(&legalized, None)? {
+            TransformOutcome::Unchanged => legalized,
+            TransformOutcome::Changed(candidate) => Arc::new(candidate),
+        };
+        if candidate.as_ref() == baseline.as_ref() {
+            return Ok(NativeStageOutcome::Unchanged);
+        }
+
+        // A non-improving candidate may become the next exploration state, so
+        // validation is mandatory before returning it in every build profile.
+        self.device().validate_circuit(&candidate)?;
+        let mut candidate_context = context.clone();
+        let candidate_costs =
+            self.candidate_costs_with_reuse(&candidate, &mut candidate_context)?;
+        let improves_best = match scope_quality_decision(
+            &candidate_costs,
+            best_costs,
+            entry_costs,
+            self.quality_policy,
+        ) {
+            Ok(()) => true,
+            Err(violation) => {
+                resynthesis_session.record_quality_rejection(violation);
+                false
+            }
+        };
+        Ok(NativeStageOutcome::Candidate(NativeStageCandidate {
+            circuit: candidate,
+            costs: candidate_costs,
+            context: candidate_context,
+            improves_best,
+        }))
     }
 
     /// Costs a candidate with the run-scoped context, rebuilding transactionally
@@ -479,6 +611,21 @@ impl<'a> NativeOptimizer<'a> {
             Err(error) => Err(scope_cost_error(error)),
         }
     }
+}
+
+fn install_best_checkpoint(
+    candidate: &NativeStageCandidate,
+    best: &mut Arc<Circuit>,
+    best_costs: &mut Vec<NativeQualityVector>,
+    best_context: &mut DeviceTwoQubitSynthesisContext,
+) -> bool {
+    if !candidate.improves_best {
+        return false;
+    }
+    *best = candidate.circuit.clone();
+    best_costs.clone_from(&candidate.costs);
+    *best_context = candidate.context.clone();
+    true
 }
 
 fn validate_native_optimization_budgets(
