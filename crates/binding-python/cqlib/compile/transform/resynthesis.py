@@ -15,9 +15,13 @@ _resynthesis_module = _compile_module.transform.resynthesis
 TwoQubitBlockResynthesisConfig = _resynthesis_module.TwoQubitBlockResynthesisConfig
 ResynthesizeTwoQubitBlocks = _resynthesis_module.ResynthesizeTwoQubitBlocks
 resynthesize_two_qubit_blocks = _resynthesis_module.resynthesize_two_qubit_blocks
+resynthesize_two_qubit_blocks_for_device = (
+    _resynthesis_module.resynthesize_two_qubit_blocks_for_device
+)
 
 __all__ = [
     "TwoQubitBlockResynthesisConfig",
     "ResynthesizeTwoQubitBlocks",
     "resynthesize_two_qubit_blocks",
+    "resynthesize_two_qubit_blocks_for_device",
 ]

@@ -32,6 +32,9 @@ from cqlib.compile.transform import (
     KnowledgeRewriteStats,
     KnowledgeRewriter,
     LowerToRoutingBasis,
+    NativeOptimizationResult,
+    NativeOptimizationSummary,
+    NativeOptimizer,
     OptimizeOneQubitRuns,
     RewriteConfig,
     RewriteMode,
@@ -39,9 +42,11 @@ from cqlib.compile.transform import (
     TargetBasisLowerer,
     TransformResult,
     canonicalize_circuit,
+    elide_virtual_permutations,
     lower_to_routing_basis,
     rewrite_circuit,
 )
+from cqlib.device import Device
 from cqlib.compile.transform.decompose import (
     TwoQubitUnitaryDecomposeBasis,
     UnitaryDecomposeConfig,
@@ -55,6 +60,7 @@ from cqlib.compile.transform.resynthesis import (
     ResynthesizeTwoQubitBlocks,
     TwoQubitBlockResynthesisConfig,
     resynthesize_two_qubit_blocks,
+    resynthesize_two_qubit_blocks_for_device,
 )
 
 
@@ -73,6 +79,14 @@ def test_transform_module_and_public_types_are_registered() -> None:
     assert KnowledgeRewriteStats.__module__ == "cqlib.compile.transform"
     assert KnowledgeRewriteResult.__module__ == "cqlib.compile.transform"
     assert LowerToRoutingBasis.__module__ == "cqlib.compile.transform"
+    assert (
+        resynthesize_two_qubit_blocks_for_device.__module__
+        == "cqlib.compile.transform.resynthesis"
+    )
+    assert (
+        elide_virtual_permutations.__module__
+        == "cqlib.compile.transform.virtual_permutation"
+    )
     assert TransformResult is ResultModuleTransformResult
 
 
@@ -628,6 +642,120 @@ def test_two_qubit_block_resynthesis_python_api_preserves_input() -> None:
     assert len(result.circuit.operations) == 0
     assert transformer.config == config
     assert transformer_result == result
+
+
+def test_native_optimizer_exposes_structured_exact_physical_result() -> None:
+    device = Device.bidirectional_line("native-optimizer-python", 1)
+    device.native_gates = [Instruction.from_standard_gate(StandardGate.U)]
+    circuit = Circuit(1)
+    circuit.u(0, 0.2, 0.3, 0.4)
+    circuit.u(0, -0.1, 0.5, -0.2)
+    optimizer = NativeOptimizer(device, enhanced=True)
+
+    result = optimizer.run(circuit)
+
+    assert optimizer.enhanced is True
+    assert optimizer.max_rounds == 8
+    assert optimizer.max_stale_rounds == 3
+    assert isinstance(result, NativeOptimizationResult)
+    assert isinstance(result.before, NativeOptimizationSummary)
+    assert len(circuit.operations) == 2
+    assert result.changed is True
+    assert result.rounds >= 1
+    assert result.before.native_total_ops == 2
+    assert result.after.native_total_ops == 1
+    assert result.after.total_native_depth <= result.before.total_native_depth
+    device.validate_circuit(result.circuit)
+    assert copy.copy(optimizer).run(circuit).circuit == result.circuit
+    assert copy.deepcopy(result).circuit == result.circuit
+    assert copy.copy(result.before) == result.before
+    assert "NativeOptimizer" in repr(optimizer)
+    assert "NativeOptimizationResult" in repr(result)
+
+
+def test_device_aware_resynthesis_entry_is_explicit_and_non_mutating() -> None:
+    device = Device.bidirectional_line("device-aware-resynthesis-python", 2)
+    device.native_gates = [
+        Instruction.from_standard_gate(StandardGate.U),
+        Instruction.from_standard_gate(StandardGate.CX),
+    ]
+    circuit = Circuit(2)
+    circuit.cx(0, 1)
+    circuit.cx(0, 1)
+
+    result = resynthesize_two_qubit_blocks_for_device(
+        circuit,
+        device,
+        placement="exact_physical",
+    )
+
+    assert len(circuit.operations) == 2
+    assert result.changed is True
+    assert len(result.circuit.operations) == 0
+
+    with pytest.raises(
+        CompilerConfigError, match="unknown device resynthesis placement"
+    ):
+        resynthesize_two_qubit_blocks_for_device(
+            circuit,
+            device,
+            placement="logical",
+        )
+
+
+def test_native_optimizer_rejects_invalid_round_budgets() -> None:
+    device = Device.bidirectional_line("native-optimizer-invalid-budget", 1)
+    device.native_gates = [Instruction.from_standard_gate(StandardGate.U)]
+
+    with pytest.raises(
+        CompilerConfigError, match="max_rounds must be greater than zero"
+    ):
+        NativeOptimizer(device, max_rounds=0)
+    with pytest.raises(
+        CompilerConfigError, match="max_stale_rounds must be greater than zero"
+    ):
+        NativeOptimizer(device, max_stale_rounds=0)
+
+    with pytest.raises(OverflowError):
+        NativeOptimizer(device, max_rounds=-1)
+    with pytest.raises(OverflowError):
+        NativeOptimizer(device, max_rounds=256)
+
+
+def test_device_aware_resynthesis_uses_pre_layout_envelope_by_default() -> None:
+    device = Device.bidirectional_line("pre-layout-resynthesis-python", 3)
+    device.native_gates = [
+        Instruction.from_standard_gate(StandardGate.U),
+        Instruction.from_standard_gate(StandardGate.CX),
+    ]
+    circuit = Circuit(2)
+    circuit.cx(0, 1)
+    circuit.cx(0, 1)
+
+    result = resynthesize_two_qubit_blocks_for_device(circuit, device)
+
+    assert len(circuit.operations) == 2
+    assert result.changed is True
+    assert len(result.circuit.operations) == 0
+
+
+def test_virtual_permutation_elision_is_structured_and_non_mutating() -> None:
+    circuit = Circuit(2)
+    circuit.swap(0, 1)
+    circuit.x(0)
+
+    result = elide_virtual_permutations(circuit)
+
+    assert len(circuit.operations) == 2
+    assert result.changed is True
+    assert result.status == "changed"
+    assert result.elided_swap_count == 1
+    assert result.virtual_permutation == {0: 1, 1: 0}
+    assert len(result.circuit.operations) == 1
+    assert result.circuit.operations[0].instruction.instruction.name == "X"
+    assert [qubit.index for qubit in result.circuit.operations[0].qubits] == [1]
+    assert copy.deepcopy(result).virtual_permutation == {0: 1, 1: 0}
+    assert "VirtualPermutationElisionResult" in repr(result)
 
 
 def test_target_basis_lowerer_accepts_gate_name_strings() -> None:

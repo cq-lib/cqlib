@@ -33,10 +33,12 @@ from . import commutative_cancellation as commutative_cancellation
 from . import decompose as decompose
 from . import device_lowering as device_lowering
 from . import layout as layout
+from . import native_optimization as native_optimization
 from . import one_qubit_optimization as one_qubit_optimization
 from . import routing as routing
 from . import resynthesis as resynthesis
 from . import target_basis as target_basis
+from . import virtual_permutation as virtual_permutation
 from .analysis import CircuitAnalysis as CircuitAnalysis
 from .canonicalize import CanonicalizeConfig as CanonicalizeConfig
 from .canonicalize import CanonicalizeResult as CanonicalizeResult
@@ -70,6 +72,9 @@ from .layout import trivial_layout as trivial_layout
 from .layout import trivial_layout_prepared as trivial_layout_prepared
 from .layout import vf2_perfect_layout as vf2_perfect_layout
 from .layout import vf2_perfect_layout_prepared as vf2_perfect_layout_prepared
+from .native_optimization import NativeOptimizationResult as NativeOptimizationResult
+from .native_optimization import NativeOptimizationSummary as NativeOptimizationSummary
+from .native_optimization import NativeOptimizer as NativeOptimizer
 from .one_qubit_optimization import OptimizeOneQubitRuns as OptimizeOneQubitRuns
 from .routing import RoutedCircuit as RoutedCircuit
 from .routing import SabreRouteResult as SabreRouteResult
@@ -81,6 +86,12 @@ from .target_basis import TargetBasisCost as TargetBasisCost
 from .target_basis import TargetBasisCostModel as TargetBasisCostModel
 from .target_basis import TargetBasisLowerer as TargetBasisLowerer
 from .target_basis import TargetBasisSignature as TargetBasisSignature
+from .virtual_permutation import (
+    VirtualPermutationElisionResult as VirtualPermutationElisionResult,
+)
+from .virtual_permutation import (
+    elide_virtual_permutations as elide_virtual_permutations,
+)
 from .rewrite import KnowledgeRewriteResult as KnowledgeRewriteResult
 from .rewrite import KnowledgeRewriteStats as KnowledgeRewriteStats
 from .rewrite import KnowledgeRewriter as KnowledgeRewriter
@@ -95,10 +106,12 @@ __all__ = [
     "decompose",
     "device_lowering",
     "layout",
+    "native_optimization",
     "one_qubit_optimization",
     "routing",
     "resynthesis",
     "target_basis",
+    "virtual_permutation",
     "TransformResult",
     "CircuitAnalysis",
     "DeviceLowerer",
@@ -108,6 +121,9 @@ __all__ = [
     "canonicalize_circuit",
     "CommutativeCancellation",
     "OptimizeOneQubitRuns",
+    "NativeOptimizationSummary",
+    "NativeOptimizationResult",
+    "NativeOptimizer",
     "LayoutObjective",
     "Interaction",
     "InteractionGraph",
@@ -142,6 +158,8 @@ __all__ = [
     "TargetBasisSignature",
     "TargetBasisCost",
     "TargetBasisCostModel",
+    "VirtualPermutationElisionResult",
+    "elide_virtual_permutations",
     "RewriteMode",
     "RewriteConfig",
     "KnowledgeRewriter",

@@ -18,6 +18,7 @@ mod commutative_cancellation;
 pub mod decompose;
 mod device_lowering;
 pub mod layout;
+mod native_optimization;
 mod one_qubit_optimization;
 pub mod result;
 mod resynthesis;
@@ -25,6 +26,7 @@ mod rewrite;
 pub mod routing;
 mod routing_basis;
 mod target_basis;
+mod virtual_permutation;
 
 use pyo3::prelude::*;
 
@@ -33,6 +35,7 @@ use canonicalize::{
     PyCanonicalizeConfig, PyCanonicalizeResult, PyCanonicalizer, py_canonicalize_circuit,
 };
 use device_lowering::register_device_lowering_module;
+use native_optimization::register_native_optimization_module;
 use one_qubit_optimization::register_one_qubit_optimization_module;
 use result::PyTransformResult;
 use resynthesis::register_resynthesis_module;
@@ -42,6 +45,7 @@ use rewrite::{
 };
 use routing_basis::{PyLowerToRoutingBasis, py_lower_to_routing_basis};
 use target_basis::register_target_basis_module;
+use virtual_permutation::register_virtual_permutation_module;
 
 /// Registers transform bindings as `_native.compile.transform`.
 pub(crate) fn register_transform_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -65,11 +69,13 @@ pub(crate) fn register_transform_module(parent: &Bound<'_, PyModule>) -> PyResul
     register_analysis_module(&m)?;
     commutative_cancellation::register_commutative_cancellation_module(&m)?;
     register_device_lowering_module(&m)?;
+    register_native_optimization_module(&m)?;
     register_one_qubit_optimization_module(&m)?;
     layout::register_layout_module(&m)?;
     routing::register_routing_module(&m)?;
     register_resynthesis_module(&m)?;
     register_target_basis_module(&m)?;
+    register_virtual_permutation_module(&m)?;
 
     parent.add_submodule(&m)?;
     parent

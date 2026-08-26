@@ -20,12 +20,14 @@ use crate::circuit::{PyCircuit, PyInstruction};
 use crate::compile::commutation::PyCommutationConfig;
 use crate::compile::error::compiler_error_to_py_err;
 use crate::compile::target_basis_item::PyTargetBasisItem;
+use crate::device::device_impl::PyDevice;
 use crate::utils::python_bool;
 use cqlib_core::circuit::Instruction;
 use cqlib_core::compile::CompilerError;
 use cqlib_core::compile::transform::{
-    ResynthesizeTwoQubitBlocks, Transformer, TwoQubitBlockResynthesisConfig,
-    resynthesize_two_qubit_blocks,
+    DeviceResynthesisPlacement, ResynthesizeTwoQubitBlocks, Transformer,
+    TwoQubitBlockResynthesisConfig, resynthesize_two_qubit_blocks,
+    resynthesize_two_qubit_blocks_for_device,
 };
 use pyo3::prelude::*;
 
@@ -38,6 +40,10 @@ pub(crate) fn register_resynthesis_module(parent: &Bound<'_, PyModule>) -> PyRes
         py_resynthesize_two_qubit_blocks,
         &m
     )?)?;
+    let device_resynthesis =
+        pyo3::wrap_pyfunction!(py_resynthesize_two_qubit_blocks_for_device, &m)?;
+    device_resynthesis.setattr("__module__", "cqlib.compile.transform.resynthesis")?;
+    m.add_function(device_resynthesis)?;
 
     parent.add_submodule(&m)?;
     parent
@@ -59,6 +65,22 @@ pub struct PyTwoQubitBlockResynthesisConfig {
     pub(crate) inner: TwoQubitBlockResynthesisConfig,
     two_qubit_basis: Option<PyTwoQubitUnitaryDecomposeBasis>,
     target_basis: Option<Vec<Instruction>>,
+}
+
+impl PyTwoQubitBlockResynthesisConfig {
+    pub(crate) fn unconstrained(enhanced: bool) -> Self {
+        let target = Default::default();
+        let inner = if enhanced {
+            TwoQubitBlockResynthesisConfig::enhanced(target)
+        } else {
+            TwoQubitBlockResynthesisConfig::normal(target)
+        };
+        Self {
+            inner,
+            two_qubit_basis: None,
+            target_basis: None,
+        }
+    }
 }
 
 #[pymethods]
@@ -292,6 +314,48 @@ fn py_resynthesize_two_qubit_blocks(
     );
     py.detach(move || {
         let outcome = resynthesize_two_qubit_blocks(&circuit, config)?;
+        Ok(PyTransformResult::from_outcome(circuit, outcome))
+    })
+    .map_err(compiler_error_to_py_err)
+}
+
+/// Runs device-aware resynthesis without mutating `circuit` or `device`.
+#[pyfunction(name = "resynthesize_two_qubit_blocks_for_device")]
+#[pyo3(signature = (circuit, device, *, placement="pre_layout_envelope", config=None))]
+fn py_resynthesize_two_qubit_blocks_for_device(
+    py: Python<'_>,
+    circuit: PyRef<'_, PyCircuit>,
+    device: PyRef<'_, PyDevice>,
+    placement: &str,
+    config: Option<PyTwoQubitBlockResynthesisConfig>,
+) -> PyResult<PyTransformResult> {
+    let placement = match placement {
+        "pre_layout_envelope" => DeviceResynthesisPlacement::PreLayoutEnvelope,
+        "exact_physical" => DeviceResynthesisPlacement::ExactPhysical,
+        value => {
+            return Err(compiler_error_to_py_err(CompilerError::InvalidInput(
+                format!(
+                    "unknown device resynthesis placement {value:?}; expected \
+                     'pre_layout_envelope' or 'exact_physical'"
+                ),
+            )));
+        }
+    };
+    let circuit = circuit.inner.clone();
+    let device = device.inner.clone();
+    let config = config.map_or_else(
+        || {
+            PyTwoQubitBlockResynthesisConfig::new(
+                py, None, None, false, None, None, None, true, true, None,
+            )
+            .expect("default resynthesis config must be valid")
+            .inner
+        },
+        |value| value.inner,
+    );
+    py.detach(move || {
+        let outcome =
+            resynthesize_two_qubit_blocks_for_device(&circuit, &device, placement, config)?;
         Ok(PyTransformResult::from_outcome(circuit, outcome))
     })
     .map_err(compiler_error_to_py_err)
