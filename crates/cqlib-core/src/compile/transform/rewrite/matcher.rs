@@ -1492,9 +1492,10 @@ fn scan_anchors(
     if anchors.len() < parallel_threshold {
         let commutation_cache =
             LocalExactCommutationCache::new(block.cache.commutation_memo.as_ref());
+        let mut bindings = MatchBindings::new();
         let mut candidates = Vec::new();
         for &anchor in anchors {
-            scanner.scan_anchor_into(anchor, &commutation_cache, &mut candidates)?;
+            scanner.scan_anchor_into(anchor, &commutation_cache, &mut bindings, &mut candidates)?;
         }
         return Ok(candidates);
     }
@@ -1510,6 +1511,7 @@ fn scan_anchors(
                     && let Err(error) = scanner.scan_anchor_into(
                         anchor,
                         &worker.commutation_cache,
+                        &mut worker.bindings,
                         &mut worker.candidates,
                     )
                 {
@@ -1536,6 +1538,7 @@ struct AnchorScanWorker<'a> {
     candidates: Vec<CandidatePatch>,
     error: Option<(usize, CompilerError)>,
     commutation_cache: LocalExactCommutationCache<'a>,
+    bindings: MatchBindings,
 }
 
 impl<'a> AnchorScanWorker<'a> {
@@ -1544,6 +1547,7 @@ impl<'a> AnchorScanWorker<'a> {
             candidates: Vec::new(),
             error: None,
             commutation_cache: LocalExactCommutationCache::new(memo),
+            bindings: MatchBindings::new(),
         }
     }
 }
@@ -1572,6 +1576,7 @@ impl AnchorScanner<'_> {
         &self,
         anchor: usize,
         commutation_cache: &C,
+        bindings: &mut MatchBindings,
         candidates: &mut Vec<CandidatePatch>,
     ) -> Result<(), CompilerError> {
         let operation = self.block.operation(anchor);
@@ -1584,16 +1589,11 @@ impl AnchorScanner<'_> {
             if !self.active_rules.contains(rule_index) {
                 continue;
             }
+            bindings.clear();
             let compiled = self.rules.get(rule_index);
-            if let Some(candidate) = try_match_rule(
-                self.block,
-                anchor,
-                compiled,
-                &self.rules.commutation,
-                self.config,
-                self.target_context,
-                commutation_cache,
-            )? {
+            if let Some(candidate) =
+                try_match_rule(self, anchor, compiled, commutation_cache, bindings)?
+            {
                 candidates.push(candidate);
             }
         }
@@ -1767,23 +1767,24 @@ fn is_implicit_target_key(key: &RewriteInstructionKey) -> bool {
 /// after commuting past unrelated operations, but the first item owns the
 /// candidate's source position and first-key index lookup.
 fn try_match_rule<C: ExactCommutationCache>(
-    block: &BlockContext<'_>,
+    scanner: &AnchorScanner<'_>,
     anchor: usize,
     compiled: &CompiledRule,
-    commutation: &CommutationChecker,
-    config: &RewriteConfig,
-    target_context: Option<&TargetContext>,
     commutation_cache: &C,
+    bindings: &mut MatchBindings,
 ) -> Result<Option<CandidatePatch>, CompilerError> {
+    let block = scanner.block;
+    let commutation = &scanner.rules.commutation;
+    let config = scanner.config;
+    let target_context = scanner.target_context;
     let rule = &compiled.rule;
-    let mut bindings = MatchBindings::new();
 
     if !match_item(
         block,
         anchor,
         &rule.operations[0],
         &compiled.source_keys[0],
-        &mut bindings,
+        bindings,
         config,
     )? {
         return Ok(None);
@@ -1815,7 +1816,7 @@ fn try_match_rule<C: ExactCommutationCache>(
                 continue;
             }
 
-            if match_item(block, position, item, item_key, &mut bindings, config)? {
+            if match_item(block, position, item, item_key, bindings, config)? {
                 found = Some(position);
                 break;
             }
@@ -1829,15 +1830,15 @@ fn try_match_rule<C: ExactCommutationCache>(
         cursor = position + 1;
     }
 
-    let binding_cache_key = compiled.binding_cache_key(&bindings);
+    let binding_cache_key = compiled.binding_cache_key(bindings);
     let evaluate_conditions = || {
         compiled
             .numeric_conditions
             .as_ref()
-            .and_then(|conditions| conditions.evaluate(&bindings))
+            .and_then(|conditions| conditions.evaluate(bindings))
             .unwrap_or_else(|| {
                 block.cache.rule_evaluation_cache.record_symbolic_fallback();
-                knowledge_conditions_hold(rule.conditions.as_deref(), &bindings)
+                knowledge_conditions_hold(rule.conditions.as_deref(), bindings)
             })
     };
     let conditions_hold = match binding_cache_key.as_ref() {
@@ -1868,9 +1869,9 @@ fn try_match_rule<C: ExactCommutationCache>(
         .as_ref()
         .and_then(|key| block.cache.rule_evaluation_cache.replacement(key))
     {
-        instantiate_replacement_template(&template, &bindings)?
+        instantiate_replacement_template(&template, bindings)?
     } else {
-        let instantiated = knowledge_instantiate_target(&rule.target, &bindings)
+        let instantiated = knowledge_instantiate_target(&rule.target, bindings)
             .map_err(|error| CompilerError::InvariantViolation(error.to_string()))?;
         let template = instantiated
             .iter()

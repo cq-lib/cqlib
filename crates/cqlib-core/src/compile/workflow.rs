@@ -1357,9 +1357,10 @@ impl CompilerWorkflow {
             );
             return Ok(false);
         };
-        let result = state.apply_transform("optimization", name, |circuit, analysis| {
-            optimizer.transform(circuit, Some(analysis))
-        });
+        let result =
+            state.apply_transform_with_edits("optimization", name, |circuit, _analysis| {
+                optimizer.transform_with_rewrite_edits(circuit)
+            });
         state.one_qubit_optimizer = Some(optimizer);
         result
     }

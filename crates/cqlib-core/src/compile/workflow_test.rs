@@ -543,6 +543,65 @@ fn rewrite_session_edit_reconciliation_matches_full_scan() {
 }
 
 #[test]
+fn one_qubit_optimization_edits_preserve_incremental_rewrite_results() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let config = RewriteConfig::production()
+        .with_enabled_kinds(vec![RuleKind::Cancel])
+        .with_max_window_ops(16);
+    let workflow = CompilerWorkflow::new(compile_config(CompileMode::Normal));
+    let mut state = workflow_state_without_target_basis();
+    state.current = Circuit::new(2);
+    for _ in 0..128 {
+        state
+            .current
+            .append(
+                Instruction::Standard(StandardGate::H),
+                [q1],
+                std::iter::empty(),
+                Some("keep"),
+            )
+            .unwrap();
+    }
+    state.current.rx(q0, 0.2).unwrap();
+    state.current.h(q1).unwrap();
+    state.current.rz(q0, -0.3).unwrap();
+    for _ in 0..128 {
+        state
+            .current
+            .append(
+                Instruction::Standard(StandardGate::H),
+                [q1],
+                std::iter::empty(),
+                Some("keep"),
+            )
+            .unwrap();
+    }
+    state.analysis = CircuitAnalysis::analyze(&state.current);
+    assert!(
+        !state
+            .apply_knowledge_rewrite("test", "rewrite.proof", config.clone())
+            .unwrap()
+    );
+
+    assert!(
+        workflow
+            .apply_one_qubit_optimization(&mut state, "optimize.one_qubit_runs")
+            .unwrap()
+    );
+    let forced_full = KnowledgeRewriter::new(config.clone())
+        .force_full_scan()
+        .run(&state.current)
+        .unwrap();
+    state
+        .apply_knowledge_rewrite("test", "rewrite.incremental", config)
+        .unwrap();
+
+    assert_eq!(state.current, forced_full.circuit);
+    assert_eq!(state.rewrite_diagnostics.full_scan_fallbacks, 0);
+}
+
+#[test]
 fn rewrite_session_unknown_edits_force_a_full_scan() {
     let config = RewriteConfig::production()
         .with_enabled_kinds(vec![RuleKind::Cancel])

@@ -117,6 +117,14 @@ impl MatchBindings {
         Self::default()
     }
 
+    /// Removes all bindings while retaining the allocated matching workspace.
+    pub(crate) fn clear(&mut self) {
+        self.qubits.clear();
+        self.reverse_qubits.clear();
+        self.params.clear();
+        self.insertion_log.clear();
+    }
+
     /// Returns all rule-local qubit bindings.
     pub fn qubits(&self) -> &HashMap<u32, Qubit> {
         &self.qubits

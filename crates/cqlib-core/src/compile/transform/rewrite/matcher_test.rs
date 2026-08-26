@@ -199,10 +199,11 @@ fn select_with_test_cache(
         config,
         target_context: None,
     };
+    let mut bindings = MatchBindings::new();
     let mut candidates = Vec::new();
     for anchor in 0..block.len() {
         scanner
-            .scan_anchor_into(anchor, commutation_cache, &mut candidates)
+            .scan_anchor_into(anchor, commutation_cache, &mut bindings, &mut candidates)
             .unwrap();
     }
     select_candidate_patches(candidates, block.len(), None).unwrap()

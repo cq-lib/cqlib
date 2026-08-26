@@ -22,9 +22,10 @@ use crate::circuit::{Circuit, Instruction};
 use crate::compile::CompilerError;
 use crate::compile::transform::native_optimization::{
     LocalOptimizationPolicy, optimize_one_qubit_runs_with_policy,
+    optimize_one_qubit_runs_with_policy_and_edits,
 };
 use crate::compile::transform::target_basis::TargetBasisCostModel;
-use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
+use crate::compile::transform::{CircuitAnalysis, RewriteEdits, TransformOutcome, Transformer};
 use std::sync::Arc;
 
 /// Exact one-qubit optimization for logical or explicit-basis workflows.
@@ -54,6 +55,15 @@ impl OptimizeOneQubitRuns {
         Self {
             policy: LocalOptimizationPolicy::Basis(cost_model),
         }
+    }
+
+    /// Runs the optimizer and returns exact top-level operation provenance for
+    /// incremental rewrite-session invalidation.
+    pub(crate) fn transform_with_rewrite_edits(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
+        optimize_one_qubit_runs_with_policy_and_edits(circuit, &self.policy)
     }
 }
 

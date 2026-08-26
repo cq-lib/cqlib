@@ -44,6 +44,13 @@ fn assert_same_native_result(
     assert_eq!(reused.after, rebuilt.after);
 }
 
+fn propagate_frames_for_test(
+    operations: Vec<ValueOperation>,
+) -> Result<ValueRewrite, CompilerError> {
+    let provenance = (0..operations.len()).map(Some).collect();
+    propagate_frames(operations, Some(provenance))
+}
+
 /// Reference implementation of the pre-reuse behavior. It deliberately rebuilds
 /// an exact context for every consumer so tests can compare semantic results.
 fn run_rebuild_every_use(
@@ -423,7 +430,7 @@ fn cx_propagates_target_z_to_both_qubits() {
         ValueOperation::from_standard(StandardGate::CX, [q0, q1], []),
     ];
 
-    let rewrite = propagate_frames(operations).unwrap();
+    let rewrite = propagate_frames_for_test(operations).unwrap();
     let gates = rewrite
         .operations
         .iter()
@@ -443,7 +450,7 @@ fn cx_propagates_target_z_to_both_qubits() {
 fn swap_exchanges_pending_frames() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
-    let rewrite = propagate_frames(vec![
+    let rewrite = propagate_frames_for_test(vec![
         ValueOperation::from_standard(StandardGate::Z, [q0], []),
         ValueOperation::from_standard(StandardGate::SWAP, [q0, q1], []),
     ])
@@ -470,7 +477,7 @@ fn measurement_drops_a_pending_z_frame() {
         label: None,
     };
 
-    let rewrite = propagate_frames(vec![
+    let rewrite = propagate_frames_for_test(vec![
         ValueOperation::from_standard(StandardGate::RZ, [q0], [ParameterValue::Fixed(0.4)]),
         measurement,
     ])
@@ -486,7 +493,7 @@ fn measurement_drops_a_pending_z_frame() {
 #[test]
 fn phase_carrier_records_rz_global_phase_difference() {
     let q0 = Qubit::new(0);
-    let rewrite = propagate_frames(vec![ValueOperation::from_standard(
+    let rewrite = propagate_frames_for_test(vec![ValueOperation::from_standard(
         StandardGate::Phase,
         [q0],
         [ParameterValue::Fixed(0.6)],
@@ -503,7 +510,7 @@ fn phase_carrier_records_rz_global_phase_difference() {
 #[test]
 fn z_frame_is_absorbed_into_xy_axis() {
     let q0 = Qubit::new(0);
-    let rewrite = propagate_frames(vec![
+    let rewrite = propagate_frames_for_test(vec![
         ValueOperation::from_standard(StandardGate::RZ, [q0], [ParameterValue::Fixed(0.2)]),
         ValueOperation::from_standard(StandardGate::XY, [q0], [ParameterValue::Fixed(0.7)]),
     ])
@@ -526,7 +533,7 @@ fn z_frame_is_absorbed_into_xy_axis() {
 #[test]
 fn pauli_product_uses_circuit_time_order() {
     let q0 = Qubit::new(0);
-    let rewrite = propagate_frames(vec![
+    let rewrite = propagate_frames_for_test(vec![
         ValueOperation::from_standard(StandardGate::X, [q0], []),
         ValueOperation::from_standard(StandardGate::Z, [q0], []),
     ])

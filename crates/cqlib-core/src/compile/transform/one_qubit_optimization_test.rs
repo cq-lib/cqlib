@@ -13,7 +13,7 @@
 use super::*;
 use crate::circuit::{ClassicalControlOp, ClassicalExpr, Instruction, Qubit, StandardGate};
 use crate::compile::test_utils::assert_compiled_circuit_equivalent;
-use crate::compile::transform::TransformerTestExt;
+use crate::compile::transform::{OperationReplacement, RewriteEdits, TransformerTestExt};
 use std::sync::Arc;
 
 #[test]
@@ -57,6 +57,64 @@ fn logical_fuses_numeric_run_to_one_u() {
     ));
     assert!(!second.changed);
     assert_compiled_circuit_equivalent(&first.circuit, &circuit);
+}
+
+#[test]
+fn logical_reports_sparse_edits_for_fusion_across_disjoint_operation() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.rx(q0, 0.2).unwrap();
+    circuit.h(q1).unwrap();
+    circuit.rz(q0, -0.3).unwrap();
+
+    let (outcome, edits) = OptimizeOneQubitRuns::logical()
+        .transform_with_rewrite_edits(&circuit)
+        .unwrap();
+    let TransformOutcome::Changed(optimized) = outcome else {
+        panic!("expected one-qubit fusion");
+    };
+
+    assert_eq!(optimized.operations().len(), 2);
+    assert_eq!(
+        edits,
+        RewriteEdits::linear(
+            3,
+            2,
+            vec![
+                OperationReplacement {
+                    old: 0..1,
+                    new: 0..1,
+                },
+                OperationReplacement {
+                    old: 2..3,
+                    new: 2..2,
+                },
+            ],
+        )
+    );
+    assert_compiled_circuit_equivalent(&optimized, &circuit);
+}
+
+#[test]
+fn unchanged_optimizer_reports_empty_exact_edits() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    circuit
+        .append(
+            Instruction::Standard(StandardGate::H),
+            [q0],
+            std::iter::empty(),
+            Some("keep"),
+        )
+        .unwrap();
+
+    let (outcome, edits) = OptimizeOneQubitRuns::logical()
+        .transform_with_rewrite_edits(&circuit)
+        .unwrap();
+
+    assert!(matches!(outcome, TransformOutcome::Unchanged));
+    assert_eq!(edits, RewriteEdits::linear(1, 1, Vec::new()));
 }
 
 #[test]
@@ -152,6 +210,38 @@ fn optimizer_recurses_into_control_flow_bodies() {
         operation.instruction,
         Instruction::Standard(StandardGate::U)
     )));
+}
+
+#[test]
+fn changed_control_flow_body_invalidates_only_its_top_level_operation() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit
+        .if_(ClassicalExpr::bool_literal(true), |body| {
+            body.rx(q0, 0.2)?;
+            body.ry(q0, -0.4)?;
+            Ok(())
+        })
+        .unwrap();
+    circuit.h(q1).unwrap();
+
+    let (outcome, edits) = OptimizeOneQubitRuns::logical()
+        .transform_with_rewrite_edits(&circuit)
+        .unwrap();
+
+    assert!(matches!(outcome, TransformOutcome::Changed(_)));
+    assert_eq!(
+        edits,
+        RewriteEdits::linear(
+            2,
+            2,
+            vec![OperationReplacement {
+                old: 0..1,
+                new: 0..1,
+            }],
+        )
+    );
 }
 
 #[test]

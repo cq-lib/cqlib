@@ -49,7 +49,7 @@ use crate::compile::transform::resynthesis::{
 };
 use crate::compile::transform::target_basis::{TargetBasisCost, TargetBasisCostModel};
 use crate::compile::transform::{
-    Canonicalizer, CircuitAnalysis, DeviceLowerer, TransformOutcome, Transformer,
+    Canonicalizer, CircuitAnalysis, DeviceLowerer, RewriteEdits, TransformOutcome, Transformer,
 };
 use crate::device::Device;
 use ndarray::Array2;
@@ -646,6 +646,13 @@ pub(crate) fn optimize_one_qubit_runs_with_policy(
     LocalOneQPass::run(circuit, policy)
 }
 
+pub(crate) fn optimize_one_qubit_runs_with_policy_and_edits(
+    circuit: &Circuit,
+    policy: &LocalOptimizationPolicy,
+) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
+    LocalOneQPass::run_with_rewrite_edits(circuit, policy)
+}
+
 struct LocalOneQPass<'source, 'policy> {
     source: &'source Circuit,
     policy: &'policy LocalOptimizationPolicy,
@@ -654,6 +661,10 @@ struct LocalOneQPass<'source, 'policy> {
 
 struct SequenceRewrite {
     operations: Vec<ValueOperation>,
+    /// Output-to-input correspondence for the current sequence. Rebuilt or
+    /// generated operations are `None`; unchanged operations retain their
+    /// source order.
+    provenance: Option<Vec<Option<usize>>>,
     phase_delta: f64,
     changed: bool,
 }
@@ -663,6 +674,25 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
         source: &'source Circuit,
         policy: &'policy LocalOptimizationPolicy,
     ) -> Result<TransformOutcome, CompilerError> {
+        Self::run_internal(source, policy, false).map(|(outcome, _)| outcome)
+    }
+
+    fn run_with_rewrite_edits(
+        source: &'source Circuit,
+        policy: &'policy LocalOptimizationPolicy,
+    ) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
+        let (outcome, edits) = Self::run_internal(source, policy, true)?;
+        Ok((
+            outcome,
+            edits.expect("rewrite edits were requested for the one-qubit pass"),
+        ))
+    }
+
+    fn run_internal(
+        source: &'source Circuit,
+        policy: &'policy LocalOptimizationPolicy,
+        track_rewrite_edits: bool,
+    ) -> Result<(TransformOutcome, Option<RewriteEdits>), CompilerError> {
         let rebuild = CircuitRebuildContext::new(source);
         let root_classical = rebuild.root_classical().clone();
         let mut pass = Self {
@@ -670,10 +700,29 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
             policy,
             rebuild,
         };
-        let rewrite = pass.process_sequence(source.operations(), &root_classical)?;
+        let rewrite =
+            pass.process_sequence(source.operations(), &root_classical, track_rewrite_edits)?;
         if !rewrite.changed {
-            return Ok(TransformOutcome::Unchanged);
+            return Ok((
+                TransformOutcome::Unchanged,
+                track_rewrite_edits.then(|| {
+                    RewriteEdits::linear(
+                        source.operations().len(),
+                        source.operations().len(),
+                        Vec::new(),
+                    )
+                }),
+            ));
         }
+        debug_assert!(
+            rewrite
+                .provenance
+                .as_ref()
+                .is_none_or(|provenance| rewrite.operations.len() == provenance.len())
+        );
+        let edits = rewrite.provenance.as_ref().map(|provenance| {
+            RewriteEdits::from_operation_provenance(source.operations().len(), provenance)
+        });
         let mut global_phase = source.global_phase();
         if rewrite.phase_delta.abs() > PHASE_EPS {
             global_phase = global_phase + Parameter::from(rewrite.phase_delta);
@@ -681,17 +730,19 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
         let circuit = pass
             .rebuild
             .finish(source.qubits(), rewrite.operations, global_phase)?;
-        Ok(TransformOutcome::Changed(circuit))
+        Ok((TransformOutcome::Changed(circuit), edits))
     }
 
     fn process_sequence(
         &mut self,
         operations: &[Operation],
         classical_remap: &ClassicalRemap,
+        track_provenance: bool,
     ) -> Result<SequenceRewrite, CompilerError> {
         let mut values = Vec::with_capacity(operations.len());
+        let mut provenance = track_provenance.then(|| Vec::with_capacity(operations.len()));
         let mut nested_changed = false;
-        for operation in operations {
+        for (order, operation) in operations.iter().enumerate() {
             if let Instruction::ClassicalControl(control) = &operation.instruction {
                 let (instruction, changed) = self.rebuild_control_flow(control, classical_remap)?;
                 values.push(ValueOperation {
@@ -703,6 +754,9 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
                     )?,
                     label: operation.label.clone(),
                 });
+                if let Some(provenance) = &mut provenance {
+                    provenance.push((!changed).then_some(order));
+                }
                 nested_changed |= changed;
             } else {
                 values.push(self.rebuild.remap_preserved_operation(
@@ -710,6 +764,9 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
                     operation,
                     classical_remap,
                 )?);
+                if let Some(provenance) = &mut provenance {
+                    provenance.push(Some(order));
+                }
             }
         }
 
@@ -718,20 +775,22 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
                 // Preserve the existing native behavior: frame movement is
                 // speculative within a native round, while the outer minimum
                 // point controller decides whether the whole round survives.
-                let framed = propagate_frames(values)?;
-                let fused = fuse_one_qubit_runs(framed.operations, self.policy)?;
+                let framed = propagate_frames(values, provenance)?;
+                let fused = fuse_one_qubit_runs(framed.operations, framed.provenance, self.policy)?;
                 ValueRewrite {
                     operations: fused.operations,
+                    provenance: fused.provenance,
                     phase_delta: framed.phase_delta + fused.phase_delta,
                     changed: framed.changed || fused.changed,
                 }
             }
             LocalOptimizationPolicy::Logical | LocalOptimizationPolicy::Basis(_) => {
-                optimize_transactional(values, self.policy)?
+                optimize_transactional(values, provenance, self.policy)?
             }
         };
         Ok(SequenceRewrite {
             operations: optimized.operations,
+            provenance: optimized.provenance,
             phase_delta: optimized.phase_delta,
             changed: nested_changed || optimized.changed,
         })
@@ -742,7 +801,7 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
         operations: &[Operation],
         classical_remap: &ClassicalRemap,
     ) -> Result<(ValueControlBody, bool), CompilerError> {
-        let mut rewrite = self.process_sequence(operations, classical_remap)?;
+        let mut rewrite = self.process_sequence(operations, classical_remap, false)?;
         if rewrite.phase_delta.abs() > PHASE_EPS {
             rewrite.operations.insert(
                 0,
@@ -842,6 +901,7 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
 
 struct ValueRewrite {
     operations: Vec<ValueOperation>,
+    provenance: Option<Vec<Option<usize>>>,
     phase_delta: f64,
     changed: bool,
 }
@@ -915,15 +975,22 @@ fn exact_local_sequence_cost(
 
 fn optimize_transactional(
     operations: Vec<ValueOperation>,
+    provenance: Option<Vec<Option<usize>>>,
     policy: &LocalOptimizationPolicy,
 ) -> Result<ValueRewrite, CompilerError> {
-    let framed = propagate_frames(operations.clone())?;
-    let fused_after_frames = fuse_one_qubit_runs(framed.operations, policy)?;
+    debug_assert!(
+        provenance
+            .as_ref()
+            .is_none_or(|provenance| operations.len() == provenance.len())
+    );
+    let framed = propagate_frames(operations.clone(), provenance.clone())?;
+    let fused_after_frames = fuse_one_qubit_runs(framed.operations, framed.provenance, policy)?;
     let combined_phase = framed.phase_delta + fused_after_frames.phase_delta;
     let combined_changed = framed.changed || fused_after_frames.changed;
     if combined_changed && policy.strictly_better(&fused_after_frames.operations, &operations)? {
         return Ok(ValueRewrite {
             operations: fused_after_frames.operations,
+            provenance: fused_after_frames.provenance,
             phase_delta: combined_phase,
             changed: true,
         });
@@ -931,7 +998,7 @@ fn optimize_transactional(
 
     // A neutral or harmful frame movement must not hide an independently
     // useful one-qubit fusion on the original sequence.
-    fuse_one_qubit_runs(operations, policy)
+    fuse_one_qubit_runs(operations, provenance, policy)
 }
 
 fn logical_one_qubit_cost(operations: &[ValueOperation]) -> LogicalOneQCost {
@@ -1014,8 +1081,14 @@ fn compare_basis_cost(left: TargetBasisCost, right: TargetBasisCost) -> std::cmp
 /// strictly better exact-physical device cost than the original run.
 fn fuse_one_qubit_runs(
     operations: Vec<ValueOperation>,
+    provenance: Option<Vec<Option<usize>>>,
     policy: &LocalOptimizationPolicy,
 ) -> Result<ValueRewrite, CompilerError> {
+    debug_assert!(
+        provenance
+            .as_ref()
+            .is_none_or(|provenance| operations.len() == provenance.len())
+    );
     let runs = collect_one_qubit_runs(&operations);
     let mut replacements = HashMap::<usize, (Vec<usize>, Vec<ValueOperation>)>::new();
     let mut phase_delta = 0.0;
@@ -1049,6 +1122,7 @@ fn fuse_one_qubit_runs(
     if replacements.is_empty() {
         return Ok(ValueRewrite {
             operations,
+            provenance,
             phase_delta: 0.0,
             changed: false,
         });
@@ -1059,15 +1133,27 @@ fn fuse_one_qubit_runs(
         skipped.extend(orders.iter().copied().filter(|order| order != first));
     }
     let mut output = Vec::with_capacity(operations.len());
+    let mut output_provenance = provenance
+        .as_ref()
+        .map(|provenance| Vec::with_capacity(provenance.len()));
+    let mut source_orders = provenance.unwrap_or_default().into_iter();
     for (order, operation) in operations.into_iter().enumerate() {
+        let source_order = source_orders.next().flatten();
         if let Some((_, replacement)) = replacements.remove(&order) {
+            if let Some(output_provenance) = &mut output_provenance {
+                output_provenance.extend(std::iter::repeat_n(None, replacement.len()));
+            }
             output.extend(replacement);
         } else if !skipped.contains(&order) {
             output.push(operation);
+            if let Some(output_provenance) = &mut output_provenance {
+                output_provenance.push(source_order);
+            }
         }
     }
     Ok(ValueRewrite {
         operations: output,
+        provenance: output_provenance,
         phase_delta,
         changed: true,
     })
@@ -1182,17 +1268,36 @@ impl QubitFrame {
 /// A pending frame occurs earlier in circuit time than the operation currently
 /// being visited. Moving it forward therefore conjugates it by that operation.
 /// Frames never cross structured control flow, labels, barriers, or resets.
-fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, CompilerError> {
+fn propagate_frames(
+    operations: Vec<ValueOperation>,
+    provenance: Option<Vec<Option<usize>>>,
+) -> Result<ValueRewrite, CompilerError> {
+    debug_assert!(
+        provenance
+            .as_ref()
+            .is_none_or(|provenance| operations.len() == provenance.len())
+    );
     let mut frames = BTreeMap::<Qubit, QubitFrame>::new();
     let mut output = Vec::with_capacity(operations.len());
+    let mut output_provenance = provenance
+        .as_ref()
+        .map(|provenance| Vec::with_capacity(provenance.len()));
+    let mut source_orders = provenance.unwrap_or_default().into_iter();
     let mut phase_delta = 0.0;
     let mut changed = false;
 
     for mut operation in operations {
+        let source_order = source_orders.next().flatten();
         if operation.label.is_none()
             && let Some((qubit, z_angle, phase)) = z_carrier(&operation)
         {
-            flush_pauli(qubit, &mut frames, &mut output, &mut phase_delta);
+            flush_pauli(
+                qubit,
+                &mut frames,
+                &mut output,
+                &mut output_provenance,
+                &mut phase_delta,
+            );
             frames.entry(qubit).or_default().z_angle += z_angle;
             phase_delta += phase;
             changed = true;
@@ -1201,7 +1306,7 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
         if operation.label.is_none()
             && let Some((qubit, x, z, phase)) = pauli_carrier(&operation)
         {
-            flush_z(qubit, &mut frames, &mut output);
+            flush_z(qubit, &mut frames, &mut output, &mut output_provenance);
             let frame = frames.entry(qubit).or_default();
             let extra_phase = frame.multiply_pauli(x, z);
             phase_delta += phase + f64::from(extra_phase) * FRAC_PI_2;
@@ -1226,6 +1331,9 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
             frames.insert(operation.qubits[0], right);
             frames.insert(operation.qubits[1], left);
             output.push(operation);
+            if let Some(output_provenance) = &mut output_provenance {
+                output_provenance.push(source_order);
+            }
             changed |= !left.is_empty() || !right.is_empty();
             continue;
         }
@@ -1243,7 +1351,7 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
         {
             let pair = [operation.qubits[0], operation.qubits[1]];
             if gate == StandardGate::CX {
-                flush_z(pair[1], &mut frames, &mut output);
+                flush_z(pair[1], &mut frames, &mut output, &mut output_provenance);
             }
             if pair.iter().any(|qubit| {
                 frames
@@ -1251,12 +1359,15 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
                     .is_some_and(|frame| frame.pauli_x || frame.pauli_z)
             }) {
                 for qubit in pair {
-                    flush_z(qubit, &mut frames, &mut output);
+                    flush_z(qubit, &mut frames, &mut output, &mut output_provenance);
                 }
                 phase_delta += propagate_clifford_paulis(gate, pair, &mut frames);
                 changed = true;
             }
             output.push(operation);
+            if let Some(output_provenance) = &mut output_provenance {
+                output_provenance.push(source_order);
+            }
             continue;
         }
 
@@ -1270,12 +1381,18 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
                 .any(|qubit| frames.get(qubit).is_some_and(|frame| frame.pauli_x));
             if !blocked {
                 output.push(operation);
+                if let Some(output_provenance) = &mut output_provenance {
+                    output_provenance.push(source_order);
+                }
                 continue;
             }
         }
 
         if operation.label.is_none() && absorb_z_into_xy_axis(&mut operation, &frames) {
             output.push(operation);
+            if let Some(output_provenance) = &mut output_provenance {
+                output_provenance.push(None);
+            }
             changed = true;
             continue;
         }
@@ -1286,12 +1403,21 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
         {
             for qubit in &operation.qubits {
                 if frames.get(qubit).is_some_and(|frame| frame.pauli_x) {
-                    flush_frame(*qubit, &mut frames, &mut output, &mut phase_delta);
+                    flush_frame(
+                        *qubit,
+                        &mut frames,
+                        &mut output,
+                        &mut output_provenance,
+                        &mut phase_delta,
+                    );
                 } else {
                     changed |= frames.remove(qubit).is_some_and(|frame| !frame.is_empty());
                 }
             }
             output.push(operation);
+            if let Some(output_provenance) = &mut output_provenance {
+                output_provenance.push(source_order);
+            }
             continue;
         }
 
@@ -1305,18 +1431,38 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
                 ))
             );
         if global_boundary {
-            flush_all(&mut frames, &mut output, &mut phase_delta);
+            flush_all(
+                &mut frames,
+                &mut output,
+                &mut output_provenance,
+                &mut phase_delta,
+            );
         } else {
             for qubit in &operation.qubits {
-                flush_frame(*qubit, &mut frames, &mut output, &mut phase_delta);
+                flush_frame(
+                    *qubit,
+                    &mut frames,
+                    &mut output,
+                    &mut output_provenance,
+                    &mut phase_delta,
+                );
             }
         }
         output.push(operation);
+        if let Some(output_provenance) = &mut output_provenance {
+            output_provenance.push(source_order);
+        }
     }
-    flush_all(&mut frames, &mut output, &mut phase_delta);
+    flush_all(
+        &mut frames,
+        &mut output,
+        &mut output_provenance,
+        &mut phase_delta,
+    );
 
     Ok(ValueRewrite {
         operations: output,
+        provenance: output_provenance,
         phase_delta,
         changed,
     })
@@ -1488,11 +1634,12 @@ fn propagate_clifford_paulis(
 fn flush_all(
     frames: &mut BTreeMap<Qubit, QubitFrame>,
     output: &mut Vec<ValueOperation>,
+    provenance: &mut Option<Vec<Option<usize>>>,
     phase_delta: &mut f64,
 ) {
     let qubits = frames.keys().copied().collect::<Vec<_>>();
     for qubit in qubits {
-        flush_frame(qubit, frames, output, phase_delta);
+        flush_frame(qubit, frames, output, provenance, phase_delta);
     }
 }
 
@@ -1500,10 +1647,11 @@ fn flush_frame(
     qubit: Qubit,
     frames: &mut BTreeMap<Qubit, QubitFrame>,
     output: &mut Vec<ValueOperation>,
+    provenance: &mut Option<Vec<Option<usize>>>,
     phase_delta: &mut f64,
 ) {
-    flush_pauli(qubit, frames, output, phase_delta);
-    flush_z(qubit, frames, output);
+    flush_pauli(qubit, frames, output, provenance, phase_delta);
+    flush_z(qubit, frames, output, provenance);
     if frames.get(&qubit).is_some_and(|frame| frame.is_empty()) {
         frames.remove(&qubit);
     }
@@ -1513,6 +1661,7 @@ fn flush_pauli(
     qubit: Qubit,
     frames: &mut BTreeMap<Qubit, QubitFrame>,
     output: &mut Vec<ValueOperation>,
+    provenance: &mut Option<Vec<Option<usize>>>,
     phase_delta: &mut f64,
 ) {
     let Some(frame) = frames.get_mut(&qubit) else {
@@ -1534,6 +1683,9 @@ fn flush_pauli(
             params: SmallVec::new(),
             label: None,
         });
+        if let Some(provenance) = provenance {
+            provenance.push(None);
+        }
     }
     frame.pauli_x = false;
     frame.pauli_z = false;
@@ -1543,6 +1695,7 @@ fn flush_z(
     qubit: Qubit,
     frames: &mut BTreeMap<Qubit, QubitFrame>,
     output: &mut Vec<ValueOperation>,
+    provenance: &mut Option<Vec<Option<usize>>>,
 ) {
     let Some(frame) = frames.get_mut(&qubit) else {
         return;
@@ -1556,6 +1709,9 @@ fn flush_z(
             params: smallvec![ParameterValue::Fixed(frame.z_angle)],
             label: None,
         });
+        if let Some(provenance) = provenance {
+            provenance.push(None);
+        }
     }
     frame.z_angle = 0.0;
 }
