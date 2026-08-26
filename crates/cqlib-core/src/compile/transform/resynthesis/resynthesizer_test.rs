@@ -43,6 +43,7 @@ fn resynthesize_two_qubit_blocks_with_cache_budget(
         device_context: None,
         synthesis_cache: &mut synthesis_cache,
         incremental: None,
+        quality_policy: NativeQualityPolicy::EntanglerFirst,
     };
     pass.run_with_stats()
         .map(|(outcome, stats)| (resolve_transform_for_test(outcome, circuit), stats))
@@ -63,6 +64,7 @@ fn resynthesize_two_qubit_blocks_with_device_cache_budget(
         device_context: Some(device_context),
         synthesis_cache: &mut synthesis_cache,
         incremental: None,
+        quality_policy: NativeQualityPolicy::EntanglerFirst,
     }
     .run_with_stats()
     .map(|(outcome, stats)| (resolve_transform_for_test(outcome, circuit), stats))
@@ -572,13 +574,19 @@ fn incremental_device_resynthesis_recollects_current_maximal_runs() {
         config.clone(),
         context.clone(),
         &mut session,
+        NativeQualityPolicy::EntanglerFirst,
     )
     .map(|outcome| resolve_transform_for_test(outcome, &circuit))
     .unwrap();
-    let second =
-        resynthesize_two_qubit_blocks_incremental(&first.circuit, config, context, &mut session)
-            .map(|outcome| resolve_transform_for_test(outcome, &first.circuit))
-            .unwrap();
+    let second = resynthesize_two_qubit_blocks_incremental(
+        &first.circuit,
+        config,
+        context,
+        &mut session,
+        NativeQualityPolicy::EntanglerFirst,
+    )
+    .map(|outcome| resolve_transform_for_test(outcome, &first.circuit))
+    .unwrap();
 
     assert!(first.changed);
     assert_eq!(first.circuit, expected.circuit);

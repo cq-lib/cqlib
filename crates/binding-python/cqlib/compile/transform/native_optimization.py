@@ -14,10 +14,12 @@ _native_optimization_module = _compile_module.transform.native_optimization
 
 NativeOptimizationSummary = _native_optimization_module.NativeOptimizationSummary
 NativeOptimizationResult = _native_optimization_module.NativeOptimizationResult
+NativeQualityPolicy = _native_optimization_module.NativeQualityPolicy
 NativeOptimizer = _native_optimization_module.NativeOptimizer
 
 __all__ = [
     "NativeOptimizationSummary",
     "NativeOptimizationResult",
+    "NativeQualityPolicy",
     "NativeOptimizer",
 ]

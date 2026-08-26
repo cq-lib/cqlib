@@ -187,6 +187,54 @@ fn equal_physical_cost_is_not_a_strict_improvement() {
 }
 
 #[test]
+fn exact_schedule_profile_detects_equal_scalar_but_prefix_sensitive_depth() {
+    let device = Device::bidirectional_line("schedule-profile", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::RZ),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.rz(q0, 0.1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    let context =
+        build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
+    let rz = |qubit, angle| {
+        ValueOperation::from_standard(StandardGate::RZ, [qubit], [ParameterValue::Fixed(angle)])
+    };
+    let source = vec![rz(q0, 0.1), rz(q0, 0.2)];
+    let different_tail = vec![rz(q1, 0.1), rz(q1, 0.2)];
+    let shorter_same_tail = vec![rz(q0, 0.3)];
+
+    assert_eq!(
+        context.exact_cost_diagnostic(&source, [q0, q1]).unwrap(),
+        context
+            .exact_cost_diagnostic(&different_tail, [q0, q1])
+            .unwrap()
+    );
+    let source_profile = context
+        .exact_schedule_profile_diagnostic(&source, [q0, q1])
+        .unwrap();
+    let different_tail_profile = context
+        .exact_schedule_profile_diagnostic(&different_tail, [q0, q1])
+        .unwrap();
+    let shorter_same_tail_profile = context
+        .exact_schedule_profile_diagnostic(&shorter_same_tail, [q0, q1])
+        .unwrap();
+
+    assert_eq!(different_tail_profile.dominance(&source_profile), None);
+    assert_eq!(source_profile.dominance(&source_profile), Some(false));
+    assert_eq!(
+        shorter_same_tail_profile.dominance(&source_profile),
+        Some(true)
+    );
+}
+
+#[test]
 fn exact_sequence_cost_supports_one_qubit_only_circuits() {
     let device = Device::line("one-qubit-sequence", 1)
         .unwrap()

@@ -34,6 +34,7 @@ from cqlib.compile.transform import (
     LowerToRoutingBasis,
     NativeOptimizationResult,
     NativeOptimizationSummary,
+    NativeQualityPolicy,
     NativeOptimizer,
     OptimizeOneQubitRuns,
     RewriteConfig,
@@ -657,6 +658,7 @@ def test_native_optimizer_exposes_structured_exact_physical_result() -> None:
     assert optimizer.enhanced is True
     assert optimizer.max_rounds == 8
     assert optimizer.max_stale_rounds == 3
+    assert optimizer.quality_policy == NativeQualityPolicy.entangler_first()
     assert isinstance(result, NativeOptimizationResult)
     assert isinstance(result.before, NativeOptimizationSummary)
     assert len(circuit.operations) == 2
@@ -671,6 +673,25 @@ def test_native_optimizer_exposes_structured_exact_physical_result() -> None:
     assert copy.copy(result.before) == result.before
     assert "NativeOptimizer" in repr(optimizer)
     assert "NativeOptimizationResult" in repr(result)
+
+
+def test_native_optimizer_exposes_balanced_quality_policy() -> None:
+    device = Device.bidirectional_line("native-quality-policy-python", 1)
+    device.native_gates = [Instruction.from_standard_gate(StandardGate.U)]
+
+    balanced = NativeOptimizer(
+        device,
+        quality_policy=NativeQualityPolicy.balanced_depth(),
+    )
+    by_name = NativeOptimizer(device, quality_policy="balanced_depth")
+
+    assert balanced.quality_policy == NativeQualityPolicy.balanced_depth()
+    assert by_name.quality_policy == NativeQualityPolicy.balanced_depth()
+    assert str(balanced.quality_policy) == "balanced_depth"
+    assert "quality_policy=NativeQualityPolicy.BalancedDepth" in repr(balanced)
+
+    with pytest.raises(ValueError, match="unknown native quality policy"):
+        NativeOptimizer(device, quality_policy="fidelity_first")
 
 
 def test_device_aware_resynthesis_entry_is_explicit_and_non_mutating() -> None:

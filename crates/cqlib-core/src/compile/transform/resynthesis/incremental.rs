@@ -23,6 +23,7 @@ use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, Instruction, Operation, Parameter, Qubit,
 };
 use crate::compile::CompilerError;
+use crate::compile::transform::native_quality::NativeQualityViolation;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 
@@ -49,6 +50,13 @@ pub(crate) struct NativeWorksetStats {
     pub(crate) maximal_blocks_reused: usize,
     pub(crate) maximal_blocks_recomputed: usize,
     pub(crate) cycle_early_exits: usize,
+    pub(crate) quality_scope_shape_rejections: usize,
+    pub(crate) quality_two_qubit_ops_rejections: usize,
+    pub(crate) quality_two_qubit_depth_rejections: usize,
+    pub(crate) quality_total_depth_rejections: usize,
+    pub(crate) quality_error_rejections: usize,
+    pub(crate) quality_makespan_rejections: usize,
+    pub(crate) quality_rank_rejections: usize,
     pub(crate) synthesis_cache: TwoQubitSynthesisCacheStats,
 }
 
@@ -444,6 +452,21 @@ impl NativeResynthesisSession {
 
     pub(crate) fn record_cycle_early_exit(&mut self) {
         self.stats.cycle_early_exits = self.stats.cycle_early_exits.saturating_add(1);
+    }
+
+    pub(crate) fn record_quality_rejection(&mut self, violation: NativeQualityViolation) {
+        let counter = match violation {
+            NativeQualityViolation::ScopeShape => &mut self.stats.quality_scope_shape_rejections,
+            NativeQualityViolation::TwoQubitOps => &mut self.stats.quality_two_qubit_ops_rejections,
+            NativeQualityViolation::TwoQubitDepth => {
+                &mut self.stats.quality_two_qubit_depth_rejections
+            }
+            NativeQualityViolation::TotalDepth => &mut self.stats.quality_total_depth_rejections,
+            NativeQualityViolation::Error => &mut self.stats.quality_error_rejections,
+            NativeQualityViolation::Makespan => &mut self.stats.quality_makespan_rejections,
+            NativeQualityViolation::Rank => &mut self.stats.quality_rank_rejections,
+        };
+        *counter = counter.saturating_add(1);
     }
 
     pub(crate) fn current_operation_key(&self, scope: &NativeScopeId, order: usize) -> Option<u64> {

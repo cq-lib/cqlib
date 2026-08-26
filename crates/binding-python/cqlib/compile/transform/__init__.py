@@ -75,6 +75,7 @@ from .layout import vf2_perfect_layout as vf2_perfect_layout
 from .layout import vf2_perfect_layout_prepared as vf2_perfect_layout_prepared
 from .native_optimization import NativeOptimizationResult as NativeOptimizationResult
 from .native_optimization import NativeOptimizationSummary as NativeOptimizationSummary
+from .native_optimization import NativeQualityPolicy as NativeQualityPolicy
 from .native_optimization import NativeOptimizer as NativeOptimizer
 from .one_qubit_optimization import OptimizeOneQubitRuns as OptimizeOneQubitRuns
 from .routing import RoutedCircuit as RoutedCircuit
@@ -124,6 +125,7 @@ __all__ = [
     "OptimizeOneQubitRuns",
     "NativeOptimizationSummary",
     "NativeOptimizationResult",
+    "NativeQualityPolicy",
     "NativeOptimizer",
     "LayoutObjective",
     "Interaction",

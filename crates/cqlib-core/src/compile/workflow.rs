@@ -65,8 +65,8 @@ use crate::compile::transform::transformer::{PassApplicability, WorkflowPass};
 use crate::compile::transform::{
     CanonicalizeConfig, Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer,
     KnowledgeRewriteDiagnostics, KnowledgeRewriteSession, KnowledgeRewriter, LayoutObjective,
-    LowerToRoutingBasis, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks, RewriteConfig,
-    RewriteEdits, RewriteExecutionRecord, TargetBasisCostModel, TargetBasisLowerer,
+    LowerToRoutingBasis, NativeQualityPolicy, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks,
+    RewriteConfig, RewriteEdits, RewriteExecutionRecord, TargetBasisCostModel, TargetBasisLowerer,
     TransformOutcome, Transformer, TwoQubitBlockResynthesisConfig, VirtualPermutation,
     VirtualPermutationElisionStatus, elide_virtual_permutations, route_sabre_tracked_on_topology,
     route_sabre_tracked_with_session_on_physical, route_with_layout_tracked_on_topology,
@@ -830,12 +830,13 @@ impl CompilerWorkflow {
             max_rounds,
             max_stale_rounds,
             planning_session,
-        );
+        )
+        .with_quality_policy(NativeQualityPolicy::BalancedDepth);
         let input_is_canonical = state.has_canonical_proof(Canonicalizer::production().config());
-        let result = if input_is_canonical {
-            optimizer.run_with_proven_canonical_input(&state.current)?
+        let (result, native_stats) = if input_is_canonical {
+            optimizer.run_with_proven_canonical_input_and_stats(&state.current)?
         } else {
-            optimizer.run(&state.current)?
+            optimizer.run_with_stats(&state.current)?
         };
         if result.changed {
             state.analysis = None;
@@ -849,7 +850,7 @@ impl CompilerWorkflow {
             changed: result.changed,
             skipped: false,
             reason: Some(format!(
-                "rounds={}; restored_best={}; native_2q_ops={}->{}; native_2q_depth={}->{}; native_depth={}->{}; native_ops={}->{}; predicted_log_error={:?}->{:?}; unavailable_error_count={}->{}; imputed_error_count={}->{}",
+                "quality_policy=balanced_depth; rounds={}; restored_best={}; native_2q_ops={}->{}; native_2q_depth={}->{}; native_depth={}->{}; native_ops={}->{}; predicted_log_error={:?}->{:?}; unavailable_error_count={}->{}; imputed_error_count={}->{}; quality_rejections=scope_shape:{},2q_ops:{},2q_depth:{},total_depth:{},error:{},makespan:{},rank:{}",
                 result.rounds,
                 result.restored_best,
                 result.before.native_two_qubit_ops,
@@ -866,6 +867,13 @@ impl CompilerWorkflow {
                 result.after.unavailable_error_count,
                 result.before.imputed_error_count,
                 result.after.imputed_error_count,
+                native_stats.quality_scope_shape_rejections,
+                native_stats.quality_two_qubit_ops_rejections,
+                native_stats.quality_two_qubit_depth_rejections,
+                native_stats.quality_total_depth_rejections,
+                native_stats.quality_error_rejections,
+                native_stats.quality_makespan_rejections,
+                native_stats.quality_rank_rejections,
             )),
         });
         Ok(())

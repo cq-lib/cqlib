@@ -12,7 +12,11 @@
 
 use super::*;
 use crate::compile::device_planning::DevicePlanningSession;
+use crate::compile::device_planning::cost::{DevicePhysicalCost, MetricAvailability};
 use crate::compile::test_utils::build_device_synthesis_context;
+use crate::compile::transform::native_quality::{
+    NativeCriticalPathQuality, NativeQualityViolation,
+};
 use crate::compile::transform::{ResynthesizeTwoQubitBlocks, TransformerTestExt};
 use crate::device::{EdgeProp, InstructionProp, PhysicalQubit};
 use std::sync::Arc;
@@ -70,6 +74,7 @@ fn run_rebuild_every_use(
     )?;
     let mut best_costs =
         scope_costs_with_context(&best, &initial_context).map_err(scope_cost_error)?;
+    let entry_costs = best_costs.clone();
     let before = summarize_scope_costs(&best_costs);
     let mut rounds = 0;
     let mut stale = 0_u8;
@@ -92,9 +97,12 @@ fn run_rebuild_every_use(
             &resynthesized,
             DeviceSynthesisPlacement::ExactPhysical,
         )?;
-        let locally_optimized = OptimizeNativeLocalGates::new(local_context)
-            .transform_resolved(&resynthesized, None)?
-            .circuit;
+        let locally_optimized = OptimizeNativeLocalGates::with_quality_policy(
+            local_context,
+            NativeQualityPolicy::EntanglerFirst,
+        )
+        .transform_resolved(&resynthesized, None)?
+        .circuit;
         let legalized = match DeviceLowerer::new(optimizer.device())
             .transform_resolved(&locally_optimized, None)
         {
@@ -122,7 +130,14 @@ fn run_rebuild_every_use(
         )?;
         let candidate_costs =
             scope_costs_with_context(&candidate, &candidate_context).map_err(scope_cost_error)?;
-        if scope_costs_dominate(&candidate_costs, &best_costs) {
+        if scope_quality_decision(
+            &candidate_costs,
+            &best_costs,
+            &entry_costs,
+            optimizer.quality_policy(),
+        )
+        .is_ok()
+        {
             best = candidate.clone();
             best_costs = candidate_costs;
             stale = 0;
@@ -166,6 +181,23 @@ fn native_optimizer_stops_after_one_stable_round() {
     assert!(!result.changed);
     assert!(!result.restored_best);
     assert_eq!(result.circuit, circuit);
+}
+
+#[test]
+fn native_optimizer_quality_policy_is_explicit_and_legacy_by_default() {
+    let device = Device::line("native-quality-policy", 1)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::U)])
+        .unwrap();
+    let legacy = NativeOptimizer::normal(&device);
+    let balanced =
+        NativeOptimizer::normal(&device).with_quality_policy(NativeQualityPolicy::BalancedDepth);
+
+    assert_eq!(legacy.quality_policy(), NativeQualityPolicy::EntanglerFirst);
+    assert_eq!(
+        balanced.quality_policy(),
+        NativeQualityPolicy::BalancedDepth
+    );
 }
 
 #[test]
@@ -409,9 +441,10 @@ fn one_qubit_fusion_requires_exact_physical_improvement() {
         build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
             .unwrap();
 
-    let result = OptimizeNativeLocalGates::new(context)
-        .transform_resolved(&circuit, None)
-        .unwrap();
+    let result =
+        OptimizeNativeLocalGates::with_quality_policy(context, NativeQualityPolicy::EntanglerFirst)
+            .transform_resolved(&circuit, None)
+            .unwrap();
 
     assert!(result.changed);
     assert_eq!(result.circuit.operations().len(), 1);
@@ -544,4 +577,144 @@ fn pauli_product_uses_circuit_time_order() {
         rewrite.operations[0].instruction,
         ValueInstruction::Instruction(Instruction::Standard(StandardGate::Y))
     ));
+}
+
+fn synthetic_quality(
+    two_qubit_ops: u32,
+    two_qubit_depth: u32,
+    total_depth: u32,
+    total_ops: u32,
+    critical_path_1q: u32,
+) -> NativeQualityVector {
+    NativeQualityVector {
+        physical: DevicePhysicalCost {
+            native_two_qubit_ops: two_qubit_ops,
+            native_two_qubit_depth: two_qubit_depth,
+            error: MetricAvailability::Disabled,
+            total_native_depth: total_depth,
+            native_total_ops: total_ops,
+            duration: MetricAvailability::Disabled,
+            makespan: MetricAvailability::Disabled,
+        },
+        critical_path: NativeCriticalPathQuality {
+            one_qubit_ops: critical_path_1q,
+            longest_one_qubit_run: 1,
+        },
+    }
+}
+
+#[test]
+fn balanced_scope_dominance_rejects_regression_in_any_control_flow_scope() {
+    let entry = vec![
+        synthetic_quality(10, 8, 20, 40, 8),
+        synthetic_quality(4, 4, 10, 20, 4),
+    ];
+    let candidate = vec![
+        synthetic_quality(10, 8, 19, 39, 7),
+        synthetic_quality(4, 4, 10, 19, 5),
+    ];
+
+    assert!(
+        scope_quality_decision(
+            &candidate,
+            &entry,
+            &entry,
+            NativeQualityPolicy::BalancedDepth,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn balanced_scope_dominance_ranks_against_best_but_guards_against_entry() {
+    let entry = vec![synthetic_quality(10, 8, 100, 200, 50)];
+    let best = vec![synthetic_quality(10, 8, 90, 190, 45)];
+    let worse_than_best = vec![synthetic_quality(9, 8, 95, 180, 40)];
+    let better_than_best = vec![synthetic_quality(9, 8, 89, 180, 40)];
+    let outside_entry = vec![synthetic_quality(8, 7, 101, 170, 35)];
+
+    assert!(
+        scope_quality_decision(
+            &worse_than_best,
+            &best,
+            &entry,
+            NativeQualityPolicy::BalancedDepth,
+        )
+        .is_err()
+    );
+    assert!(
+        scope_quality_decision(
+            &better_than_best,
+            &best,
+            &entry,
+            NativeQualityPolicy::BalancedDepth,
+        )
+        .is_ok()
+    );
+    assert!(
+        scope_quality_decision(
+            &outside_entry,
+            &best,
+            &entry,
+            NativeQualityPolicy::BalancedDepth,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn balanced_scope_decision_reports_shape_guard_and_rank_rejections() {
+    let entry = vec![synthetic_quality(10, 8, 20, 40, 8)];
+    let equal = entry.clone();
+    let shape_changed = vec![entry[0], entry[0]];
+    let worse_rank = vec![synthetic_quality(10, 8, 20, 40, 9)];
+
+    assert_eq!(
+        scope_quality_decision(
+            &shape_changed,
+            &entry,
+            &entry,
+            NativeQualityPolicy::BalancedDepth,
+        ),
+        Err(NativeQualityViolation::ScopeShape)
+    );
+    assert_eq!(
+        scope_quality_decision(&equal, &entry, &entry, NativeQualityPolicy::BalancedDepth,),
+        Err(NativeQualityViolation::Rank)
+    );
+    assert_eq!(
+        scope_quality_decision(
+            &worse_rank,
+            &entry,
+            &entry,
+            NativeQualityPolicy::BalancedDepth,
+        ),
+        Err(NativeQualityViolation::Rank)
+    );
+}
+
+#[test]
+fn native_workset_stats_count_quality_rejections_by_reason() {
+    let mut session = NativeResynthesisSession::new(NativeResynthesisPolicy::Incremental);
+    for violation in [
+        NativeQualityViolation::ScopeShape,
+        NativeQualityViolation::TwoQubitOps,
+        NativeQualityViolation::TwoQubitDepth,
+        NativeQualityViolation::TotalDepth,
+        NativeQualityViolation::Error,
+        NativeQualityViolation::Makespan,
+        NativeQualityViolation::Rank,
+        NativeQualityViolation::TotalDepth,
+    ] {
+        session.record_quality_rejection(violation);
+    }
+    let stats = session.stats();
+
+    assert_eq!(stats.quality_scope_shape_rejections, 1);
+    assert_eq!(stats.quality_two_qubit_ops_rejections, 1);
+    assert_eq!(stats.quality_two_qubit_depth_rejections, 1);
+    assert_eq!(stats.quality_total_depth_rejections, 2);
+    assert_eq!(stats.quality_error_rejections, 1);
+    assert_eq!(stats.quality_makespan_rejections, 1);
+    assert_eq!(stats.quality_rank_rejections, 1);
 }

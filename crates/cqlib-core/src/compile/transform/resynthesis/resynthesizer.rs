@@ -23,7 +23,7 @@ use super::config::TwoQubitBlockResynthesisConfig;
 use super::dag_collector::collect_two_qubit_blocks_dag;
 use super::incremental::{NativeResynthesisSession, NativeScopeId, NativeScopeSegment};
 use super::maximal_run::collect_maximal_two_qubit_runs;
-use super::selector::{BlockPatch, select_patches_with_device};
+use super::selector::{BlockPatch, select_patches_with_device_policy};
 use super::synthesis_cache::{TwoQubitSynthesisCache, TwoQubitSynthesisCacheStats};
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, Instruction, Operation, Parameter, ParameterValue,
@@ -32,6 +32,7 @@ use crate::circuit::{
 };
 use crate::compile::CompilerError;
 use crate::compile::device_planning::DevicePlanningSession;
+use crate::compile::transform::NativeQualityPolicy;
 use crate::compile::transform::decompose::unitary::{
     DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
 };
@@ -251,6 +252,7 @@ fn resynthesize_two_qubit_blocks_with_cache(
         device_context,
         synthesis_cache,
         incremental: None,
+        quality_policy: NativeQualityPolicy::EntanglerFirst,
     };
     pass.run_with_edits()
 }
@@ -260,6 +262,7 @@ pub(crate) fn resynthesize_two_qubit_blocks_incremental(
     config: TwoQubitBlockResynthesisConfig,
     device_context: DeviceTwoQubitSynthesisContext,
     session: &mut NativeResynthesisSession,
+    quality_policy: NativeQualityPolicy,
 ) -> Result<TransformOutcome, CompilerError> {
     session.begin_round(&config);
     let mut synthesis_cache = std::mem::take(&mut session.synthesis_cache);
@@ -271,6 +274,7 @@ pub(crate) fn resynthesize_two_qubit_blocks_incremental(
         device_context: Some(device_context),
         synthesis_cache: &mut synthesis_cache,
         incremental: Some(session),
+        quality_policy,
     }
     .run();
     session.synthesis_cache = synthesis_cache;
@@ -287,6 +291,7 @@ struct ResynthesisPass<'a, 'session, 'cache> {
     device_context: Option<DeviceTwoQubitSynthesisContext>,
     synthesis_cache: &'cache mut TwoQubitSynthesisCache,
     incremental: Option<&'session mut NativeResynthesisSession>,
+    quality_policy: NativeQualityPolicy,
 }
 
 struct SequenceRewrite {
@@ -385,13 +390,14 @@ impl<'a, 'session, 'cache> ResynthesisPass<'a, 'session, 'cache> {
             .iter()
             .map(|block| block.matched_orders.clone())
             .collect::<HashSet<_>>();
-        let mut patches = select_patches_with_device(
+        let mut patches = select_patches_with_device_policy(
             maximal_blocks,
             &views,
             &commutation,
             &self.config,
             self.device_context.as_ref(),
             self.synthesis_cache,
+            self.quality_policy,
         )?;
         let protected_orders = patches
             .iter()
@@ -427,13 +433,14 @@ impl<'a, 'session, 'cache> ResynthesisPass<'a, 'session, 'cache> {
                         .chain(&block.crossed_orders)
                         .any(|order| protected_orders.contains(order))
             });
-            patches.extend(select_patches_with_device(
+            patches.extend(select_patches_with_device_policy(
                 bounded_blocks,
                 &views,
                 &commutation,
                 &self.config,
                 self.device_context.as_ref(),
                 self.synthesis_cache,
+                self.quality_policy,
             )?);
             patches.sort_by_key(|patch| patch.first_order);
         }

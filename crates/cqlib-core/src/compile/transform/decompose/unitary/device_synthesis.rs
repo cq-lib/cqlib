@@ -28,6 +28,7 @@
 
 use crate::circuit::{Circuit, Instruction, Qubit, StandardGate, ValueInstruction, ValueOperation};
 use crate::compile::CompilerError;
+use crate::compile::device_planning::cost::DeviceScheduleProfile;
 use crate::compile::device_planning::{
     CalibrationEstimator, DeviceGateState, DevicePlanSnapshot, DevicePlanningSession,
     NativePlanAvailability, NativePlanCatalog, NativePlanCost, NativePlanLeaf, NativePlanSummary,
@@ -306,6 +307,49 @@ impl DeviceTwoQubitSynthesisContext {
         }
         let pair = physical_qubits.map(PhysicalQubit::from_qubit);
         self.cost_on_pair_diagnostic(operations, physical_qubits, pair, None)
+    }
+
+    /// Builds the exact pair schedule transition used to prove that replacing
+    /// one native block cannot increase depth or makespan for any possible
+    /// prefix readiness on the two physical qubits.
+    pub(crate) fn exact_schedule_profile_diagnostic(
+        &self,
+        operations: &[ValueOperation],
+        physical_qubits: [Qubit; 2],
+    ) -> Result<DeviceScheduleProfile, DeviceContextCostFailure> {
+        if self.data.placement != DeviceSynthesisPlacement::ExactPhysical {
+            return Err(DeviceContextCostFailure::WrongPlacement);
+        }
+        let physical_pair = physical_qubits.map(PhysicalQubit::from_qubit);
+        let leaves = self.exact_native_leaves_diagnostic(operations, physical_qubits)?;
+        self.data
+            .estimator
+            .schedule_profile(&leaves, &physical_pair)
+            .map_err(|reason| {
+                DeviceContextCostFailure::InvalidOperation(format!(
+                    "invalid native two-qubit schedule profile: {reason}"
+                ))
+            })
+    }
+
+    /// Expands a pair-local sequence through the exact native plans selected by
+    /// the same immutable planning session used by device lowering.
+    pub(crate) fn exact_native_leaves_diagnostic(
+        &self,
+        operations: &[ValueOperation],
+        physical_qubits: [Qubit; 2],
+    ) -> Result<Vec<NativePlanLeaf>, DeviceContextCostFailure> {
+        if self.data.placement != DeviceSynthesisPlacement::ExactPhysical {
+            return Err(DeviceContextCostFailure::WrongPlacement);
+        }
+        let physical_pair = physical_qubits.map(PhysicalQubit::from_qubit);
+        let states = states_on_pair(operations, physical_qubits, physical_pair)?;
+        let mut leaves = Vec::new();
+        for state in states {
+            let summary = self.catalog_summary(&state, None)?;
+            leaves.extend(summary.leaves.iter().cloned());
+        }
+        Ok(leaves)
     }
 
     /// Costs one flat operation sequence on the physical qargs carried by the

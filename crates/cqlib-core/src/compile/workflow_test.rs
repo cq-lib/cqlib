@@ -1721,6 +1721,24 @@ fn native_fixed_point_recovers_exact_pair_lowering_in_both_modes() {
     assert!(!normal.step_changed("resynthesize.two_qubit_blocks.post_routing"));
     assert!(enhanced.step_changed("resynthesize.two_qubit_blocks.post_routing"));
     assert!(normal.step_changed("optimize.native_fixed_point"));
+    assert!(
+        normal
+            .step("optimize.native_fixed_point")
+            .unwrap()
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("quality_policy=balanced_depth")
+    );
+    assert!(
+        normal
+            .step("optimize.native_fixed_point")
+            .unwrap()
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("quality_rejections=")
+    );
     let mut physical_expected = Circuit::new(4);
     physical_expected
         .swap(Qubit::new(1), Qubit::new(2))

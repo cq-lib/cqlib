@@ -17,10 +17,11 @@
 //! canonicalization. Every transform recursively visits structured control-flow
 //! bodies, while the loop itself advances all scopes synchronously.
 //!
-//! Candidate circuits are accepted only when their `DevicePhysicalCost`
-//! (represented internally by the exact sequence evaluator) is non-worse in
-//! every corresponding control-flow scope and strictly better in at least one.
-//! This conservative Pareto rule avoids assigning an arbitrary execution count
+//! Candidate circuits are accepted under a Native-only quality policy. The
+//! balanced policy first protects the immutable entry circuit's entangler
+//! count/depth, total depth, calibrated error, and makespan in every
+//! control-flow scope; candidates inside that envelope are then ranked against
+//! the best accepted circuit. This avoids assigning arbitrary execution counts
 //! to conditional or loop bodies. The optimizer restores the best whole-circuit
 //! point seen; it does not splice independently optimal bodies from different
 //! rounds.
@@ -41,6 +42,9 @@ use crate::compile::sabre::MetricAvailability;
 use crate::compile::transform::decompose::unitary::{
     DeviceContextCostFailure, DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
     OneQubitUnitaryDecomposition, synthesize_numeric_1q_unitary,
+};
+use crate::compile::transform::native_quality::{
+    NativeQualityPolicy, NativeQualityVector, NativeQualityViolation,
 };
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::resynthesis::{
@@ -108,6 +112,7 @@ pub struct NativeOptimizer<'a> {
     resynthesis: TwoQubitBlockResynthesisConfig,
     max_rounds: u8,
     max_stale_rounds: u8,
+    quality_policy: NativeQualityPolicy,
 }
 
 impl<'a> NativeOptimizer<'a> {
@@ -134,6 +139,7 @@ impl<'a> NativeOptimizer<'a> {
             resynthesis,
             max_rounds,
             max_stale_rounds,
+            quality_policy: NativeQualityPolicy::EntanglerFirst,
         })
     }
 
@@ -156,6 +162,7 @@ impl<'a> NativeOptimizer<'a> {
             resynthesis,
             max_rounds,
             max_stale_rounds,
+            quality_policy: NativeQualityPolicy::EntanglerFirst,
         })
     }
 
@@ -201,6 +208,17 @@ impl<'a> NativeOptimizer<'a> {
         self.max_stale_rounds
     }
 
+    /// Candidate quality policy used by this optimizer.
+    pub const fn quality_policy(&self) -> NativeQualityPolicy {
+        self.quality_policy
+    }
+
+    /// Selects the Native-only candidate quality policy.
+    pub fn with_quality_policy(mut self, quality_policy: NativeQualityPolicy) -> Self {
+        self.quality_policy = quality_policy;
+        self
+    }
+
     pub(crate) fn with_session(
         device: &'a Device,
         resynthesis: TwoQubitBlockResynthesisConfig,
@@ -216,6 +234,7 @@ impl<'a> NativeOptimizer<'a> {
             resynthesis,
             max_rounds,
             max_stale_rounds,
+            quality_policy: NativeQualityPolicy::EntanglerFirst,
         }
     }
 
@@ -224,20 +243,27 @@ impl<'a> NativeOptimizer<'a> {
             .map(|(result, _)| result)
     }
 
-    /// Runs without repeating the entry canonicalization pass.
+    pub(crate) fn run_with_stats(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<(NativeOptimizationResult, NativeWorksetStats), CompilerError> {
+        self.run_with_policy(circuit, NativeResynthesisPolicy::Incremental)
+    }
+
+    /// Runs without repeating the entry canonicalization pass and returns
+    /// diagnostics used by the production workflow report.
     ///
     /// Callers must hold a proof for the exact input circuit revision and the
     /// production canonicalization configuration.
-    pub(crate) fn run_with_proven_canonical_input(
+    pub(crate) fn run_with_proven_canonical_input_and_stats(
         &self,
         circuit: &Circuit,
-    ) -> Result<NativeOptimizationResult, CompilerError> {
+    ) -> Result<(NativeOptimizationResult, NativeWorksetStats), CompilerError> {
         self.run_canonicalized(
             circuit,
             circuit.clone(),
             NativeResynthesisPolicy::Incremental,
         )
-        .map(|(result, _)| result)
     }
 
     pub(crate) fn run_with_policy(
@@ -275,6 +301,7 @@ impl<'a> NativeOptimizer<'a> {
             Arc::clone(&self.planning_session),
         )?;
         let mut best_costs = scope_costs_with_context(&best, &context).map_err(scope_cost_error)?;
+        let entry_costs = best_costs.clone();
         let before = summarize_scope_costs(&best_costs);
         let mut rounds = 0;
         let mut stale = 0;
@@ -289,6 +316,7 @@ impl<'a> NativeOptimizer<'a> {
                 self.resynthesis.clone(),
                 context.clone(),
                 &mut resynthesis_session,
+                self.quality_policy,
             )?;
             let resynthesis_changed = resynthesis_outcome.changed();
             let resynthesized = match &resynthesis_outcome {
@@ -296,7 +324,8 @@ impl<'a> NativeOptimizer<'a> {
                 TransformOutcome::Changed(circuit) => circuit,
             };
             let local_outcome =
-                OptimizeNativeLocalGates::new(context.clone()).transform(resynthesized, None)?;
+                OptimizeNativeLocalGates::with_quality_policy(context.clone(), self.quality_policy)
+                    .transform(resynthesized, None)?;
             let local_changed = local_outcome.changed();
             // A fully stable round makes the remaining passes deterministic
             // no-ops: lowering and canonicalization reproduce `current` (the
@@ -378,15 +407,21 @@ impl<'a> NativeOptimizer<'a> {
             }
             let candidate_costs = self.candidate_costs_with_reuse(&candidate, &mut context)?;
             let candidate = Arc::new(candidate);
-            if scope_costs_dominate(&candidate_costs, &best_costs) {
+            if let Err(violation) = scope_quality_decision(
+                &candidate_costs,
+                &best_costs,
+                &entry_costs,
+                self.quality_policy,
+            ) {
+                resynthesis_session.record_quality_rejection(violation);
+                stale = stale.saturating_add(1);
+            } else {
                 if !validate_every_round {
                     self.device().validate_circuit(&candidate)?;
                 }
                 best = candidate.clone();
                 best_costs = candidate_costs;
                 stale = 0;
-            } else {
-                stale = stale.saturating_add(1);
             }
             seen_states.push(candidate.clone());
             current = candidate;
@@ -419,8 +454,7 @@ impl<'a> NativeOptimizer<'a> {
         &self,
         candidate: &Circuit,
         context: &mut DeviceTwoQubitSynthesisContext,
-    ) -> Result<Vec<crate::compile::transform::decompose::unitary::DevicePhysicalCost>, CompilerError>
-    {
+    ) -> Result<Vec<NativeQualityVector>, CompilerError> {
         match scope_costs_with_context(candidate, context) {
             Ok(costs) => Ok(costs),
             Err(ScopeCostError::Context(DeviceContextCostFailure::Unprepared(_))) => {
@@ -488,8 +522,7 @@ fn scope_cost_error(error: ScopeCostError) -> CompilerError {
 fn scope_costs_with_context(
     circuit: &Circuit,
     context: &DeviceTwoQubitSynthesisContext,
-) -> Result<Vec<crate::compile::transform::decompose::unitary::DevicePhysicalCost>, ScopeCostError>
-{
+) -> Result<Vec<NativeQualityVector>, ScopeCostError> {
     let mut costs = Vec::new();
     collect_scope_costs(circuit.operations(), context, &mut costs)?;
     Ok(costs)
@@ -498,7 +531,7 @@ fn scope_costs_with_context(
 fn collect_scope_costs(
     operations: &[Operation],
     context: &DeviceTwoQubitSynthesisContext,
-    output: &mut Vec<crate::compile::transform::decompose::unitary::DevicePhysicalCost>,
+    output: &mut Vec<NativeQualityVector>,
 ) -> Result<(), ScopeCostError> {
     let mut accumulator = context
         .exact_sequence_cost_accumulator()
@@ -538,35 +571,46 @@ fn collect_scope_costs(
             | Instruction::Delay => {}
         }
     }
-    output.push(accumulator.finish());
+    output.push(NativeQualityVector::for_operations(
+        accumulator.finish(),
+        operations,
+    ));
     Ok(())
 }
 
-fn scope_costs_dominate(
-    candidate: &[crate::compile::transform::decompose::unitary::DevicePhysicalCost],
-    current: &[crate::compile::transform::decompose::unitary::DevicePhysicalCost],
-) -> bool {
-    if candidate.len() != current.len() {
-        return false;
+fn scope_quality_decision(
+    candidate: &[NativeQualityVector],
+    current: &[NativeQualityVector],
+    entry: &[NativeQualityVector],
+    policy: NativeQualityPolicy,
+) -> Result<(), NativeQualityViolation> {
+    if candidate.len() != current.len() || candidate.len() != entry.len() {
+        return Err(NativeQualityViolation::ScopeShape);
     }
     let mut improved = false;
-    for (candidate, current) in candidate.iter().zip(current) {
-        match candidate.compare(*current) {
+    for ((candidate, current), entry) in candidate.iter().zip(current).zip(entry) {
+        if let Some(violation) = candidate.admissibility_violation_against(*entry, policy) {
+            return Err(violation);
+        }
+        match candidate.compare(*current, policy) {
             std::cmp::Ordering::Less => improved = true,
             std::cmp::Ordering::Equal => {}
-            std::cmp::Ordering::Greater => return false,
+            std::cmp::Ordering::Greater => return Err(NativeQualityViolation::Rank),
         }
     }
-    improved
+    if improved {
+        Ok(())
+    } else {
+        Err(NativeQualityViolation::Rank)
+    }
 }
 
-fn summarize_scope_costs(
-    costs: &[crate::compile::transform::decompose::unitary::DevicePhysicalCost],
-) -> NativeOptimizationSummary {
+fn summarize_scope_costs(costs: &[NativeQualityVector]) -> NativeOptimizationSummary {
     let mut predicted_log_error = Some(0.0);
     let mut unavailable_error_count = 0;
     let mut imputed_error_count = 0;
-    for cost in costs {
+    for quality in costs {
+        let cost = quality.physical;
         match cost.error {
             MetricAvailability::Available(error) => {
                 if let Some(total) = &mut predicted_log_error {
@@ -583,19 +627,19 @@ fn summarize_scope_costs(
     NativeOptimizationSummary {
         native_two_qubit_ops: costs
             .iter()
-            .map(|cost| u64::from(cost.native_two_qubit_ops))
+            .map(|quality| u64::from(quality.physical.native_two_qubit_ops))
             .sum(),
         native_two_qubit_depth: costs
             .iter()
-            .map(|cost| u64::from(cost.native_two_qubit_depth))
+            .map(|quality| u64::from(quality.physical.native_two_qubit_depth))
             .sum(),
         total_native_depth: costs
             .iter()
-            .map(|cost| u64::from(cost.total_native_depth))
+            .map(|quality| u64::from(quality.physical.total_native_depth))
             .sum(),
         native_total_ops: costs
             .iter()
-            .map(|cost| u64::from(cost.native_total_ops))
+            .map(|quality| u64::from(quality.physical.native_total_ops))
             .sum(),
         predicted_log_error,
         unavailable_error_count,
@@ -607,11 +651,18 @@ fn summarize_scope_costs(
 #[derive(Debug, Clone)]
 pub(crate) struct OptimizeNativeLocalGates {
     device_context: DeviceTwoQubitSynthesisContext,
+    quality_policy: NativeQualityPolicy,
 }
 
 impl OptimizeNativeLocalGates {
-    pub(crate) fn new(device_context: DeviceTwoQubitSynthesisContext) -> Self {
-        Self { device_context }
+    pub(crate) fn with_quality_policy(
+        device_context: DeviceTwoQubitSynthesisContext,
+        quality_policy: NativeQualityPolicy,
+    ) -> Self {
+        Self {
+            device_context,
+            quality_policy,
+        }
     }
 }
 
@@ -625,7 +676,10 @@ impl Transformer for OptimizeNativeLocalGates {
         circuit: &Circuit,
         _analysis: Option<&CircuitAnalysis>,
     ) -> Result<TransformOutcome, CompilerError> {
-        let policy = LocalOptimizationPolicy::Device(self.device_context.clone());
+        let policy = LocalOptimizationPolicy::Device {
+            context: self.device_context.clone(),
+            quality_policy: self.quality_policy,
+        };
         LocalOneQPass::run(circuit, &policy)
     }
 }
@@ -635,7 +689,10 @@ impl Transformer for OptimizeNativeLocalGates {
 pub(crate) enum LocalOptimizationPolicy {
     Logical,
     Basis(Arc<TargetBasisCostModel>),
-    Device(DeviceTwoQubitSynthesisContext),
+    Device {
+        context: DeviceTwoQubitSynthesisContext,
+        quality_policy: NativeQualityPolicy,
+    },
 }
 
 /// Runs the shared one-qubit/frame optimizer with an explicit cost policy.
@@ -771,7 +828,7 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
         }
 
         let optimized = match self.policy {
-            LocalOptimizationPolicy::Device(_) => {
+            LocalOptimizationPolicy::Device { .. } => {
                 // Preserve the existing native behavior: frame movement is
                 // speculative within a native round, while the outer minimum
                 // point controller decides whether the whole round survives.
@@ -931,7 +988,10 @@ impl LocalOptimizationPolicy {
                 after.two_qubit_ops <= before.two_qubit_ops
                     && compare_basis_cost(after, before).is_lt()
             }
-            Self::Device(context) => {
+            Self::Device {
+                context,
+                quality_policy,
+            } => {
                 let Some(before) = exact_local_sequence_cost(context, source, "source")? else {
                     return Ok(false);
                 };
@@ -939,7 +999,10 @@ impl LocalOptimizationPolicy {
                 else {
                     return Ok(false);
                 };
-                after.strictly_better_than(before)
+                let before = NativeQualityVector::for_value_operations(before, source);
+                let after = NativeQualityVector::for_value_operations(after, candidate);
+                after.admissible_against(before, *quality_policy)
+                    && after.compare(before, *quality_policy).is_lt()
             }
         })
     }

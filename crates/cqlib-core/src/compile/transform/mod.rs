@@ -66,6 +66,9 @@ pub mod device_lowering;
 pub mod layout;
 pub(crate) mod lowering_support;
 pub mod native_optimization;
+mod native_quality;
+#[cfg(test)]
+mod native_quality_test;
 pub mod one_qubit_optimization;
 pub mod rebuild;
 pub mod resynthesis;
@@ -93,6 +96,7 @@ pub use layout::{
 pub use native_optimization::{
     NativeOptimizationResult, NativeOptimizationSummary, NativeOptimizer,
 };
+pub use native_quality::NativeQualityPolicy;
 pub use one_qubit_optimization::OptimizeOneQubitRuns;
 pub use resynthesis::{
     DeviceResynthesisPlacement, ResynthesizeTwoQubitBlocks, TwoQubitBlockResynthesisConfig,

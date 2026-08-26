@@ -49,6 +49,7 @@ use crate::compile::transform::decompose::unitary::{
     DeviceTwoQubitSynthesisContext, TwoQubitSynthesisRequest, TwoQubitUnitaryDecomposeBasis,
     plan_numeric_2q_unitary,
 };
+use crate::compile::transform::native_quality::{NativeQualityPolicy, NativeQualityVector};
 use crate::compile::{CompilerError, compare_some_first_by};
 use ndarray::Array2;
 use num_complex::Complex64;
@@ -74,8 +75,16 @@ pub(crate) struct BlockPatch {
     pub before_cost: ResynthesisCost,
     pub after_cost: ResynthesisCost,
     pub device_after_cost: Option<DevicePhysicalCost>,
+    device_after_quality: Option<NativeQualityVector>,
+    quality_policy: NativeQualityPolicy,
     pub synthesis_phase: f64,
     selection_rank: usize,
+}
+
+#[derive(Clone, Copy)]
+struct DeviceSelectionContext<'a> {
+    synthesis: Option<&'a DeviceTwoQubitSynthesisContext>,
+    quality_policy: NativeQualityPolicy,
 }
 
 /// A block whose extraction invariants were rechecked against the current
@@ -98,23 +107,25 @@ pub(crate) fn select_patches(
     commutation: &CachedCommutation,
     config: &TwoQubitBlockResynthesisConfig,
 ) -> Result<Vec<BlockPatch>, CompilerError> {
-    select_patches_with_device(
+    select_patches_with_device_policy(
         blocks,
         ops,
         commutation,
         config,
         None,
         &mut TwoQubitSynthesisCache::default(),
+        NativeQualityPolicy::EntanglerFirst,
     )
 }
 
-pub(crate) fn select_patches_with_device(
+pub(crate) fn select_patches_with_device_policy(
     blocks: Vec<TwoQubitNumericBlock>,
     ops: &[OperationView<'_>],
     commutation: &CachedCommutation,
     config: &TwoQubitBlockResynthesisConfig,
     device_context: Option<&DeviceTwoQubitSynthesisContext>,
     synthesis_cache: &mut TwoQubitSynthesisCache,
+    quality_policy: NativeQualityPolicy,
 ) -> Result<Vec<BlockPatch>, CompilerError> {
     let stats = synthesis_cache.selection_stats_mut();
     stats.input_blocks = stats.input_blocks.saturating_add(blocks.len());
@@ -139,7 +150,7 @@ pub(crate) fn select_patches_with_device(
     let bounded = blocks
         .iter()
         .all(|block| matches!(block.origin(), BlockOrigin::DagDependencyClosed));
-    if bounded {
+    if bounded && quality_policy == NativeQualityPolicy::EntanglerFirst {
         let stats = synthesis_cache.selection_stats_mut();
         stats.bounded_blocks = stats.bounded_blocks.saturating_add(blocks.len());
         return select_bounded_best_first(
@@ -162,7 +173,10 @@ pub(crate) fn select_patches_with_device(
             ops,
             commutation,
             config,
-            device_context,
+            DeviceSelectionContext {
+                synthesis: device_context,
+                quality_policy,
+            },
             synthesis_cache,
             selection_rank,
         )?;
@@ -478,7 +492,10 @@ fn select_component_best_first(
             ops,
             commutation,
             config,
-            device_context,
+            DeviceSelectionContext {
+                synthesis: device_context,
+                quality_policy: NativeQualityPolicy::EntanglerFirst,
+            },
             synthesis_cache,
             &prepared_block.facts,
             prepared_block.selection_rank,
@@ -699,11 +716,15 @@ fn compare_patches(lhs: &BlockPatch, rhs: &BlockPatch) -> Ordering {
         .lowered_two_qubit_ops
         .saturating_sub(rhs.after_cost.lowered_two_qubit_ops);
 
-    let physical = compare_some_first_by(
-        lhs.device_after_cost,
-        rhs.device_after_cost,
-        |left, right| left.compare(right),
-    );
+    debug_assert_eq!(lhs.quality_policy, rhs.quality_policy);
+    let physical = match (lhs.device_after_quality, rhs.device_after_quality) {
+        (Some(left), Some(right)) => left.compare(right, lhs.quality_policy),
+        _ => compare_some_first_by(
+            lhs.device_after_cost,
+            rhs.device_after_cost,
+            |left, right| left.compare(right),
+        ),
+    };
 
     physical
         .then_with(|| lhs.after_cost.cmp(&rhs.after_cost))
@@ -718,7 +739,7 @@ fn try_synthesize_block(
     ops: &[OperationView<'_>],
     commutation: &CachedCommutation,
     config: &TwoQubitBlockResynthesisConfig,
-    device_context: Option<&DeviceTwoQubitSynthesisContext>,
+    device: DeviceSelectionContext<'_>,
     synthesis_cache: &mut TwoQubitSynthesisCache,
     selection_rank: usize,
 ) -> Result<Option<BlockPatch>, CompilerError> {
@@ -730,7 +751,7 @@ fn try_synthesize_block(
         ops,
         commutation,
         config,
-        device_context,
+        device,
         synthesis_cache,
         &facts,
         selection_rank,
@@ -773,7 +794,7 @@ fn try_synthesize_block_from_facts(
     ops: &[OperationView<'_>],
     commutation: &CachedCommutation,
     config: &TwoQubitBlockResynthesisConfig,
-    device_context: Option<&DeviceTwoQubitSynthesisContext>,
+    device: DeviceSelectionContext<'_>,
     synthesis_cache: &mut TwoQubitSynthesisCache,
     facts: &CachedBlockFacts,
     selection_rank: usize,
@@ -798,7 +819,7 @@ fn try_synthesize_block_from_facts(
         .collect::<Vec<_>>();
     let stats = synthesis_cache.selection_stats_mut();
     stats.synthesis_attempts = stats.synthesis_attempts.saturating_add(1);
-    if let Some(device_context) = device_context {
+    if let Some(device_context) = device.synthesis {
         return try_synthesize_device_block(
             block,
             ops,
@@ -810,6 +831,7 @@ fn try_synthesize_block_from_facts(
             before_cost,
             synthesis_cache,
             selection_rank,
+            device.quality_policy,
         );
     }
     let mut counts = SelectionAttemptCounts::default();
@@ -916,6 +938,8 @@ fn try_synthesize_block_from_facts(
                     before_cost,
                     after_cost: candidate.cost,
                     device_after_cost: None,
+                    device_after_quality: None,
+                    quality_policy: device.quality_policy,
                     synthesis_phase: candidate.global_phase,
                     selection_rank,
                 }));
@@ -954,7 +978,13 @@ fn try_synthesize_device_block(
     before_cost: ResynthesisCost,
     synthesis_cache: &mut TwoQubitSynthesisCache,
     selection_rank: usize,
+    quality_policy: NativeQualityPolicy,
 ) -> Result<Option<BlockPatch>, CompilerError> {
+    let quality_policy = if context.placement() == DeviceSynthesisPlacement::ExactPhysical {
+        quality_policy
+    } else {
+        NativeQualityPolicy::EntanglerFirst
+    };
     let (device_before_cost, source_domain) = match context.placement() {
         DeviceSynthesisPlacement::PreLayoutEnvelope => {
             let Some(evaluation) = context.evaluate_pre_layout(source_operations, block.qubits)
@@ -984,6 +1014,31 @@ fn try_synthesize_device_block(
                 }
             }
         }
+    };
+    let device_before_quality = if quality_policy == NativeQualityPolicy::BalancedDepth {
+        let leaves = context
+            .exact_native_leaves_diagnostic(source_operations, block.qubits)
+            .map_err(|failure| {
+                CompilerError::InvariantViolation(format!(
+                    "failed to expand exact-device resynthesis source: {failure:?}"
+                ))
+            })?;
+        NativeQualityVector::for_native_plan_leaves(device_before_cost, &leaves)
+    } else {
+        NativeQualityVector::for_value_operations(device_before_cost, source_operations)
+    };
+    let device_before_schedule = if quality_policy == NativeQualityPolicy::BalancedDepth {
+        Some(
+            context
+                .exact_schedule_profile_diagnostic(source_operations, block.qubits)
+                .map_err(|failure| {
+                    CompilerError::InvariantViolation(format!(
+                        "failed to profile exact-device resynthesis source schedule: {failure:?}"
+                    ))
+                })?,
+        )
+    } else {
+        None
     };
     let mut counts = SelectionAttemptCounts::default();
     let Some(mut candidates) = synthesis_cache.with_device_plan(
@@ -1053,14 +1108,30 @@ fn try_synthesize_device_block(
                 }
                 DeviceSynthesisPlacement::ExactPhysical => candidate.physical_cost,
             };
-            ranked.push((index, candidate, device_after_cost));
+            let device_after_quality = if quality_policy == NativeQualityPolicy::BalancedDepth {
+                let leaves = context
+                    .exact_native_leaves_diagnostic(&candidate.candidate.operations, block.qubits)
+                    .map_err(|failure| {
+                        CompilerError::InvariantViolation(format!(
+                            "failed to expand exact-device resynthesis candidate: {failure:?}"
+                        ))
+                    })?;
+                NativeQualityVector::for_native_plan_leaves(device_after_cost, &leaves)
+            } else {
+                NativeQualityVector::for_value_operations(
+                    device_after_cost,
+                    &candidate.candidate.operations,
+                )
+            };
+            ranked.push((index, candidate, device_after_cost, device_after_quality));
         }
-        ranked.sort_by(|(_, left, left_cost), (_, right, right_cost)| {
-            left_cost
-                .compare(*right_cost)
+        ranked.sort_by(|(_, left, _, left_quality), (_, right, _, right_quality)| {
+            left_quality
+                .compare(*right_quality, quality_policy)
                 .then_with(|| left.candidate.cost.cmp(&right.candidate.cost))
         });
-        let Some((index, _, device_after_cost)) = ranked.first().copied() else {
+        let Some((index, _, device_after_cost, device_after_quality)) = ranked.first().copied()
+        else {
             if !pauli_generated && !saw_exact_primary && !primary_unrankable {
                 pauli_generated = true;
                 let Some(decomp) = synthesis_cache.kak_decomposition(matrix)? else {
@@ -1087,7 +1158,28 @@ fn try_synthesize_device_block(
         )? {
             NumericTwoQubitCandidateValidation::Exact => {
                 saw_exact_primary = true;
-                if !device_after_cost.strictly_better_than(device_before_cost) {
+                let schedule_is_no_worse = if let Some(before_schedule) = &device_before_schedule {
+                    match context.exact_schedule_profile_diagnostic(
+                        &candidate.candidate.operations,
+                        block.qubits,
+                    ) {
+                        Ok(after_schedule) => after_schedule.dominance(before_schedule).is_some(),
+                        Err(DeviceContextCostFailure::Unsupported(_)) => false,
+                        Err(failure) => {
+                            return Err(CompilerError::InvariantViolation(format!(
+                                "failed to profile exact-device resynthesis candidate schedule: {failure:?}"
+                            )));
+                        }
+                    }
+                } else {
+                    true
+                };
+                if !device_after_quality.admissible_against(device_before_quality, quality_policy)
+                    || !device_after_quality
+                        .compare(device_before_quality, quality_policy)
+                        .is_lt()
+                    || !schedule_is_no_worse
+                {
                     counts.device_cost_rejections = counts.device_cost_rejections.saturating_add(1);
                     continue;
                 }
@@ -1120,6 +1212,8 @@ fn try_synthesize_device_block(
                     before_cost,
                     after_cost: candidate.candidate.cost,
                     device_after_cost: Some(device_after_cost),
+                    device_after_quality: Some(device_after_quality),
+                    quality_policy,
                     synthesis_phase: candidate.candidate.global_phase,
                     selection_rank,
                 }));

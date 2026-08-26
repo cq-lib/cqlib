@@ -13,9 +13,13 @@ use super::*;
 use crate::circuit::{
     Circuit, CircuitParam, Instruction, Operation, Parameter, Qubit, StandardGate,
 };
+use crate::compile::device_planning::cost::{DevicePhysicalCost, MetricAvailability};
 use crate::compile::test_utils::build_device_synthesis_context;
 use crate::compile::transform::decompose::unitary::DeviceSynthesisPlacement;
 use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
+use crate::compile::transform::native_quality::{
+    NativeCriticalPathQuality, NativeQualityPolicy, NativeQualityVector,
+};
 use crate::device::Device;
 use ndarray::Array2;
 use ndarray::linalg::kron;
@@ -410,7 +414,7 @@ fn generic_best_first_matches_eager_reference_and_prunes_matrix_synthesis() {
     )
     .unwrap();
     let mut cache = TwoQubitSynthesisCache::default();
-    let patches = select_patches_with_device(
+    let patches = select_patches_with_device_policy(
         vec![
             dag_block([q0, q1], vec![0, 1]),
             dag_block([q0, q1], vec![1, 2]),
@@ -420,6 +424,7 @@ fn generic_best_first_matches_eager_reference_and_prunes_matrix_synthesis() {
         &config,
         None,
         &mut cache,
+        NativeQualityPolicy::EntanglerFirst,
     )
     .unwrap();
 
@@ -457,7 +462,7 @@ fn generic_best_first_prunes_full_validation_for_nonempty_replacement() {
     )
     .unwrap();
     let mut cache = TwoQubitSynthesisCache::default();
-    let patches = select_patches_with_device(
+    let patches = select_patches_with_device_policy(
         vec![
             dag_block([q0, q1], (0..5).collect()),
             dag_block([q0, q1], (1..6).collect()),
@@ -467,6 +472,7 @@ fn generic_best_first_prunes_full_validation_for_nonempty_replacement() {
         &config,
         None,
         &mut cache,
+        NativeQualityPolicy::EntanglerFirst,
     )
     .unwrap();
 
@@ -502,7 +508,7 @@ fn analytic_bound_prunes_before_candidate_planning() {
     let commutation = CachedCommutation::new(config.commutation.clone());
     let mut cache = TwoQubitSynthesisCache::default();
 
-    let patches = select_patches_with_device(
+    let patches = select_patches_with_device_policy(
         vec![
             dag_block([q0, q1], (0..5).collect()),
             dag_block([q0, q1], (4..9).collect()),
@@ -512,6 +518,7 @@ fn analytic_bound_prunes_before_candidate_planning() {
         &config,
         None,
         &mut cache,
+        NativeQualityPolicy::EntanglerFirst,
     )
     .unwrap();
 
@@ -552,7 +559,7 @@ fn device_best_first_matches_eager_reference_and_prunes_full_validation() {
 
     let mut eager_cache = TwoQubitSynthesisCache::default();
     eager_cache.ensure_namespace(&config, Some(&context));
-    let eager = select_patches_with_device(
+    let eager = select_patches_with_device_policy(
         source_blocks()
             .into_iter()
             .map(|orders| block([q0, q1], orders, 0, 5))
@@ -562,12 +569,13 @@ fn device_best_first_matches_eager_reference_and_prunes_full_validation() {
         &config,
         Some(&context),
         &mut eager_cache,
+        NativeQualityPolicy::EntanglerFirst,
     )
     .unwrap();
 
     let mut bounded_cache = TwoQubitSynthesisCache::default();
     bounded_cache.ensure_namespace(&config, Some(&context));
-    let bounded = select_patches_with_device(
+    let bounded = select_patches_with_device_policy(
         source_blocks()
             .into_iter()
             .map(|orders| dag_block([q0, q1], orders))
@@ -577,6 +585,7 @@ fn device_best_first_matches_eager_reference_and_prunes_full_validation() {
         &config,
         Some(&context),
         &mut bounded_cache,
+        NativeQualityPolicy::EntanglerFirst,
     )
     .unwrap();
 
@@ -594,6 +603,55 @@ fn device_best_first_matches_eager_reference_and_prunes_full_validation() {
     assert_eq!(bounded_cache.stats().selection.synthesis_attempts, 1);
     assert_eq!(bounded_cache.stats().selection.lower_bound_pruned, 1);
     assert_eq!(eager_cache.stats().selection.synthesis_attempts, 2);
+
+    let mut balanced_eager_cache = TwoQubitSynthesisCache::default();
+    balanced_eager_cache.ensure_namespace(&config, Some(&context));
+    let balanced_eager = select_patches_with_device_policy(
+        source_blocks()
+            .into_iter()
+            .map(|orders| block([q0, q1], orders, 0, 5))
+            .collect(),
+        &ops,
+        &commutation,
+        &config,
+        Some(&context),
+        &mut balanced_eager_cache,
+        NativeQualityPolicy::BalancedDepth,
+    )
+    .unwrap();
+    let mut balanced_bounded_cache = TwoQubitSynthesisCache::default();
+    balanced_bounded_cache.ensure_namespace(&config, Some(&context));
+    let balanced_bounded = select_patches_with_device_policy(
+        source_blocks()
+            .into_iter()
+            .map(|orders| dag_block([q0, q1], orders))
+            .collect(),
+        &ops,
+        &commutation,
+        &config,
+        Some(&context),
+        &mut balanced_bounded_cache,
+        NativeQualityPolicy::BalancedDepth,
+    )
+    .unwrap();
+
+    assert_eq!(balanced_bounded.len(), balanced_eager.len());
+    assert_eq!(
+        balanced_bounded[0].matched_orders,
+        balanced_eager[0].matched_orders
+    );
+    assert_eq!(
+        balanced_bounded[0].replacement,
+        balanced_eager[0].replacement
+    );
+    assert_eq!(
+        balanced_bounded_cache.stats().selection.lower_bound_pruned,
+        0
+    );
+    assert_eq!(
+        balanced_bounded_cache.stats().selection.synthesis_attempts,
+        balanced_eager_cache.stats().selection.synthesis_attempts
+    );
 }
 
 #[test]
@@ -626,4 +684,70 @@ fn select_patches_rejects_single_cx_without_cost_improvement() {
     let patches = select_patches(blocks, &ops, &commutation, &config).unwrap();
 
     assert!(patches.is_empty());
+}
+
+fn priority_test_patch(
+    policy: NativeQualityPolicy,
+    two_qubit_ops: u32,
+    two_qubit_depth: u32,
+    total_depth: u32,
+    total_ops: u32,
+    critical_path_1q: u32,
+) -> BlockPatch {
+    let physical = DevicePhysicalCost {
+        native_two_qubit_ops: two_qubit_ops,
+        native_two_qubit_depth: two_qubit_depth,
+        error: MetricAvailability::Disabled,
+        total_native_depth: total_depth,
+        native_total_ops: total_ops,
+        duration: MetricAvailability::Disabled,
+        makespan: MetricAvailability::Disabled,
+    };
+    BlockPatch {
+        first_order: 0,
+        matched_orders: vec![0],
+        crossed_orders: Vec::new(),
+        replacement: Vec::new(),
+        before_cost: ResynthesisCost {
+            lowered_two_qubit_ops: 10,
+            ..Default::default()
+        },
+        after_cost: ResynthesisCost {
+            lowered_two_qubit_ops: two_qubit_ops as usize,
+            lowered_depth: total_depth as usize,
+            lowered_total_ops: total_ops as usize,
+            ..Default::default()
+        },
+        device_after_cost: Some(physical),
+        device_after_quality: Some(NativeQualityVector {
+            physical,
+            critical_path: NativeCriticalPathQuality {
+                one_qubit_ops: critical_path_1q,
+                longest_one_qubit_run: 1,
+            },
+        }),
+        quality_policy: policy,
+        synthesis_phase: 0.0,
+        selection_rank: 0,
+    }
+}
+
+#[test]
+fn patch_priority_uses_the_native_quality_policy() {
+    let legacy_entangler =
+        priority_test_patch(NativeQualityPolicy::EntanglerFirst, 8, 8, 100, 120, 80);
+    let legacy_balanced = priority_test_patch(NativeQualityPolicy::EntanglerFirst, 9, 9, 20, 30, 8);
+    assert_eq!(
+        compare_patches(&legacy_entangler, &legacy_balanced),
+        Ordering::Less
+    );
+
+    let balanced_entangler =
+        priority_test_patch(NativeQualityPolicy::BalancedDepth, 8, 8, 100, 120, 80);
+    let balanced_candidate =
+        priority_test_patch(NativeQualityPolicy::BalancedDepth, 9, 9, 20, 30, 8);
+    assert_eq!(
+        compare_patches(&balanced_entangler, &balanced_candidate),
+        Ordering::Greater
+    );
 }

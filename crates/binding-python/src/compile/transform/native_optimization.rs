@@ -17,10 +17,77 @@ use crate::circuit::PyCircuit;
 use crate::compile::error::compiler_error_to_py_err;
 use crate::device::device_impl::PyDevice;
 use cqlib_core::compile::transform::{
-    NativeOptimizationResult, NativeOptimizationSummary, NativeOptimizer,
+    NativeOptimizationResult, NativeOptimizationSummary, NativeOptimizer, NativeQualityPolicy,
 };
 use pyo3::prelude::*;
 use std::sync::Arc;
+
+#[derive(FromPyObject)]
+enum PyNativeQualityPolicyInput {
+    Policy(PyNativeQualityPolicy),
+    Name(String),
+}
+
+impl PyNativeQualityPolicyInput {
+    fn into_policy(self) -> PyResult<NativeQualityPolicy> {
+        match self {
+            Self::Policy(policy) => Ok(policy.inner),
+            Self::Name(name) => match name.to_ascii_lowercase().as_str() {
+                "entangler_first" => Ok(NativeQualityPolicy::EntanglerFirst),
+                "balanced_depth" => Ok(NativeQualityPolicy::BalancedDepth),
+                _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown native quality policy {name:?}; expected 'entangler_first' or 'balanced_depth'"
+                ))),
+            },
+        }
+    }
+}
+
+/// Candidate quality policy used by the exact-physical Native optimizer.
+#[pyclass(
+    name = "NativeQualityPolicy",
+    module = "cqlib.compile.transform.native_optimization",
+    from_py_object
+)]
+#[derive(Clone, Copy, Debug)]
+pub struct PyNativeQualityPolicy {
+    inner: NativeQualityPolicy,
+}
+
+#[pymethods]
+impl PyNativeQualityPolicy {
+    #[staticmethod]
+    fn entangler_first() -> Self {
+        Self {
+            inner: NativeQualityPolicy::EntanglerFirst,
+        }
+    }
+
+    #[staticmethod]
+    fn balanced_depth() -> Self {
+        Self {
+            inner: NativeQualityPolicy::BalancedDepth,
+        }
+    }
+
+    fn __repr__(&self) -> &'static str {
+        match self.inner {
+            NativeQualityPolicy::EntanglerFirst => "NativeQualityPolicy.EntanglerFirst",
+            NativeQualityPolicy::BalancedDepth => "NativeQualityPolicy.BalancedDepth",
+        }
+    }
+
+    fn __str__(&self) -> &'static str {
+        match self.inner {
+            NativeQualityPolicy::EntanglerFirst => "entangler_first",
+            NativeQualityPolicy::BalancedDepth => "balanced_depth",
+        }
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
 
 /// Exact physical cost summary at one native optimizer checkpoint.
 #[pyclass(
@@ -184,6 +251,7 @@ pub struct PyNativeOptimizer {
     inner: Arc<NativeOptimizer<'static>>,
     resynthesis: PyTwoQubitBlockResynthesisConfig,
     enhanced: bool,
+    quality_policy: PyNativeQualityPolicy,
 }
 
 impl std::fmt::Debug for PyNativeOptimizer {
@@ -194,6 +262,7 @@ impl std::fmt::Debug for PyNativeOptimizer {
             .field("enhanced", &self.enhanced)
             .field("max_rounds", &self.inner.max_rounds())
             .field("max_stale_rounds", &self.inner.max_stale_rounds())
+            .field("quality_policy", &self.inner.quality_policy())
             .finish()
     }
 }
@@ -207,13 +276,14 @@ impl PyNativeOptimizer {
     /// resynthesis configuration; explicit round limits replace the matching
     /// production budget.
     #[new]
-    #[pyo3(signature = (device, *, enhanced=false, resynthesis=None, max_rounds=None, max_stale_rounds=None))]
+    #[pyo3(signature = (device, *, enhanced=false, resynthesis=None, max_rounds=None, max_stale_rounds=None, quality_policy=None))]
     fn new(
         device: PyRef<'_, PyDevice>,
         enhanced: bool,
         resynthesis: Option<PyTwoQubitBlockResynthesisConfig>,
         max_rounds: Option<u8>,
         max_stale_rounds: Option<u8>,
+        quality_policy: Option<PyNativeQualityPolicyInput>,
     ) -> PyResult<Self> {
         let resynthesis = resynthesis
             .unwrap_or_else(|| PyTwoQubitBlockResynthesisConfig::unconstrained(enhanced));
@@ -227,17 +297,25 @@ impl PyNativeOptimizer {
         } else {
             NativeOptimizer::NORMAL_MAX_STALE_ROUNDS
         });
+        let quality_policy = quality_policy
+            .map_or(Ok(NativeQualityPolicy::EntanglerFirst), |policy| {
+                policy.into_policy()
+            })?;
         let inner = NativeOptimizer::new_owned(
             device.inner.clone(),
             resynthesis.inner.clone(),
             max_rounds,
             max_stale_rounds,
         )
-        .map_err(compiler_error_to_py_err)?;
+        .map_err(compiler_error_to_py_err)?
+        .with_quality_policy(quality_policy);
         Ok(Self {
             inner: Arc::new(inner),
             resynthesis,
             enhanced,
+            quality_policy: PyNativeQualityPolicy {
+                inner: quality_policy,
+            },
         })
     }
 
@@ -266,6 +344,11 @@ impl PyNativeOptimizer {
         self.inner.max_stale_rounds()
     }
 
+    #[getter]
+    fn quality_policy(&self) -> PyNativeQualityPolicy {
+        self.quality_policy
+    }
+
     /// Optimizes an exact-native physical circuit without modifying the input.
     fn run(
         &self,
@@ -280,11 +363,12 @@ impl PyNativeOptimizer {
 
     fn __repr__(&self) -> String {
         format!(
-            "NativeOptimizer(device=Device(name={:?}), enhanced={}, max_rounds={}, max_stale_rounds={})",
+            "NativeOptimizer(device=Device(name={:?}), enhanced={}, max_rounds={}, max_stale_rounds={}, quality_policy={})",
             self.inner.device().name(),
             if self.enhanced { "True" } else { "False" },
             self.inner.max_rounds(),
             self.inner.max_stale_rounds(),
+            self.quality_policy.__repr__(),
         )
     }
 
@@ -301,6 +385,7 @@ pub(crate) fn register_native_optimization_module(parent: &Bound<'_, PyModule>) 
     let module = PyModule::new(parent.py(), "native_optimization")?;
     module.add_class::<PyNativeOptimizationSummary>()?;
     module.add_class::<PyNativeOptimizationResult>()?;
+    module.add_class::<PyNativeQualityPolicy>()?;
     module.add_class::<PyNativeOptimizer>()?;
     parent.add_submodule(&module)?;
     parent.py().import("sys")?.getattr("modules")?.set_item(
