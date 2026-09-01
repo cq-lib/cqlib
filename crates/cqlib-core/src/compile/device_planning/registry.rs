@@ -11,9 +11,9 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-use super::session::{DevicePlanningSessionCache, SelectedNativePlan, prepare_cache_baseline};
+use super::session::{DevicePlanningSessionCache, prepare_cache_baseline};
 use super::swap_equivalence::prepare_equivalent_swaps;
-use super::{CalibrationEstimator, DeviceGateState, NativePlanAvailability};
+use super::{CalibrationEstimator, DeviceGateState};
 use crate::circuit::{Instruction, StandardGate};
 use crate::compile::CompilerError;
 use crate::compile::knowledge::{KnowledgeInstructionKey, RuleLibrary};
@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 // changes. Bump the algorithm revision for graph expansion, feasibility,
 // physical-cost, or selection-order changes.
 const DEVICE_PLANNING_RULESET_REVISION: u32 = 1;
-const DEVICE_PLANNING_ALGORITHM_REVISION: u32 = 2;
+const DEVICE_PLANNING_ALGORITHM_REVISION: u32 = 3;
 const DEVICE_PLANNING_REGISTRY_MAX_ENTRIES: usize = 8;
 const DEVICE_PLANNING_REGISTRY_MAX_BYTES: usize = 256 * 1024 * 1024;
 
@@ -214,20 +214,24 @@ impl DevicePlanningKnowledge {
     pub(super) fn prepare_common(
         &self,
         mut roots: Vec<DeviceGateState>,
-    ) -> Result<(), CompilerError> {
+    ) -> Result<Arc<DevicePlanningSessionCache>, CompilerError> {
         roots.sort();
         roots.dedup();
+        if roots.is_empty() {
+            return Ok(Arc::new(DevicePlanningSessionCache::default()));
+        }
+        let requested_roots = roots.clone();
         let requested = roots.len();
         let mut cache = self
             .common_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        roots.retain(|root| !cache.availability.contains_key(root));
+        roots.retain(|root| !cache.contains_key(root));
         self.stats
             .common_cache_hits
             .fetch_add((requested - roots.len()) as u64, Ordering::Relaxed);
         if roots.is_empty() {
-            return Ok(());
+            return Ok(Arc::new(cache.subset(&requested_roots)?));
         }
 
         self.stats.cold_batches.fetch_add(1, Ordering::Relaxed);
@@ -265,7 +269,11 @@ impl DevicePlanningKnowledge {
                 )?;
             }
         }
-        cache.merge(staged);
+        // The process registry is intentionally restricted to common SWAP
+        // roots. Their selected trees own every contextual dependency.
+        staged.retain(|state| requested_roots.binary_search(state).is_ok());
+        cache.merge(staged)?;
+        let pinned = Arc::new(cache.subset(&requested_roots)?);
         let cache_bytes = cache.estimated_bytes();
         drop(cache);
 
@@ -278,25 +286,7 @@ impl DevicePlanningKnowledge {
             Ordering::Relaxed,
         );
         refresh_registry_entry(self);
-        Ok(())
-    }
-
-    pub(super) fn availability(&self, state: &DeviceGateState) -> Option<NativePlanAvailability> {
-        self.common_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .availability
-            .get(state)
-            .cloned()
-    }
-
-    pub(super) fn selected_plan(&self, state: &DeviceGateState) -> Option<Arc<SelectedNativePlan>> {
-        self.common_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .selected_plans
-            .get(state)
-            .cloned()
+        Ok(pinned)
     }
 }
 

@@ -13,8 +13,7 @@
 
 use super::registry::{CalibrationFingerprint, calibration_fingerprint};
 use super::session::{
-    DevicePlanningSessionCache, NativePlanAvailability, SelectedNativePlan, own_selected_plan,
-    retain_selected_dependencies,
+    CanonicalRootResult, DevicePlanningSessionCache, SelectedNativePlan, populate_canonical_cache,
 };
 use super::{
     CalibrationEstimator, DeviceGateState, DevicePlanner, NativePlanLeaf, NativePlanSummary,
@@ -172,44 +171,27 @@ pub(super) fn prepare_equivalent_local_roots(
             .first()
             .cloned()
             .ok_or_else(|| "empty local planning equivalence class".to_string())?;
-        if let Some(plan) = planner.selected_plan_for(&representative) {
-            let representative_selected = own_selected_plan(&planner, plan, &mut owned_memo)
-                .map_err(|error| error.to_string())?;
-            for member in members {
-                let selected = if member.ordered_qargs == representative.ordered_qargs {
-                    Arc::clone(&representative_selected)
-                } else {
-                    let mut remap_memo = HashMap::new();
-                    let selected = remap_selected_plan(
-                        &representative_selected,
-                        &representative.ordered_qargs,
-                        &member.ordered_qargs,
-                        &mut remap_memo,
-                    )?;
-                    retain_selected_dependencies(cache, remap_memo.into_values());
-                    selected
-                };
-                cache.availability.insert(
-                    member.clone(),
-                    NativePlanAvailability::Feasible(Arc::clone(&selected.summary)),
-                );
-                cache.selected_plans.insert(member, selected);
-            }
-        } else {
-            let failure = planner.failure_for(&representative);
-            for member in members {
-                cache.availability.insert(
-                    member.clone(),
-                    NativePlanAvailability::Unsupported(Arc::new(remap_failure(
-                        &failure,
-                        &representative.ordered_qargs,
-                        &member.ordered_qargs,
-                    )?)),
-                );
-            }
+        let mut representative_cache = DevicePlanningSessionCache::default();
+        populate_canonical_cache(
+            &planner,
+            [representative.clone()],
+            &mut representative_cache,
+            &mut owned_memo,
+        )
+        .map_err(|error| error.to_string())?;
+        for member in members {
+            let mapped = if member.ordered_qargs == representative.ordered_qargs {
+                representative_cache.clone()
+            } else {
+                remap_canonical_cache(
+                    &representative_cache,
+                    &representative.ordered_qargs,
+                    &member.ordered_qargs,
+                )?
+            };
+            cache.merge(mapped).map_err(|error| error.to_string())?;
         }
     }
-    retain_selected_dependencies(cache, owned_memo.into_values());
     Ok(representatives.len())
 }
 
@@ -304,58 +286,62 @@ pub(super) fn prepare_equivalent_swaps(
             representative.ordered_qargs[1],
         ];
 
-        if let Some(plan) = planner.selected_plan_for(representative) {
-            let mut owned_memo = HashMap::new();
-            let representative_selected = own_selected_plan(&planner, plan, &mut owned_memo)
-                .map_err(|error| error.to_string())?;
-            retain_selected_dependencies(cache, owned_memo.into_values());
-
-            for member in members {
-                let member_pair = [member.ordered_qargs[0], member.ordered_qargs[1]];
-                let selected = if member_pair == representative_pair {
-                    Arc::clone(&representative_selected)
-                } else {
-                    let mut remap_memo = HashMap::new();
-                    let selected = remap_selected_plan(
-                        &representative_selected,
-                        &representative_pair,
-                        &member_pair,
-                        &mut remap_memo,
-                    )?;
-                    retain_selected_dependencies(cache, remap_memo.into_values());
-                    selected
-                };
-                cache.availability.insert(
-                    member.clone(),
-                    NativePlanAvailability::Feasible(Arc::clone(&selected.summary)),
-                );
-                cache.selected_plans.insert(member, selected);
-            }
-        } else {
-            let failure = planner.failure_for(representative);
-            for member in members {
-                let member_pair = [member.ordered_qargs[0], member.ordered_qargs[1]];
-                cache.availability.insert(
-                    member,
-                    NativePlanAvailability::Unsupported(Arc::new(remap_failure(
-                        &failure,
-                        &representative_pair,
-                        &member_pair,
-                    )?)),
-                );
-            }
+        let mut representative_cache = DevicePlanningSessionCache::default();
+        let mut owned_memo = HashMap::new();
+        populate_canonical_cache(
+            &planner,
+            [representative.clone()],
+            &mut representative_cache,
+            &mut owned_memo,
+        )
+        .map_err(|error| error.to_string())?;
+        for member in members {
+            let member_pair = [member.ordered_qargs[0], member.ordered_qargs[1]];
+            let mapped = if member_pair == representative_pair {
+                representative_cache.clone()
+            } else {
+                remap_canonical_cache(&representative_cache, &representative_pair, &member_pair)?
+            };
+            cache.merge(mapped).map_err(|error| error.to_string())?;
         }
     }
     Ok(equivalence_classes)
+}
+
+fn remap_canonical_cache(
+    source: &DevicePlanningSessionCache,
+    from: &[PhysicalQubit],
+    to: &[PhysicalQubit],
+) -> Result<DevicePlanningSessionCache, String> {
+    let mut entries = source.iter().collect::<Vec<_>>();
+    entries.sort_by_key(|(state, _)| *state);
+    let mut remapped = DevicePlanningSessionCache::default();
+    let mut plan_memo = HashMap::new();
+    for (state, result) in entries {
+        let state = remap_state(state, from, to)?;
+        let result = match result.as_ref() {
+            CanonicalRootResult::Feasible(selected) => Arc::new(CanonicalRootResult::Feasible(
+                remap_selected_plan(selected, from, to, &mut plan_memo)?,
+            )),
+            CanonicalRootResult::Unsupported(failure) => Arc::new(
+                CanonicalRootResult::Unsupported(Arc::new(remap_failure(failure, from, to)?)),
+            ),
+        };
+        remapped
+            .insert(state, result)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(remapped)
 }
 
 fn remap_selected_plan(
     selected: &Arc<SelectedNativePlan>,
     from: &[PhysicalQubit],
     to: &[PhysicalQubit],
-    memo: &mut HashMap<DeviceGateState, Arc<SelectedNativePlan>>,
+    memo: &mut HashMap<usize, Arc<SelectedNativePlan>>,
 ) -> Result<Arc<SelectedNativePlan>, String> {
-    if let Some(remapped) = memo.get(&selected.state) {
+    let source = Arc::as_ptr(selected) as usize;
+    if let Some(remapped) = memo.get(&source) {
         return Ok(Arc::clone(remapped));
     }
     let state = remap_state(&selected.state, from, to)?;
@@ -388,7 +374,7 @@ fn remap_selected_plan(
         physical_cost: selected.physical_cost,
         summary,
     });
-    memo.insert(selected.state.clone(), Arc::clone(&remapped));
+    memo.insert(source, Arc::clone(&remapped));
     Ok(remapped)
 }
 
@@ -468,4 +454,50 @@ fn remap_failure(
             })
             .collect::<Result<Vec<_>, String>>()?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{DevicePhysicalCost, PlanChoice};
+    use super::*;
+
+    fn selected(
+        state: DeviceGateState,
+        native_total_ops: u32,
+        children: Vec<Arc<SelectedNativePlan>>,
+    ) -> Arc<SelectedNativePlan> {
+        Arc::new(SelectedNativePlan {
+            state,
+            choice: PlanChoice::Native,
+            children: children.into(),
+            physical_cost: DevicePhysicalCost::optimistic_entangler_lower_bound(native_total_ops),
+            summary: Arc::new(NativePlanSummary {
+                native_two_qubit_ops: native_total_ops,
+                native_total_ops,
+                leaves: Vec::new(),
+            }),
+        })
+    }
+
+    #[test]
+    fn remap_memo_distinguishes_pareto_nodes_for_the_same_state() {
+        let source_qargs = [PhysicalQubit::new(0), PhysicalQubit::new(1)];
+        let target_qargs = [PhysicalQubit::new(1), PhysicalQubit::new(0)];
+        let child_state = DeviceGateState::standard(StandardGate::CX, source_qargs.into());
+        let first = selected(child_state.clone(), 1, Vec::new());
+        let second = selected(child_state, 2, Vec::new());
+        let parent = selected(
+            DeviceGateState::standard(StandardGate::CY, source_qargs.into()),
+            3,
+            vec![first, second],
+        );
+
+        let remapped =
+            remap_selected_plan(&parent, &source_qargs, &target_qargs, &mut HashMap::new())
+                .unwrap();
+
+        assert_eq!(remapped.children[0].summary.native_total_ops, 1);
+        assert_eq!(remapped.children[1].summary.native_total_ops, 2);
+        assert!(!Arc::ptr_eq(&remapped.children[0], &remapped.children[1]));
+    }
 }

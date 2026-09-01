@@ -11,6 +11,9 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+use super::super::session::{
+    DevicePlanningSessionCache, populate_canonical_cache, prepare_cache_baseline,
+};
 use super::*;
 use crate::compile::knowledge::rule::{Rule, RuleItem};
 use crate::device::{EdgeProp, InstructionProp, PhysicalQubit, QubitProp};
@@ -341,6 +344,71 @@ fn parent_depth_keeps_equal_scalar_children_with_different_readiness_profiles() 
         planner.nodes[root_plan.0].physical_cost.total_native_depth,
         5
     );
+
+    // The parent legitimately selects the context-sensitive CX variant above,
+    // while CX as an independent root has the opposite deterministic tie-break.
+    // Exporting the parent's dependency tree must preserve both decisions.
+    let standalone_cx = planner.selected_plan_for(&child).unwrap();
+    let PlanChoice::Template(PlanTemplate::Rule(rule_id)) =
+        planner.choice_for_plan(standalone_cx).unwrap()
+    else {
+        panic!("expected standalone CX to select a rule-backed plan");
+    };
+    assert_eq!(library.get(rule_id).unwrap().name, "a_cx_tail_target");
+
+    let mut cache = DevicePlanningSessionCache::default();
+    let mut memo = HashMap::new();
+    populate_canonical_cache(&planner, [root.clone()], &mut cache, &mut memo).unwrap();
+
+    let cached_parent = cache.selected_plan(&root).unwrap();
+    let PlanChoice::Template(PlanTemplate::Rule(rule_id)) = cached_parent.children[1].choice else {
+        panic!("expected cached parent to retain its contextual CX plan");
+    };
+    assert_eq!(library.get(rule_id).unwrap().name, "z_cx_tail_control");
+
+    let cached_child = cache.selected_plan(&child).unwrap();
+    let PlanChoice::Template(PlanTemplate::Rule(rule_id)) = cached_child.choice else {
+        panic!("expected cached standalone CX to retain its canonical plan");
+    };
+    assert_eq!(library.get(rule_id).unwrap().name, "a_cx_tail_target");
+    assert_eq!(
+        cached_child.physical_cost,
+        planner.cost_for_plan(standalone_cx).unwrap()
+    );
+
+    // Independent planner batches must merge to the same roots regardless of
+    // which state warmed the session first. Existing canonical entries remain
+    // pinned instead of being overwritten by a later parent's child variant.
+    let physical_qubits = device.usable_qubits().collect::<Vec<_>>();
+    let estimator = Arc::new(CalibrationEstimator::from_device(&device, &physical_qubits));
+    let mut child_first = DevicePlanningSessionCache::default();
+    prepare_cache_baseline(
+        &device,
+        &library,
+        [child.clone()],
+        Arc::clone(&estimator),
+        &mut child_first,
+    )
+    .unwrap();
+    let child_before_parent = child_first.selected_plan(&child).unwrap();
+    prepare_cache_baseline(
+        &device,
+        &library,
+        [root.clone()],
+        estimator,
+        &mut child_first,
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(
+        &child_before_parent,
+        &child_first.selected_plan(&child).unwrap()
+    ));
+    let PlanChoice::Template(PlanTemplate::Rule(rule_id)) =
+        child_first.selected_plan(&root).unwrap().children[1].choice
+    else {
+        panic!("expected child-first history to retain the contextual CX plan");
+    };
+    assert_eq!(library.get(rule_id).unwrap().name, "z_cx_tail_control");
 }
 
 #[test]

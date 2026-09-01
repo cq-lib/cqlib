@@ -345,6 +345,29 @@ fn circuit_specific_roots_remain_session_local() {
 }
 
 #[test]
+fn common_plan_snapshot_does_not_observe_later_registry_growth() {
+    let device = Device::bidirectional_line("pinned-common-plan-snapshot", 3)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::SWAP)])
+        .unwrap()
+        .with_default_two_qubit_error(0.247_913);
+    let first = swap(0, 1);
+    let later = swap(1, 2);
+    let session = DevicePlanningSession::new(&device);
+
+    let pinned = session.prepare([first.clone()]).unwrap();
+    assert!(pinned.selected_plan(&first).is_some());
+    assert!(pinned.availability(&later).is_none());
+
+    let grown = session.prepare([later.clone()]).unwrap();
+    assert!(grown.selected_plan(&later).is_some());
+    assert!(
+        pinned.availability(&later).is_none(),
+        "an immutable planning snapshot must not read later process-cache entries"
+    );
+}
+
+#[test]
 fn equivalent_swap_plans_match_the_original_batch_planner_exactly() {
     let device = Device::bidirectional_line("equivalent-swap-baseline", 5)
         .unwrap()
