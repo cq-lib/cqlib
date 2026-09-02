@@ -14,7 +14,7 @@
 
 use crate::circuit::{Instruction, Operation, Qubit, ValueInstruction, ValueOperation};
 use crate::compile::device_planning::cost::{
-    DevicePhysicalCost, MetricAvailability, NativePlanLeaf, RobustErrorKey,
+    DevicePhysicalCost, MetricAvailability, NativePlanLeaf, RobustDurationKey, RobustErrorKey,
 };
 use smallvec::SmallVec;
 use std::cmp::Ordering;
@@ -203,6 +203,133 @@ impl NativeQualityVector {
                         .compare_by(other.physical.duration, |left, right| left.compare(right))
                 }),
         }
+    }
+
+    /// Returns Pareto dominance against one exact control-flow scope.
+    ///
+    /// `Some(false)` means equality across every protected component,
+    /// `Some(true)` means no component is worse and at least one is strictly
+    /// better, and `None` means the vectors are incomparable or `self`
+    /// regresses at least one component. Optional metric availability must
+    /// match exactly so missing calibration data can never masquerade as an
+    /// improvement.
+    pub(crate) fn exact_pareto_dominance(self, other: Self) -> Option<bool> {
+        let mut strict = false;
+        dominance_component(
+            self.physical.native_two_qubit_ops,
+            other.physical.native_two_qubit_ops,
+            &mut strict,
+        )?;
+        dominance_component(
+            self.physical.native_two_qubit_depth,
+            other.physical.native_two_qubit_depth,
+            &mut strict,
+        )?;
+        dominance_component(
+            self.physical.total_native_depth,
+            other.physical.total_native_depth,
+            &mut strict,
+        )?;
+        dominance_component(
+            self.physical.native_total_ops,
+            other.physical.native_total_ops,
+            &mut strict,
+        )?;
+        strict |= error_dominance(self.physical.error, other.physical.error)?;
+        strict |= duration_dominance(self.physical.duration, other.physical.duration)?;
+        strict |= scalar_availability_dominance(self.physical.makespan, other.physical.makespan)?;
+        dominance_component(
+            self.critical_path.one_qubit_ops,
+            other.critical_path.one_qubit_ops,
+            &mut strict,
+        )?;
+        dominance_component(
+            self.critical_path.longest_one_qubit_run,
+            other.critical_path.longest_one_qubit_run,
+            &mut strict,
+        )?;
+        Some(strict)
+    }
+}
+
+fn dominance_component<T: Ord>(candidate: T, incumbent: T, strict: &mut bool) -> Option<()> {
+    match candidate.cmp(&incumbent) {
+        Ordering::Less => *strict = true,
+        Ordering::Equal => {}
+        Ordering::Greater => return None,
+    }
+    Some(())
+}
+
+fn error_dominance(
+    candidate: MetricAvailability<RobustErrorKey>,
+    incumbent: MetricAvailability<RobustErrorKey>,
+) -> Option<bool> {
+    match (candidate, incumbent) {
+        (MetricAvailability::Disabled, MetricAvailability::Disabled)
+        | (MetricAvailability::Inconsistent, MetricAvailability::Inconsistent) => Some(false),
+        (MetricAvailability::Available(candidate), MetricAvailability::Available(incumbent)) => {
+            if !error_is_no_worse(
+                MetricAvailability::Available(candidate),
+                MetricAvailability::Available(incumbent),
+            ) {
+                return None;
+            }
+            Some(
+                candidate.unavailable_count < incumbent.unavailable_count
+                    || candidate.imputed_count < incumbent.imputed_count
+                    || candidate.log_error + ERROR_LOG_TOLERANCE < incumbent.log_error,
+            )
+        }
+        _ => None,
+    }
+}
+
+fn duration_dominance(
+    candidate: MetricAvailability<RobustDurationKey>,
+    incumbent: MetricAvailability<RobustDurationKey>,
+) -> Option<bool> {
+    match (candidate, incumbent) {
+        (MetricAvailability::Disabled, MetricAvailability::Disabled)
+        | (MetricAvailability::Inconsistent, MetricAvailability::Inconsistent) => Some(false),
+        (MetricAvailability::Available(candidate), MetricAvailability::Available(incumbent)) => {
+            if candidate.unavailable_count > incumbent.unavailable_count
+                || candidate.imputed_count > incumbent.imputed_count
+                || candidate
+                    .duration_work
+                    .total_cmp(&incumbent.duration_work)
+                    .is_gt()
+            {
+                return None;
+            }
+            Some(
+                candidate.unavailable_count < incumbent.unavailable_count
+                    || candidate.imputed_count < incumbent.imputed_count
+                    || candidate
+                        .duration_work
+                        .total_cmp(&incumbent.duration_work)
+                        .is_lt(),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn scalar_availability_dominance(
+    candidate: MetricAvailability<f64>,
+    incumbent: MetricAvailability<f64>,
+) -> Option<bool> {
+    match (candidate, incumbent) {
+        (MetricAvailability::Disabled, MetricAvailability::Disabled)
+        | (MetricAvailability::Inconsistent, MetricAvailability::Inconsistent) => Some(false),
+        (MetricAvailability::Available(candidate), MetricAvailability::Available(incumbent)) => {
+            match candidate.total_cmp(&incumbent) {
+                Ordering::Less => Some(true),
+                Ordering::Equal => Some(false),
+                Ordering::Greater => None,
+            }
+        }
+        _ => None,
     }
 }
 

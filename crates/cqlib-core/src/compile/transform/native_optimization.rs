@@ -42,6 +42,7 @@ use crate::circuit::{
 };
 use crate::compile::CompilerError;
 use crate::compile::device_planning::DevicePlanningSession;
+use crate::compile::device_planning::cost::{RobustDurationKey, RobustErrorKey};
 use crate::compile::sabre::MetricAvailability;
 use crate::compile::transform::decompose::unitary::{
     DeviceContextCostFailure, DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
@@ -64,6 +65,7 @@ use ndarray::Array2;
 use num_complex::Complex64;
 use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
 use std::sync::Arc;
@@ -105,6 +107,133 @@ pub struct NativeOptimizationSummary {
     pub unavailable_error_count: u64,
     /// Number of operations whose error metric was imputed.
     pub imputed_error_count: u64,
+}
+
+/// Exact final quality for every control-flow scope in deterministic traversal
+/// order. Aggregate summaries remain useful diagnostics, but only this
+/// checkpoint is strong enough to authorize workflow-level candidate
+/// replacement.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NativeExactQualityCheckpoint {
+    scopes: Vec<NativeQualityVector>,
+}
+
+impl NativeExactQualityCheckpoint {
+    fn new(scopes: Vec<NativeQualityVector>) -> Self {
+        Self { scopes }
+    }
+
+    /// Returns whether this checkpoint strictly Pareto-dominates `incumbent`
+    /// in every corresponding control-flow scope.
+    pub(crate) fn strictly_dominates(&self, incumbent: &Self) -> bool {
+        if self.scopes.len() != incumbent.scopes.len() {
+            return false;
+        }
+        let mut strict = false;
+        for (candidate, incumbent) in self.scopes.iter().zip(&incumbent.scopes) {
+            let Some(scope_strict) = candidate.exact_pareto_dominance(*incumbent) else {
+                return false;
+            };
+            strict |= scope_strict;
+        }
+        strict
+    }
+
+    /// Requires the full exact Pareto contract and a strict entangler-count or
+    /// entangler-depth improvement in at least one corresponding scope.
+    pub(crate) fn strictly_dominates_with_two_qubit_gain(&self, incumbent: &Self) -> bool {
+        if !self.strictly_dominates(incumbent) {
+            return false;
+        }
+        self.scopes
+            .iter()
+            .zip(&incumbent.scopes)
+            .any(|(candidate, incumbent)| {
+                candidate.physical.native_two_qubit_ops < incumbent.physical.native_two_qubit_ops
+                    || candidate.physical.native_two_qubit_depth
+                        < incumbent.physical.native_two_qubit_depth
+            })
+    }
+
+    /// Deterministic final SABRE-beam ordering. Lower is better.
+    pub(crate) fn compare_for_sabre_beam(&self, other: &Self) -> Ordering {
+        let left = self.summary();
+        let right = other.summary();
+        left.native_two_qubit_ops
+            .cmp(&right.native_two_qubit_ops)
+            .then_with(|| {
+                left.native_two_qubit_depth
+                    .cmp(&right.native_two_qubit_depth)
+            })
+            .then_with(|| left.total_native_depth.cmp(&right.total_native_depth))
+            .then_with(|| left.native_total_ops.cmp(&right.native_total_ops))
+            .then_with(|| {
+                aggregate_error(&self.scopes)
+                    .compare_by(aggregate_error(&other.scopes), RobustErrorKey::compare)
+            })
+            .then_with(|| {
+                aggregate_duration(&self.scopes).compare_by(
+                    aggregate_duration(&other.scopes),
+                    RobustDurationKey::compare,
+                )
+            })
+            .then_with(|| {
+                aggregate_makespan(&self.scopes)
+                    .compare_by(aggregate_makespan(&other.scopes), |left, right| {
+                        left.total_cmp(&right)
+                    })
+            })
+    }
+
+    pub(crate) fn summary(&self) -> NativeOptimizationSummary {
+        summarize_scope_costs(&self.scopes)
+    }
+}
+
+fn aggregate_error(scopes: &[NativeQualityVector]) -> MetricAvailability<RobustErrorKey> {
+    aggregate_optional_metric(
+        scopes.iter().map(|quality| quality.physical.error),
+        |left, right| left.combine(right),
+    )
+}
+
+fn aggregate_duration(scopes: &[NativeQualityVector]) -> MetricAvailability<RobustDurationKey> {
+    aggregate_optional_metric(
+        scopes.iter().map(|quality| quality.physical.duration),
+        |left, right| left.combine(right),
+    )
+}
+
+fn aggregate_makespan(scopes: &[NativeQualityVector]) -> MetricAvailability<f64> {
+    aggregate_optional_metric(
+        scopes.iter().map(|quality| quality.physical.makespan),
+        |left, right| left + right,
+    )
+}
+
+fn aggregate_optional_metric<T: Copy>(
+    metrics: impl IntoIterator<Item = MetricAvailability<T>>,
+    combine: impl Fn(T, T) -> T,
+) -> MetricAvailability<T> {
+    let mut aggregate = None;
+    for metric in metrics {
+        aggregate = Some(match (aggregate, metric) {
+            (None, metric) => metric,
+            (Some(MetricAvailability::Disabled), MetricAvailability::Disabled) => {
+                MetricAvailability::Disabled
+            }
+            (Some(MetricAvailability::Available(left)), MetricAvailability::Available(right)) => {
+                MetricAvailability::Available(combine(left, right))
+            }
+            (Some(MetricAvailability::Inconsistent), _)
+            | (_, MetricAvailability::Inconsistent)
+            | (Some(MetricAvailability::Disabled), MetricAvailability::Available(_))
+            | (Some(MetricAvailability::Available(_)), MetricAvailability::Disabled) => {
+                MetricAvailability::Inconsistent
+            }
+        });
+    }
+    aggregate.unwrap_or(MetricAvailability::Disabled)
 }
 
 /// Result of one bounded exact-physical native optimization run.
@@ -267,22 +396,34 @@ impl<'a> NativeOptimizer<'a> {
             .map(|(result, _)| result)
     }
 
-    pub(crate) fn run_with_stats(
+    pub(crate) fn run_with_exact_quality_and_stats(
         &self,
         circuit: &Circuit,
-    ) -> Result<(NativeOptimizationResult, NativeWorksetStats), CompilerError> {
-        self.run_with_policy(circuit, NativeResynthesisPolicy::Incremental)
+    ) -> Result<
+        (
+            NativeOptimizationResult,
+            NativeExactQualityCheckpoint,
+            NativeWorksetStats,
+        ),
+        CompilerError,
+    > {
+        let initial = Canonicalizer::production()
+            .transform(circuit, None)?
+            .into_circuit(circuit);
+        self.run_canonicalized(circuit, initial, NativeResynthesisPolicy::Incremental)
     }
 
-    /// Runs without repeating the entry canonicalization pass and returns
-    /// diagnostics used by the production workflow report.
-    ///
-    /// Callers must hold a proof for the exact input circuit revision and the
-    /// production canonicalization configuration.
-    pub(crate) fn run_with_proven_canonical_input_and_stats(
+    pub(crate) fn run_with_proven_canonical_input_exact_quality_and_stats(
         &self,
         circuit: &Circuit,
-    ) -> Result<(NativeOptimizationResult, NativeWorksetStats), CompilerError> {
+    ) -> Result<
+        (
+            NativeOptimizationResult,
+            NativeExactQualityCheckpoint,
+            NativeWorksetStats,
+        ),
+        CompilerError,
+    > {
         self.run_canonicalized(
             circuit,
             circuit.clone(),
@@ -299,6 +440,7 @@ impl<'a> NativeOptimizer<'a> {
             .transform(circuit, None)?
             .into_circuit(circuit);
         self.run_canonicalized(circuit, initial, policy)
+            .map(|(result, _, stats)| (result, stats))
     }
 
     /// Runs from an input whose production-canonical postcondition has already
@@ -308,7 +450,14 @@ impl<'a> NativeOptimizer<'a> {
         source: &Circuit,
         initial: Circuit,
         policy: NativeResynthesisPolicy,
-    ) -> Result<(NativeOptimizationResult, NativeWorksetStats), CompilerError> {
+    ) -> Result<
+        (
+            NativeOptimizationResult,
+            NativeExactQualityCheckpoint,
+            NativeWorksetStats,
+        ),
+        CompilerError,
+    > {
         self.device().validate_circuit(&initial)?;
         // Native rounds can carry very large circuits. Share immutable states
         // between the exploration cursor, the best returnable checkpoint, and
@@ -441,6 +590,7 @@ impl<'a> NativeOptimizer<'a> {
 
         let restored_best = current.as_ref() != best.as_ref();
         let after = summarize_scope_costs(&best_costs);
+        let exact_quality = NativeExactQualityCheckpoint::new(best_costs);
         drop(current);
         drop(seen_states);
         let best = Arc::try_unwrap(best).unwrap_or_else(|shared| shared.as_ref().clone());
@@ -454,7 +604,7 @@ impl<'a> NativeOptimizer<'a> {
         };
         let mut stats = baseline_session.stats();
         stats.merge_workset_from(after_local_session.stats());
-        Ok((result, stats))
+        Ok((result, exact_quality, stats))
     }
 
     /// Evaluates one detached `B -> C` branch. B and C are separate returnable

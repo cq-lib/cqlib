@@ -35,7 +35,7 @@ use crate::compile::sabre::{
 };
 use crate::compile::transform::layout::{
     LayoutDiagnostics, LayoutObjective, LayoutScore, PhysicalLayoutGraph, PreparedSabreCircuit,
-    PreparedSabreTarget, prepare_sabre_circuit,
+    PreparedSabreParetoSearch, PreparedSabreTarget, SabreParetoCandidateId, prepare_sabre_circuit,
     prepare_sabre_device_target_with_session_and_physical, prepare_sabre_topology_target,
     prepare_sabre_topology_target_with_prepared, sabre_route_selection_prepared,
 };
@@ -126,6 +126,84 @@ impl RoutedCircuit {
 pub(crate) struct TrackedRoutedCircuit {
     routed: RoutedCircuit,
     provenance: Vec<RouteOperationProvenance>,
+}
+
+pub(crate) struct SabreParetoRouteCandidate {
+    pub(crate) id: SabreParetoCandidateId,
+    pub(crate) routed: TrackedRoutedCircuit,
+}
+
+/// Stateful two-tier route search. It owns the prepared circuit/target pair so
+/// extending from eight to twenty trials never rebuilds refinement state or
+/// replays the first tier.
+pub(crate) struct SabreParetoRouteSearch {
+    source: Circuit,
+    prepared: PreparedSabreCircuit,
+    prepared_target: PreparedSabreTarget,
+    search: PreparedSabreParetoSearch,
+}
+
+impl SabreParetoRouteSearch {
+    pub(crate) fn extend_to(
+        &mut self,
+        route_limit: usize,
+        candidate_limit: usize,
+    ) -> Result<Vec<SabreParetoRouteCandidate>, CompilerError> {
+        let selections = self.search.extend_to(
+            &self.prepared,
+            &self.prepared_target,
+            route_limit,
+            candidate_limit,
+        )?;
+        selections
+            .into_iter()
+            .map(|candidate| {
+                let selection = candidate.selection;
+                let routed = finish_sabre_route(
+                    &self.source,
+                    self.prepared_target.routing_target(),
+                    selection.initial_layout,
+                    selection.trial,
+                    selection.selected_trial_index,
+                    selection.trials_evaluated,
+                )?;
+                Ok(SabreParetoRouteCandidate {
+                    id: candidate.id,
+                    routed: tracked_routed_circuit(routed),
+                })
+            })
+            .collect()
+    }
+}
+
+pub(crate) fn prepare_sabre_pareto_routes_with_session_on_physical(
+    circuit: &Circuit,
+    device: &Device,
+    config: &SabreConfig,
+    physical: Arc<PhysicalLayoutGraph>,
+    planning_session: &DevicePlanningSession,
+    supplied_layout: Option<&Layout>,
+) -> Result<SabreParetoRouteSearch, CompilerError> {
+    let prepared = prepare_sabre_circuit(circuit)?;
+    let prepared_target = prepare_sabre_device_target_with_session_and_physical(
+        &prepared,
+        device,
+        physical,
+        planning_session,
+    )?;
+    let search = PreparedSabreParetoSearch::new(
+        &prepared,
+        &prepared_target,
+        &LayoutObjective::topology_only(),
+        config,
+        supplied_layout,
+    )?;
+    Ok(SabreParetoRouteSearch {
+        source: circuit.clone(),
+        prepared,
+        prepared_target,
+        search,
+    })
 }
 
 impl TrackedRoutedCircuit {

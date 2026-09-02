@@ -52,6 +52,9 @@ use std::sync::Arc;
 /// short searches do not spread a few candidates across an oversized pool.
 const LAYOUT_PARALLELISM_THRESHOLDS: ParallelismThresholds =
     ParallelismThresholds::new(2_048, 8_192, 32_768);
+const PARETO_ROUTE_FRONTIER_CAPACITY: usize = 64;
+const PARETO_EQUAL_QUALITY_CAPACITY: usize = 2;
+const PARETO_ROUTE_OUTCOME_BATCH_CAPACITY: usize = 64;
 
 /// Circuit-side data prepared once for repeated SABRE layout selection.
 ///
@@ -330,6 +333,526 @@ pub(crate) struct PreparedSabreRouteSelection {
     pub(crate) trials_evaluated: usize,
     pub(crate) score: LayoutScore,
     pub(crate) diagnostics: LayoutDiagnostics,
+}
+
+/// Stable identity of one route in the exploratory SABRE profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SabreParetoCandidateId {
+    pub(crate) layout_index: usize,
+    pub(crate) route_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SabreRouteQuality {
+    native_two_qubit_ops: usize,
+    native_two_qubit_depth: usize,
+    native_total_depth: usize,
+    native_total_ops: usize,
+}
+
+impl SabreRouteQuality {
+    fn dominates(self, other: Self) -> bool {
+        self.native_two_qubit_ops <= other.native_two_qubit_ops
+            && self.native_two_qubit_depth <= other.native_two_qubit_depth
+            && self.native_total_depth <= other.native_total_depth
+            && self.native_total_ops <= other.native_total_ops
+            && self != other
+    }
+
+    fn objective(self, index: usize) -> usize {
+        match index {
+            0 => self.native_two_qubit_ops,
+            1 => self.native_two_qubit_depth,
+            2 => self.native_total_depth,
+            3 => self.native_total_ops,
+            _ => unreachable!("SABRE route quality has four objectives"),
+        }
+    }
+
+    fn stable_route_key(self) -> (usize, usize, usize, usize) {
+        (
+            self.native_two_qubit_ops,
+            self.native_two_qubit_depth,
+            self.native_total_depth,
+            self.native_total_ops,
+        )
+    }
+}
+
+pub(crate) struct PreparedSabreParetoRouteSelection {
+    pub(crate) id: SabreParetoCandidateId,
+    pub(crate) selection: PreparedSabreRouteSelection,
+}
+
+#[derive(Clone)]
+struct ParetoRefinedCandidate {
+    index: usize,
+    layout: Layout,
+    score: LayoutScore,
+}
+
+#[derive(Clone)]
+struct ParetoRouteCandidate {
+    id: SabreParetoCandidateId,
+    layout: Layout,
+    score: LayoutScore,
+    trial: RankedTrial,
+    quality: SabreRouteQuality,
+    structure_fingerprint: u64,
+}
+
+/// Incremental exploratory search used by the Enhanced strict-device
+/// workflow. Refinement is prepared once, route indices are extended without
+/// replaying earlier trials, and only a compact non-dominated frontier is
+/// retained between tiers.
+pub(crate) struct PreparedSabreParetoSearch {
+    config: SabreConfig,
+    base_seed: u64,
+    refined: Vec<ParetoRefinedCandidate>,
+    frontier: Vec<ParetoRouteCandidate>,
+    emitted: BTreeSet<SabreParetoCandidateId>,
+    next_route_index: usize,
+    trials_evaluated: usize,
+    candidates_evaluated: usize,
+    candidate_notes: Vec<String>,
+}
+
+impl PreparedSabreParetoSearch {
+    /// Builds the Qiskit-style four-refinement search profile. A supplied
+    /// layout is normalized and kept fixed; generated layouts deliberately do
+    /// not use the dense-interaction refinement shortcut employed by candidate
+    /// zero.
+    pub(crate) fn new(
+        prepared: &PreparedSabreCircuit,
+        prepared_target: &PreparedSabreTarget,
+        objective: &LayoutObjective,
+        config: &SabreConfig,
+        supplied_layout: Option<&Layout>,
+    ) -> Result<Self, CompilerError> {
+        validate_layout_config(config)?;
+        let target = prepared_target.routing_target();
+        if prepared.logical_qubits().len() > target.physical_qubits.len() {
+            return Err(CompilerError::InvalidInput(format!(
+                "sabre layout requires at least as many usable physical qubits as logical qubits; got {} logical qubits and {} usable physical qubits",
+                prepared.logical_qubits().len(),
+                target.physical_qubits.len()
+            )));
+        }
+
+        // Keep the exploratory streams disjoint from candidate zero even when
+        // both profiles share the workflow seed.
+        let base_seed =
+            splitmix64(config.seed.unwrap_or_else(rand::random) ^ 0x7061_7265_746f_5f62);
+        let (layouts, mut candidate_notes) = if let Some(layout) = supplied_layout {
+            (
+                vec![normalize_initial_layout_for_target(
+                    prepared.logical_qubits(),
+                    target,
+                    layout,
+                )?],
+                vec!["kept the caller-supplied initial layout fixed".to_string()],
+            )
+        } else {
+            let mut rng = StdRng::seed_from_u64(base_seed);
+            let generated =
+                initial_layout_candidates(prepared, prepared_target, objective, config, &mut rng)?;
+            (generated.layouts, generated.notes)
+        };
+        let candidates_evaluated = layouts.len();
+        if supplied_layout.is_none()
+            && dense_interaction_path_skips_refinement(
+                prepared.analysis(),
+                prepared_target.physical(),
+            )
+        {
+            candidate_notes.push(
+                "forced four-refinement exploratory profile for dense interactions".to_string(),
+            );
+        }
+
+        let refinement_iterations = if supplied_layout.is_none() {
+            config.refinement_iterations
+        } else {
+            0
+        };
+        let mut refined = Vec::with_capacity(layouts.len());
+        let mut missing_terminal = 0;
+        let mut movement_unreachable = 0;
+        let mut unsupported_native = 0;
+        for (index, layout) in layouts.into_iter().enumerate() {
+            match prepare_pareto_refined_candidate(
+                prepared,
+                prepared_target,
+                objective,
+                config,
+                refinement_iterations,
+                CandidateTrial {
+                    index,
+                    layout,
+                    base_seed,
+                },
+            )? {
+                CandidateOutcome::Success(candidate) => refined.push(candidate),
+                CandidateOutcome::Infeasible(reason, _) => match reason {
+                    CandidateInfeasibleReason::MissingTerminal => missing_terminal += 1,
+                    CandidateInfeasibleReason::MovementUnreachable => movement_unreachable += 1,
+                    CandidateInfeasibleReason::UnsupportedNative => unsupported_native += 1,
+                },
+            }
+        }
+        if refined.is_empty() {
+            return Err(CompilerError::SabreRoutingFailed(
+                SabreRoutingFailure::NoFeasibleLayoutCandidate {
+                    evaluated: candidates_evaluated,
+                    missing_terminal,
+                    movement_unreachable,
+                    unsupported_native,
+                },
+            ));
+        }
+
+        Ok(Self {
+            config: config.clone(),
+            base_seed,
+            refined,
+            frontier: Vec::new(),
+            emitted: BTreeSet::new(),
+            next_route_index: 0,
+            trials_evaluated: 0,
+            candidates_evaluated,
+            candidate_notes,
+        })
+    }
+
+    /// Extends routing through `route_limit` and materializes at most
+    /// `candidate_limit` previously unseen, diverse frontier candidates.
+    pub(crate) fn extend_to(
+        &mut self,
+        prepared: &PreparedSabreCircuit,
+        prepared_target: &PreparedSabreTarget,
+        route_limit: usize,
+        candidate_limit: usize,
+    ) -> Result<Vec<PreparedSabreParetoRouteSelection>, CompilerError> {
+        if route_limit <= self.next_route_index || route_limit > self.config.routing_trials {
+            return Err(CompilerError::InvalidInput(format!(
+                "incremental SABRE route limit must be in {}..={}, got {route_limit}",
+                self.next_route_index.saturating_add(1),
+                self.config.routing_trials
+            )));
+        }
+        let start = self.next_route_index;
+        let tasks = self
+            .refined
+            .iter()
+            .enumerate()
+            .flat_map(|(refined_index, _)| {
+                (start..route_limit).map(move |route_index| (refined_index, route_index))
+            })
+            .collect::<Vec<_>>();
+        for task_batch in tasks.chunks(PARETO_ROUTE_OUTCOME_BATCH_CAPACITY) {
+            let outcomes = task_batch
+                .into_par_iter()
+                .map(|&(refined_index, route_index)| {
+                    route_pareto_candidate(
+                        prepared,
+                        prepared_target,
+                        &self.config,
+                        self.base_seed,
+                        &self.refined[refined_index],
+                        route_index,
+                    )
+                })
+                .collect::<Result<Vec<_>, CompilerError>>()?;
+            self.trials_evaluated = self.trials_evaluated.saturating_add(outcomes.len());
+
+            let mut new_candidates = Vec::new();
+            for outcome in outcomes {
+                if let CandidateOutcome::Success(candidate) = outcome {
+                    new_candidates.push(candidate);
+                }
+            }
+            self.merge_frontier(new_candidates);
+        }
+        self.next_route_index = route_limit;
+        let selected_ids = self.select_diverse_unseen(candidate_limit);
+        let target = prepared_target.routing_target();
+        selected_ids
+            .into_iter()
+            .map(|id| {
+                let candidate = self
+                    .frontier
+                    .iter()
+                    .find(|candidate| candidate.id == id)
+                    .expect("selected Pareto candidate remains on the frontier")
+                    .clone();
+                let is_perfect = is_perfect_layout(
+                    prepared.analysis(),
+                    prepared_target.physical(),
+                    &candidate.layout,
+                );
+                let mut notes = self.candidate_notes.clone();
+                notes.push(format!(
+                    "selected exploratory Pareto route layout={} trial={} from 0..{route_limit}",
+                    id.layout_index, id.route_index
+                ));
+                Ok(PreparedSabreParetoRouteSelection {
+                    id,
+                    selection: PreparedSabreRouteSelection {
+                        initial_layout: candidate.layout,
+                        trial: candidate.trial.finish(target)?,
+                        selected_trial_index: id.route_index,
+                        trials_evaluated: self.trials_evaluated,
+                        score: candidate.score.clone(),
+                        diagnostics: LayoutDiagnostics {
+                            is_perfect,
+                            candidates_evaluated: self.candidates_evaluated,
+                            used_fidelity: candidate.score.used_fidelity,
+                            notes,
+                        },
+                    },
+                })
+            })
+            .collect()
+    }
+
+    fn merge_frontier(&mut self, new_candidates: Vec<ParetoRouteCandidate>) {
+        self.frontier.extend(new_candidates);
+        self.frontier.sort_by_key(|candidate| candidate.id);
+        let mut frontier = Vec::<ParetoRouteCandidate>::new();
+        for candidate in self.frontier.drain(..) {
+            if frontier.iter().any(|incumbent| {
+                incumbent.quality.dominates(candidate.quality)
+                    || incumbent.quality == candidate.quality
+                        && (incumbent.structure_fingerprint == candidate.structure_fingerprint
+                            || frontier
+                                .iter()
+                                .filter(|peer| peer.quality == candidate.quality)
+                                .count()
+                                >= PARETO_EQUAL_QUALITY_CAPACITY)
+            }) {
+                continue;
+            }
+            frontier.retain(|incumbent| !candidate.quality.dominates(incumbent.quality));
+            frontier.push(candidate);
+        }
+        if frontier.len() > PARETO_ROUTE_FRONTIER_CAPACITY {
+            let retained = select_diverse_candidate_ids(
+                frontier.iter().collect(),
+                PARETO_ROUTE_FRONTIER_CAPACITY,
+            )
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+            frontier.retain(|candidate| retained.contains(&candidate.id));
+        }
+        self.frontier = frontier;
+    }
+
+    fn select_diverse_unseen(&mut self, limit: usize) -> Vec<SabreParetoCandidateId> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let unseen = self
+            .frontier
+            .iter()
+            .filter(|candidate| !self.emitted.contains(&candidate.id))
+            .collect::<Vec<_>>();
+        let selected = select_diverse_candidate_ids(unseen, limit);
+        self.emitted.extend(selected.iter().copied());
+        selected
+    }
+}
+
+fn select_diverse_candidate_ids(
+    mut candidates: Vec<&ParetoRouteCandidate>,
+    limit: usize,
+) -> Vec<SabreParetoCandidateId> {
+    let mut selected = Vec::new();
+    for objective in 0..4 {
+        let best = candidates
+            .iter()
+            .copied()
+            .filter(|candidate| !selected.contains(&candidate.id))
+            .min_by_key(|candidate| {
+                (
+                    candidate.quality.objective(objective),
+                    candidate.quality.stable_route_key(),
+                    candidate.structure_fingerprint,
+                    candidate.id,
+                )
+            });
+        if let Some(best) = best {
+            selected.push(best.id);
+        }
+        if selected.len() == limit {
+            return selected;
+        }
+    }
+    candidates.sort_by_key(|candidate| {
+        (
+            candidate.quality.stable_route_key(),
+            candidate.structure_fingerprint,
+            candidate.id,
+        )
+    });
+    for candidate in candidates {
+        if !selected.contains(&candidate.id) {
+            selected.push(candidate.id);
+        }
+        if selected.len() == limit {
+            break;
+        }
+    }
+    selected
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_pareto_refined_candidate(
+    prepared: &PreparedSabreCircuit,
+    prepared_target: &PreparedSabreTarget,
+    objective: &LayoutObjective,
+    config: &SabreConfig,
+    refinement_iterations: usize,
+    trial: CandidateTrial,
+) -> Result<CandidateOutcome<ParetoRefinedCandidate>, CompilerError> {
+    let target = prepared_target.routing_target();
+    match interaction_reachability_for_target_with_metadata(
+        &prepared.routing_dag,
+        target,
+        &prepared_target.routing_metadata,
+        &trial.layout,
+    )? {
+        InteractionReachability::Reachable => {}
+        InteractionReachability::UnreachableUnary {
+            cause: RequirementReachabilityFailure::NoExecutableTerminal,
+            ..
+        }
+        | InteractionReachability::UnreachablePair {
+            cause: RequirementReachabilityFailure::NoExecutableTerminal,
+            ..
+        } => {
+            return Ok(CandidateOutcome::Infeasible(
+                CandidateInfeasibleReason::MissingTerminal,
+                0,
+            ));
+        }
+        InteractionReachability::UnreachableUnary {
+            cause: RequirementReachabilityFailure::MovementDisconnected,
+            ..
+        }
+        | InteractionReachability::UnreachablePair {
+            cause: RequirementReachabilityFailure::MovementDisconnected,
+            ..
+        } => {
+            return Ok(CandidateOutcome::Infeasible(
+                CandidateInfeasibleReason::MovementUnreachable,
+                0,
+            ));
+        }
+    }
+
+    let mut refined = trial.layout;
+    let initial_signature = layout_mapping_signature(&refined, prepared.logical_qubits())?;
+    let mut seen_signatures = BTreeSet::from([initial_signature]);
+    for iteration in 0..refinement_iterations {
+        let forward_seed = derive_semantic_seed(
+            trial.base_seed,
+            11,
+            trial.index,
+            iteration,
+            layout_signature(&refined),
+        );
+        let forward = match refine_layout_with_metadata(
+            &prepared.refinement_dag,
+            target,
+            &prepared_target.refinement_metadata,
+            &refined,
+            &config.heuristic,
+            forward_seed,
+        ) {
+            Ok(layout) => layout,
+            Err(error) => return classify_candidate_error(error, 0),
+        };
+        let backward_seed = derive_semantic_seed(
+            trial.base_seed,
+            12,
+            trial.index,
+            iteration,
+            layout_signature(&forward),
+        );
+        let next = match refine_layout_with_metadata(
+            &prepared.backward_refinement_dag,
+            target,
+            &prepared_target.backward_refinement_metadata,
+            &forward,
+            &config.heuristic,
+            backward_seed,
+        ) {
+            Ok(layout) => layout,
+            Err(error) => return classify_candidate_error(error, 0),
+        };
+        let signature = layout_mapping_signature(&next, prepared.logical_qubits())?;
+        if !seen_signatures.insert(signature) {
+            break;
+        }
+        refined = next;
+    }
+    let score =
+        objective.score_layout(prepared.analysis(), prepared_target.physical(), &refined)?;
+    Ok(CandidateOutcome::Success(ParetoRefinedCandidate {
+        index: trial.index,
+        layout: refined,
+        score,
+    }))
+}
+
+fn route_pareto_candidate(
+    prepared: &PreparedSabreCircuit,
+    prepared_target: &PreparedSabreTarget,
+    config: &SabreConfig,
+    base_seed: u64,
+    refined: &ParetoRefinedCandidate,
+    route_index: usize,
+) -> Result<CandidateOutcome<ParetoRouteCandidate>, CompilerError> {
+    let target = prepared_target.routing_target();
+    let seed = derive_semantic_seed(
+        base_seed,
+        13,
+        refined.index,
+        route_index,
+        layout_signature(&refined.layout),
+    );
+    let mut trial = match route_ranked_trial_with_metadata(
+        &prepared.routing_dag,
+        target,
+        &prepared_target.routing_metadata,
+        &refined.layout,
+        &config.heuristic,
+        seed,
+    ) {
+        Ok(trial) => trial,
+        Err(error) => return classify_candidate_error(error, 1),
+    };
+    let quality = match trial.quality(target) {
+        Ok(quality) => quality,
+        Err(error) => return classify_candidate_error(error, 1),
+    };
+    let structure_fingerprint = trial.structure_fingerprint();
+    Ok(CandidateOutcome::Success(ParetoRouteCandidate {
+        id: SabreParetoCandidateId {
+            layout_index: refined.index,
+            route_index,
+        },
+        layout: refined.layout.clone(),
+        score: refined.score.clone(),
+        trial,
+        structure_fingerprint,
+        quality: SabreRouteQuality {
+            native_two_qubit_ops: quality.native_two_qubit_ops,
+            native_two_qubit_depth: quality.native_two_qubit_depth,
+            native_total_depth: quality.native_total_depth,
+            native_total_ops: quality.native_total_ops,
+        },
+    }))
 }
 
 pub(crate) fn sabre_route_selection_prepared(

@@ -13,7 +13,8 @@
 
 use super::{
     CompilerWorkflow, DeviceSynthesisPlacement, PreparedTargetBasis, RewritePhase,
-    WorkflowResynthesisSession, WorkflowState, sabre_config_for_mode,
+    WorkflowResynthesisSession, WorkflowState, pareto_exploration_error_is_recoverable,
+    sabre_config_for_mode,
 };
 use crate::circuit::gate::FrozenCircuit;
 use crate::circuit::{
@@ -91,6 +92,7 @@ fn workflow_state_with_target_basis(target_basis: Vec<Instruction>) -> WorkflowS
         routing_physical: None,
         topology_routing_target: None,
         planning_session: None,
+        native_quality_checkpoint: None,
     }
 }
 
@@ -116,6 +118,7 @@ fn workflow_state_without_target_basis() -> WorkflowState {
         routing_physical: None,
         topology_routing_target: None,
         planning_session: None,
+        native_quality_checkpoint: None,
     }
 }
 
@@ -1499,6 +1502,7 @@ fn workflow_uses_three_native_cx_for_device_targeted_swap_unitary() {
     );
     assert_compiled_circuit_equivalent(&result.circuit, &circuit);
     device.validate_circuit(&result.circuit).unwrap();
+    assert!(result.step("select.sabre_pareto_beam").is_none());
 }
 
 #[test]
@@ -2975,6 +2979,60 @@ fn enhanced_device_workflow_runs_post_routing_cleanup() {
         .find(|step| step.name == "optimize.post_routing")
         .unwrap();
     assert!(!post_routing.skipped);
+    let route_index = result
+        .steps
+        .iter()
+        .position(|step| step.name == "route.sabre")
+        .unwrap();
+    assert_eq!(
+        result.steps[route_index..]
+            .iter()
+            .map(|step| step.name)
+            .collect::<Vec<_>>(),
+        vec![
+            "route.sabre",
+            "resynthesize.two_qubit_blocks.post_routing",
+            "optimize.post_routing",
+            "translate.target_basis",
+            "optimize.target_cleanup",
+            "optimize.one_qubit.post_translation",
+            "translate.target_basis.after_one_qubit",
+            "canonicalize.output",
+            "lower.device_instructions",
+            "canonicalize.native_input",
+            "optimize.native_fixed_point",
+            "validate.device",
+            "select.sabre_pareto_beam",
+        ]
+    );
+    let selection = result.step("select.sabre_pareto_beam").unwrap();
+    assert!(!selection.skipped);
+    assert!(
+        selection
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("contract=exact_scope_pareto_with_2q_gain")
+    );
+    let reason = selection.reason.as_deref().unwrap();
+    assert!(reason.contains("tiers_evaluated=2"));
+    assert!(reason.contains("native_2q_ops=") || reason.contains("candidate0_native_2q_ops="));
+}
+
+#[test]
+fn optional_sabre_beam_discards_recoverable_candidate_errors_only() {
+    assert!(pareto_exploration_error_is_recoverable(
+        &CompilerError::InvalidInput("candidate-local input".to_string())
+    ));
+    assert!(pareto_exploration_error_is_recoverable(
+        &CompilerError::TransformFailed {
+            name: "candidate-transform",
+            reason: "candidate-local failure".to_string(),
+        }
+    ));
+    assert!(!pareto_exploration_error_is_recoverable(
+        &CompilerError::InvariantViolation("internal contract".to_string())
+    ));
 }
 
 #[test]
@@ -3312,6 +3370,7 @@ fn enhanced_topology_basis_target_keeps_routed_two_qubit_gates_on_topology() {
             .iter()
             .all(|gate| matches!(gate, StandardGate::H | StandardGate::CZ))
     );
+    assert!(result.step("select.sabre_pareto_beam").is_none());
 }
 
 #[test]

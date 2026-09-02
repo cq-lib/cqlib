@@ -878,6 +878,62 @@ fn synthetic_quality(
 }
 
 #[test]
+fn exact_workflow_checkpoint_requires_full_per_scope_dominance() {
+    let incumbent = NativeExactQualityCheckpoint::new(vec![
+        synthetic_quality(10, 8, 20, 40, 8),
+        synthetic_quality(4, 4, 10, 20, 4),
+    ]);
+    let dominating = NativeExactQualityCheckpoint::new(vec![
+        synthetic_quality(9, 8, 20, 40, 8),
+        synthetic_quality(4, 4, 10, 20, 4),
+    ]);
+    let total_ops_regression = NativeExactQualityCheckpoint::new(vec![
+        synthetic_quality(9, 8, 20, 41, 8),
+        synthetic_quality(4, 4, 10, 20, 4),
+    ]);
+    let nested_critical_path_regression = NativeExactQualityCheckpoint::new(vec![
+        synthetic_quality(9, 8, 20, 40, 8),
+        synthetic_quality(4, 4, 10, 20, 5),
+    ]);
+    let one_qubit_only_gain = NativeExactQualityCheckpoint::new(vec![
+        synthetic_quality(10, 8, 20, 39, 8),
+        synthetic_quality(4, 4, 10, 20, 4),
+    ]);
+    let scope_shape_mismatch =
+        NativeExactQualityCheckpoint::new(vec![synthetic_quality(9, 8, 20, 40, 8)]);
+
+    assert!(dominating.strictly_dominates(&incumbent));
+    assert!(dominating.strictly_dominates_with_two_qubit_gain(&incumbent));
+    assert!(one_qubit_only_gain.strictly_dominates(&incumbent));
+    assert!(!one_qubit_only_gain.strictly_dominates_with_two_qubit_gain(&incumbent));
+    assert!(!incumbent.strictly_dominates(&incumbent));
+    assert!(!total_ops_regression.strictly_dominates(&incumbent));
+    assert!(!nested_critical_path_regression.strictly_dominates(&incumbent));
+    assert!(!scope_shape_mismatch.strictly_dominates(&incumbent));
+}
+
+#[test]
+fn sabre_beam_ranking_prioritizes_two_qubit_count_then_depth() {
+    let fewer_two_qubit_ops =
+        NativeExactQualityCheckpoint::new(vec![synthetic_quality(9, 9, 22, 42, 8)]);
+    let shallower_two_qubit_depth =
+        NativeExactQualityCheckpoint::new(vec![synthetic_quality(10, 7, 18, 38, 8)]);
+    let shallower_total_depth =
+        NativeExactQualityCheckpoint::new(vec![synthetic_quality(9, 9, 21, 42, 8)]);
+
+    assert!(
+        fewer_two_qubit_ops
+            .compare_for_sabre_beam(&shallower_two_qubit_depth)
+            .is_lt()
+    );
+    assert!(
+        shallower_total_depth
+            .compare_for_sabre_beam(&fewer_two_qubit_ops)
+            .is_lt()
+    );
+}
+
+#[test]
 fn balanced_scope_dominance_rejects_regression_in_any_control_flow_scope() {
     let entry = vec![
         synthetic_quality(10, 8, 20, 40, 8),

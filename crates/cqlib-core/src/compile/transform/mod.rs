@@ -112,6 +112,7 @@ pub(crate) use rewrite::{
 };
 pub use routing::{RoutedCircuit, SabreRouteResult, route_sabre, route_with_layout};
 pub(crate) use routing::{
+    SabreParetoRouteCandidate, prepare_sabre_pareto_routes_with_session_on_physical,
     route_sabre_tracked_on_topology, route_sabre_tracked_with_session_on_physical,
     route_with_layout_tracked_on_topology, route_with_layout_tracked_with_session_on_physical,
 };

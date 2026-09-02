@@ -10,7 +10,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-use super::sabre::dense_interaction_path_skips_refinement;
+use super::sabre::{PreparedSabreParetoSearch, dense_interaction_path_skips_refinement};
 use super::*;
 use crate::circuit::{Circuit, ClassicalExpr, Instruction, Qubit, StandardGate};
 use crate::compile::device_planning::DevicePlanningSession;
@@ -20,7 +20,7 @@ use crate::compile::sabre::{
 use crate::compile::transform::route_sabre;
 use crate::compile::{CompilerError, SabreRoutingFailure};
 use crate::device::{
-    Device, EdgeProp, InstructionProp, LogicalQubit, PhysicalQubit, QubitProp, Topology,
+    Device, EdgeProp, InstructionProp, Layout, LogicalQubit, PhysicalQubit, QubitProp, Topology,
 };
 use rayon::ThreadPoolBuilder;
 use std::collections::HashSet;
@@ -136,6 +136,134 @@ fn dense_interaction_refinement_skip_requires_a_path_topology() {
     sparse.cx(Qubit::new(2), Qubit::new(3)).unwrap();
     let sparse = analyze_circuit_for_layout(&sparse).unwrap();
     assert!(!dense_interaction_path_skips_refinement(&sparse, &line));
+}
+
+#[test]
+fn pareto_search_extends_from_eight_to_twenty_trials_without_replay() {
+    let mut circuit = Circuit::new(5);
+    for (left, right) in [(0, 4), (1, 3), (0, 2), (2, 4), (1, 4), (0, 3), (2, 3)] {
+        circuit.cx(Qubit::new(left), Qubit::new(right)).unwrap();
+    }
+    let prepared = prepare_sabre_circuit(&circuit).unwrap();
+    let target =
+        prepare_sabre_topology_target(&prepared, &Device::line("pareto-line", 5).unwrap()).unwrap();
+    let config = SabreConfig {
+        layout_trials: 2,
+        vf2_prepass: None,
+        refinement_iterations: 4,
+        routing_trials: 20,
+        ..SabreConfig::deterministic_seeded(71)
+    };
+    let mut search = PreparedSabreParetoSearch::new(
+        &prepared,
+        &target,
+        &LayoutObjective::topology_only(),
+        &config,
+        None,
+    )
+    .unwrap();
+
+    assert!(
+        search
+            .extend_to(&prepared, &target, 8, 0)
+            .unwrap()
+            .is_empty()
+    );
+    let extended = search.extend_to(&prepared, &target, 20, 1).unwrap();
+
+    assert_eq!(extended.len(), 1);
+    let diagnostics = &extended[0].selection;
+    assert_eq!(
+        diagnostics.trials_evaluated,
+        diagnostics.diagnostics.candidates_evaluated * 20
+    );
+}
+
+#[test]
+fn pareto_search_forces_four_refinements_for_dense_path_interactions() {
+    let mut circuit = Circuit::new(4);
+    for left in 0..4 {
+        for right in (left + 1)..4 {
+            circuit.cx(Qubit::new(left), Qubit::new(right)).unwrap();
+        }
+    }
+    let prepared = prepare_sabre_circuit(&circuit).unwrap();
+    let target =
+        prepare_sabre_topology_target(&prepared, &Device::line("pareto-dense-line", 4).unwrap())
+            .unwrap();
+    assert!(dense_interaction_path_skips_refinement(
+        prepared.analysis(),
+        target.physical()
+    ));
+    let config = SabreConfig {
+        layout_trials: 2,
+        vf2_prepass: None,
+        refinement_iterations: 4,
+        routing_trials: 8,
+        ..SabreConfig::deterministic_seeded(73)
+    };
+    let mut search = PreparedSabreParetoSearch::new(
+        &prepared,
+        &target,
+        &LayoutObjective::topology_only(),
+        &config,
+        None,
+    )
+    .unwrap();
+
+    let candidates = search.extend_to(&prepared, &target, 8, 1).unwrap();
+
+    assert_eq!(candidates.len(), 1);
+    assert!(
+        candidates[0]
+            .selection
+            .diagnostics
+            .notes
+            .iter()
+            .any(|note| {
+                note.contains("forced four-refinement exploratory profile for dense interactions")
+            })
+    );
+}
+
+#[test]
+fn pareto_search_keeps_a_supplied_initial_layout_fixed() {
+    let mut circuit = Circuit::new(3);
+    circuit.cx(Qubit::new(0), Qubit::new(2)).unwrap();
+    circuit.cx(Qubit::new(1), Qubit::new(2)).unwrap();
+    let prepared = prepare_sabre_circuit(&circuit).unwrap();
+    let target =
+        prepare_sabre_topology_target(&prepared, &Device::line("pareto-fixed-line", 5).unwrap())
+            .unwrap();
+    let supplied = Layout::from_pairs(&[(0, 3), (1, 1), (2, 4)], 5).unwrap();
+    let config = SabreConfig {
+        layout_trials: 2,
+        vf2_prepass: None,
+        refinement_iterations: 4,
+        routing_trials: 8,
+        ..SabreConfig::deterministic_seeded(79)
+    };
+    let mut search = PreparedSabreParetoSearch::new(
+        &prepared,
+        &target,
+        &LayoutObjective::topology_only(),
+        &config,
+        Some(&supplied),
+    )
+    .unwrap();
+
+    let candidates = search.extend_to(&prepared, &target, 8, 3).unwrap();
+
+    assert!(!candidates.is_empty());
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.selection.initial_layout == supplied)
+    );
+    assert!(candidates.iter().all(|candidate| {
+        candidate.selection.diagnostics.candidates_evaluated == 1
+            && candidate.selection.trials_evaluated == 8
+    }));
 }
 
 #[test]

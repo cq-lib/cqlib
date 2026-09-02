@@ -66,7 +66,9 @@ use crate::compile::transform::decompose::{
     UnitaryDecomposeConfig,
 };
 use crate::compile::transform::layout::PhysicalLayoutGraph;
-use crate::compile::transform::native_optimization::NativeOptimizer;
+use crate::compile::transform::native_optimization::{
+    NativeExactQualityCheckpoint, NativeOptimizationSummary, NativeOptimizer,
+};
 use crate::compile::transform::resynthesis::{
     WorkflowResynthesisSession, resynthesize_two_qubit_blocks_workflow,
 };
@@ -75,11 +77,12 @@ use crate::compile::transform::{
     CanonicalizeConfig, Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer,
     KnowledgeRewriteDiagnostics, KnowledgeRewriteSession, KnowledgeRewriter, LayoutObjective,
     LowerToRoutingBasis, NativeQualityPolicy, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks,
-    RewriteConfig, RewriteEdits, RewriteExecutionRecord, TargetBasisCostModel, TargetBasisLowerer,
-    TransformOutcome, Transformer, TwoQubitBlockResynthesisConfig, VirtualPermutation,
-    VirtualPermutationElisionStatus, elide_virtual_permutations, route_sabre_tracked_on_topology,
-    route_sabre_tracked_with_session_on_physical, route_with_layout_tracked_on_topology,
-    route_with_layout_tracked_with_session_on_physical,
+    RewriteConfig, RewriteEdits, RewriteExecutionRecord, SabreParetoRouteCandidate,
+    TargetBasisCostModel, TargetBasisLowerer, TransformOutcome, Transformer,
+    TwoQubitBlockResynthesisConfig, VirtualPermutation, VirtualPermutationElisionStatus,
+    elide_virtual_permutations, prepare_sabre_pareto_routes_with_session_on_physical,
+    route_sabre_tracked_on_topology, route_sabre_tracked_with_session_on_physical,
+    route_with_layout_tracked_on_topology, route_with_layout_tracked_with_session_on_physical,
 };
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -132,6 +135,7 @@ struct WorkflowState {
     routing_physical: Option<Arc<PhysicalLayoutGraph>>,
     topology_routing_target: Option<Arc<RoutingTarget>>,
     planning_session: Option<Arc<DevicePlanningSession>>,
+    native_quality_checkpoint: Option<NativeExactQualityCheckpoint>,
 }
 
 struct PreparedTargetBasis {
@@ -225,6 +229,35 @@ impl PreparedCompileTarget {
 }
 
 impl WorkflowState {
+    /// Creates an isolated branch at the current workflow boundary. Immutable
+    /// target preparation is shared, while mutation-sensitive rewrite and
+    /// resynthesis sessions start fresh so one exploratory route cannot affect
+    /// candidate zero or a sibling candidate.
+    fn detached_clone(&self) -> Self {
+        Self {
+            current: self.current.clone(),
+            analysis: None,
+            circuit_revision: self.circuit_revision,
+            canonical_proof: self.canonical_proof.clone(),
+            rewrite_session: KnowledgeRewriteSession::default(),
+            rewrite_diagnostics: self.rewrite_diagnostics,
+            collect_rewrite_diagnostics: self.collect_rewrite_diagnostics,
+            changed: self.changed,
+            steps: self.steps.clone(),
+            prepared_target_basis: self.prepared_target_basis.clone(),
+            two_qubit_target: self.two_qubit_target.clone(),
+            virtual_permutation: self.virtual_permutation.clone(),
+            device_metadata: self.device_metadata.clone(),
+            one_qubit_optimizer: self.one_qubit_optimizer.clone(),
+            pending_one_qubit_resynthesis: self.pending_one_qubit_resynthesis,
+            resynthesis_session: WorkflowResynthesisSession::default(),
+            routing_physical: self.routing_physical.clone(),
+            topology_routing_target: self.topology_routing_target.clone(),
+            planning_session: self.planning_session.clone(),
+            native_quality_checkpoint: self.native_quality_checkpoint.clone(),
+        }
+    }
+
     fn analysis(&mut self) -> &WorkflowCircuitAnalysis {
         if self.analysis.is_none() {
             self.analysis = Some(WorkflowCircuitAnalysis::analyze(&self.current));
@@ -597,6 +630,7 @@ impl CompilerWorkflow {
             routing_physical: prepared_target.routing_physical.clone(),
             topology_routing_target: prepared_target.topology_routing_target.clone(),
             planning_session: prepared_target.planning_session.clone(),
+            native_quality_checkpoint: None,
         };
 
         self.record_pre_init(&mut state);
@@ -605,14 +639,14 @@ impl CompilerWorkflow {
         self.lower_decompose(&mut state)?;
         self.lower_optimize(&mut state)?;
         self.lower_routing_basis(&mut state)?;
+        let pareto_prefix = (self.config.mode == CompileMode::Enhanced
+            && self.strict_device_target().is_some())
+        .then(|| state.detached_clone());
         self.lower_physical(&mut state)?;
-        self.lower_target(&mut state)?;
-        self.lower_output(&mut state)?;
-        self.lower_device_instructions(&mut state)?;
-        self.canonicalize_native_input(&mut state)?;
-        self.optimize_native_instructions(&mut state)?;
-        self.validate_device(&mut state)?;
-        self.validate_topology_target(&mut state)?;
+        self.finish_post_routing(&mut state)?;
+        if let Some(prefix) = pareto_prefix {
+            self.apply_sabre_pareto_beam(&mut state, prefix)?;
+        }
 
         Ok((
             CompileResult {
@@ -693,11 +727,23 @@ impl CompilerWorkflow {
 
     /// Applies optional physical lowering from logical to physical qubits.
     fn lower_physical(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        self.apply_layout_and_routing(state)?;
+        self.apply_layout_and_routing(state)
+    }
+
+    /// Completes the shared lowering, optimization, and validation suffix after
+    /// the routing stage has either produced a routed circuit or been skipped.
+    fn finish_post_routing(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         if self.config.mode == CompileMode::Enhanced {
             self.apply_post_routing_resynthesis(state)?;
             self.apply_post_routing_cleanup(state)?;
         }
+        self.lower_target(state)?;
+        self.lower_output(state)?;
+        self.lower_device_instructions(state)?;
+        self.canonicalize_native_input(state)?;
+        self.optimize_native_instructions(state)?;
+        self.validate_device(state)?;
+        self.validate_topology_target(state)?;
         Ok(())
     }
 
@@ -838,53 +884,56 @@ impl CompilerWorkflow {
             self.two_qubit_resynthesis_config_for_state(state),
             max_rounds,
             max_stale_rounds,
-            planning_session,
+            Arc::clone(&planning_session),
         )
         .with_quality_policy(NativeQualityPolicy::BalancedDepth);
         let input_is_canonical = state.has_canonical_proof(Canonicalizer::production().config());
-        let (result, native_stats) = if input_is_canonical {
-            optimizer.run_with_proven_canonical_input_and_stats(&state.current)?
+        let (result, exact_quality, native_stats) = if input_is_canonical {
+            optimizer.run_with_proven_canonical_input_exact_quality_and_stats(&state.current)?
         } else {
-            optimizer.run_with_stats(&state.current)?
+            optimizer.run_with_exact_quality_and_stats(&state.current)?
         };
-        if result.changed {
+        let changed = result.changed;
+        let reason = format!(
+            "quality_policy=balanced_depth; rounds={}; restored_best={}; native_2q_ops={}->{}; native_2q_depth={}->{}; native_depth={}->{}; native_ops={}->{}; predicted_log_error={:?}->{:?}; unavailable_error_count={}->{}; imputed_error_count={}->{}; quality_rejections=scope_shape:{},2q_ops:{},2q_depth:{},total_depth:{},error:{},makespan:{},rank:{}",
+            result.rounds,
+            result.restored_best,
+            result.before.native_two_qubit_ops,
+            result.after.native_two_qubit_ops,
+            result.before.native_two_qubit_depth,
+            result.after.native_two_qubit_depth,
+            result.before.total_native_depth,
+            result.after.total_native_depth,
+            result.before.native_total_ops,
+            result.after.native_total_ops,
+            result.before.predicted_log_error,
+            result.after.predicted_log_error,
+            result.before.unavailable_error_count,
+            result.after.unavailable_error_count,
+            result.before.imputed_error_count,
+            result.after.imputed_error_count,
+            native_stats.quality_scope_shape_rejections,
+            native_stats.quality_two_qubit_ops_rejections,
+            native_stats.quality_two_qubit_depth_rejections,
+            native_stats.quality_total_depth_rejections,
+            native_stats.quality_error_rejections,
+            native_stats.quality_makespan_rejections,
+            native_stats.quality_rank_rejections,
+        );
+        if changed {
             state.analysis = None;
             state.advance_circuit_revision();
         }
         state.current = result.circuit;
-        state.changed |= result.changed;
+        state.changed |= changed;
         state.steps.push(WorkflowStepReport {
             stage: "optimization",
             name: "optimize.native_fixed_point",
-            changed: result.changed,
+            changed,
             skipped: false,
-            reason: Some(format!(
-                "quality_policy=balanced_depth; rounds={}; restored_best={}; native_2q_ops={}->{}; native_2q_depth={}->{}; native_depth={}->{}; native_ops={}->{}; predicted_log_error={:?}->{:?}; unavailable_error_count={}->{}; imputed_error_count={}->{}; quality_rejections=scope_shape:{},2q_ops:{},2q_depth:{},total_depth:{},error:{},makespan:{},rank:{}",
-                result.rounds,
-                result.restored_best,
-                result.before.native_two_qubit_ops,
-                result.after.native_two_qubit_ops,
-                result.before.native_two_qubit_depth,
-                result.after.native_two_qubit_depth,
-                result.before.total_native_depth,
-                result.after.total_native_depth,
-                result.before.native_total_ops,
-                result.after.native_total_ops,
-                result.before.predicted_log_error,
-                result.after.predicted_log_error,
-                result.before.unavailable_error_count,
-                result.after.unavailable_error_count,
-                result.before.imputed_error_count,
-                result.after.imputed_error_count,
-                native_stats.quality_scope_shape_rejections,
-                native_stats.quality_two_qubit_ops_rejections,
-                native_stats.quality_two_qubit_depth_rejections,
-                native_stats.quality_total_depth_rejections,
-                native_stats.quality_error_rejections,
-                native_stats.quality_makespan_rejections,
-                native_stats.quality_rank_rejections,
-            )),
+            reason: Some(reason),
         });
+        state.native_quality_checkpoint = Some(exact_quality);
         Ok(())
     }
 
@@ -1337,7 +1386,6 @@ impl CompilerWorkflow {
                 swap_count, trials_evaluated
             )
         };
-
         state.steps.push(WorkflowStepReport {
             stage: "routing",
             name: "route.sabre",
@@ -1346,6 +1394,208 @@ impl CompilerWorkflow {
             reason: Some(reason),
         });
         Ok(())
+    }
+
+    /// Runs the bounded two-tier route beam after candidate zero has completed
+    /// the entire workflow. Every exploratory route starts from the immutable
+    /// pre-routing prefix and traverses the same post-routing, lowering,
+    /// native-optimization, and validation suffix. Candidate zero remains the
+    /// fallback unless a finalized branch strictly improves two-qubit count or
+    /// depth while preserving its exact native quality in every control-flow
+    /// scope.
+    fn apply_sabre_pareto_beam(
+        &self,
+        state: &mut WorkflowState,
+        prefix: WorkflowState,
+    ) -> Result<(), CompilerError> {
+        let target = self.strict_device_target().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "SABRE Pareto beam requires a strict device target".to_string(),
+            )
+        })?;
+        let baseline_quality = state.native_quality_checkpoint.clone().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "candidate zero completed without an exact native quality checkpoint".to_string(),
+            )
+        })?;
+        let baseline_summary = baseline_quality.summary();
+        let physical = prefix.routing_physical.clone().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "SABRE Pareto beam has no prepared physical graph".to_string(),
+            )
+        })?;
+        let planning_session = prefix.planning_session.as_deref().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "SABRE Pareto beam has no device planning session".to_string(),
+            )
+        })?;
+        let config = sabre_pareto_config(target.seed);
+        let mut search = match prepare_sabre_pareto_routes_with_session_on_physical(
+            &prefix.current,
+            &target.device,
+            &config,
+            physical,
+            planning_session,
+            target.initial_layout.as_ref(),
+        ) {
+            Ok(search) => search,
+            Err(error) if pareto_exploration_error_is_recoverable(&error) => {
+                state.steps.push(WorkflowStepReport {
+                    stage: "selection",
+                    name: "select.sabre_pareto_beam",
+                    changed: false,
+                    skipped: false,
+                    reason: Some(format!(
+                        "accepted=false; contract=exact_scope_pareto_with_2q_gain; candidate0_retained=true; finalized_candidates=1; {}; exploratory search unavailable: {error}",
+                        sabre_pareto_quality_log(baseline_summary, None),
+                    )),
+                });
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+
+        let mut finalized_candidates = 1usize;
+        let mut attempted_candidates = 0usize;
+        let mut discarded_candidates = 0usize;
+        let mut first_discarded_error = None::<String>;
+        let mut route_candidates = Vec::new();
+        let mut tiers_evaluated = 0usize;
+        for (tier, route_limit) in [(1usize, 8usize), (2, 20)] {
+            tiers_evaluated = tier;
+            match search.extend_to(route_limit, 3) {
+                Ok(candidates) => route_candidates
+                    .extend(candidates.into_iter().map(|candidate| (tier, candidate))),
+                Err(error) if pareto_exploration_error_is_recoverable(&error) => {
+                    discarded_candidates = discarded_candidates.saturating_add(1);
+                    first_discarded_error.get_or_insert_with(|| error.to_string());
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        let mut selected = None::<(
+            WorkflowState,
+            NativeExactQualityCheckpoint,
+            usize,
+            usize,
+            usize,
+        )>;
+        for (tier, candidate) in route_candidates {
+            let id = candidate.id;
+            attempted_candidates = attempted_candidates.saturating_add(1);
+            let branch = match self.finalize_sabre_pareto_candidate(&prefix, candidate) {
+                Ok(branch) => branch,
+                Err(error) if pareto_exploration_error_is_recoverable(&error) => {
+                    discarded_candidates = discarded_candidates.saturating_add(1);
+                    first_discarded_error.get_or_insert_with(|| error.to_string());
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            finalized_candidates = finalized_candidates.saturating_add(1);
+            let quality = branch.native_quality_checkpoint.clone().ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "finalized SABRE Pareto candidate has no exact quality checkpoint".to_string(),
+                )
+            })?;
+            if !quality.strictly_dominates_with_two_qubit_gain(&baseline_quality) {
+                continue;
+            }
+            let replace = selected.as_ref().is_none_or(
+                |(_, incumbent, _, incumbent_layout, incumbent_route)| {
+                    let ordering = quality.compare_for_sabre_beam(incumbent);
+                    ordering.is_lt()
+                        || ordering.is_eq()
+                            && (id.layout_index, id.route_index)
+                                < (*incumbent_layout, *incumbent_route)
+                },
+            );
+            if replace {
+                selected = Some((branch, quality, tier, id.layout_index, id.route_index));
+            }
+        }
+
+        let winner_summary = selected
+            .as_ref()
+            .map(|(_, quality, _, _, _)| quality.summary());
+        let (changed, accepted, selected_tier, selected_layout, selected_route) =
+            if let Some((branch, _, tier, layout, route)) = selected {
+                let changed = branch.current != state.current
+                    || branch.device_metadata != state.device_metadata;
+                *state = branch;
+                (changed, true, Some(tier), Some(layout), Some(route))
+            } else {
+                (false, false, None, None, None)
+            };
+        state.steps.push(WorkflowStepReport {
+            stage: "selection",
+            name: "select.sabre_pareto_beam",
+            changed,
+            skipped: false,
+            reason: Some(format!(
+                "accepted={accepted}; contract=exact_scope_pareto_with_2q_gain; candidate0_retained={}; tiers_evaluated={tiers_evaluated}; finalized_candidates={finalized_candidates}; attempted_candidates={attempted_candidates}; discarded_candidates={discarded_candidates}; selected_tier={selected_tier:?}; selected_layout={selected_layout:?}; selected_route={selected_route:?}; {}; first_discarded_error={first_discarded_error:?}",
+                !accepted,
+                sabre_pareto_quality_log(baseline_summary, winner_summary),
+            )),
+        });
+        Ok(())
+    }
+
+    fn finalize_sabre_pareto_candidate(
+        &self,
+        prefix: &WorkflowState,
+        candidate: SabreParetoRouteCandidate,
+    ) -> Result<WorkflowState, CompilerError> {
+        let target = self.strict_device_target().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "SABRE Pareto candidate requires a strict device target".to_string(),
+            )
+        })?;
+        let mut branch = prefix.detached_clone();
+        let virtual_permutation = branch.virtual_permutation.clone().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "SABRE Pareto candidate has no virtual permutation".to_string(),
+            )
+        })?;
+        let routed = candidate.routed;
+        let route_changed = routed.routed().changed(&prefix.current);
+        let swap_count = routed.routed().swap_count();
+        let trials_evaluated = routed.routed().diagnostics().trials_evaluated;
+        let final_layout =
+            virtual_permutation.compose_final_layout(routed.routed().final_layout())?;
+        branch.device_metadata = Some(DeviceCompilationMetadata {
+            initial_layout: routed.routed().initial_layout().clone(),
+            final_layout,
+            virtual_permutation,
+        });
+        let edits = routed.rewrite_edits(&prefix.current);
+        let routed_circuit = routed.into_routed().into_circuit();
+        if route_changed {
+            branch.adopt_changed_circuit(routed_circuit, &edits);
+        } else {
+            branch.current = routed_circuit;
+        }
+        branch.steps.push(WorkflowStepReport {
+            stage: "routing",
+            name: "route.sabre",
+            changed: route_changed,
+            skipped: false,
+            reason: Some(format!(
+                "exploratory Pareto route layout={} trial={}; inserted {swap_count} swap operations using {trials_evaluated} routing trials{}",
+                candidate.id.layout_index,
+                candidate.id.route_index,
+                if target.initial_layout.is_some() {
+                    " from supplied initial layout"
+                } else {
+                    ""
+                },
+            )),
+        });
+
+        self.finish_post_routing(&mut branch)?;
+        Ok(branch)
     }
 
     /// Removes static logical SWAPs before numeric two-qubit optimization can
@@ -1656,6 +1906,53 @@ fn sabre_config_for_mode(mode: CompileMode, seed: Option<u32>) -> SabreConfig {
     }
 
     config
+}
+
+fn sabre_pareto_config(seed: Option<u32>) -> SabreConfig {
+    let mut config = sabre_config_for_mode(CompileMode::Enhanced, seed);
+    config.refinement_iterations = 4;
+    config.routing_trials = 20;
+    config
+}
+
+fn pareto_exploration_error_is_recoverable(error: &CompilerError) -> bool {
+    matches!(
+        error,
+        CompilerError::Circuit(_)
+            | CompilerError::InvalidInput(_)
+            | CompilerError::TransformFailed { .. }
+            | CompilerError::SabreRoutingFailed(_)
+            | CompilerError::DeviceLoweringFailed(_)
+            | CompilerError::DeviceValidationFailed(_)
+    )
+}
+
+fn sabre_pareto_quality_log(
+    candidate0: NativeOptimizationSummary,
+    winner: Option<NativeOptimizationSummary>,
+) -> String {
+    let Some(winner) = winner else {
+        return format!(
+            "candidate0_native_2q_ops={}; candidate0_native_2q_depth={}; candidate0_native_depth={}; candidate0_native_ops={}; winner_quality=None",
+            candidate0.native_two_qubit_ops,
+            candidate0.native_two_qubit_depth,
+            candidate0.total_native_depth,
+            candidate0.native_total_ops,
+        );
+    };
+    format!(
+        "native_2q_ops={}->{}; native_2q_depth={}->{}; native_depth={}->{}; native_ops={}->{}; predicted_log_error={:?}->{:?}",
+        candidate0.native_two_qubit_ops,
+        winner.native_two_qubit_ops,
+        candidate0.native_two_qubit_depth,
+        winner.native_two_qubit_depth,
+        candidate0.total_native_depth,
+        winner.total_native_depth,
+        candidate0.native_total_ops,
+        winner.native_total_ops,
+        candidate0.predicted_log_error,
+        winner.predicted_log_error,
+    )
 }
 
 fn validate_workflow_target_basis_config(

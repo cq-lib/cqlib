@@ -43,6 +43,7 @@ use smallvec::{SmallVec, smallvec};
 use std::cell::{Cell, RefCell};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, VecDeque};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Condvar, Mutex};
 
 const CONTROL_FLOW_EPILOGUE_TRIALS: usize = 4;
@@ -410,6 +411,62 @@ impl RankedTrial {
 
     pub(crate) fn swap_count(&self) -> usize {
         self.trial.swap_count
+    }
+
+    /// Search-local fingerprint of the routed structure, independent of proxy
+    /// quality. It distinguishes routes with equal counts/depths so a bounded
+    /// beam can preserve more than one downstream optimization opportunity.
+    /// This key is not persisted and is not expected to remain stable across
+    /// Rust versions or platforms.
+    pub(crate) fn structure_fingerprint(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for step in &self.trial.plan.steps {
+            match step {
+                CompactRouteStep::Owned {
+                    operation,
+                    source_order,
+                } => {
+                    0_u8.hash(&mut hasher);
+                    source_order.hash(&mut hasher);
+                    operation.qubits.hash(&mut hasher);
+                }
+                CompactRouteStep::Mapped {
+                    qubits,
+                    source_order,
+                    ..
+                } => {
+                    1_u8.hash(&mut hasher);
+                    source_order.hash(&mut hasher);
+                    qubits.hash(&mut hasher);
+                }
+                CompactRouteStep::Swap(pair) => {
+                    2_u8.hash(&mut hasher);
+                    pair.hash(&mut hasher);
+                }
+            }
+        }
+        for (logical, physical) in self.trial.final_layout.l2p_map() {
+            logical.hash(&mut hasher);
+            physical.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    pub(crate) fn quality(
+        &mut self,
+        target: &RoutingTarget,
+    ) -> Result<TrialQuality, CompilerError> {
+        Ok(TrialQuality {
+            abstract_quality: AbstractTrialQuality {
+                two_qubit_depth: self.ensure_abstract_two_qubit_depth(target)?,
+                ..self.abstract_quality
+            },
+            native_two_qubit_ops: self.native_two_qubit_ops,
+            native_two_qubit_depth: self.ensure_native_two_qubit_depth(target)?,
+            native_total_depth: self.ensure_native_total_depth(target)?,
+            native_total_ops: self.native_total_ops,
+            unknown_loop_count: self.unknown_loop_count,
+        })
     }
 
     pub(crate) fn finish(self, target: &RoutingTarget) -> Result<TrialResult, CompilerError> {

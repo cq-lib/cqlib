@@ -71,6 +71,7 @@ pub use sabre::{
     prepare_sabre_topology_target, sabre_layout, sabre_layout_prepared,
 };
 pub(crate) use sabre::{
+    PreparedSabreParetoSearch, SabreParetoCandidateId,
     prepare_sabre_device_target_with_session_and_physical,
     prepare_sabre_topology_target_with_prepared, sabre_route_selection_prepared,
 };
