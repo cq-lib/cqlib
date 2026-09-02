@@ -18,22 +18,28 @@
 //! deterministic order, and records only the postconditions it can actually
 //! verify with the compiler capabilities currently implemented.
 //!
-//! The normal workflow follows the stable pass order:
+//! The shared workflow follows the stable pass order:
 //! canonicalize input, expand circuit-backed definitions, apply production
 //! knowledge rewrite, decompose unitary and multi-controlled gates,
 //! canonicalize again, optimize the decomposed circuit, optionally lower to a
 //! routing-compatible basis, optionally route on a device, optionally translate
 //! to the resolved target basis, and canonicalize the output representation. A
-//! device workflow then lowers every gate to exact ordered native capabilities,
-//! closes a bounded native-optimization loop, and validates the completed
-//! physical circuit before returning it.
+//! strict-device candidate suffix then lowers every gate to exact ordered native
+//! capabilities, closes a bounded native-optimization loop, and validates the
+//! completed physical circuit.
 //!
-//! The enhanced workflow uses the same required correctness stages but raises
-//! rewrite budgets, uses stronger SABRE trial settings, performs a
-//! post-routing cleanup pass, and adds a target-aware cleanup pass after
-//! target-basis translation. This keeps `Normal` suitable for predictable
-//! production compilation while giving `Enhanced` more chances to recover
-//! simplifications exposed by decomposition, routing, and lowering.
+//! The enhanced workflow uses the same correctness contract but raises rewrite,
+//! resynthesis, native-optimization, and SABRE search budgets, performs
+//! post-routing cleanup, and adds target-aware cleanup when an explicit target
+//! basis is present. For a strict [`CompileTarget::Device`], it also snapshots
+//! the immutable pre-routing prefix. Candidate zero first completes the entire
+//! routing-to-validation suffix; a bounded two-tier SABRE Pareto beam then
+//! explores alternative routes from the same prefix, with every candidate
+//! independently traversing that same suffix through device validation. An
+//! exploratory candidate replaces candidate zero only when it preserves the
+//! exact native-quality contract in every control-flow scope and strictly
+//! improves native two-qubit count or depth. Otherwise the validated candidate
+//! zero remains the result.
 //!
 //! Stages are deliberately ordered around compiler invariants. Early
 //! canonicalization gives later passes a stable representation, definition and
@@ -41,7 +47,10 @@
 //! routing runs before final target-basis cleanup because it may insert SWAPs,
 //! and output canonicalization removes representation noise before exact device
 //! lowering. Native optimization is re-legalized and costed on exact physical
-//! qargs; device validation remains terminal, with no transform after it.
+//! qargs. Validation is terminal within each finalized candidate suffix. In an
+//! enhanced strict-device workflow, `select.sabre_pareto_beam` is the final
+//! orchestration and reporting step; it applies no transform after validation
+//! and can select only an already validated candidate.
 
 use crate::circuit::{Circuit, ClassicalControlOp, Instruction, Operation, StandardGate};
 use crate::compile::CompilerError;

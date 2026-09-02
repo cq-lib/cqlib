@@ -427,6 +427,10 @@ impl PyCompileMode {
     }
 
     /// Returns the enhanced compiler mode.
+    ///
+    /// This raises optimization and routing effort, adds target-aware cleanup,
+    /// and enables validated SABRE Pareto route selection for strict device
+    /// targets.
     #[staticmethod]
     fn enhanced() -> Self {
         Self {
@@ -699,6 +703,11 @@ impl PyCompileResult {
         self.inner.mode.into()
     }
 
+    /// Returns reports for the retained output path in workflow order.
+    ///
+    /// Enhanced strict-device runs summarize discarded Pareto branches in the
+    /// final `select.sabre_pareto_beam` report instead of returning every branch
+    /// as a complete step sequence.
     #[getter]
     fn steps(&self) -> Vec<PyWorkflowStepReport> {
         self.inner

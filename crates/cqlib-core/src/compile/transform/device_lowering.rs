@@ -17,8 +17,9 @@
 //! transform runs after routing and closes the remaining ISA gap: every
 //! gate-like operation is either retained as an exact native capability or
 //! lowered through a finite, recursively verified plan whose leaves are exact
-//! device capabilities. A separate terminal device verifier remains the final
-//! workflow safety boundary.
+//! device capabilities. A separate device verifier remains the terminal safety
+//! boundary for each finalized candidate. Enhanced workflow selection may run
+//! afterward, but it only chooses among candidates that crossed that boundary.
 //!
 //! Emission fuses buffered one-qubit runs on each qubit before they reach the
 //! output: exact peephole merges (`RZ` accumulation, `X2P`/`X2M` pairs,

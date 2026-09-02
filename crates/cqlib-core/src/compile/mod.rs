@@ -33,8 +33,15 @@
 //!   -> canonicalized output
 //!   -> exact device instruction lowering
 //!   -> native-input canonicalization and fixed-point optimization
-//!   -> final device validation
+//!   -> target-specific candidate validation
+//!   -> optional validated SABRE Pareto selection
 //! ```
+//!
+//! The last step applies only to [`CompileMode::Enhanced`] with a strict
+//! [`CompileTarget::Device`]. Candidate zero is finalized and validated first;
+//! every exploratory route then repeats the same post-routing suffix through
+//! validation. Selection performs no further circuit transform and either
+//! retains candidate zero or chooses an already validated Pareto improvement.
 //!
 //! # Public Entry Points
 //!
@@ -89,6 +96,10 @@
 //! reason. Step names describe workflow positions such as `route.sabre` or
 //! `translate.target_basis`; they are not required to equal
 //! [`Transformer::name`](transform::Transformer::name).
+//!
+//! For an enhanced strict-device run, the returned reports describe the retained
+//! baseline or winning candidate path followed by `select.sabre_pareto_beam`;
+//! they are not an exhaustive trace of every discarded exploratory branch.
 //!
 //! # Examples
 //!
