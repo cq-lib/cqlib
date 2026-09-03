@@ -165,7 +165,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "binding-c"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "cbindgen",
  "cqlib-core",
@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "binding-python"
-version = "0.1.0"
+version = "1.4.0-beta1"
 dependencies = [
  "chrono",
  "cqlib-core",
@@ -462,14 +462,14 @@ dependencies = [
 
 [[package]]
 name = "cqlib"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "cqlib-core",
 ]
 
 [[package]]
 name = "cqlib-core"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "approx",
  "bitvec",

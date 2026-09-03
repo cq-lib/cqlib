@@ -64,7 +64,10 @@ from .qis import (
     TrotterMode as TrotterMode,
 )
 
+__version__: str
+
 __all__ = [
+    "__version__",
     "Circuit",
     "CircuitDag",
     "CircuitError",

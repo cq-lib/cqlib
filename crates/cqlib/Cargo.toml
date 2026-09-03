@@ -12,10 +12,10 @@ documentation = "https://docs.rs/cqlib-core"
 readme = "README.md"
 keywords = [
     "quantum",
-    "quantum circuit",
-    "quantum computing",
-    "quantum programming language",
-    "physics",
+    "quantum-circuit",
+    "quantum-computing",
+    "quantum-compiler",
+    "simulator",
 ]
 categories = [
     "science",
@@ -27,4 +27,4 @@ categories = [
 
 
 [dependencies]
-cqlib-core = { path = "../cqlib-core", version = "0.1.0" }
+cqlib-core = { path = "../cqlib-core", version = "0.1.0-beta.1" }

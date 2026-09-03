@@ -1,10 +1,14 @@
 [project]
 name = "cqlib"
+description = "A high-performance quantum computing SDK with a Rust core and Python bindings."
 requires-python = ">=3.10"
 license = "Apache-2.0"
 readme = "README.md"
+authors = [
+    { name = "Cqlib Development Team", email = "tianyan@chinatelecom.cn" },
+]
 classifiers = [
-    "Environment :: Console",
+    "Development Status :: 4 - Beta",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",

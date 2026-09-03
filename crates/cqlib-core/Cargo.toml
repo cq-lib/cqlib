@@ -26,7 +26,10 @@ categories = [
 ]
 include = [
     "src/**/*.rs",
-    "src/compile/knowledge/rule_dsl/*.rule",
+    "src/compile/knowledge/rules/*.rule",
+    "src/ir/qasm2/parser.lalrpop",
+    "src/visualization/circuit/styles/*.json",
+    "build.rs",
     "Cargo.toml",
     "README.md",
 ]

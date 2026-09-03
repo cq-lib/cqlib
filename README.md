@@ -5,7 +5,7 @@
 **High-Performance Quantum Computing SDK — Built in Rust, for Every Language**
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.txt)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.89%2B-orange.svg)](https://www.rust-lang.org)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![C](https://img.shields.io/badge/c-11%2B-lightgrey.svg)](https://en.cppreference.com/w/c/11)
 
@@ -140,13 +140,13 @@ int main(void) {
 
 | Language | Minimum Version | Binding Technology |
 |----------|-----------------|--------------------|
-| Rust     | 1.85            | Native             |
+| Rust     | 1.89            | Native             |
 | Python   | 3.10            | PyO3 (abi3-py310)  |
 | C        | 11              | cbindgen           |
 
 ## Building from Source
 
-**Prerequisites:** Rust 1.85+, Python 3.10+ (for Python bindings)
+**Prerequisites:** Rust 1.89+, Python 3.10+ (for Python bindings)
 
 ```bash
 git clone https://gitee.com/cq-lib/cqlib.git

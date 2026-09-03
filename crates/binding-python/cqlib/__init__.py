@@ -10,6 +10,9 @@
 # copyright notice, and modified files need to carry a notice indicating
 # that they have been altered from the originals.
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _distribution_version
+
 from .circuit import (
     Circuit,
     CircuitDag,
@@ -64,7 +67,13 @@ from .qis import (
     TrotterMode,
 )
 
+try:
+    __version__ = _distribution_version("cqlib")
+except PackageNotFoundError:
+    __version__ = "0+unknown"
+
 __all__ = [
+    "__version__",
     "Circuit",
     "CircuitDag",
     "CircuitError",
