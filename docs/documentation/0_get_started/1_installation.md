@@ -17,7 +17,7 @@
 对于大多数用户，推荐使用 `pip` 直接安装。
 
 
-> 适用场景：算法研发、原型验证。  
+> 适用场景：算法研发、原型验证。
 > 注意事项：此方式已包含预编译二进制文件，无需安装 Rust 或 C 编译器。
 
 ### 第一步：创建并激活虚拟环境
@@ -61,7 +61,7 @@ python -m pip show cqlib
 
 在构建前，请根据您的操作系统安装以下必要组件：
 
-- 安装 Rust 工具链（Stable 1.85+）：
+- 安装 Rust 工具链（Stable 1.89+）：
 
   - Windows：访问官方网站： https://www.rust-lang.org/tools/install 下载并运行安装程序。
   - Linux/macOS：执行 `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`

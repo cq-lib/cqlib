@@ -62,7 +62,7 @@ Keep common changes scoped to the relevant module when possible, and avoid combi
 
 The project currently requires:
 
-- Rust 1.85+
+- Rust 1.89+
 - Python 3.10+
 - A C 11+ toolchain for C binding development
 
