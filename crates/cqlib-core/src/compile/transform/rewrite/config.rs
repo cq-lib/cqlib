@@ -33,6 +33,7 @@ pub struct RewriteConfig {
     max_pattern_len: usize,
     recurse_control_flow: bool,
     skip_labeled_ops: bool,
+    preserve_two_qubit_connectivity: bool,
     enabled_kinds: Vec<RuleKind>,
     mode: RewriteMode,
     target_instructions: Option<Vec<TargetInstruction>>,
@@ -60,6 +61,7 @@ impl RewriteConfig {
             max_pattern_len: 8,
             recurse_control_flow: true,
             skip_labeled_ops: true,
+            preserve_two_qubit_connectivity: false,
             enabled_kinds: vec![
                 RuleKind::Simplify,
                 RuleKind::Cancel,
@@ -114,6 +116,26 @@ impl RewriteConfig {
 
     pub fn skip_labeled_ops(mut self, enabled: bool) -> Self {
         self.skip_labeled_ops = enabled;
+        self
+    }
+
+    /// Restricts rewrites to those that cannot introduce new undirected
+    /// two-qubit connectivity.
+    ///
+    /// This is the post-routing safety policy: once a circuit has been
+    /// physically mapped, every two-qubit operation acts on a device coupling
+    /// edge, and a rewrite rule whose replacement uses a qubit pair absent
+    /// from its match (e.g. a CX bridge collapsing `CX 0 1, CX 1 2, CX 0 1,
+    /// CX 1 2` to `CX 0 2`) would break that mapping. When enabled, rules
+    /// are statically filtered before matching so replacements only act on
+    /// pairs already present in the matched operations.
+    ///
+    /// The guarantee is undirected topology connectivity, not ordered native
+    /// legality: direction flips such as `CX 0 1 -> H 0, H 1, CX 1 0, H 0,
+    /// H 1` remain allowed, since gate direction is the device-lowering
+    /// stage's responsibility.
+    pub fn with_preserve_two_qubit_connectivity(mut self, enabled: bool) -> Self {
+        self.preserve_two_qubit_connectivity = enabled;
         self
     }
 
@@ -185,6 +207,12 @@ impl RewriteConfig {
 
     pub const fn skips_labeled_ops(&self) -> bool {
         self.skip_labeled_ops
+    }
+
+    /// Returns whether rewrites must preserve undirected two-qubit
+    /// connectivity, rejecting rules that may act on new qubit pairs.
+    pub const fn preserve_two_qubit_connectivity(&self) -> bool {
+        self.preserve_two_qubit_connectivity
     }
 
     pub const fn mode(&self) -> RewriteMode {

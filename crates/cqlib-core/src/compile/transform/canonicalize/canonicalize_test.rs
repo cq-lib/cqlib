@@ -18,11 +18,37 @@ use crate::circuit::{
     StandardGate, UnitaryGate, ValueInstruction, ValueOperation, circuit_to_matrix,
 };
 use crate::compile::test_utils::generated_small_matrix_circuit;
-use crate::compile::transform::TransformerTestExt;
+use crate::compile::transform::{RewriteEdits, TransformOutcome, TransformerTestExt};
 use ndarray::array;
 use num_complex::Complex64;
 use proptest::prelude::*;
 use smallvec::smallvec;
+
+#[test]
+fn reports_exact_canonicalization_deletion_provenance() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    circuit.h(q0).unwrap();
+    circuit.i(q0).unwrap();
+    circuit.x(q0).unwrap();
+
+    let (outcome, edits) = Canonicalizer::production()
+        .transform_with_rewrite_edits(&circuit)
+        .unwrap();
+    assert!(matches!(outcome, TransformOutcome::Changed(_)));
+    let RewriteEdits::Linear {
+        old_len,
+        new_len,
+        replacements,
+    } = edits
+    else {
+        panic!("expected exact linear edits");
+    };
+    assert_eq!((old_len, new_len), (3, 2));
+    assert_eq!(replacements.len(), 1);
+    assert_eq!(replacements[0].old, 1..2);
+    assert_eq!(replacements[0].new, 1..1);
+}
 
 #[test]
 fn parameter_table_is_rebuilt_and_unused_params_are_removed() {
@@ -977,6 +1003,56 @@ fn canonicalization_is_idempotent() {
     let second = canonicalize_circuit(&first.circuit).unwrap();
 
     assert!(first.changed);
+    assert!(!second.changed);
+}
+
+#[test]
+fn canonical_transform_reports_stable_input_without_an_output_circuit() {
+    let mut circuit = Circuit::new(1);
+    circuit.h(Qubit::new(0)).unwrap();
+
+    let (outcome, edits) = Canonicalizer::production()
+        .transform_with_rewrite_edits(&circuit)
+        .unwrap();
+
+    assert!(matches!(outcome, TransformOutcome::Unchanged));
+    assert!(matches!(
+        edits,
+        RewriteEdits::Linear { replacements, .. } if replacements.is_empty()
+    ));
+}
+
+#[test]
+fn canonicalize_phase_fast_path_does_not_accept_negative_zero() {
+    let q0 = Qubit::new(0);
+    let mut circuit = Circuit::new(1);
+    circuit.set_global_phase(Parameter::from(-0.0));
+    circuit.i(q0).unwrap();
+
+    let result = Canonicalizer::production().run(&circuit).unwrap();
+    assert!(result.changed);
+    assert_eq!(
+        result
+            .circuit
+            .global_phase()
+            .evaluate(&None)
+            .unwrap()
+            .to_bits(),
+        0.0_f64.to_bits()
+    );
+}
+
+#[test]
+fn canonical_transform_normalizes_global_phase_accumulator_residue() {
+    let mut circuit = Circuit::new(1);
+    circuit.set_global_phase(Parameter::from(-3.330_669_073_875_469_6e-16));
+    circuit.h(Qubit::new(0)).unwrap();
+
+    let first = Canonicalizer::production().run(&circuit).unwrap();
+    assert!(first.changed);
+    assert_eq!(first.circuit.global_phase(), Parameter::from(0.0));
+
+    let second = Canonicalizer::production().run(&first.circuit).unwrap();
     assert!(!second.changed);
 }
 

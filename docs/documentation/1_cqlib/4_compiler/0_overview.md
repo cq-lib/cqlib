@@ -1,6 +1,6 @@
 # 编译优化
 
-Cqlib 2.0 Python 绑定以 **`cqlib.compile`** 为推荐入口：一次调用完成规范化、知识规则优化、分解、可选设备布局与 SABRE 路由、目标门集翻译。
+Cqlib 2.0 Python 绑定以 **`cqlib.compile`** 为推荐入口：一次调用完成规范化、知识规则优化、分解、可选设备布局与 SABRE 路由、目标门集翻译，以及严格设备目标所需的原生指令 lowering、固定点优化和验证。
 
 ---
 
@@ -45,6 +45,8 @@ for step in result.steps:
 compiled = result.circuit
 ```
 
+上例同时传入 `device` 和 `target_basis`，因此选择的是 `TopologyBasis` 语义：设备用于容量、布局和路由，显式门集约束输出，但不承诺输出满足设备的原生指令能力。只有配置了原生能力的严格 `Device` 目标，才会在 Enhanced 模式下运行后文所述的 SABRE Pareto beam。
+
 ---
 
 ## 分步调试管线
@@ -83,15 +85,43 @@ print("swap_count:", route_result.swap_count)
 逻辑线路 (Circuit)
   → canonicalize.input
   → decompose.definitions
-  → optimize.pre_decomposition     
-  → decompose.unitary / mc_gates
+  → optimize.pre_decomposition
+  → decompose.unitary / decompose.mc_gates
+  → canonicalize.after_decomposition
   → optimize.post_decomposition
-  → route.sabre                    
-  → optimize.post_routing        
-  → translate.target_basis
-  → optimize.target_cleanup
+  → decompose.routing_basis                         [物理目标]
+  → route.sabre                                     [物理目标]
+  → post-routing resynthesis / cleanup              [Enhanced + 物理目标]
+  → translate.target_basis / target cleanup         [显式目标门集]
   → canonicalize.output
+  → lower.device_instructions                       [严格 Device 目标]
+  → native-input canonicalization / fixed point     [严格 Device 目标]
+  → validate.device / validate.topology             [按目标类型]
+  → select.sabre_pareto_beam                        [Enhanced + 严格 Device 目标]
+  → result.circuit
 ```
+
+`canonicalize.output` 只结束通用输出表示的整理。对于严格 `Device` 目标，后面仍会执行精确原生指令 lowering、`optimize.native_fixed_point` 和 `validate.device`。
+
+### Enhanced 严格设备的 Pareto 选择
+
+Enhanced 严格设备编译会在第一次路由前保存不可变的 pre-routing prefix，并把普通完整编译结果作为 candidate 0：
+
+```text
+保存 pre-routing prefix
+  → candidate 0：route + 完整后缀 + validate.device
+  → bounded SABRE Pareto beam
+      → 每个探索候选从同一 prefix 开始
+      → route + 同一完整后缀 + validate.device
+  → select.sabre_pareto_beam
+      ├─ 存在满足契约的改进候选：选择已验证的 winner
+      └─ 否则：保留已验证的 candidate 0
+  → result.circuit
+```
+
+候选必须在每个控制流作用域上满足精确 Pareto 契约，并且至少严格改善原生双比特门数量或深度，才能替换 candidate 0。因此，`selection` 出现在 `validation` 之后不表示输出绕过了验证：selection 不再变换线路，只在已完成相同 validation 后缀的候选之间决策。
+
+成功返回时，`result.steps` 记录公共前缀、最终保留的 baseline 或 winner 路径，以及末尾的 `select.sabre_pareto_beam`；它不是所有探索分支的完整执行日志。候选尝试数、丢弃数、首次可恢复错误，以及 candidate 0/winner 的质量摘要记录在 selection 的 `reason` 中。
 
 ---
 
@@ -100,7 +130,7 @@ print("swap_count:", route_result.swap_count)
 | 模式 | 说明 |
 |------|------|
 | `CompileMode.normal()` | 生产默认可预测：保守 rewrite 预算与 SABRE 试次 |
-| `CompileMode.enhanced()` | 更强 rewrite、更多 SABRE trials、路由后/目标基清理 |
+| `CompileMode.enhanced()` | 更高的 rewrite、重综合、native 固定点优化和 SABRE 搜索预算，并增加路由后/目标门集清理；严格 `Device` 目标还会运行已验证候选间的有界 SABRE Pareto beam |
 
 ---
 
@@ -109,8 +139,8 @@ print("swap_count:", route_result.swap_count)
 | 字段 | 作用 |
 |------|------|
 | `mode` | `normal` / `enhanced` |
-| `device` | 可用比特、拓扑、可选 native gates 与标定 |
-| `target_basis` | 显式目标门集（优先于 device.native_gates） |
+| `device` | 可用比特、拓扑、native gates 与可选标定；单独使用时选择严格 `Device` 目标 |
+| `target_basis` | 显式目标门集；与 `device` 同时使用时选择 `TopologyBasis`，不承诺设备原生兼容，也不运行 Pareto beam |
 | `initial_layout` | 跳过自动布局，直接用给定映射做 SABRE 路由 |
 | `resource_policy` | 分解阶段辅助比特策略 |
 | `seed` | 启发式布局/路由随机试次 |

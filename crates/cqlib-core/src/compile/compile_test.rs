@@ -11,7 +11,9 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-use super::{CompileConfig, CompileMode, CompileTarget, DeviceCompileTarget, compile};
+use super::{
+    CompileConfig, CompileMode, CompileTarget, DeviceCompileTarget, compile, compile_owned,
+};
 use crate::circuit::{
     Circuit, CircuitParam, Instruction, MCGate, Parameter, ParameterValue, Qubit, StandardGate,
 };
@@ -38,6 +40,22 @@ fn compile_normal(circuit: &Circuit) -> super::CompileResult {
         },
     )
     .unwrap()
+}
+
+#[test]
+fn owned_compile_entry_matches_borrowed_entry() {
+    let circuit = bell_circuit();
+    let config = CompileConfig {
+        mode: CompileMode::Normal,
+        target: CompileTarget::Logical,
+        resource_policy: ResourcePolicy::default(),
+    };
+
+    let borrowed = compile(&circuit, config.clone()).unwrap();
+    let owned = compile_owned(circuit.clone(), config).unwrap();
+
+    assert_eq!(owned, borrowed);
+    assert_eq!(circuit, bell_circuit());
 }
 
 fn assert_compiled_matrix_equivalent(actual: &Circuit, expected: &Circuit) {

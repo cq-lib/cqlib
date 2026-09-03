@@ -138,7 +138,7 @@ print("before:", len(circuit.operations))
 print("after:", len(optimized.operations))
 ```
 
-`CompileMode.enhanced()` 会使用更高的规则搜索预算，并在路由和目标门集转换后增加清理步骤。对于 Clifford-RZ 片段较多、路由后容易暴露新相邻门的线路，增强模式通常更容易找到额外的合并或抵消机会。
+`CompileMode.enhanced()` 会使用更高的规则搜索、重综合、native 固定点优化和 SABRE 搜索预算，并在路由和目标门集转换后增加清理步骤。对于严格 `Device` 目标，它还会让多个路由候选分别完成后续 lowering、优化和验证，再通过有界 Pareto beam 选择最终结果。对于 Clifford-RZ 片段较多、路由后容易暴露新相邻门的线路，增强模式通常更容易找到额外的合并或抵消机会。
 
 ---
 

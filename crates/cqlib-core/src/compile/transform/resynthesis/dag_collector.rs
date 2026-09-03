@@ -13,8 +13,9 @@
 //! DAG-backed candidate collection for two-qubit block resynthesis.
 //!
 //! The DAG is a pass-local dependency view. It only improves candidate
-//! discovery; final replacement legality is still checked by the selector via
-//! exact matrix synthesis, strict cost improvement, and replacement/crossed
+//! discovery. Dependency closure and exact source crossings provide the inputs
+//! for structural validation; the selector rechecks them before requiring
+//! exact 4x4 synthesis, strict cost improvement, and replacement/crossed
 //! commutation validation.
 
 use super::collector::{

@@ -30,10 +30,12 @@
 //!   State $|q_{n-1} \dots q_1 q_0\rangle$.
 //! - **Parallelization**: Large matrix multiplications (large state spaces) are automatically parallelized using `rayon`.
 
+use crate::circuit::Circuit;
 use crate::circuit::circuit_param::CircuitParam;
 use crate::circuit::error::CircuitError;
 use crate::circuit::gate::Instruction;
-use crate::circuit::{Circuit, ParameterValue, Qubit, ValueOperation};
+#[cfg(any(test, debug_assertions))]
+use crate::circuit::{ParameterValue, Qubit, ValueOperation};
 use ndarray::Array2;
 use ndarray::parallel::prelude::*;
 use num_complex::Complex64;
@@ -249,6 +251,7 @@ pub fn circuit_to_matrix(
 ///
 /// This internal path avoids constructing and validating a temporary `Circuit`
 /// in compiler passes that already hold finite, standard-gate operations.
+#[cfg(any(test, debug_assertions))]
 pub(crate) fn value_operations_to_matrix(
     qubits: &[Qubit],
     operations: &[ValueOperation],

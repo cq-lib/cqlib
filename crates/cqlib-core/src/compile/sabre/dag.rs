@@ -49,6 +49,7 @@ use rustworkx_core::petgraph::Direction;
 use rustworkx_core::petgraph::graph::DiGraph;
 use rustworkx_core::petgraph::prelude::NodeIndex;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Deref;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -121,13 +122,27 @@ pub(crate) struct SabreSwitchCase {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SabreNode {
-    pub(crate) operations: Vec<Arc<Operation>>,
+    pub(crate) operations: Vec<SabreOperation>,
     pub(crate) kind: SabreNodeKind,
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct SabreOperation {
+    pub(crate) operation: Arc<Operation>,
+    pub(crate) source_order: usize,
+}
+
+impl Deref for SabreOperation {
+    type Target = Operation;
+
+    fn deref(&self) -> &Self::Target {
+        &self.operation
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct SabreDag {
-    pub(crate) initial: Vec<Arc<Operation>>,
+    pub(crate) initial: Vec<SabreOperation>,
     pub(crate) graph: DiGraph<SabreNode, ()>,
     pub(crate) first_layer: Vec<NodeIndex>,
 }
@@ -142,7 +157,7 @@ impl SabreDag {
         let mut parent_marks = Vec::<u32>::new();
         let mut parent_generation = 0_u32;
 
-        for operation in operations {
+        for (source_order, operation) in operations.iter().enumerate() {
             let kind = kind_from_operation(operation)?;
             let is_global_barrier = matches!(
                 operation.instruction,
@@ -193,14 +208,18 @@ impl SabreDag {
                 _ => Predecessors::Multiple(parents),
             };
             let mut created_node = None;
+            let operation = SabreOperation {
+                operation: Arc::new(operation.clone()),
+                source_order,
+            };
             match predecessors {
                 Predecessors::AllUnmapped => match kind {
                     SabreNodeKind::Synchronize if !ordering_barrier => {
-                        initial.push(Arc::new(operation.clone()))
+                        initial.push(operation.clone())
                     }
                     kind => {
                         let node = graph.add_node(SabreNode {
-                            operations: vec![Arc::new(operation.clone())],
+                            operations: vec![operation.clone()],
                             kind,
                         });
                         first_layer.push(node);
@@ -225,13 +244,13 @@ impl SabreDag {
                             _ => false,
                         };
                     if fold_into_previous {
-                        graph[previous].operations.push(Arc::new(operation.clone()));
+                        graph[previous].operations.push(operation.clone());
                         for logical in qubits {
                             wire_pos.insert(logical, previous);
                         }
                     } else {
                         let node = graph.add_node(SabreNode {
-                            operations: vec![Arc::new(operation.clone())],
+                            operations: vec![operation.clone()],
                             kind,
                         });
                         graph.add_edge(previous, node, ());
@@ -243,7 +262,7 @@ impl SabreDag {
                 }
                 Predecessors::Multiple(parents) => {
                     let node = graph.add_node(SabreNode {
-                        operations: vec![Arc::new(operation.clone())],
+                        operations: vec![operation.clone()],
                         kind,
                     });
                     created_node = Some(node);

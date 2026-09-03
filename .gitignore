@@ -131,6 +131,6 @@ proptest-regressions
 /crates/cqlib-core/src/visualization/**/figure/*.png
 /crates/cqlib-core/src/visualization/**/figure/*.svg
 /crates/cqlib-core/src/visualization/**/figure/diffs/
-/tests/python/visualization/figure/*.png
-/tests/python/visualization/figure/*.svg
-/tests/python/visualization/figure/diffs/
+/crates/binding-python/tests/visualization/figure/*.png
+/crates/binding-python/tests/visualization/figure/*.svg
+/crates/binding-python/tests/visualization/figure/diffs/

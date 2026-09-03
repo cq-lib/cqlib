@@ -23,9 +23,10 @@ use crate::compile::knowledge::library::RuleLibrary;
 use crate::compile::knowledge::matcher::KnowledgeInstructionKey as RewriteInstructionKey;
 use crate::compile::transform::rewrite::basis::{TargetContext, validate_final_target};
 use crate::compile::transform::rewrite::config::RewriteConfig;
+use crate::compile::transform::rewrite::diagnostics::KnowledgeRewriteDiagnostics;
 use crate::compile::transform::rewrite::matcher::{
     BlockMatchCache, CompiledRuleSet, PatchPlanStep, ReplacementItem, RewritePatch,
-    is_gphase_instruction, patch_application_plan, resolve_operation_param,
+    RunActiveRuleSet, is_gphase_instruction, patch_application_plan, resolve_operation_param,
     select_rewrites_for_anchor_ranges,
 };
 
@@ -33,6 +34,7 @@ use crate::compile::transform::lowering_support::LoweringTarget;
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::{TransformOutcome, Transformer};
 use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::ops::Range;
@@ -48,10 +50,10 @@ static BUILTIN_COMPILED_RULES: OnceLock<Result<Arc<CompiledRuleSet>, String>> = 
 /// bookkeeping (match-cache construction, dirty-range tracking) costs more
 /// than it saves. This intentionally deviates from an "incremental by
 /// default" policy to protect small-circuit latency. The knob is independent
-/// of `PARALLEL_ANCHOR_THRESHOLD` in `matcher.rs`, which controls rayon
+/// of the workload thresholds in `matcher.rs`, which control rayon
 /// parallelism once a scan happens; adjust each only against its own
 /// measurements.
-const SMALL_CIRCUIT_FULL_SCAN_THRESHOLD: usize = 4_096;
+pub(super) const SMALL_CIRCUIT_FULL_SCAN_THRESHOLD: usize = 4_096;
 
 /// Execution strategy for the rewrite fixpoint.
 ///
@@ -93,6 +95,44 @@ pub struct KnowledgeRewriteResult {
     pub circuit: Circuit,
     pub changed: bool,
     pub stats: KnowledgeRewriteStats,
+    /// Incremental-workset and condition-evaluation counters for this run.
+    pub diagnostics: KnowledgeRewriteDiagnostics,
+}
+
+/// Workflow-only result which leaves a stable input circuit in place instead
+/// of cloning it solely to populate the standalone result shape.
+pub(crate) struct KnowledgeRewriteSessionResult {
+    pub(crate) circuit: Option<Circuit>,
+    pub(crate) changed: bool,
+    pub(crate) stats: KnowledgeRewriteStats,
+    pub(crate) diagnostics: KnowledgeRewriteDiagnostics,
+}
+
+struct LinearRewriteResult {
+    circuit: Option<Circuit>,
+    changed: bool,
+    stats: KnowledgeRewriteStats,
+    diagnostics: KnowledgeRewriteDiagnostics,
+}
+
+impl LinearRewriteResult {
+    fn into_public(self, source: &Circuit) -> KnowledgeRewriteResult {
+        KnowledgeRewriteResult {
+            circuit: self.circuit.unwrap_or_else(|| source.clone()),
+            changed: self.changed,
+            stats: self.stats,
+            diagnostics: self.diagnostics,
+        }
+    }
+
+    fn into_session(self) -> KnowledgeRewriteSessionResult {
+        KnowledgeRewriteSessionResult {
+            circuit: self.circuit,
+            changed: self.changed,
+            stats: self.stats,
+            diagnostics: self.diagnostics,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -100,6 +140,7 @@ struct RoundStats {
     rules_applied: usize,
     changed_sequences: usize,
     representation_changes: usize,
+    diagnostics: KnowledgeRewriteDiagnostics,
 }
 
 impl RoundStats {
@@ -146,6 +187,31 @@ struct RewriteWorkset {
     blocks: HashMap<BlockId, BlockWorkset>,
     full_scopes: HashSet<ScopeId>,
     caches: HashMap<BlockId, Arc<BlockMatchCache>>,
+}
+
+/// Cached matching state for the workflow's single flat rewrite block.
+///
+/// The owning [`KnowledgeRewriteSession`](super::session::KnowledgeRewriteSession)
+/// advances this cache through verified transform edits, so a later rewrite
+/// resolves and indexes only replacement operations.
+#[derive(Debug, Clone)]
+pub(crate) struct LinearRewriteWorkspace {
+    cache: BlockMatchCache,
+}
+
+impl LinearRewriteWorkspace {
+    pub(super) fn after_linear_replacements(
+        self,
+        after: &Circuit,
+        replacements: &[super::OperationReplacement],
+        qubits_renamed: bool,
+    ) -> Option<Self> {
+        Some(Self {
+            cache: self
+                .cache
+                .after_linear_replacements(after, replacements, qubits_renamed)?,
+        })
+    }
 }
 
 impl RewriteWorkset {
@@ -197,6 +263,28 @@ impl KnowledgeRewriter {
         &self.config
     }
 
+    /// Returns the maximum forward matcher reach for this configuration.
+    ///
+    /// Workflow-lifetime rewrite certificates store this exact value beside
+    /// their clean-anchor proof. Later mutation invalidation must use the
+    /// stored proof reach rather than deriving a potentially narrower value
+    /// from a subsequent configuration.
+    pub(crate) fn proof_reach(&self) -> Result<usize, CompilerError> {
+        Ok(builtin_compiled_rules()?.max_match_reach(&self.config))
+    }
+
+    /// Returns whether clean-anchor proofs produced by this rewriter survive
+    /// a bijective renaming of runtime qubits.
+    ///
+    /// The current rule language binds dense rule-local qubit labels and its
+    /// conditions observe parameters only. It cannot name a physical qubit or
+    /// inspect a device domain. Keep this capability explicit so a future
+    /// domain-aware rule model must opt out before routing edits can
+    /// advance its proofs.
+    pub(crate) fn proof_is_qubit_bijection_invariant(&self) -> Result<bool, CompilerError> {
+        Ok(builtin_compiled_rules()?.is_qubit_bijection_invariant())
+    }
+
     #[cfg(test)]
     pub(crate) fn force_full_scan(mut self) -> Self {
         self.execution_policy = RewriteExecutionPolicy::FullScan;
@@ -227,6 +315,14 @@ impl KnowledgeRewriter {
     /// let _rewritten = result.circuit;
     /// ```
     pub fn run(&self, circuit: &Circuit) -> Result<KnowledgeRewriteResult, CompilerError> {
+        self.run_internal(circuit, true)
+    }
+
+    fn run_internal(
+        &self,
+        circuit: &Circuit,
+        collect_diagnostics: bool,
+    ) -> Result<KnowledgeRewriteResult, CompilerError> {
         if self.config.max_rounds() == 0 {
             return Err(CompilerError::InvalidInput(
                 "rewrite max_rounds must be greater than zero".to_string(),
@@ -245,11 +341,22 @@ impl KnowledgeRewriter {
             RewriteExecutionPolicy::Incremental => true,
         };
         if incremental && is_linear_workspace_eligible(circuit) {
-            return self.run_linear_workspace(circuit, rules.as_ref(), target_context.as_ref());
+            return self
+                .run_linear_workspace(
+                    circuit,
+                    rules.as_ref(),
+                    target_context.as_ref(),
+                    None,
+                    None,
+                    collect_diagnostics,
+                )
+                .map(|(result, _)| result.into_public(circuit));
         }
+        let active_rules = rules.active_rules(&self.config, target_context.as_ref());
 
         let mut current = circuit.clone();
         let mut aggregate = KnowledgeRewriteStats::default();
+        let mut diagnostics = KnowledgeRewriteDiagnostics::default();
         let mut changed = false;
         let mut workset: Option<RewriteWorkset> = None;
 
@@ -258,10 +365,13 @@ impl KnowledgeRewriter {
             let (next, round_stats, next_workset) = RoundRewriter::run(
                 &current,
                 rules.as_ref(),
+                &active_rules,
                 &self.config,
                 target_context.as_ref(),
                 workset.as_ref(),
+                collect_diagnostics,
             )?;
+            diagnostics.merge(round_stats.diagnostics);
             if !round_stats.changed() {
                 aggregate.reached_fixpoint = true;
                 break;
@@ -279,7 +389,65 @@ impl KnowledgeRewriter {
             circuit: current,
             changed,
             stats: aggregate,
+            diagnostics,
         })
+    }
+
+    /// Workflow entry point which always establishes a reusable flat
+    /// workspace when the circuit shape permits it, independent of the
+    /// standalone small-circuit policy.
+    pub(crate) fn run_for_session(
+        &self,
+        circuit: &Circuit,
+        reconciled: Option<(Vec<Range<usize>>, Option<LinearRewriteWorkspace>)>,
+        collect_diagnostics: bool,
+    ) -> Result<
+        (
+            KnowledgeRewriteSessionResult,
+            Option<LinearRewriteWorkspace>,
+        ),
+        CompilerError,
+    > {
+        if !is_linear_workspace_eligible(circuit) {
+            let fell_back_from_incremental = reconciled.is_some();
+            return self
+                .run_internal(circuit, collect_diagnostics)
+                .map(|mut result| {
+                    if collect_diagnostics && fell_back_from_incremental {
+                        result.diagnostics.full_scan_fallbacks =
+                            result.diagnostics.full_scan_fallbacks.saturating_add(1);
+                    }
+                    let circuit = result.changed.then_some(result.circuit);
+                    (
+                        KnowledgeRewriteSessionResult {
+                            circuit,
+                            changed: result.changed,
+                            stats: result.stats,
+                            diagnostics: result.diagnostics,
+                        },
+                        None,
+                    )
+                });
+        }
+        if self.config.max_rounds() == 0 {
+            return Err(CompilerError::InvalidInput(
+                "rewrite max_rounds must be greater than zero".to_string(),
+            ));
+        }
+        let rules = builtin_compiled_rules()?;
+        let target_context = TargetContext::from_config(&self.config, rules.as_ref())?;
+        let (ranges, workspace) = reconciled.map_or((None, None), |(ranges, workspace)| {
+            (Some(ranges), workspace)
+        });
+        self.run_linear_workspace(
+            circuit,
+            rules.as_ref(),
+            target_context.as_ref(),
+            ranges,
+            workspace,
+            collect_diagnostics,
+        )
+        .map(|(result, workspace)| (result.into_session(), Some(workspace)))
     }
 
     /// Runs the rewrite fixpoint on a flat, gate-only circuit without
@@ -288,8 +456,8 @@ impl KnowledgeRewriter {
     /// Eligible circuits (see [`is_linear_workspace_eligible`]) form a single
     /// rewrite block, so the fixpoint runs on one persistent operation vector
     /// plus a [`BlockMatchCache`]: each round scans only the dirty anchor
-    /// ranges produced by the previous round's patches (or everything, after
-    /// a block-summary change), splices the selected patches in place, and
+    /// ranges produced by the previous round's patches, splices the selected
+    /// patches in place, and
     /// folds global-phase replacements into a running phase delta. The final
     /// [`Circuit`] is materialized exactly once, after the fixpoint.
     ///
@@ -304,21 +472,30 @@ impl KnowledgeRewriter {
         circuit: &Circuit,
         rules: &CompiledRuleSet,
         target_context: Option<&TargetContext>,
-    ) -> Result<KnowledgeRewriteResult, CompilerError> {
-        let mut operations = circuit.operations().to_vec();
-        let mut cache = BlockMatchCache::new(circuit, &operations)?;
-        let mut anchor_ranges: Option<Vec<Range<usize>>> = None;
+        initial_anchor_ranges: Option<Vec<Range<usize>>>,
+        workspace: Option<LinearRewriteWorkspace>,
+        collect_diagnostics: bool,
+    ) -> Result<(LinearRewriteResult, LinearRewriteWorkspace), CompilerError> {
+        let mut operations = Cow::Borrowed(circuit.operations());
+        let mut cache = match workspace {
+            Some(workspace) if workspace.cache.len() == operations.len() => workspace.cache,
+            _ => BlockMatchCache::new_with_diagnostics(circuit, &operations, collect_diagnostics)?,
+        };
+        let mut anchor_ranges = initial_anchor_ranges;
         let mut aggregate = KnowledgeRewriteStats::default();
+        let diagnostics_before = cache.diagnostics();
         let mut changed = false;
         let mut phase_delta = Parameter::from(0.0);
         let max_match_reach = rules.max_match_reach(&self.config);
+        let active_rules = rules.active_rules(&self.config, target_context);
 
         for round in 1..=self.config.max_rounds() {
             aggregate.rounds_executed = round;
             let patches = select_rewrites_for_anchor_ranges(
-                &operations,
+                operations.as_ref(),
                 &cache,
                 rules,
+                &active_rules,
                 &self.config,
                 target_context,
                 anchor_ranges.as_deref(),
@@ -331,8 +508,9 @@ impl KnowledgeRewriter {
             changed = true;
             aggregate.rules_applied = aggregate.rules_applied.saturating_add(patches.len());
             aggregate.changed_sequences = aggregate.changed_sequences.saturating_add(1);
-            let (next_cache, summary_changed) =
-                cache.into_rewritten(&operations, &patches).ok_or_else(|| {
+            let next_cache = cache
+                .into_rewritten(operations.as_ref(), &patches)
+                .ok_or_else(|| {
                     CompilerError::InvariantViolation(
                         "linear rewrite workspace could not materialize its selected patches"
                             .to_string(),
@@ -349,15 +527,17 @@ impl KnowledgeRewriter {
                     next_cache.len()
                 )));
             }
-            let (next_operations, round_phase) = apply_linear_patches(operations, &patches)?;
+            let (next_operations, round_phase) =
+                apply_linear_patches(operations.as_ref(), &patches)?;
             phase_delta = &phase_delta + &round_phase;
-            operations = next_operations;
+            operations = Cow::Owned(next_operations);
             cache = next_cache;
-            anchor_ranges = (!summary_changed).then_some(next_ranges);
+            anchor_ranges = Some(next_ranges);
         }
 
         let output = if changed {
             let value_operations = operations
+                .into_owned()
                 .into_iter()
                 .enumerate()
                 .map(|(position, operation)| ValueOperation {
@@ -372,20 +552,26 @@ impl KnowledgeRewriter {
                     label: operation.label,
                 })
                 .collect();
-            CircuitRebuildContext::new(circuit).finish(
+            Some(CircuitRebuildContext::new(circuit).finish(
                 circuit.qubits(),
                 value_operations,
                 &circuit.global_phase() + &phase_delta,
-            )?
+            )?)
         } else {
-            circuit.clone()
+            None
         };
-        validate_final_target(&output, &self.config)?;
-        Ok(KnowledgeRewriteResult {
-            circuit: output,
-            changed,
-            stats: aggregate,
-        })
+        validate_final_target(output.as_ref().unwrap_or(circuit), &self.config)?;
+        let mut diagnostics = KnowledgeRewriteDiagnostics::default();
+        diagnostics.merge_matcher(cache.diagnostics().saturating_delta(diagnostics_before));
+        Ok((
+            LinearRewriteResult {
+                circuit: output,
+                changed,
+                stats: aggregate,
+                diagnostics,
+            },
+            LinearRewriteWorkspace { cache },
+        ))
     }
 }
 
@@ -433,8 +619,10 @@ pub fn rewrite_circuit(
 struct RoundRewriter<'a> {
     source: &'a Circuit,
     rules: &'a CompiledRuleSet,
+    active_rules: &'a RunActiveRuleSet,
     config: &'a RewriteConfig,
     target_context: Option<&'a TargetContext>,
+    collect_diagnostics: bool,
     workset: Option<&'a RewriteWorkset>,
     next_workset: RewriteWorkset,
     max_match_reach: usize,
@@ -446,15 +634,19 @@ impl<'a> RoundRewriter<'a> {
     fn run(
         source: &'a Circuit,
         rules: &'a CompiledRuleSet,
+        active_rules: &'a RunActiveRuleSet,
         config: &'a RewriteConfig,
         target_context: Option<&'a TargetContext>,
         workset: Option<&'a RewriteWorkset>,
+        collect_diagnostics: bool,
     ) -> Result<(Circuit, RoundStats, RewriteWorkset), CompilerError> {
         let mut rewriter = Self {
             source,
             rules,
+            active_rules,
             config,
             target_context,
+            collect_diagnostics,
             workset,
             next_workset: RewriteWorkset::default(),
             max_match_reach: rules.max_match_reach(config),
@@ -533,16 +725,25 @@ impl<'a> RoundRewriter<'a> {
                 .and_then(|workset| workset.caches.get(&block_id))
             {
                 Some(cache) if cache.len() == block.len() => Arc::clone(cache),
-                _ => Arc::new(BlockMatchCache::new(self.source, block)?),
+                _ => Arc::new(BlockMatchCache::new_with_diagnostics(
+                    self.source,
+                    block,
+                    self.collect_diagnostics,
+                )?),
             };
+            let diagnostics_before = cache.diagnostics();
             let patches = select_rewrites_for_anchor_ranges(
                 block,
                 cache.as_ref(),
                 self.rules,
+                self.active_rules,
                 self.config,
                 self.target_context,
                 ranges,
             )?;
+            self.stats
+                .diagnostics
+                .merge_matcher(cache.diagnostics().saturating_delta(diagnostics_before));
             if patches.is_empty() {
                 self.next_workset
                     .caches
@@ -1001,7 +1202,7 @@ impl<'a> RoundRewriter<'a> {
 /// measurements, control flow, or other unkeyed instructions) and none is a
 /// global-phase operation, whose absorption into the phase delta the
 /// workspace does not model in its operation vector.
-fn is_linear_workspace_eligible(circuit: &Circuit) -> bool {
+pub(super) fn is_linear_workspace_eligible(circuit: &Circuit) -> bool {
     circuit.classical_vars().is_empty()
         && circuit.classical_values().is_empty()
         && circuit.operations().iter().all(|operation| {
@@ -1076,13 +1277,13 @@ fn dirty_ranges_after_patches(
 /// while the placeholder preserves the correct parameter count for local
 /// cost accounting.
 fn apply_linear_patches(
-    operations: Vec<Operation>,
+    operations: &[Operation],
     patches: &[RewritePatch],
 ) -> Result<(Vec<Operation>, Parameter), CompilerError> {
     let steps = patch_application_plan(operations.len(), patches)?;
     let mut output = Vec::with_capacity(operations.len());
     let mut phase_delta = Parameter::from(0.0);
-    let mut operations = operations.into_iter();
+    let mut operations = operations.iter();
     for step in steps {
         match step {
             PatchPlanStep::Replacements(patch) => {
@@ -1109,9 +1310,12 @@ fn apply_linear_patches(
             }
             PatchPlanStep::Keep(_) => {
                 output.push(
-                    operations.next().expect(
-                        "patch application plan produces exactly one step per block position",
-                    ),
+                    operations
+                        .next()
+                        .expect(
+                            "patch application plan produces exactly one step per block position",
+                        )
+                        .clone(),
                 );
             }
         }

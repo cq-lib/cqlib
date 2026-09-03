@@ -22,6 +22,18 @@ use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
 use crate::circuit::{Instruction, Qubit, StandardGate};
 
+/// Collector provenance used to select the applicable validation rules.
+///
+/// This tag is not trusted as a proof by itself: the selector rechecks the
+/// origin-specific extraction invariants before synthesis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BlockOrigin {
+    /// A linear run closed at every operation touching its qubit pair.
+    MaximalClosedRun,
+    /// A dependency-closed DAG block whose crossings were proved exact.
+    DagDependencyClosed,
+}
+
 /// Dependency-closed operation block that can be converted into a 4x4 unitary.
 ///
 /// `matched_orders` are the source operations consumed by numerical synthesis.
@@ -40,9 +52,51 @@ pub(crate) struct TwoQubitNumericBlock {
     pub matched_1q_count: usize,
     pub matched_2q_count: usize,
     pub contains_swap: bool,
+    origin: BlockOrigin,
 }
 
 impl TwoQubitNumericBlock {
+    pub(super) fn maximal_closed_run(
+        qubits: [Qubit; 2],
+        matched_orders: Vec<usize>,
+        matched_1q_count: usize,
+        matched_2q_count: usize,
+        contains_swap: bool,
+    ) -> Self {
+        Self {
+            qubits,
+            matched_orders,
+            crossed_orders: Vec::new(),
+            matched_1q_count,
+            matched_2q_count,
+            contains_swap,
+            origin: BlockOrigin::MaximalClosedRun,
+        }
+    }
+
+    pub(super) fn dag_dependency_closed(
+        qubits: [Qubit; 2],
+        matched_orders: Vec<usize>,
+        crossed_orders: Vec<usize>,
+        matched_1q_count: usize,
+        matched_2q_count: usize,
+        contains_swap: bool,
+    ) -> Self {
+        Self {
+            qubits,
+            matched_orders,
+            crossed_orders,
+            matched_1q_count,
+            matched_2q_count,
+            contains_swap,
+            origin: BlockOrigin::DagDependencyClosed,
+        }
+    }
+
+    pub(super) fn origin(&self) -> BlockOrigin {
+        self.origin
+    }
+
     pub(crate) fn first_order(&self) -> usize {
         self.matched_orders[0]
     }
@@ -156,14 +210,14 @@ impl<'a> BlockBuilder<'a> {
             contains_swap |= matches!(op.instruction, Instruction::Standard(StandardGate::SWAP));
         }
 
-        TwoQubitNumericBlock {
-            qubits: self.qubits,
-            matched_orders: self.matched_positions,
-            crossed_orders: self.crossed_positions,
+        TwoQubitNumericBlock::dag_dependency_closed(
+            self.qubits,
+            self.matched_positions,
+            self.crossed_positions,
             matched_1q_count,
             matched_2q_count,
             contains_swap,
-        }
+        )
     }
 }
 
@@ -187,6 +241,7 @@ pub(super) fn is_hard_boundary(
     }
     !matches!(view.operation.instruction, Instruction::Standard(_))
         || view.operation.qubits.len() > 2
+        || !is_fixed_numeric_standard(view)
 }
 
 pub(super) fn is_fixed_numeric_standard(view: &OperationView<'_>) -> bool {

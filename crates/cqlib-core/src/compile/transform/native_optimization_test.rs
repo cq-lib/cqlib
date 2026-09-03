@@ -11,8 +11,30 @@
 // that they have been altered from the originals.
 
 use super::*;
-use crate::compile::transform::TransformerTestExt;
+use crate::compile::device_planning::DevicePlanningSession;
+use crate::compile::device_planning::cost::{DevicePhysicalCost, MetricAvailability};
+use crate::compile::test_utils::build_device_synthesis_context;
+use crate::compile::transform::native_quality::{
+    NativeCriticalPathQuality, NativeQualityViolation,
+};
+use crate::compile::transform::{ResynthesizeTwoQubitBlocks, TransformerTestExt};
 use crate::device::{EdgeProp, InstructionProp, PhysicalQubit};
+use std::sync::Arc;
+
+fn native_optimizer<'a>(
+    device: &'a Device,
+    resynthesis: TwoQubitBlockResynthesisConfig,
+    max_rounds: u8,
+    max_stale_rounds: u8,
+) -> NativeOptimizer<'a> {
+    NativeOptimizer::with_session(
+        device,
+        resynthesis,
+        max_rounds,
+        max_stale_rounds,
+        Arc::new(DevicePlanningSession::new(device)),
+    )
+}
 
 fn assert_same_native_result(
     reused: &NativeOptimizationResult,
@@ -26,33 +48,42 @@ fn assert_same_native_result(
     assert_eq!(reused.after, rebuilt.after);
 }
 
-/// Reference implementation of the pre-reuse behavior. It deliberately rebuilds
-/// an exact context for every consumer so tests can compare semantic results.
-fn run_rebuild_every_use(
+fn propagate_frames_for_test(
+    operations: Vec<ValueOperation>,
+) -> Result<ValueRewrite, CompilerError> {
+    let provenance = (0..operations.len()).map(Some).collect();
+    propagate_frames(operations, Some(provenance))
+}
+
+/// Reference implementation of the earlier fused `B -> 1Q` transaction. It
+/// deliberately rebuilds an exact context for every consumer; selected
+/// workloads use it as a compatibility floor for the independent branch graph.
+fn run_legacy_fused_rebuild_every_use(
     optimizer: &NativeOptimizer<'_>,
     circuit: &Circuit,
 ) -> Result<NativeOptimizationResult, CompilerError> {
     let initial = Canonicalizer::production()
         .transform_resolved(circuit, None)?
         .circuit;
-    optimizer.device.validate_circuit(&initial)?;
+    optimizer.device().validate_circuit(&initial)?;
     let mut current = initial.clone();
     let mut best = initial;
-    let initial_context = DeviceTwoQubitSynthesisContext::build(
-        optimizer.device,
+    let initial_context = build_device_synthesis_context(
+        optimizer.device(),
         &best,
         DeviceSynthesisPlacement::ExactPhysical,
     )?;
     let mut best_costs =
         scope_costs_with_context(&best, &initial_context).map_err(scope_cost_error)?;
+    let entry_costs = best_costs.clone();
     let before = summarize_scope_costs(&best_costs);
     let mut rounds = 0;
     let mut stale = 0_u8;
 
     while rounds < optimizer.max_rounds && stale < optimizer.max_stale_rounds {
         rounds += 1;
-        let resynthesis_context = DeviceTwoQubitSynthesisContext::build(
-            optimizer.device,
+        let resynthesis_context = build_device_synthesis_context(
+            optimizer.device(),
             &current,
             DeviceSynthesisPlacement::ExactPhysical,
         )?;
@@ -62,20 +93,23 @@ fn run_rebuild_every_use(
         )
         .transform_resolved(&current, None)?
         .circuit;
-        let local_context = DeviceTwoQubitSynthesisContext::build(
-            optimizer.device,
+        let local_context = build_device_synthesis_context(
+            optimizer.device(),
             &resynthesized,
             DeviceSynthesisPlacement::ExactPhysical,
         )?;
-        let locally_optimized = OptimizeNativeLocalGates::new(local_context)
-            .transform_resolved(&resynthesized, None)?
-            .circuit;
-        let legalized = match DeviceLowerer::new(optimizer.device)
+        let locally_optimized = OptimizeNativeLocalGates::with_quality_policy(
+            local_context,
+            NativeQualityPolicy::EntanglerFirst,
+        )
+        .transform_resolved(&resynthesized, None)?
+        .circuit;
+        let legalized = match DeviceLowerer::new(optimizer.device())
             .transform_resolved(&locally_optimized, None)
         {
             Ok(result) => result.circuit,
             Err(CompilerError::DeviceLoweringFailed(_)) => {
-                DeviceLowerer::new(optimizer.device)
+                DeviceLowerer::new(optimizer.device())
                     .transform_resolved(&resynthesized, None)?
                     .circuit
             }
@@ -84,20 +118,27 @@ fn run_rebuild_every_use(
         let candidate = Canonicalizer::production()
             .transform_resolved(&legalized, None)?
             .circuit;
-        optimizer.device.validate_circuit(&candidate)?;
+        optimizer.device().validate_circuit(&candidate)?;
         if candidate == current {
             current = candidate;
             break;
         }
 
-        let candidate_context = DeviceTwoQubitSynthesisContext::build(
-            optimizer.device,
+        let candidate_context = build_device_synthesis_context(
+            optimizer.device(),
             &candidate,
             DeviceSynthesisPlacement::ExactPhysical,
         )?;
         let candidate_costs =
             scope_costs_with_context(&candidate, &candidate_context).map_err(scope_cost_error)?;
-        if scope_costs_dominate(&candidate_costs, &best_costs) {
+        if scope_quality_decision(
+            &candidate_costs,
+            &best_costs,
+            &entry_costs,
+            optimizer.quality_policy(),
+        )
+        .is_ok()
+        {
             best = candidate.clone();
             best_costs = candidate_costs;
             stale = 0;
@@ -128,7 +169,7 @@ fn native_optimizer_stops_after_one_stable_round() {
     let q0 = Qubit::new(0);
     let mut circuit = Circuit::new(1);
     circuit.u(q0, 0.2, 0.3, 0.4).unwrap();
-    let optimizer = NativeOptimizer::new(
+    let optimizer = native_optimizer(
         &device,
         TwoQubitBlockResynthesisConfig::normal(Default::default()),
         8,
@@ -144,7 +185,297 @@ fn native_optimizer_stops_after_one_stable_round() {
 }
 
 #[test]
-fn native_optimizer_reuse_matches_rebuild_every_use() {
+fn native_round_resynthesizes_baseline_and_local_branch_independently() {
+    let device = Device::bidirectional_line("native-independent-stage-branches", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::X),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.x(q0).unwrap();
+    circuit.cx(q0, q1).unwrap();
+
+    // Phase A propagates the X frame through CX, so its legal exploration
+    // state differs from the immutable round baseline. Phase B must inspect
+    // both roots; otherwise A still controls which 2Q blocks can be seen.
+    let context =
+        build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
+    assert!(
+        OptimizeNativeLocalGates::with_quality_policy(
+            context,
+            NativeQualityPolicy::EntanglerFirst,
+        )
+        .transform(&circuit, None)
+        .unwrap()
+        .changed()
+    );
+
+    let optimizer = native_optimizer(
+        &device,
+        TwoQubitBlockResynthesisConfig::normal(Default::default()),
+        1,
+        1,
+    );
+    let (result, stats) = optimizer
+        .run_with_policy(&circuit, NativeResynthesisPolicy::FullScan)
+        .unwrap();
+
+    assert_eq!(
+        stats.scopes_total, 2,
+        "one full scan is required for baseline->B and one for A->B: {stats:?}"
+    );
+    assert_eq!(
+        stats.synthesis_cache.device_misses, 1,
+        "equivalent branch matrices should share the run-scoped synthesis cache: {stats:?}"
+    );
+    assert!(
+        stats.synthesis_cache.device_hits >= 1,
+        "the second independent branch should reuse exact synthesis artifacts: {stats:?}"
+    );
+    assert!(stats.quality_rank_rejections > 0, "stats={stats:?}");
+    assert!(
+        !result.restored_best,
+        "a rejected stage must not become the next-round exploration cursor: {result:?}"
+    );
+    assert_eq!(result.circuit, circuit);
+    assert!(
+        result.after.native_two_qubit_ops <= result.before.native_two_qubit_ops,
+        "an independent branch must not weaken the immutable entry guard: {result:?}"
+    );
+}
+
+#[test]
+fn native_quality_rejection_does_not_block_a_dependent_checkpoint() {
+    let device = Device::bidirectional_line("native-dependent-checkpoints", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let optimizer = native_optimizer(
+        &device,
+        TwoQubitBlockResynthesisConfig::normal(Default::default()),
+        4,
+        1,
+    );
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut entry = Circuit::new(2);
+    entry.u(q0, 0.1, 0.2, 0.3).unwrap();
+    entry.cx(q0, q1).unwrap();
+
+    let mut best = Arc::new(entry);
+    let context =
+        build_device_synthesis_context(&device, &best, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
+    let entry_costs = scope_costs_with_context(&best, &context).unwrap();
+    let mut best_costs = entry_costs.clone();
+    let mut best_context = context.clone();
+    let mut session = NativeResynthesisSession::new(NativeResynthesisPolicy::Incremental);
+
+    // This intermediate is worse than the entry checkpoint, but remains a
+    // legal exploration state instead of being discarded.
+    let mut intermediate = best.as_ref().clone();
+    intermediate.cx(q0, q1).unwrap();
+    let intermediate = match optimizer
+        .evaluate_stage_candidate(
+            &best,
+            Arc::new(intermediate),
+            &best_costs,
+            &entry_costs,
+            &context,
+            &mut session,
+        )
+        .unwrap()
+    {
+        NativeStageOutcome::Candidate(candidate) => candidate,
+        NativeStageOutcome::Unchanged | NativeStageOutcome::Unavailable => {
+            panic!("the intermediate checkpoint should remain explorable")
+        }
+    };
+    assert!(!intermediate.improves_best);
+    assert!(!install_best_checkpoint(
+        &intermediate,
+        &mut best,
+        &mut best_costs,
+        &mut best_context,
+    ));
+
+    // A dependent cleanup can consume that non-improving state and produce a
+    // new returnable minimum.
+    let cleaned = Arc::new(Circuit::new(2));
+    let cleaned = match optimizer
+        .evaluate_stage_candidate(
+            &intermediate.circuit,
+            cleaned,
+            &best_costs,
+            &entry_costs,
+            &intermediate.context,
+            &mut session,
+        )
+        .unwrap()
+    {
+        NativeStageOutcome::Candidate(candidate) => candidate,
+        NativeStageOutcome::Unchanged | NativeStageOutcome::Unavailable => {
+            panic!("the dependent checkpoint should be available")
+        }
+    };
+    assert!(cleaned.improves_best);
+    assert!(install_best_checkpoint(
+        &cleaned,
+        &mut best,
+        &mut best_costs,
+        &mut best_context,
+    ));
+    assert!(best.operations().is_empty());
+    assert_eq!(session.stats().quality_rank_rejections, 1);
+}
+
+#[test]
+fn harmful_later_checkpoint_does_not_replace_an_earlier_best() {
+    let device = Device::line("native-best-checkpoint", 1)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::U)])
+        .unwrap();
+    let optimizer = native_optimizer(
+        &device,
+        TwoQubitBlockResynthesisConfig::normal(Default::default()),
+        4,
+        1,
+    );
+    let q0 = Qubit::new(0);
+    let mut entry = Circuit::new(1);
+    entry.u(q0, 0.1, 0.2, 0.3).unwrap();
+    entry.u(q0, -0.2, 0.3, -0.4).unwrap();
+    let mut best = Arc::new(entry);
+    let context =
+        build_device_synthesis_context(&device, &best, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
+    let entry_costs = scope_costs_with_context(&best, &context).unwrap();
+    let mut best_costs = entry_costs.clone();
+    let mut best_context = context.clone();
+    let mut session = NativeResynthesisSession::new(NativeResynthesisPolicy::Incremental);
+
+    let mut improved = Circuit::new(1);
+    improved.u(q0, 0.2, -0.1, 0.4).unwrap();
+    let improved = match optimizer
+        .evaluate_stage_candidate(
+            &best,
+            Arc::new(improved),
+            &best_costs,
+            &entry_costs,
+            &context,
+            &mut session,
+        )
+        .unwrap()
+    {
+        NativeStageOutcome::Candidate(candidate) => candidate,
+        NativeStageOutcome::Unchanged | NativeStageOutcome::Unavailable => {
+            panic!("the earlier checkpoint should improve")
+        }
+    };
+    assert!(install_best_checkpoint(
+        &improved,
+        &mut best,
+        &mut best_costs,
+        &mut best_context,
+    ));
+    let saved_best = best.clone();
+
+    let mut harmful = improved.circuit.as_ref().clone();
+    harmful.u(q0, 0.3, 0.2, 0.1).unwrap();
+    let harmful = match optimizer
+        .evaluate_stage_candidate(
+            &improved.circuit,
+            Arc::new(harmful),
+            &best_costs,
+            &entry_costs,
+            &improved.context,
+            &mut session,
+        )
+        .unwrap()
+    {
+        NativeStageOutcome::Candidate(candidate) => candidate,
+        NativeStageOutcome::Unchanged | NativeStageOutcome::Unavailable => {
+            panic!("the later checkpoint should remain explorable")
+        }
+    };
+    assert!(!harmful.improves_best);
+    assert!(!install_best_checkpoint(
+        &harmful,
+        &mut best,
+        &mut best_costs,
+        &mut best_context,
+    ));
+    assert_eq!(best, saved_best);
+}
+
+#[test]
+fn native_stage_lowering_failure_rejects_only_the_candidate() {
+    let device = Device::line("native-stage-lowering-rejection", 1)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::X)])
+        .unwrap();
+    let optimizer = native_optimizer(
+        &device,
+        TwoQubitBlockResynthesisConfig::normal(Default::default()),
+        2,
+        1,
+    );
+    let q0 = Qubit::new(0);
+    let mut entry = Circuit::new(1);
+    entry.x(q0).unwrap();
+    let current = Arc::new(entry);
+    let context =
+        build_device_synthesis_context(&device, &current, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
+    let entry_costs = scope_costs_with_context(&current, &context).unwrap();
+    let mut session = NativeResynthesisSession::new(NativeResynthesisPolicy::Incremental);
+    let mut unsupported = Circuit::new(1);
+    unsupported.h(q0).unwrap();
+
+    assert!(matches!(
+        optimizer
+            .evaluate_stage_candidate(
+                &current,
+                Arc::new(unsupported),
+                &entry_costs,
+                &entry_costs,
+                &context,
+                &mut session,
+            )
+            .unwrap(),
+        NativeStageOutcome::Unavailable
+    ));
+    assert_eq!(current.operations().len(), 1);
+}
+
+#[test]
+fn native_optimizer_quality_policy_is_explicit_and_legacy_by_default() {
+    let device = Device::line("native-quality-policy", 1)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::U)])
+        .unwrap();
+    let legacy = NativeOptimizer::normal(&device);
+    let balanced =
+        NativeOptimizer::normal(&device).with_quality_policy(NativeQualityPolicy::BalancedDepth);
+
+    assert_eq!(legacy.quality_policy(), NativeQualityPolicy::EntanglerFirst);
+    assert_eq!(
+        balanced.quality_policy(),
+        NativeQualityPolicy::BalancedDepth
+    );
+}
+
+#[test]
+fn independent_branches_preserve_legacy_single_qubit_result() {
     let device = Device::line("native-context-reference", 1)
         .unwrap()
         .with_native_gates(vec![Instruction::Standard(StandardGate::U)])
@@ -154,21 +485,21 @@ fn native_optimizer_reuse_matches_rebuild_every_use() {
     let mut circuit = Circuit::new(1);
     circuit.u(q0, 0.2, 0.3, 0.4).unwrap();
     circuit.u(q0, -0.1, 0.5, -0.2).unwrap();
-    let optimizer = NativeOptimizer::new(
+    let optimizer = native_optimizer(
         &device,
         TwoQubitBlockResynthesisConfig::normal(Default::default()),
         8,
         3,
     );
 
-    let reused = optimizer.run(&circuit).unwrap();
-    let rebuilt = run_rebuild_every_use(&optimizer, &circuit).unwrap();
+    let independent = optimizer.run(&circuit).unwrap();
+    let legacy = run_legacy_fused_rebuild_every_use(&optimizer, &circuit).unwrap();
 
-    assert_same_native_result(&reused, &rebuilt);
+    assert_same_native_result(&independent, &legacy);
 }
 
 #[test]
-fn native_optimizer_reuse_matches_rebuild_on_calibrated_two_qubit_workload() {
+fn independent_branches_preserve_legacy_calibrated_two_qubit_result() {
     let p0 = PhysicalQubit::new(0);
     let p1 = PhysicalQubit::new(1);
     let mut device = Device::bidirectional_line("native-context-calibrated", 2)
@@ -201,17 +532,17 @@ fn native_optimizer_reuse_matches_rebuild_on_calibrated_two_qubit_workload() {
     circuit.cx(q0, q1).unwrap();
     circuit.u(q1, -0.3, 0.5, 0.2).unwrap();
     circuit.cx(q0, q1).unwrap();
-    let optimizer = NativeOptimizer::new(
+    let optimizer = native_optimizer(
         &device,
         TwoQubitBlockResynthesisConfig::normal(Default::default()),
         4,
         2,
     );
 
-    let reused = optimizer.run(&circuit).unwrap();
-    let rebuilt = run_rebuild_every_use(&optimizer, &circuit).unwrap();
+    let independent = optimizer.run(&circuit).unwrap();
+    let legacy = run_legacy_fused_rebuild_every_use(&optimizer, &circuit).unwrap();
 
-    assert_same_native_result(&reused, &rebuilt);
+    assert_same_native_result(&independent, &legacy);
 }
 
 #[test]
@@ -228,7 +559,7 @@ fn incremental_resynthesis_matches_full_scan_and_reuses_clean_flat_anchors() {
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     circuit.cx(Qubit::new(2), Qubit::new(3)).unwrap();
     circuit.cx(Qubit::new(4), Qubit::new(5)).unwrap();
-    let optimizer = NativeOptimizer::new(
+    let optimizer = native_optimizer(
         &device,
         TwoQubitBlockResynthesisConfig::normal(Default::default()),
         4,
@@ -255,7 +586,52 @@ fn incremental_resynthesis_matches_full_scan_and_reuses_clean_flat_anchors() {
 }
 
 #[test]
-fn native_optimizer_rebuilds_unprepared_candidate_context() {
+fn native_rounds_reuse_clean_terminal_resynthesis_decisions() {
+    let device = Device::bidirectional_line("native-resynthesis-session-cache", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap()
+        .with_default_single_qubit_error(0.001);
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let q2 = Qubit::new(2);
+    let mut circuit = Circuit::new(3);
+    // This already-native 2Q block is reconsidered after the disjoint q2 run
+    // is fused in round one, so round two exercises the session warm path.
+    circuit.u(q0, 0.2, -0.3, 0.4).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    circuit.u(q2, 0.1, 0.2, 0.3).unwrap();
+    circuit.u(q2, -0.2, 0.4, -0.1).unwrap();
+    let optimizer = native_optimizer(
+        &device,
+        TwoQubitBlockResynthesisConfig::normal(Default::default()),
+        4,
+        2,
+    );
+
+    let (result, stats) = optimizer
+        .run_with_policy(&circuit, NativeResynthesisPolicy::Incremental)
+        .unwrap();
+
+    assert!(result.rounds >= 2, "result={result:?}");
+    assert_eq!(
+        stats.synthesis_cache.block_fact_misses, 1,
+        "stats={stats:?}"
+    );
+    assert_eq!(stats.synthesis_cache.device_misses, 1, "stats={stats:?}");
+    assert!(stats.synthesis_cache.kak_entries > 0, "stats={stats:?}");
+    assert!(
+        stats.synthesis_cache.terminal_decision_hits > 0,
+        "stats={stats:?}"
+    );
+    assert!(stats.anchors_reused > 0, "stats={stats:?}");
+}
+
+#[test]
+fn native_optimizer_lazily_prepares_candidate_context() {
     let device = Device::line("native-context-fallback", 2)
         .unwrap()
         .with_native_gates(vec![
@@ -263,30 +639,22 @@ fn native_optimizer_rebuilds_unprepared_candidate_context() {
             Instruction::Standard(StandardGate::FSIM),
         ])
         .unwrap();
-    let optimizer = NativeOptimizer::new(
+    let optimizer = native_optimizer(
         &device,
         TwoQubitBlockResynthesisConfig::normal(Default::default()),
         2,
         1,
     );
     let initial = Circuit::new(2);
-    let mut context = DeviceTwoQubitSynthesisContext::build(
-        &device,
-        &initial,
-        DeviceSynthesisPlacement::ExactPhysical,
-    )
-    .unwrap();
+    let mut context =
+        build_device_synthesis_context(&device, &initial, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
     let mut candidate = Circuit::new(2);
     candidate
         .fsim(Qubit::new(0), Qubit::new(1), 0.2, -0.3)
         .unwrap();
 
-    assert!(matches!(
-        scope_costs_with_context(&candidate, &context),
-        Err(ScopeCostError::Context(
-            DeviceContextCostFailure::Unprepared(_)
-        ))
-    ));
+    assert!(scope_costs_with_context(&candidate, &context).is_ok());
     let costs = optimizer
         .candidate_costs_with_reuse(&candidate, &mut context)
         .unwrap();
@@ -298,7 +666,7 @@ fn native_optimizer_rebuilds_unprepared_candidate_context() {
 #[test]
 fn native_optimizer_does_not_rebuild_unsupported_candidate() {
     let device = Device::line("native-context-unsupported", 2).unwrap();
-    let optimizer = NativeOptimizer::new(
+    let optimizer = native_optimizer(
         &device,
         TwoQubitBlockResynthesisConfig::normal(Default::default()),
         2,
@@ -306,7 +674,7 @@ fn native_optimizer_does_not_rebuild_unsupported_candidate() {
     );
     let mut candidate = Circuit::new(2);
     candidate.cx(Qubit::new(0), Qubit::new(1)).unwrap();
-    let mut context = DeviceTwoQubitSynthesisContext::build(
+    let mut context = build_device_synthesis_context(
         &device,
         &candidate,
         DeviceSynthesisPlacement::ExactPhysical,
@@ -343,16 +711,14 @@ fn one_qubit_fusion_requires_exact_physical_improvement() {
     let mut circuit = Circuit::new(1);
     circuit.u(q0, 0.2, 0.3, 0.4).unwrap();
     circuit.u(q0, -0.1, 0.5, -0.2).unwrap();
-    let context = DeviceTwoQubitSynthesisContext::build(
-        &device,
-        &circuit,
-        DeviceSynthesisPlacement::ExactPhysical,
-    )
-    .unwrap();
+    let context =
+        build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
 
-    let result = OptimizeNativeLocalGates::new(context)
-        .transform_resolved(&circuit, None)
-        .unwrap();
+    let result =
+        OptimizeNativeLocalGates::with_quality_policy(context, NativeQualityPolicy::EntanglerFirst)
+            .transform_resolved(&circuit, None)
+            .unwrap();
 
     assert!(result.changed);
     assert_eq!(result.circuit.operations().len(), 1);
@@ -371,7 +737,7 @@ fn cx_propagates_target_z_to_both_qubits() {
         ValueOperation::from_standard(StandardGate::CX, [q0, q1], []),
     ];
 
-    let rewrite = propagate_frames(operations).unwrap();
+    let rewrite = propagate_frames_for_test(operations).unwrap();
     let gates = rewrite
         .operations
         .iter()
@@ -391,7 +757,7 @@ fn cx_propagates_target_z_to_both_qubits() {
 fn swap_exchanges_pending_frames() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
-    let rewrite = propagate_frames(vec![
+    let rewrite = propagate_frames_for_test(vec![
         ValueOperation::from_standard(StandardGate::Z, [q0], []),
         ValueOperation::from_standard(StandardGate::SWAP, [q0, q1], []),
     ])
@@ -418,7 +784,7 @@ fn measurement_drops_a_pending_z_frame() {
         label: None,
     };
 
-    let rewrite = propagate_frames(vec![
+    let rewrite = propagate_frames_for_test(vec![
         ValueOperation::from_standard(StandardGate::RZ, [q0], [ParameterValue::Fixed(0.4)]),
         measurement,
     ])
@@ -434,7 +800,7 @@ fn measurement_drops_a_pending_z_frame() {
 #[test]
 fn phase_carrier_records_rz_global_phase_difference() {
     let q0 = Qubit::new(0);
-    let rewrite = propagate_frames(vec![ValueOperation::from_standard(
+    let rewrite = propagate_frames_for_test(vec![ValueOperation::from_standard(
         StandardGate::Phase,
         [q0],
         [ParameterValue::Fixed(0.6)],
@@ -451,7 +817,7 @@ fn phase_carrier_records_rz_global_phase_difference() {
 #[test]
 fn z_frame_is_absorbed_into_xy_axis() {
     let q0 = Qubit::new(0);
-    let rewrite = propagate_frames(vec![
+    let rewrite = propagate_frames_for_test(vec![
         ValueOperation::from_standard(StandardGate::RZ, [q0], [ParameterValue::Fixed(0.2)]),
         ValueOperation::from_standard(StandardGate::XY, [q0], [ParameterValue::Fixed(0.7)]),
     ])
@@ -474,7 +840,7 @@ fn z_frame_is_absorbed_into_xy_axis() {
 #[test]
 fn pauli_product_uses_circuit_time_order() {
     let q0 = Qubit::new(0);
-    let rewrite = propagate_frames(vec![
+    let rewrite = propagate_frames_for_test(vec![
         ValueOperation::from_standard(StandardGate::X, [q0], []),
         ValueOperation::from_standard(StandardGate::Z, [q0], []),
     ])
@@ -485,4 +851,220 @@ fn pauli_product_uses_circuit_time_order() {
         rewrite.operations[0].instruction,
         ValueInstruction::Instruction(Instruction::Standard(StandardGate::Y))
     ));
+}
+
+fn synthetic_quality(
+    two_qubit_ops: u32,
+    two_qubit_depth: u32,
+    total_depth: u32,
+    total_ops: u32,
+    critical_path_1q: u32,
+) -> NativeQualityVector {
+    NativeQualityVector {
+        physical: DevicePhysicalCost {
+            native_two_qubit_ops: two_qubit_ops,
+            native_two_qubit_depth: two_qubit_depth,
+            error: MetricAvailability::Disabled,
+            total_native_depth: total_depth,
+            native_total_ops: total_ops,
+            duration: MetricAvailability::Disabled,
+            makespan: MetricAvailability::Disabled,
+        },
+        critical_path: NativeCriticalPathQuality {
+            one_qubit_ops: critical_path_1q,
+            longest_one_qubit_run: 1,
+        },
+    }
+}
+
+#[test]
+fn exact_workflow_checkpoint_requires_full_per_scope_dominance() {
+    let incumbent = NativeExactQualityCheckpoint::new(vec![
+        synthetic_quality(10, 8, 20, 40, 8),
+        synthetic_quality(4, 4, 10, 20, 4),
+    ]);
+    let dominating = NativeExactQualityCheckpoint::new(vec![
+        synthetic_quality(9, 8, 20, 40, 8),
+        synthetic_quality(4, 4, 10, 20, 4),
+    ]);
+    let total_ops_regression = NativeExactQualityCheckpoint::new(vec![
+        synthetic_quality(9, 8, 20, 41, 8),
+        synthetic_quality(4, 4, 10, 20, 4),
+    ]);
+    let nested_critical_path_regression = NativeExactQualityCheckpoint::new(vec![
+        synthetic_quality(9, 8, 20, 40, 8),
+        synthetic_quality(4, 4, 10, 20, 5),
+    ]);
+    let one_qubit_only_gain = NativeExactQualityCheckpoint::new(vec![
+        synthetic_quality(10, 8, 20, 39, 8),
+        synthetic_quality(4, 4, 10, 20, 4),
+    ]);
+    let scope_shape_mismatch =
+        NativeExactQualityCheckpoint::new(vec![synthetic_quality(9, 8, 20, 40, 8)]);
+
+    assert!(dominating.strictly_dominates(&incumbent));
+    assert!(dominating.strictly_dominates_with_two_qubit_gain(&incumbent));
+    assert!(one_qubit_only_gain.strictly_dominates(&incumbent));
+    assert!(!one_qubit_only_gain.strictly_dominates_with_two_qubit_gain(&incumbent));
+    assert!(!incumbent.strictly_dominates(&incumbent));
+    assert!(!total_ops_regression.strictly_dominates(&incumbent));
+    assert!(!nested_critical_path_regression.strictly_dominates(&incumbent));
+    assert!(!scope_shape_mismatch.strictly_dominates(&incumbent));
+}
+
+#[test]
+fn sabre_beam_ranking_prioritizes_two_qubit_count_then_depth() {
+    let fewer_two_qubit_ops =
+        NativeExactQualityCheckpoint::new(vec![synthetic_quality(9, 9, 22, 42, 8)]);
+    let shallower_two_qubit_depth =
+        NativeExactQualityCheckpoint::new(vec![synthetic_quality(10, 7, 18, 38, 8)]);
+    let shallower_total_depth =
+        NativeExactQualityCheckpoint::new(vec![synthetic_quality(9, 9, 21, 42, 8)]);
+
+    assert!(
+        fewer_two_qubit_ops
+            .compare_for_sabre_beam(&shallower_two_qubit_depth)
+            .is_lt()
+    );
+    assert!(
+        shallower_total_depth
+            .compare_for_sabre_beam(&fewer_two_qubit_ops)
+            .is_lt()
+    );
+}
+
+#[test]
+fn balanced_scope_dominance_rejects_regression_in_any_control_flow_scope() {
+    let entry = vec![
+        synthetic_quality(10, 8, 20, 40, 8),
+        synthetic_quality(4, 4, 10, 20, 4),
+    ];
+    let candidate = vec![
+        synthetic_quality(10, 8, 19, 39, 7),
+        synthetic_quality(4, 4, 10, 19, 5),
+    ];
+
+    assert!(
+        scope_quality_decision(
+            &candidate,
+            &entry,
+            &entry,
+            NativeQualityPolicy::BalancedDepth,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn balanced_scope_dominance_ranks_against_best_but_guards_against_entry() {
+    let entry = vec![synthetic_quality(10, 8, 100, 200, 50)];
+    let best = vec![synthetic_quality(10, 8, 90, 190, 45)];
+    let worse_than_best = vec![synthetic_quality(9, 8, 95, 180, 40)];
+    let better_than_best = vec![synthetic_quality(9, 8, 89, 180, 40)];
+    let outside_entry = vec![synthetic_quality(8, 7, 101, 170, 35)];
+
+    assert!(
+        scope_quality_decision(
+            &worse_than_best,
+            &best,
+            &entry,
+            NativeQualityPolicy::BalancedDepth,
+        )
+        .is_err()
+    );
+    assert!(
+        scope_quality_decision(
+            &better_than_best,
+            &best,
+            &entry,
+            NativeQualityPolicy::BalancedDepth,
+        )
+        .is_ok()
+    );
+    assert!(
+        scope_quality_decision(
+            &outside_entry,
+            &best,
+            &entry,
+            NativeQualityPolicy::BalancedDepth,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn balanced_depth_keeps_its_entry_relative_entangler_envelope() {
+    let entry = vec![synthetic_quality(10, 10, 22, 40, 8)];
+    let best = vec![synthetic_quality(9, 9, 20, 38, 7)];
+    let depth_improvement_with_more_entanglers = vec![synthetic_quality(10, 10, 19, 39, 6)];
+
+    assert!(
+        scope_quality_decision(
+            &depth_improvement_with_more_entanglers,
+            &best,
+            &entry,
+            NativeQualityPolicy::BalancedDepth,
+        )
+        .is_ok(),
+        "BalancedDepth is depth-first inside the immutable entry envelope"
+    );
+}
+
+#[test]
+fn balanced_scope_decision_reports_shape_guard_and_rank_rejections() {
+    let entry = vec![synthetic_quality(10, 8, 20, 40, 8)];
+    let equal = entry.clone();
+    let shape_changed = vec![entry[0], entry[0]];
+    let worse_rank = vec![synthetic_quality(10, 8, 20, 40, 9)];
+
+    assert_eq!(
+        scope_quality_decision(
+            &shape_changed,
+            &entry,
+            &entry,
+            NativeQualityPolicy::BalancedDepth,
+        ),
+        Err(NativeQualityViolation::ScopeShape)
+    );
+    assert_eq!(
+        scope_quality_decision(&equal, &entry, &entry, NativeQualityPolicy::BalancedDepth,),
+        Err(NativeQualityViolation::Rank)
+    );
+    assert_eq!(
+        scope_quality_decision(
+            &worse_rank,
+            &entry,
+            &entry,
+            NativeQualityPolicy::BalancedDepth,
+        ),
+        Err(NativeQualityViolation::Rank)
+    );
+}
+
+#[test]
+fn native_workset_stats_count_quality_rejections_by_reason() {
+    let mut session = NativeResynthesisSession::new(NativeResynthesisPolicy::Incremental);
+    session.record_cycle_early_exit();
+    for violation in [
+        NativeQualityViolation::ScopeShape,
+        NativeQualityViolation::TwoQubitOps,
+        NativeQualityViolation::TwoQubitDepth,
+        NativeQualityViolation::TotalDepth,
+        NativeQualityViolation::Error,
+        NativeQualityViolation::Makespan,
+        NativeQualityViolation::Rank,
+        NativeQualityViolation::TotalDepth,
+    ] {
+        session.record_quality_rejection(violation);
+    }
+    let stats = session.stats();
+
+    assert_eq!(stats.cycle_early_exits, 1);
+    assert_eq!(stats.quality_scope_shape_rejections, 1);
+    assert_eq!(stats.quality_two_qubit_ops_rejections, 1);
+    assert_eq!(stats.quality_two_qubit_depth_rejections, 1);
+    assert_eq!(stats.quality_total_depth_rejections, 2);
+    assert_eq!(stats.quality_error_rejections, 1);
+    assert_eq!(stats.quality_makespan_rejections, 1);
+    assert_eq!(stats.quality_rank_rejections, 1);
 }

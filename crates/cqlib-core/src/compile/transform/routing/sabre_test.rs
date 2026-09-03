@@ -11,9 +11,10 @@
 // that they have been altered from the originals.
 
 use super::*;
-use crate::circuit::{Circuit, Qubit};
+use crate::circuit::{Circuit, Instruction, Qubit, StandardGate};
 use crate::compile::CompilerError;
-use crate::compile::sabre::SabreConfig;
+use crate::compile::device_planning::DevicePlanningSession;
+use crate::compile::sabre::{RoutingTarget, SabreConfig};
 use crate::compile::test_utils::{
     assert_two_qubit_operations_supported_by_topology, generated_small_routable_circuit,
 };
@@ -38,6 +39,53 @@ fn sabre_routing_auto_layout_routes_non_embeddable_interactions() {
     assert_eq!(result.circuit().qubits().len(), 3);
     assert_all_two_qubit_operations_are_adjacent_on_line(result.circuit());
     assert_two_qubit_operations_supported_by_topology(result.circuit(), device.topology());
+}
+
+#[test]
+fn shared_planning_session_preserves_seeded_routing_output() {
+    let device = Device::line("shared-session-line", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let config = SabreConfig::deterministic_seeded(73);
+    let mut circuit = Circuit::new(3);
+    circuit.cx(Qubit::new(0), Qubit::new(2)).unwrap();
+    circuit.cx(Qubit::new(2), Qubit::new(1)).unwrap();
+    let logical = (0..3).map(LogicalQubit::new).collect::<Vec<_>>();
+    let physical = (0..3).map(PhysicalQubit::new).collect::<Vec<_>>();
+    let layout = Layout::new(
+        logical.clone(),
+        physical.clone(),
+        Some(logical.into_iter().zip(physical).collect()),
+    )
+    .unwrap();
+
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
+    let routing_target = RoutingTarget::from_physical(&physical).unwrap();
+    let standalone =
+        route_with_layout_tracked_on_topology(&circuit, &routing_target, &layout, &config).unwrap();
+    let session = DevicePlanningSession::new(&device);
+    let shared = route_with_layout_tracked_with_session_on_physical(
+        &circuit, &device, &physical, &layout, &config, &session,
+    )
+    .unwrap();
+
+    assert_eq!(standalone.routed().circuit(), shared.routed().circuit());
+    assert_eq!(
+        standalone.routed().initial_layout(),
+        shared.routed().initial_layout()
+    );
+    assert_eq!(
+        standalone.routed().final_layout(),
+        shared.routed().final_layout()
+    );
+    assert_eq!(
+        standalone.routed().swap_count(),
+        shared.routed().swap_count()
+    );
 }
 
 #[test]
@@ -186,6 +234,28 @@ fn sabre_changed_detects_non_identity_layout_without_swaps() {
         diagnostics: Default::default(),
     };
     assert!(routed.changed(&circuit));
+}
+
+#[test]
+fn routed_circuit_equality_is_structural() {
+    let circuit = Circuit::new(1);
+    let layout = Layout::from_pairs(&[(0, 0)], 1).unwrap();
+    let first = RoutedCircuit {
+        circuit: circuit.clone(),
+        initial_layout: layout.clone(),
+        final_layout: layout.clone(),
+        swap_count: 0,
+        diagnostics: Default::default(),
+    };
+    let second = RoutedCircuit {
+        circuit,
+        initial_layout: layout.clone(),
+        final_layout: layout,
+        swap_count: 0,
+        diagnostics: Default::default(),
+    };
+
+    assert_eq!(first, second);
 }
 
 #[test]

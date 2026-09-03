@@ -55,6 +55,9 @@ pub mod two_qubit_kak;
 pub mod unitary_1q;
 pub mod unitary_2q;
 
+#[cfg(test)]
+mod unitary_2q_test;
+
 pub use decompose::{
     DecomposeUnitaries, UnitaryDecomposeConfig, decompose_unitaries,
     decompose_unitaries_with_rule_stats,
@@ -65,6 +68,7 @@ pub use unitary_2q::{
     TargetAwareSynthesisCost, TwoQubitSynthesisCandidate, TwoQubitSynthesisRequest,
     TwoQubitSynthesisTarget, TwoQubitUnitaryDecomposeBasis, TwoQubitUnitarySynthesisResult,
     plan_numeric_2q_unitary, synthesize_numeric_2q_unitary, target_aware_cost_of_value_operations,
+    validate_numeric_2q_candidate,
 };
 
 pub(crate) use device_synthesis::{

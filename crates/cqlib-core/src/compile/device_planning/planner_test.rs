@@ -11,9 +11,42 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+use super::super::session::{
+    DevicePlanningSessionCache, populate_canonical_cache, prepare_cache_baseline,
+};
 use super::*;
 use crate::compile::knowledge::rule::{Rule, RuleItem};
 use crate::device::{EdgeProp, InstructionProp, PhysicalQubit, QubitProp};
+
+fn build_planner<'a>(
+    device: &'a Device,
+    library: &RuleLibrary,
+    roots: impl IntoIterator<Item = DeviceGateState>,
+) -> Result<DevicePlanner<'a>, DevicePlannerError> {
+    let physical_qubits = device.usable_qubits().collect::<Vec<_>>();
+    DevicePlanner::build_with_estimator(
+        device,
+        library,
+        roots,
+        Arc::new(CalibrationEstimator::from_device(device, &physical_qubits)),
+    )
+}
+
+fn build_planner_with_budget<'a>(
+    device: &'a Device,
+    library: &RuleLibrary,
+    roots: impl IntoIterator<Item = DeviceGateState>,
+    budget: PlannerBudget,
+) -> Result<DevicePlanner<'a>, DevicePlannerError> {
+    let physical_qubits = device.usable_qubits().collect::<Vec<_>>();
+    DevicePlanner::build_with_estimator_and_budget(
+        device,
+        library,
+        roots,
+        budget,
+        Arc::new(CalibrationEstimator::from_device(device, &physical_qubits)),
+    )
+}
 
 fn plan_for(planner: &DevicePlanner<'_>, state: &DeviceGateState) -> Option<PlanChoice> {
     planner
@@ -64,7 +97,7 @@ fn dead_two_state_cycle_terminates_without_a_plan() {
     let device = Device::line("dead-cycle", 1).unwrap();
     let root = state(StandardGate::X, &[0]);
 
-    let planner = DevicePlanner::build(&device, &library, [root.clone()]).unwrap();
+    let planner = build_planner(&device, &library, [root.clone()]).unwrap();
 
     assert!(plan_for(&planner, &root).is_none());
 }
@@ -91,7 +124,7 @@ fn cycle_with_native_exit_propagates_a_finite_plan() {
         .unwrap();
     let root = state(StandardGate::X, &[0]);
 
-    let planner = DevicePlanner::build(&device, &library, [root.clone()]).unwrap();
+    let planner = build_planner(&device, &library, [root.clone()]).unwrap();
 
     assert!(matches!(
         plan_for(&planner, &root),
@@ -117,7 +150,7 @@ fn repeated_child_occurrences_contribute_multiplicity_to_cost() {
         .unwrap();
     let root = state(StandardGate::SWAP, &[0, 1]);
 
-    let planner = DevicePlanner::build(&device, &library, [root.clone()]).unwrap();
+    let planner = build_planner(&device, &library, [root.clone()]).unwrap();
     let root_id = planner.state_ids[&root];
 
     assert_eq!(
@@ -172,7 +205,7 @@ fn equal_shape_plans_select_lower_calibrated_error() {
     }
     let root = state(StandardGate::CX, &[0, 1]);
 
-    let planner = DevicePlanner::build(&device, &library, [root.clone()]).unwrap();
+    let planner = build_planner(&device, &library, [root.clone()]).unwrap();
     assert!(matches!(
         plan_for(&planner, &root),
         Some(PlanChoice::Template(PlanTemplate::Direction(
@@ -232,7 +265,7 @@ fn frontier_retains_two_qubit_count_fidelity_tradeoff() {
         .unwrap();
     let root = state(StandardGate::CX, &[0, 1]);
 
-    let planner = DevicePlanner::build(&device, &library, [root.clone()]).unwrap();
+    let planner = build_planner(&device, &library, [root.clone()]).unwrap();
     let root_id = planner.state_ids[&root];
     assert_eq!(planner.frontiers[root_id].len(), 2);
     let selected = planner.selected[root_id].unwrap();
@@ -295,7 +328,7 @@ fn parent_depth_keeps_equal_scalar_children_with_different_readiness_profiles() 
     let child = state(StandardGate::CX, &[0, 1]);
     let root = state(StandardGate::CY, &[0, 1]);
 
-    let planner = DevicePlanner::build(&device, &library, [root.clone()]).unwrap();
+    let planner = build_planner(&device, &library, [root.clone()]).unwrap();
     let child_id = planner.state_ids[&child];
     assert_eq!(planner.frontiers[child_id].len(), 2);
     let root_plan = planner.selected_plan_for(&root).unwrap();
@@ -311,6 +344,71 @@ fn parent_depth_keeps_equal_scalar_children_with_different_readiness_profiles() 
         planner.nodes[root_plan.0].physical_cost.total_native_depth,
         5
     );
+
+    // The parent legitimately selects the context-sensitive CX variant above,
+    // while CX as an independent root has the opposite deterministic tie-break.
+    // Exporting the parent's dependency tree must preserve both decisions.
+    let standalone_cx = planner.selected_plan_for(&child).unwrap();
+    let PlanChoice::Template(PlanTemplate::Rule(rule_id)) =
+        planner.choice_for_plan(standalone_cx).unwrap()
+    else {
+        panic!("expected standalone CX to select a rule-backed plan");
+    };
+    assert_eq!(library.get(rule_id).unwrap().name, "a_cx_tail_target");
+
+    let mut cache = DevicePlanningSessionCache::default();
+    let mut memo = HashMap::new();
+    populate_canonical_cache(&planner, [root.clone()], &mut cache, &mut memo).unwrap();
+
+    let cached_parent = cache.selected_plan(&root).unwrap();
+    let PlanChoice::Template(PlanTemplate::Rule(rule_id)) = cached_parent.children[1].choice else {
+        panic!("expected cached parent to retain its contextual CX plan");
+    };
+    assert_eq!(library.get(rule_id).unwrap().name, "z_cx_tail_control");
+
+    let cached_child = cache.selected_plan(&child).unwrap();
+    let PlanChoice::Template(PlanTemplate::Rule(rule_id)) = cached_child.choice else {
+        panic!("expected cached standalone CX to retain its canonical plan");
+    };
+    assert_eq!(library.get(rule_id).unwrap().name, "a_cx_tail_target");
+    assert_eq!(
+        cached_child.physical_cost,
+        planner.cost_for_plan(standalone_cx).unwrap()
+    );
+
+    // Independent planner batches must merge to the same roots regardless of
+    // which state warmed the session first. Existing canonical entries remain
+    // pinned instead of being overwritten by a later parent's child variant.
+    let physical_qubits = device.usable_qubits().collect::<Vec<_>>();
+    let estimator = Arc::new(CalibrationEstimator::from_device(&device, &physical_qubits));
+    let mut child_first = DevicePlanningSessionCache::default();
+    prepare_cache_baseline(
+        &device,
+        &library,
+        [child.clone()],
+        Arc::clone(&estimator),
+        &mut child_first,
+    )
+    .unwrap();
+    let child_before_parent = child_first.selected_plan(&child).unwrap();
+    prepare_cache_baseline(
+        &device,
+        &library,
+        [root.clone()],
+        estimator,
+        &mut child_first,
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(
+        &child_before_parent,
+        &child_first.selected_plan(&child).unwrap()
+    ));
+    let PlanChoice::Template(PlanTemplate::Rule(rule_id)) =
+        child_first.selected_plan(&root).unwrap().children[1].choice
+    else {
+        panic!("expected child-first history to retain the contextual CX plan");
+    };
+    assert_eq!(library.get(rule_id).unwrap().name, "z_cx_tail_control");
 }
 
 #[test]
@@ -325,7 +423,7 @@ fn planner_budget_exhaustion_is_explicit() {
         .unwrap()
         .with_native_gates(vec![Instruction::Standard(StandardGate::H)])
         .unwrap();
-    let error = DevicePlanner::build_with_budget(
+    let error = build_planner_with_budget(
         &device,
         &library,
         [state(StandardGate::X, &[0])],
@@ -365,7 +463,7 @@ fn ordered_qargs_have_independent_capability_states() {
     let unsupported = state(StandardGate::X, &[1]);
 
     let planner =
-        DevicePlanner::build(&device, &library, [supported.clone(), unsupported.clone()]).unwrap();
+        build_planner(&device, &library, [supported.clone(), unsupported.clone()]).unwrap();
 
     assert_eq!(plan_for(&planner, &supported), Some(PlanChoice::Native));
     assert!(plan_for(&planner, &unsupported).is_none());
@@ -396,7 +494,7 @@ fn cost_prefers_fewer_two_qubit_leaves_before_total_gate_count() {
         .unwrap();
     let root = state(StandardGate::SWAP, &[0, 1]);
 
-    let planner = DevicePlanner::build(&device, &library, [root.clone()]).unwrap();
+    let planner = build_planner(&device, &library, [root.clone()]).unwrap();
     let Some(PlanChoice::Template(PlanTemplate::Rule(rule_id))) = plan_for(&planner, &root) else {
         panic!("expected a rule plan");
     };
@@ -446,7 +544,7 @@ fn equal_cost_rule_choice_is_stable_across_library_order() {
     let root = state(StandardGate::CX, &[0, 1]);
 
     for library in &libraries {
-        let planner = DevicePlanner::build(&device, library, [root.clone()]).unwrap();
+        let planner = build_planner(&device, library, [root.clone()]).unwrap();
         let Some(PlanChoice::Template(PlanTemplate::Rule(rule_id))) = plan_for(&planner, &root)
         else {
             panic!("expected a rule plan");

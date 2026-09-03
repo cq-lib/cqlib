@@ -571,6 +571,7 @@ fn dump_unitary_gate_definition(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dump_operations(
     circuit: &Circuit,
     operations: &[Operation],
@@ -952,6 +953,7 @@ fn measurement_destination(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dump_measurement(
     op: &Operation,
     result: ClassicalValue,
@@ -1170,6 +1172,7 @@ fn dump_directive(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dump_control_flow(
     control: &ClassicalControlOp,
     circuit: &Circuit,

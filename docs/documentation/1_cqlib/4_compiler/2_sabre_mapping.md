@@ -34,6 +34,8 @@ print("ops:", len(result.circuit.operations))
 
 ## 与 compile 工作流集成
 
+下面的 `device` 必须已经配置可执行的原生指令能力；`device` 单独作为目标时采用严格设备编译语义。
+
 ```python
 from cqlib.compile import CompileMode, compile
 
@@ -45,11 +47,23 @@ result = compile(
 )
 
 for step in result.steps:
-    if step.name == "route.sabre":
-        print(step.changed, step.reason)
+    if step.name in {
+        "route.sabre",
+        "validate.device",
+        "select.sabre_pareto_beam",
+    }:
+        print(step.stage, step.name, step.changed, step.reason)
 ```
 
 `initial_layout` 已提供时，工作流跳过自动布局，仍用相同 SABRE 路由器。
+
+### Enhanced 严格设备的 Pareto beam
+
+对于 `CompileMode.enhanced()` 和严格 `Device` 目标，第一次 `route.sabre` 的完整编译结果是 candidate 0。candidate 0 完成路由后清理、原生指令 lowering、native 固定点优化和 `validate.device` 后，编译器才启动有界 Pareto beam。每个探索候选从同一个 pre-routing prefix 出发，并重新执行相同后缀直到设备验证。
+
+`select.sabre_pareto_beam` 只接受在每个控制流作用域上都不劣化精确 native 质量、且严格减少原生双比特门数量或深度的已验证候选；没有这样的候选时保留 candidate 0。该 selection 是最后的编排与诊断步骤，不会在验证后继续变换线路。
+
+`result.steps` 记录最终保留路径，而不是所有被尝试的路线。候选数量、丢弃情况、是否接受 winner，以及 candidate 0/winner 的质量摘要可从 `select.sabre_pareto_beam.reason` 查看。`TopologyBasis` 目标即使执行 SABRE 路由也不会运行这个 beam；例如同时向 `compile()` 传入 `device` 和 `target_basis` 时采用的就是 `TopologyBasis` 语义。
 
 ---
 
@@ -124,6 +138,8 @@ compile_record = {
 轻量 checkpoint，并把 `routing_trials` 分配给成本较低且映射不同的 checkpoint；
 完整 route 直接参与全局流式归约，不再为 layout 评分后重复路由。最终固定按预测
 native 2Q 数量、native 2Q 深度、native 总深度和稳定候选索引排序。
+
+这里描述的是单次 `route_sabre()` 及工作流 candidate 0 的路由内选择。Enhanced 严格设备编译随后运行的 Pareto beam 会把候选继续 lowering、优化并验证，再依据最终精确 native 质量决定是否替换 candidate 0。
 
 ---
 

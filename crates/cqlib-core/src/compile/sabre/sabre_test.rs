@@ -16,6 +16,8 @@ use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, ClassicalExpr, ClassicalType, Directive,
     Instruction, Operation, Parameter, ParameterValue, Qubit, StandardGate,
 };
+use crate::compile::device_planning::DevicePlanningSession;
+use crate::compile::transform::layout::PhysicalLayoutGraph;
 use crate::compile::transform::{DeviceLowerer, TransformerTestExt};
 use crate::compile::{CompilerError, SabreRoutingFailure};
 use crate::device::{
@@ -23,6 +25,25 @@ use crate::device::{
 };
 use rayon::ThreadPoolBuilder;
 use std::collections::HashSet;
+
+fn sabre_route_device(
+    circuit: &Circuit,
+    device: &Device,
+    initial_layout: &Layout,
+    config: &SabreConfig,
+) -> Result<SabreRoutingResult, CompilerError> {
+    let planning_session = DevicePlanningSession::new(device);
+    let physical = PhysicalLayoutGraph::from_device(device)?;
+    sabre_route_with_provenance_and_session_on_physical(
+        circuit,
+        device,
+        &physical,
+        initial_layout,
+        config,
+        &planning_session,
+    )
+    .map(|result| result.routing)
+}
 
 fn basis_index_under_layout(index: usize, layout: &Layout, width: usize) -> usize {
     let mut mapped = 0usize;
@@ -131,7 +152,7 @@ fn unary_requirement_moves_to_a_locally_supported_physical_qubit() {
     let mut circuit = Circuit::new(1);
     circuit.h(Qubit::new(0)).unwrap();
 
-    let routed = sabre_route(
+    let routed = sabre_route_device(
         &circuit,
         &device,
         &layout,
@@ -176,7 +197,7 @@ fn validate_reachable_interactions_public_api_reports_disconnected_pairs() {
 }
 
 #[test]
-fn validate_reachable_interactions_reports_unreachable_unary_placement() {
+fn exact_device_route_reports_unreachable_unary_placement() {
     let p0 = PhysicalQubit::new(0);
     let p1 = PhysicalQubit::new(1);
     let mut device = Device::line("local-unary-without-movement", 2).unwrap();
@@ -195,7 +216,13 @@ fn validate_reachable_interactions_reports_unreachable_unary_placement() {
     let mut circuit = Circuit::new(1);
     circuit.h(Qubit::new(0)).unwrap();
 
-    let error = validate_reachable_interactions(&circuit, &device, &layout).unwrap_err();
+    let error = sabre_route_device(
+        &circuit,
+        &device,
+        &layout,
+        &SabreConfig::deterministic_seeded(0),
+    )
+    .unwrap_err();
 
     assert!(matches!(
         error,
@@ -217,7 +244,7 @@ fn adjacent_terminal_gate_does_not_require_a_lowerable_swap_edge() {
     let mut circuit = Circuit::new(2);
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
 
-    let result = sabre_route(
+    let result = sabre_route_device(
         &circuit,
         &device,
         &layout,
@@ -238,7 +265,7 @@ fn topology_connectivity_does_not_hide_missing_swap_lowering() {
     let mut circuit = Circuit::new(2);
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
 
-    let error = sabre_route(
+    let error = sabre_route_device(
         &circuit,
         &device,
         &layout,
@@ -263,7 +290,7 @@ fn folded_terminal_requires_every_gate_and_direction_to_be_lowerable() {
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
     circuit.cx(Qubit::new(1), Qubit::new(0)).unwrap();
 
-    let error = sabre_route(
+    let error = sabre_route_device(
         &circuit,
         &device,
         &layout,
@@ -292,7 +319,7 @@ fn predicted_native_counts_match_the_actual_device_lowerer() {
     let mut circuit = Circuit::new(2);
     circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
 
-    let routed = sabre_route(
+    let routed = sabre_route_device(
         &circuit,
         &device,
         &layout,
@@ -360,7 +387,7 @@ fn native_total_depth_schedules_parallel_native_leaves() {
     let mut circuit = Circuit::new(2);
     circuit.cx(Qubit::new(1), Qubit::new(0)).unwrap();
 
-    let result = sabre_route(
+    let result = sabre_route_device(
         &circuit,
         &device,
         &layout,
@@ -414,7 +441,7 @@ fn native_depth_and_count_multiply_static_for_iterations() {
         )
         .unwrap();
 
-    let result = sabre_route(
+    let result = sabre_route_device(
         &circuit,
         &device,
         &layout,
@@ -453,7 +480,7 @@ fn dynamic_nonzero_loop_reports_unknown_count_and_one_body_depth() {
         })
         .unwrap();
 
-    let result = sabre_route(
+    let result = sabre_route_device(
         &circuit,
         &device,
         &layout,
@@ -501,7 +528,7 @@ fn uniform_native_cost_does_not_increase_swaps_over_topology_scoring() {
             ..SabreConfig::deterministic_seeded(seed)
         };
         let topology = sabre_route(&circuit, &topology_device, &layout, &config).unwrap();
-        let native = sabre_route(&circuit, &native_device, &layout, &config).unwrap();
+        let native = sabre_route_device(&circuit, &native_device, &layout, &config).unwrap();
 
         assert!(
             native.swap_count <= topology.swap_count,
@@ -689,15 +716,16 @@ fn fixed_seed_is_independent_of_rayon_thread_count() {
     };
 
     let single_threaded = route_in_pool(1);
-    let four_threaded = route_in_pool(4);
-
-    assert_eq!(single_threaded.swap_count, four_threaded.swap_count);
-    assert_eq!(
-        single_threaded.final_layout.l2p_map(),
-        four_threaded.final_layout.l2p_map()
-    );
-    assert_eq!(single_threaded.diagnostics, four_threaded.diagnostics);
-    assert_eq!(single_threaded.circuit, four_threaded.circuit);
+    for threads in [2, 4, 8] {
+        let parallel = route_in_pool(threads);
+        assert_eq!(single_threaded.swap_count, parallel.swap_count);
+        assert_eq!(
+            single_threaded.final_layout.l2p_map(),
+            parallel.final_layout.l2p_map()
+        );
+        assert_eq!(single_threaded.diagnostics, parallel.diagnostics);
+        assert_eq!(single_threaded.circuit, parallel.circuit);
+    }
 
     let lowered = DeviceLowerer::new(&device)
         .transform_resolved(&single_threaded.circuit, None)
@@ -758,7 +786,7 @@ fn seeded_grid_unary_and_control_flow_corpus_is_thread_deterministic() {
                 .num_threads(threads)
                 .build()
                 .unwrap()
-                .install(|| sabre_route(circuit, device, layout, config))
+                .install(|| sabre_route_device(circuit, device, layout, config))
                 .unwrap()
         };
         let single = route(1);
@@ -929,7 +957,7 @@ fn control_flow_epilogue_avoids_topology_edges_without_a_native_swap_plan() {
         })
         .unwrap();
 
-    let result = sabre_route(
+    let result = sabre_route_device(
         &circuit,
         &device,
         &layout,
@@ -1476,7 +1504,7 @@ fn fallback_emits_the_verified_order_of_a_directional_native_swap() {
         ..SabreConfig::deterministic_seeded(29)
     };
 
-    let result = sabre_route(&circuit, &device, &layout, &config).unwrap();
+    let result = sabre_route_device(&circuit, &device, &layout, &config).unwrap();
 
     assert_eq!(result.diagnostics.fallback_count, 1);
     assert_eq!(result.swap_count, 1);

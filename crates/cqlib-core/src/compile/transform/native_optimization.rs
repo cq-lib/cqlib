@@ -12,18 +12,23 @@
 
 //! Exact physical optimization after device instruction lowering.
 //!
-//! [`NativeOptimizer`] closes a bounded loop over exact-physical two-qubit
-//! resynthesis, local phase/frame optimization, device re-legalization, and
-//! canonicalization. Every transform recursively visits structured control-flow
-//! bodies, while the loop itself advances all scopes synchronously.
+//! [`NativeOptimizer`] closes a bounded loop over independent stage branches.
+//! Every round evaluates `baseline -> A`, `baseline -> B -> C`, and
+//! `A -> B -> C`, where A/C are local one-qubit optimization and B is
+//! exact-physical two-qubit resynthesis. Each legalized stage is a returnable
+//! quality checkpoint. A non-improving intermediate may feed its dependent
+//! stage inside one branch, but it cannot replace the round cursor or suppress
+//! a sibling branch. Every transform recursively visits structured
+//! control-flow bodies.
 //!
-//! Candidate circuits are accepted only when their `DevicePhysicalCost`
-//! (represented internally by the exact sequence evaluator) is non-worse in
-//! every corresponding control-flow scope and strictly better in at least one.
-//! This conservative Pareto rule avoids assigning an arbitrary execution count
-//! to conditional or loop bodies. The optimizer restores the best whole-circuit
-//! point seen; it does not splice independently optimal bodies from different
-//! rounds.
+//! Candidate circuits are accepted under a Native-only quality policy. The
+//! balanced policy first protects the immutable entry circuit's entangler
+//! count/depth, total depth, calibrated error, and makespan in every
+//! control-flow scope; candidates inside that envelope are then ranked against
+//! the best returnable circuit. This avoids assigning arbitrary execution
+//! counts to conditional or loop bodies. The optimizer restores the best whole
+//! circuit seen; independently optimal control-flow bodies are never spliced
+//! together.
 //!
 //! One immutable exact-physical synthesis context is shared by resynthesis,
 //! local optimization, and scope costing for the lifetime of a single run. The
@@ -36,12 +41,15 @@ use crate::circuit::{
     ValueOperation, ValueSwitchCase,
 };
 use crate::compile::CompilerError;
+use crate::compile::device_planning::DevicePlanningSession;
+use crate::compile::device_planning::cost::{RobustDurationKey, RobustErrorKey};
 use crate::compile::sabre::MetricAvailability;
-#[cfg(test)]
-use crate::compile::transform::ResynthesizeTwoQubitBlocks;
 use crate::compile::transform::decompose::unitary::{
     DeviceContextCostFailure, DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
     OneQubitUnitaryDecomposition, synthesize_numeric_1q_unitary,
+};
+use crate::compile::transform::native_quality::{
+    NativeQualityPolicy, NativeQualityVector, NativeQualityViolation,
 };
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::resynthesis::{
@@ -50,65 +58,377 @@ use crate::compile::transform::resynthesis::{
 };
 use crate::compile::transform::target_basis::{TargetBasisCost, TargetBasisCostModel};
 use crate::compile::transform::{
-    Canonicalizer, CircuitAnalysis, DeviceLowerer, TransformOutcome, Transformer,
+    Canonicalizer, CircuitAnalysis, DeviceLowerer, RewriteEdits, TransformOutcome, Transformer,
 };
 use crate::device::Device;
 use ndarray::Array2;
 use num_complex::Complex64;
 use smallvec::{SmallVec, smallvec};
+use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
 use std::sync::Arc;
 
 const PHASE_EPS: f64 = 1e-12;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct NativeOptimizationSummary {
-    pub(crate) native_two_qubit_ops: u64,
-    pub(crate) native_two_qubit_depth: u64,
-    pub(crate) total_native_depth: u64,
-    pub(crate) native_total_ops: u64,
-    pub(crate) predicted_log_error: Option<f64>,
-    pub(crate) unavailable_error_count: u64,
-    pub(crate) imputed_error_count: u64,
+struct NativeStageCandidate {
+    circuit: Arc<Circuit>,
+    costs: Vec<NativeQualityVector>,
+    context: DeviceTwoQubitSynthesisContext,
+    improves_best: bool,
 }
 
+enum NativeStageOutcome {
+    Unchanged,
+    Unavailable,
+    Candidate(NativeStageCandidate),
+}
+
+struct NativeBestCheckpoint<'a> {
+    circuit: &'a mut Arc<Circuit>,
+    costs: &'a mut Vec<NativeQualityVector>,
+    context: &'a mut DeviceTwoQubitSynthesisContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NativeOptimizationSummary {
+    /// Number of native two-qubit operations across all control-flow scopes.
+    pub native_two_qubit_ops: u64,
+    /// Sum of native two-qubit depth across all control-flow scopes.
+    pub native_two_qubit_depth: u64,
+    /// Sum of total native depth across all control-flow scopes.
+    pub total_native_depth: u64,
+    /// Number of native operations across all control-flow scopes.
+    pub native_total_ops: u64,
+    /// Summed predicted log error, or `None` when calibration is unavailable.
+    pub predicted_log_error: Option<f64>,
+    /// Number of operations whose error metric was unavailable.
+    pub unavailable_error_count: u64,
+    /// Number of operations whose error metric was imputed.
+    pub imputed_error_count: u64,
+}
+
+/// Exact final quality for every control-flow scope in deterministic traversal
+/// order. Aggregate summaries remain useful diagnostics, but only this
+/// checkpoint is strong enough to authorize workflow-level candidate
+/// replacement.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct NativeExactQualityCheckpoint {
+    scopes: Vec<NativeQualityVector>,
+}
+
+impl NativeExactQualityCheckpoint {
+    fn new(scopes: Vec<NativeQualityVector>) -> Self {
+        Self { scopes }
+    }
+
+    /// Returns whether this checkpoint strictly Pareto-dominates `incumbent`
+    /// in every corresponding control-flow scope.
+    pub(crate) fn strictly_dominates(&self, incumbent: &Self) -> bool {
+        if self.scopes.len() != incumbent.scopes.len() {
+            return false;
+        }
+        let mut strict = false;
+        for (candidate, incumbent) in self.scopes.iter().zip(&incumbent.scopes) {
+            let Some(scope_strict) = candidate.exact_pareto_dominance(*incumbent) else {
+                return false;
+            };
+            strict |= scope_strict;
+        }
+        strict
+    }
+
+    /// Requires the full exact Pareto contract and a strict entangler-count or
+    /// entangler-depth improvement in at least one corresponding scope.
+    pub(crate) fn strictly_dominates_with_two_qubit_gain(&self, incumbent: &Self) -> bool {
+        if !self.strictly_dominates(incumbent) {
+            return false;
+        }
+        self.scopes
+            .iter()
+            .zip(&incumbent.scopes)
+            .any(|(candidate, incumbent)| {
+                candidate.physical.native_two_qubit_ops < incumbent.physical.native_two_qubit_ops
+                    || candidate.physical.native_two_qubit_depth
+                        < incumbent.physical.native_two_qubit_depth
+            })
+    }
+
+    /// Deterministic final SABRE-beam ordering. Lower is better.
+    pub(crate) fn compare_for_sabre_beam(&self, other: &Self) -> Ordering {
+        let left = self.summary();
+        let right = other.summary();
+        left.native_two_qubit_ops
+            .cmp(&right.native_two_qubit_ops)
+            .then_with(|| {
+                left.native_two_qubit_depth
+                    .cmp(&right.native_two_qubit_depth)
+            })
+            .then_with(|| left.total_native_depth.cmp(&right.total_native_depth))
+            .then_with(|| left.native_total_ops.cmp(&right.native_total_ops))
+            .then_with(|| {
+                aggregate_error(&self.scopes)
+                    .compare_by(aggregate_error(&other.scopes), RobustErrorKey::compare)
+            })
+            .then_with(|| {
+                aggregate_duration(&self.scopes).compare_by(
+                    aggregate_duration(&other.scopes),
+                    RobustDurationKey::compare,
+                )
+            })
+            .then_with(|| {
+                aggregate_makespan(&self.scopes)
+                    .compare_by(aggregate_makespan(&other.scopes), |left, right| {
+                        left.total_cmp(&right)
+                    })
+            })
+    }
+
+    pub(crate) fn summary(&self) -> NativeOptimizationSummary {
+        summarize_scope_costs(&self.scopes)
+    }
+}
+
+fn aggregate_error(scopes: &[NativeQualityVector]) -> MetricAvailability<RobustErrorKey> {
+    aggregate_optional_metric(
+        scopes.iter().map(|quality| quality.physical.error),
+        |left, right| left.combine(right),
+    )
+}
+
+fn aggregate_duration(scopes: &[NativeQualityVector]) -> MetricAvailability<RobustDurationKey> {
+    aggregate_optional_metric(
+        scopes.iter().map(|quality| quality.physical.duration),
+        |left, right| left.combine(right),
+    )
+}
+
+fn aggregate_makespan(scopes: &[NativeQualityVector]) -> MetricAvailability<f64> {
+    aggregate_optional_metric(
+        scopes.iter().map(|quality| quality.physical.makespan),
+        |left, right| left + right,
+    )
+}
+
+fn aggregate_optional_metric<T: Copy>(
+    metrics: impl IntoIterator<Item = MetricAvailability<T>>,
+    combine: impl Fn(T, T) -> T,
+) -> MetricAvailability<T> {
+    let mut aggregate = None;
+    for metric in metrics {
+        aggregate = Some(match (aggregate, metric) {
+            (None, metric) => metric,
+            (Some(MetricAvailability::Disabled), MetricAvailability::Disabled) => {
+                MetricAvailability::Disabled
+            }
+            (Some(MetricAvailability::Available(left)), MetricAvailability::Available(right)) => {
+                MetricAvailability::Available(combine(left, right))
+            }
+            (Some(MetricAvailability::Inconsistent), _)
+            | (_, MetricAvailability::Inconsistent)
+            | (Some(MetricAvailability::Disabled), MetricAvailability::Available(_))
+            | (Some(MetricAvailability::Available(_)), MetricAvailability::Disabled) => {
+                MetricAvailability::Inconsistent
+            }
+        });
+    }
+    aggregate.unwrap_or(MetricAvailability::Disabled)
+}
+
+/// Result of one bounded exact-physical native optimization run.
 #[derive(Debug, Clone)]
-pub(crate) struct NativeOptimizationResult {
-    pub(crate) circuit: Circuit,
-    pub(crate) changed: bool,
-    pub(crate) rounds: u8,
-    pub(crate) restored_best: bool,
-    pub(crate) before: NativeOptimizationSummary,
-    pub(crate) after: NativeOptimizationSummary,
+pub struct NativeOptimizationResult {
+    /// Best whole-circuit point accepted by the optimizer.
+    pub circuit: Circuit,
+    /// Whether the returned circuit differs from the supplied input.
+    pub changed: bool,
+    /// Number of optimization rounds entered, including a terminal stable round.
+    pub rounds: u8,
+    /// Whether the last explored state was discarded in favor of an earlier
+    /// best returnable point.
+    pub restored_best: bool,
+    /// Exact physical cost summary at optimizer entry.
+    pub before: NativeOptimizationSummary,
+    /// Exact physical cost summary for the returned circuit.
+    pub after: NativeOptimizationSummary,
 }
 
 /// Bounded native optimization loop with minimum-point restoration.
-pub(crate) struct NativeOptimizer<'a> {
-    device: &'a Device,
+///
+/// Inputs must already be routed and lowered to exact native instructions for
+/// `device`. Most callers should use the compiler workflow; this lower-level
+/// entry point is intended for diagnostics and custom physical pipelines.
+pub struct NativeOptimizer<'a> {
+    device: Cow<'a, Device>,
+    planning_session: Arc<DevicePlanningSession>,
     resynthesis: TwoQubitBlockResynthesisConfig,
     max_rounds: u8,
     max_stale_rounds: u8,
+    quality_policy: NativeQualityPolicy,
 }
 
 impl<'a> NativeOptimizer<'a> {
-    pub(crate) fn new(
+    /// Production native-loop budget used by normal compilation.
+    pub const NORMAL_MAX_ROUNDS: u8 = 2;
+    /// Production stale-round budget used by normal compilation.
+    pub const NORMAL_MAX_STALE_ROUNDS: u8 = 1;
+    /// Production native-loop budget used by enhanced compilation.
+    pub const ENHANCED_MAX_ROUNDS: u8 = 8;
+    /// Production stale-round budget used by enhanced compilation.
+    pub const ENHANCED_MAX_STALE_ROUNDS: u8 = 3;
+
+    /// Creates a reusable optimizer borrowing `device`.
+    pub fn new(
         device: &'a Device,
         resynthesis: TwoQubitBlockResynthesisConfig,
         max_rounds: u8,
         max_stale_rounds: u8,
-    ) -> Self {
-        Self {
-            device,
+    ) -> Result<Self, CompilerError> {
+        validate_native_optimization_budgets(max_rounds, max_stale_rounds)?;
+        Ok(Self {
+            device: Cow::Borrowed(device),
+            planning_session: Arc::new(DevicePlanningSession::new(device)),
             resynthesis,
             max_rounds,
             max_stale_rounds,
+            quality_policy: NativeQualityPolicy::EntanglerFirst,
+        })
+    }
+
+    /// Creates a reusable optimizer owning an immutable device snapshot.
+    ///
+    /// This is useful for language bindings and long-lived optimizer objects:
+    /// repeated runs reuse the same run-local planning cache without requiring
+    /// a self-referential wrapper.
+    pub fn new_owned(
+        device: Device,
+        resynthesis: TwoQubitBlockResynthesisConfig,
+        max_rounds: u8,
+        max_stale_rounds: u8,
+    ) -> Result<NativeOptimizer<'static>, CompilerError> {
+        validate_native_optimization_budgets(max_rounds, max_stale_rounds)?;
+        let planning_session = Arc::new(DevicePlanningSession::new(&device));
+        Ok(NativeOptimizer {
+            device: Cow::Owned(device),
+            planning_session,
+            resynthesis,
+            max_rounds,
+            max_stale_rounds,
+            quality_policy: NativeQualityPolicy::EntanglerFirst,
+        })
+    }
+
+    /// Creates an optimizer with the exact budget used by normal compilation.
+    pub fn normal(device: &'a Device) -> Self {
+        Self::new(
+            device,
+            TwoQubitBlockResynthesisConfig::normal(Default::default()),
+            Self::NORMAL_MAX_ROUNDS,
+            Self::NORMAL_MAX_STALE_ROUNDS,
+        )
+        .expect("production native optimization budgets must be valid")
+    }
+
+    /// Creates an optimizer with the exact budget used by enhanced compilation.
+    pub fn enhanced(device: &'a Device) -> Self {
+        Self::new(
+            device,
+            TwoQubitBlockResynthesisConfig::enhanced(Default::default()),
+            Self::ENHANCED_MAX_ROUNDS,
+            Self::ENHANCED_MAX_STALE_ROUNDS,
+        )
+        .expect("production native optimization budgets must be valid")
+    }
+
+    /// Device snapshot costed and validated by this optimizer.
+    pub fn device(&self) -> &Device {
+        self.device.as_ref()
+    }
+
+    /// Two-qubit resynthesis configuration used in every round.
+    pub fn resynthesis(&self) -> &TwoQubitBlockResynthesisConfig {
+        &self.resynthesis
+    }
+
+    /// Maximum number of rounds entered by one run.
+    pub const fn max_rounds(&self) -> u8 {
+        self.max_rounds
+    }
+
+    /// Number of consecutive non-improving rounds allowed before stopping.
+    pub const fn max_stale_rounds(&self) -> u8 {
+        self.max_stale_rounds
+    }
+
+    /// Candidate quality policy used by this optimizer.
+    pub const fn quality_policy(&self) -> NativeQualityPolicy {
+        self.quality_policy
+    }
+
+    /// Selects the Native-only candidate quality policy.
+    pub fn with_quality_policy(mut self, quality_policy: NativeQualityPolicy) -> Self {
+        self.quality_policy = quality_policy;
+        self
+    }
+
+    pub(crate) fn with_session(
+        device: &'a Device,
+        resynthesis: TwoQubitBlockResynthesisConfig,
+        max_rounds: u8,
+        max_stale_rounds: u8,
+        planning_session: Arc<DevicePlanningSession>,
+    ) -> Self {
+        debug_assert!(max_rounds > 0);
+        debug_assert!(max_stale_rounds > 0);
+        Self {
+            device: Cow::Borrowed(device),
+            planning_session,
+            resynthesis,
+            max_rounds,
+            max_stale_rounds,
+            quality_policy: NativeQualityPolicy::EntanglerFirst,
         }
     }
 
-    pub(crate) fn run(&self, circuit: &Circuit) -> Result<NativeOptimizationResult, CompilerError> {
+    pub fn run(&self, circuit: &Circuit) -> Result<NativeOptimizationResult, CompilerError> {
         self.run_with_policy(circuit, NativeResynthesisPolicy::Incremental)
             .map(|(result, _)| result)
+    }
+
+    pub(crate) fn run_with_exact_quality_and_stats(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<
+        (
+            NativeOptimizationResult,
+            NativeExactQualityCheckpoint,
+            NativeWorksetStats,
+        ),
+        CompilerError,
+    > {
+        let initial = Canonicalizer::production()
+            .transform(circuit, None)?
+            .into_circuit(circuit);
+        self.run_canonicalized(circuit, initial, NativeResynthesisPolicy::Incremental)
+    }
+
+    pub(crate) fn run_with_proven_canonical_input_exact_quality_and_stats(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<
+        (
+            NativeOptimizationResult,
+            NativeExactQualityCheckpoint,
+            NativeWorksetStats,
+        ),
+        CompilerError,
+    > {
+        self.run_canonicalized(
+            circuit,
+            circuit.clone(),
+            NativeResynthesisPolicy::Incremental,
+        )
     }
 
     pub(crate) fn run_with_policy(
@@ -119,130 +439,295 @@ impl<'a> NativeOptimizer<'a> {
         let initial = Canonicalizer::production()
             .transform(circuit, None)?
             .into_circuit(circuit);
-        self.device.validate_circuit(&initial)?;
+        self.run_canonicalized(circuit, initial, policy)
+            .map(|(result, _, stats)| (result, stats))
+    }
+
+    /// Runs from an input whose production-canonical postcondition has already
+    /// been established by this optimizer or its workflow caller.
+    fn run_canonicalized(
+        &self,
+        source: &Circuit,
+        initial: Circuit,
+        policy: NativeResynthesisPolicy,
+    ) -> Result<
+        (
+            NativeOptimizationResult,
+            NativeExactQualityCheckpoint,
+            NativeWorksetStats,
+        ),
+        CompilerError,
+    > {
+        self.device().validate_circuit(&initial)?;
+        // Native rounds can carry very large circuits. Share immutable states
+        // between the exploration cursor, the best returnable checkpoint, and
+        // the exact round-boundary cycle detector.
+        let initial = Arc::new(initial);
         let mut current = initial.clone();
         let mut best = initial;
         // This exact-physical context is immutable and run-scoped. All consumers
-        // share its Arc-backed catalog until a candidate exposes missing coverage.
-        let mut context = DeviceTwoQubitSynthesisContext::build(
-            self.device,
-            &best,
+        // on the exploration path share its Arc-backed catalog until a candidate
+        // exposes missing coverage.
+        let mut context = DeviceTwoQubitSynthesisContext::build_with_session(
+            self.device(),
+            &current,
             DeviceSynthesisPlacement::ExactPhysical,
+            Arc::clone(&self.planning_session),
         )?;
+        let mut best_context = context.clone();
         let mut best_costs = scope_costs_with_context(&best, &context).map_err(scope_cost_error)?;
+        let entry_costs = best_costs.clone();
         let before = summarize_scope_costs(&best_costs);
         let mut rounds = 0;
-        let mut stale = 0;
-        let mut restored_best = false;
-        let mut resynthesis_session = NativeResynthesisSession::new(policy);
+        let mut stale = 0_u8;
+        // Incremental operation identity is branch-local. Exact synthesis
+        // artifacts remain run-scoped and are moved between these sessions
+        // immediately around the A->B call.
+        let mut baseline_session = NativeResynthesisSession::new(policy);
+        let mut after_local_session = NativeResynthesisSession::new(policy);
+        let mut seen_states = vec![current.clone()];
 
         'optimization: while rounds < self.max_rounds && stale < self.max_stale_rounds {
             rounds += 1;
-            let resynthesis_outcome = resynthesize_two_qubit_blocks_incremental(
-                &current,
-                self.resynthesis.clone(),
-                context.clone(),
-                &mut resynthesis_session,
+            let round_start = current.clone();
+            let round_context = context.clone();
+            let mut improved_in_round = false;
+
+            // A is generated from the immutable round baseline. Its legal
+            // result remains available to the dependent A->B->C branch even
+            // when the standalone A checkpoint is rejected.
+            let phase_a_branch = match OptimizeNativeLocalGates::with_quality_policy(
+                round_context.clone(),
+                self.quality_policy,
+            )
+            .transform(&round_start, None)?
+            {
+                TransformOutcome::Unchanged => None,
+                TransformOutcome::Changed(candidate) => match self.evaluate_stage_candidate(
+                    &round_start,
+                    Arc::new(candidate),
+                    &best_costs,
+                    &entry_costs,
+                    &round_context,
+                    &mut after_local_session,
+                )? {
+                    NativeStageOutcome::Candidate(candidate) => {
+                        let branch = (candidate.circuit.clone(), candidate.context.clone());
+                        improved_in_round |= install_best_checkpoint(
+                            &candidate,
+                            &mut best,
+                            &mut best_costs,
+                            &mut best_context,
+                        );
+                        Some(branch)
+                    }
+                    NativeStageOutcome::Unchanged | NativeStageOutcome::Unavailable => None,
+                },
+            };
+
+            // B/C from the immutable baseline is a sibling search path. It is
+            // deliberately evaluated even when A produced a legal candidate.
+            improved_in_round |= self.explore_resynthesis_branch(
+                &round_start,
+                &round_context,
+                NativeBestCheckpoint {
+                    circuit: &mut best,
+                    costs: &mut best_costs,
+                    context: &mut best_context,
+                },
+                &entry_costs,
+                &mut baseline_session,
             )?;
-            let resynthesis_changed = resynthesis_outcome.changed();
-            let resynthesized = match &resynthesis_outcome {
-                TransformOutcome::Unchanged => &current,
-                TransformOutcome::Changed(circuit) => circuit,
-            };
-            let local_outcome =
-                OptimizeNativeLocalGates::new(context.clone()).transform(resynthesized, None)?;
-            let local_changed = local_outcome.changed();
-            // A fully stable round makes the remaining passes deterministic
-            // no-ops: lowering and canonicalization reproduce `current` (the
-            // entry point already validated it as exact-native), so this is
-            // the `candidate == current` break below without paying for the
-            // full-circuit lowering, canonicalization, validation, and cost
-            // evaluation in between.
-            if !resynthesis_changed && !local_changed {
-                break;
-            }
-            let legalized = match local_outcome {
-                TransformOutcome::Changed(locally_optimized) => {
-                    match DeviceLowerer::new(self.device).transform(&locally_optimized, None) {
-                        Ok(TransformOutcome::Unchanged) => locally_optimized,
-                        Ok(TransformOutcome::Changed(legalized)) => legalized,
-                        // Frame propagation is speculative: materializing a combined
-                        // phase as RZ may be impossible on devices whose discrete
-                        // phase gates cannot synthesize arbitrary RZ. Discard only
-                        // that local candidate and retain this round's 2Q result.
-                        Err(CompilerError::DeviceLoweringFailed(_)) => {
-                            let fallback = match &resynthesis_outcome {
-                                TransformOutcome::Unchanged => &current,
-                                TransformOutcome::Changed(circuit) => circuit,
-                            };
-                            match DeviceLowerer::new(self.device).transform(fallback, None)? {
-                                TransformOutcome::Changed(legalized) => legalized,
-                                TransformOutcome::Unchanged => match resynthesis_outcome {
-                                    TransformOutcome::Changed(resynthesized) => resynthesized,
-                                    TransformOutcome::Unchanged => break 'optimization,
-                                },
-                            }
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                TransformOutcome::Unchanged => {
-                    let resynthesized = match resynthesis_outcome {
-                        TransformOutcome::Changed(circuit) => circuit,
-                        TransformOutcome::Unchanged => unreachable!(
-                            "a stable native optimization round exits before legalization"
-                        ),
-                    };
-                    match DeviceLowerer::new(self.device).transform(&resynthesized, None)? {
-                        TransformOutcome::Unchanged => resynthesized,
-                        TransformOutcome::Changed(legalized) => legalized,
-                    }
-                }
-            };
-            let candidate = match Canonicalizer::production().transform(&legalized, None)? {
-                TransformOutcome::Unchanged => legalized,
-                TransformOutcome::Changed(candidate) => candidate,
-            };
-            // Debug builds validate every round to keep the safety net tight
-            // while developing; release builds validate only accepted
-            // candidates. The terminal workflow validation remains the final
-            // safety boundary either way.
-            let validate_every_round = cfg!(debug_assertions);
-            if validate_every_round {
-                self.device.validate_circuit(&candidate)?;
+
+            if let Some((phase_a, phase_a_context)) = phase_a_branch {
+                // Only exact synthesis artifacts cross the branch boundary;
+                // incremental operation IDs, diffs, and worksets stay local.
+                baseline_session.swap_synthesis_cache(&mut after_local_session);
+                let branch_result = self.explore_resynthesis_branch(
+                    &phase_a,
+                    &phase_a_context,
+                    NativeBestCheckpoint {
+                        circuit: &mut best,
+                        costs: &mut best_costs,
+                        context: &mut best_context,
+                    },
+                    &entry_costs,
+                    &mut after_local_session,
+                );
+                baseline_session.swap_synthesis_cache(&mut after_local_session);
+                improved_in_round |= branch_result?;
             }
 
-            if candidate == current {
-                current = candidate;
+            // Only a quality-accepted whole-circuit checkpoint may seed the
+            // next round. Rejected A/B/C states have already served their
+            // bounded dependent edge and cannot contaminate later rounds.
+            current = best.clone();
+            context = best_context.clone();
+
+            if current.as_ref() == round_start.as_ref() {
                 break;
             }
-            let candidate_costs = self.candidate_costs_with_reuse(&candidate, &mut context)?;
-            if scope_costs_dominate(&candidate_costs, &best_costs) {
-                if !validate_every_round {
-                    self.device.validate_circuit(&candidate)?;
-                }
-                best = candidate.clone();
-                best_costs = candidate_costs;
+
+            // Only round-boundary exploration states participate in cycle
+            // detection. The same circuit at different A/B/C phase positions
+            // does not imply the same remaining deterministic transition.
+            if let Some(seen) = seen_states
+                .iter()
+                .find(|seen| seen.as_ref() == current.as_ref())
+            {
+                current = seen.clone();
+                baseline_session.record_cycle_early_exit();
+                break 'optimization;
+            }
+            seen_states.push(current.clone());
+
+            if improved_in_round {
                 stale = 0;
             } else {
                 stale = stale.saturating_add(1);
             }
-            current = candidate;
         }
 
-        if current != best {
-            restored_best = true;
-        }
+        let restored_best = current.as_ref() != best.as_ref();
         let after = summarize_scope_costs(&best_costs);
+        let exact_quality = NativeExactQualityCheckpoint::new(best_costs);
+        drop(current);
+        drop(seen_states);
+        let best = Arc::try_unwrap(best).unwrap_or_else(|shared| shared.as_ref().clone());
         let result = NativeOptimizationResult {
-            changed: best != *circuit,
+            changed: best != *source,
             circuit: best,
             rounds,
             restored_best,
             before,
             after,
         };
-        Ok((result, resynthesis_session.stats()))
+        let mut stats = baseline_session.stats();
+        stats.merge_workset_from(after_local_session.stats());
+        Ok((result, exact_quality, stats))
+    }
+
+    /// Evaluates one detached `B -> C` branch. B and C are separate returnable
+    /// checkpoints, while raw B remains available to C even when B itself is
+    /// not lowerable or does not improve the whole-circuit quality point.
+    fn explore_resynthesis_branch(
+        &self,
+        branch_start: &Arc<Circuit>,
+        branch_context: &DeviceTwoQubitSynthesisContext,
+        best: NativeBestCheckpoint<'_>,
+        entry_costs: &[NativeQualityVector],
+        session: &mut NativeResynthesisSession,
+    ) -> Result<bool, CompilerError> {
+        let resynthesis_outcome = resynthesize_two_qubit_blocks_incremental(
+            branch_start,
+            self.resynthesis.clone(),
+            branch_context.clone(),
+            session,
+            self.quality_policy,
+        )?;
+        let TransformOutcome::Changed(raw_phase_b) = resynthesis_outcome else {
+            return Ok(false);
+        };
+        let raw_phase_b = Arc::new(raw_phase_b);
+        let phase_b_outcome = self.evaluate_stage_candidate(
+            branch_start,
+            raw_phase_b.clone(),
+            best.costs,
+            entry_costs,
+            branch_context,
+            session,
+        )?;
+        let cleanup_context = match phase_b_outcome {
+            NativeStageOutcome::Candidate(candidate) => {
+                let context = candidate.context.clone();
+                let improved =
+                    install_best_checkpoint(&candidate, best.circuit, best.costs, best.context);
+                (context, improved)
+            }
+            NativeStageOutcome::Unchanged | NativeStageOutcome::Unavailable => {
+                (branch_context.clone(), false)
+            }
+        };
+        let (cleanup_context, mut improved) = cleanup_context;
+
+        // C follows generated B, not accepted B. This preserves the useful
+        // coupled edge without binding B's acceptance to C's acceptance.
+        if let TransformOutcome::Changed(cleaned) =
+            OptimizeNativeLocalGates::with_quality_policy(cleanup_context, self.quality_policy)
+                .transform(&raw_phase_b, None)?
+        {
+            if let NativeStageOutcome::Candidate(candidate) = self.evaluate_stage_candidate(
+                branch_start,
+                Arc::new(cleaned),
+                best.costs,
+                entry_costs,
+                branch_context,
+                session,
+            )? {
+                improved |=
+                    install_best_checkpoint(&candidate, best.circuit, best.costs, best.context);
+            }
+        }
+        Ok(improved)
+    }
+
+    /// Legalizes, canonicalizes, validates, and scores one detached stage
+    /// candidate. A quality failure prevents only installation as `best`; the
+    /// legal candidate and its costing context remain available for bounded
+    /// exploration by a dependent stage.
+    fn evaluate_stage_candidate(
+        &self,
+        baseline: &Arc<Circuit>,
+        generated: Arc<Circuit>,
+        best_costs: &[NativeQualityVector],
+        entry_costs: &[NativeQualityVector],
+        context: &DeviceTwoQubitSynthesisContext,
+        resynthesis_session: &mut NativeResynthesisSession,
+    ) -> Result<NativeStageOutcome, CompilerError> {
+        let legalized = match DeviceLowerer::with_session(self.device(), &self.planning_session)
+            .transform(&generated, None)
+        {
+            Ok(TransformOutcome::Unchanged) => generated,
+            Ok(TransformOutcome::Changed(legalized)) => Arc::new(legalized),
+            // A standalone checkpoint may be unavailable even though a later
+            // cleanup of the raw generated circuit can still be lowerable.
+            Err(CompilerError::DeviceLoweringFailed(_)) => {
+                return Ok(NativeStageOutcome::Unavailable);
+            }
+            Err(error) => return Err(error),
+        };
+        let candidate = match Canonicalizer::production().transform(&legalized, None)? {
+            TransformOutcome::Unchanged => legalized,
+            TransformOutcome::Changed(candidate) => Arc::new(candidate),
+        };
+        if candidate.as_ref() == baseline.as_ref() {
+            return Ok(NativeStageOutcome::Unchanged);
+        }
+
+        // A non-improving candidate may become the next exploration state, so
+        // validation is mandatory before returning it in every build profile.
+        self.device().validate_circuit(&candidate)?;
+        let mut candidate_context = context.clone();
+        let candidate_costs =
+            self.candidate_costs_with_reuse(&candidate, &mut candidate_context)?;
+        let improves_best = match scope_quality_decision(
+            &candidate_costs,
+            best_costs,
+            entry_costs,
+            self.quality_policy,
+        ) {
+            Ok(()) => true,
+            Err(violation) => {
+                resynthesis_session.record_quality_rejection(violation);
+                false
+            }
+        };
+        Ok(NativeStageOutcome::Candidate(NativeStageCandidate {
+            circuit: candidate,
+            costs: candidate_costs,
+            context: candidate_context,
+            improves_best,
+        }))
     }
 
     /// Costs a candidate with the run-scoped context, rebuilding transactionally
@@ -251,15 +736,15 @@ impl<'a> NativeOptimizer<'a> {
         &self,
         candidate: &Circuit,
         context: &mut DeviceTwoQubitSynthesisContext,
-    ) -> Result<Vec<crate::compile::transform::decompose::unitary::DevicePhysicalCost>, CompilerError>
-    {
+    ) -> Result<Vec<NativeQualityVector>, CompilerError> {
         match scope_costs_with_context(candidate, context) {
             Ok(costs) => Ok(costs),
             Err(ScopeCostError::Context(DeviceContextCostFailure::Unprepared(_))) => {
-                let rebuilt = DeviceTwoQubitSynthesisContext::build(
-                    self.device,
+                let rebuilt = DeviceTwoQubitSynthesisContext::build_with_session(
+                    self.device(),
                     candidate,
                     DeviceSynthesisPlacement::ExactPhysical,
+                    Arc::clone(&self.planning_session),
                 )?;
                 let costs = match scope_costs_with_context(candidate, &rebuilt) {
                     Ok(costs) => costs,
@@ -276,6 +761,38 @@ impl<'a> NativeOptimizer<'a> {
             Err(error) => Err(scope_cost_error(error)),
         }
     }
+}
+
+fn install_best_checkpoint(
+    candidate: &NativeStageCandidate,
+    best: &mut Arc<Circuit>,
+    best_costs: &mut Vec<NativeQualityVector>,
+    best_context: &mut DeviceTwoQubitSynthesisContext,
+) -> bool {
+    if !candidate.improves_best {
+        return false;
+    }
+    *best = candidate.circuit.clone();
+    best_costs.clone_from(&candidate.costs);
+    *best_context = candidate.context.clone();
+    true
+}
+
+fn validate_native_optimization_budgets(
+    max_rounds: u8,
+    max_stale_rounds: u8,
+) -> Result<(), CompilerError> {
+    if max_rounds == 0 {
+        return Err(CompilerError::InvalidInput(
+            "native optimizer max_rounds must be greater than zero".to_string(),
+        ));
+    }
+    if max_stale_rounds == 0 {
+        return Err(CompilerError::InvalidInput(
+            "native optimizer max_stale_rounds must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -302,8 +819,7 @@ fn scope_cost_error(error: ScopeCostError) -> CompilerError {
 fn scope_costs_with_context(
     circuit: &Circuit,
     context: &DeviceTwoQubitSynthesisContext,
-) -> Result<Vec<crate::compile::transform::decompose::unitary::DevicePhysicalCost>, ScopeCostError>
-{
+) -> Result<Vec<NativeQualityVector>, ScopeCostError> {
     let mut costs = Vec::new();
     collect_scope_costs(circuit.operations(), context, &mut costs)?;
     Ok(costs)
@@ -312,7 +828,7 @@ fn scope_costs_with_context(
 fn collect_scope_costs(
     operations: &[Operation],
     context: &DeviceTwoQubitSynthesisContext,
-    output: &mut Vec<crate::compile::transform::decompose::unitary::DevicePhysicalCost>,
+    output: &mut Vec<NativeQualityVector>,
 ) -> Result<(), ScopeCostError> {
     let mut accumulator = context
         .exact_sequence_cost_accumulator()
@@ -352,35 +868,46 @@ fn collect_scope_costs(
             | Instruction::Delay => {}
         }
     }
-    output.push(accumulator.finish());
+    output.push(NativeQualityVector::for_operations(
+        accumulator.finish(),
+        operations,
+    ));
     Ok(())
 }
 
-fn scope_costs_dominate(
-    candidate: &[crate::compile::transform::decompose::unitary::DevicePhysicalCost],
-    current: &[crate::compile::transform::decompose::unitary::DevicePhysicalCost],
-) -> bool {
-    if candidate.len() != current.len() {
-        return false;
+fn scope_quality_decision(
+    candidate: &[NativeQualityVector],
+    current: &[NativeQualityVector],
+    entry: &[NativeQualityVector],
+    policy: NativeQualityPolicy,
+) -> Result<(), NativeQualityViolation> {
+    if candidate.len() != current.len() || candidate.len() != entry.len() {
+        return Err(NativeQualityViolation::ScopeShape);
     }
     let mut improved = false;
-    for (candidate, current) in candidate.iter().zip(current) {
-        match candidate.compare(*current) {
+    for ((candidate, current), entry) in candidate.iter().zip(current).zip(entry) {
+        if let Some(violation) = candidate.admissibility_violation_against(*entry, policy) {
+            return Err(violation);
+        }
+        match candidate.compare(*current, policy) {
             std::cmp::Ordering::Less => improved = true,
             std::cmp::Ordering::Equal => {}
-            std::cmp::Ordering::Greater => return false,
+            std::cmp::Ordering::Greater => return Err(NativeQualityViolation::Rank),
         }
     }
-    improved
+    if improved {
+        Ok(())
+    } else {
+        Err(NativeQualityViolation::Rank)
+    }
 }
 
-fn summarize_scope_costs(
-    costs: &[crate::compile::transform::decompose::unitary::DevicePhysicalCost],
-) -> NativeOptimizationSummary {
+fn summarize_scope_costs(costs: &[NativeQualityVector]) -> NativeOptimizationSummary {
     let mut predicted_log_error = Some(0.0);
     let mut unavailable_error_count = 0;
     let mut imputed_error_count = 0;
-    for cost in costs {
+    for quality in costs {
+        let cost = quality.physical;
         match cost.error {
             MetricAvailability::Available(error) => {
                 if let Some(total) = &mut predicted_log_error {
@@ -397,19 +924,19 @@ fn summarize_scope_costs(
     NativeOptimizationSummary {
         native_two_qubit_ops: costs
             .iter()
-            .map(|cost| u64::from(cost.native_two_qubit_ops))
+            .map(|quality| u64::from(quality.physical.native_two_qubit_ops))
             .sum(),
         native_two_qubit_depth: costs
             .iter()
-            .map(|cost| u64::from(cost.native_two_qubit_depth))
+            .map(|quality| u64::from(quality.physical.native_two_qubit_depth))
             .sum(),
         total_native_depth: costs
             .iter()
-            .map(|cost| u64::from(cost.total_native_depth))
+            .map(|quality| u64::from(quality.physical.total_native_depth))
             .sum(),
         native_total_ops: costs
             .iter()
-            .map(|cost| u64::from(cost.native_total_ops))
+            .map(|quality| u64::from(quality.physical.native_total_ops))
             .sum(),
         predicted_log_error,
         unavailable_error_count,
@@ -421,11 +948,18 @@ fn summarize_scope_costs(
 #[derive(Debug, Clone)]
 pub(crate) struct OptimizeNativeLocalGates {
     device_context: DeviceTwoQubitSynthesisContext,
+    quality_policy: NativeQualityPolicy,
 }
 
 impl OptimizeNativeLocalGates {
-    pub(crate) fn new(device_context: DeviceTwoQubitSynthesisContext) -> Self {
-        Self { device_context }
+    pub(crate) fn with_quality_policy(
+        device_context: DeviceTwoQubitSynthesisContext,
+        quality_policy: NativeQualityPolicy,
+    ) -> Self {
+        Self {
+            device_context,
+            quality_policy,
+        }
     }
 }
 
@@ -439,7 +973,10 @@ impl Transformer for OptimizeNativeLocalGates {
         circuit: &Circuit,
         _analysis: Option<&CircuitAnalysis>,
     ) -> Result<TransformOutcome, CompilerError> {
-        let policy = LocalOptimizationPolicy::Device(self.device_context.clone());
+        let policy = LocalOptimizationPolicy::Device {
+            context: self.device_context.clone(),
+            quality_policy: self.quality_policy,
+        };
         LocalOneQPass::run(circuit, &policy)
     }
 }
@@ -449,7 +986,10 @@ impl Transformer for OptimizeNativeLocalGates {
 pub(crate) enum LocalOptimizationPolicy {
     Logical,
     Basis(Arc<TargetBasisCostModel>),
-    Device(DeviceTwoQubitSynthesisContext),
+    Device {
+        context: DeviceTwoQubitSynthesisContext,
+        quality_policy: NativeQualityPolicy,
+    },
 }
 
 /// Runs the shared one-qubit/frame optimizer with an explicit cost policy.
@@ -460,6 +1000,13 @@ pub(crate) fn optimize_one_qubit_runs_with_policy(
     LocalOneQPass::run(circuit, policy)
 }
 
+pub(crate) fn optimize_one_qubit_runs_with_policy_and_edits(
+    circuit: &Circuit,
+    policy: &LocalOptimizationPolicy,
+) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
+    LocalOneQPass::run_with_rewrite_edits(circuit, policy)
+}
+
 struct LocalOneQPass<'source, 'policy> {
     source: &'source Circuit,
     policy: &'policy LocalOptimizationPolicy,
@@ -468,6 +1015,10 @@ struct LocalOneQPass<'source, 'policy> {
 
 struct SequenceRewrite {
     operations: Vec<ValueOperation>,
+    /// Output-to-input correspondence for the current sequence. Rebuilt or
+    /// generated operations are `None`; unchanged operations retain their
+    /// source order.
+    provenance: Option<Vec<Option<usize>>>,
     phase_delta: f64,
     changed: bool,
 }
@@ -477,6 +1028,25 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
         source: &'source Circuit,
         policy: &'policy LocalOptimizationPolicy,
     ) -> Result<TransformOutcome, CompilerError> {
+        Self::run_internal(source, policy, false).map(|(outcome, _)| outcome)
+    }
+
+    fn run_with_rewrite_edits(
+        source: &'source Circuit,
+        policy: &'policy LocalOptimizationPolicy,
+    ) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
+        let (outcome, edits) = Self::run_internal(source, policy, true)?;
+        Ok((
+            outcome,
+            edits.expect("rewrite edits were requested for the one-qubit pass"),
+        ))
+    }
+
+    fn run_internal(
+        source: &'source Circuit,
+        policy: &'policy LocalOptimizationPolicy,
+        track_rewrite_edits: bool,
+    ) -> Result<(TransformOutcome, Option<RewriteEdits>), CompilerError> {
         let rebuild = CircuitRebuildContext::new(source);
         let root_classical = rebuild.root_classical().clone();
         let mut pass = Self {
@@ -484,7 +1054,29 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
             policy,
             rebuild,
         };
-        let rewrite = pass.process_sequence(source.operations(), &root_classical)?;
+        let rewrite =
+            pass.process_sequence(source.operations(), &root_classical, track_rewrite_edits)?;
+        if !rewrite.changed {
+            return Ok((
+                TransformOutcome::Unchanged,
+                track_rewrite_edits.then(|| {
+                    RewriteEdits::linear(
+                        source.operations().len(),
+                        source.operations().len(),
+                        Vec::new(),
+                    )
+                }),
+            ));
+        }
+        debug_assert!(
+            rewrite
+                .provenance
+                .as_ref()
+                .is_none_or(|provenance| rewrite.operations.len() == provenance.len())
+        );
+        let edits = rewrite.provenance.as_ref().map(|provenance| {
+            RewriteEdits::from_operation_provenance(source.operations().len(), provenance)
+        });
         let mut global_phase = source.global_phase();
         if rewrite.phase_delta.abs() > PHASE_EPS {
             global_phase = global_phase + Parameter::from(rewrite.phase_delta);
@@ -492,21 +1084,19 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
         let circuit = pass
             .rebuild
             .finish(source.qubits(), rewrite.operations, global_phase)?;
-        Ok(if rewrite.changed {
-            TransformOutcome::Changed(circuit)
-        } else {
-            TransformOutcome::Unchanged
-        })
+        Ok((TransformOutcome::Changed(circuit), edits))
     }
 
     fn process_sequence(
         &mut self,
         operations: &[Operation],
         classical_remap: &ClassicalRemap,
+        track_provenance: bool,
     ) -> Result<SequenceRewrite, CompilerError> {
         let mut values = Vec::with_capacity(operations.len());
+        let mut provenance = track_provenance.then(|| Vec::with_capacity(operations.len()));
         let mut nested_changed = false;
-        for operation in operations {
+        for (order, operation) in operations.iter().enumerate() {
             if let Instruction::ClassicalControl(control) = &operation.instruction {
                 let (instruction, changed) = self.rebuild_control_flow(control, classical_remap)?;
                 values.push(ValueOperation {
@@ -518,6 +1108,9 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
                     )?,
                     label: operation.label.clone(),
                 });
+                if let Some(provenance) = &mut provenance {
+                    provenance.push((!changed).then_some(order));
+                }
                 nested_changed |= changed;
             } else {
                 values.push(self.rebuild.remap_preserved_operation(
@@ -525,28 +1118,33 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
                     operation,
                     classical_remap,
                 )?);
+                if let Some(provenance) = &mut provenance {
+                    provenance.push(Some(order));
+                }
             }
         }
 
         let optimized = match self.policy {
-            LocalOptimizationPolicy::Device(_) => {
+            LocalOptimizationPolicy::Device { .. } => {
                 // Preserve the existing native behavior: frame movement is
                 // speculative within a native round, while the outer minimum
                 // point controller decides whether the whole round survives.
-                let framed = propagate_frames(values)?;
-                let fused = fuse_one_qubit_runs(framed.operations, self.policy)?;
+                let framed = propagate_frames(values, provenance)?;
+                let fused = fuse_one_qubit_runs(framed.operations, framed.provenance, self.policy)?;
                 ValueRewrite {
                     operations: fused.operations,
+                    provenance: fused.provenance,
                     phase_delta: framed.phase_delta + fused.phase_delta,
                     changed: framed.changed || fused.changed,
                 }
             }
             LocalOptimizationPolicy::Logical | LocalOptimizationPolicy::Basis(_) => {
-                optimize_transactional(values, self.policy)?
+                optimize_transactional(values, provenance, self.policy)?
             }
         };
         Ok(SequenceRewrite {
             operations: optimized.operations,
+            provenance: optimized.provenance,
             phase_delta: optimized.phase_delta,
             changed: nested_changed || optimized.changed,
         })
@@ -557,7 +1155,7 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
         operations: &[Operation],
         classical_remap: &ClassicalRemap,
     ) -> Result<(ValueControlBody, bool), CompilerError> {
-        let mut rewrite = self.process_sequence(operations, classical_remap)?;
+        let mut rewrite = self.process_sequence(operations, classical_remap, false)?;
         if rewrite.phase_delta.abs() > PHASE_EPS {
             rewrite.operations.insert(
                 0,
@@ -657,6 +1255,7 @@ impl<'source, 'policy> LocalOneQPass<'source, 'policy> {
 
 struct ValueRewrite {
     operations: Vec<ValueOperation>,
+    provenance: Option<Vec<Option<usize>>>,
     phase_delta: f64,
     changed: bool,
 }
@@ -686,7 +1285,10 @@ impl LocalOptimizationPolicy {
                 after.two_qubit_ops <= before.two_qubit_ops
                     && compare_basis_cost(after, before).is_lt()
             }
-            Self::Device(context) => {
+            Self::Device {
+                context,
+                quality_policy,
+            } => {
                 let Some(before) = exact_local_sequence_cost(context, source, "source")? else {
                     return Ok(false);
                 };
@@ -694,7 +1296,10 @@ impl LocalOptimizationPolicy {
                 else {
                     return Ok(false);
                 };
-                after.strictly_better_than(before)
+                let before = NativeQualityVector::for_value_operations(before, source);
+                let after = NativeQualityVector::for_value_operations(after, candidate);
+                after.admissible_against(before, *quality_policy)
+                    && after.compare(before, *quality_policy).is_lt()
             }
         })
     }
@@ -730,15 +1335,22 @@ fn exact_local_sequence_cost(
 
 fn optimize_transactional(
     operations: Vec<ValueOperation>,
+    provenance: Option<Vec<Option<usize>>>,
     policy: &LocalOptimizationPolicy,
 ) -> Result<ValueRewrite, CompilerError> {
-    let framed = propagate_frames(operations.clone())?;
-    let fused_after_frames = fuse_one_qubit_runs(framed.operations, policy)?;
+    debug_assert!(
+        provenance
+            .as_ref()
+            .is_none_or(|provenance| operations.len() == provenance.len())
+    );
+    let framed = propagate_frames(operations.clone(), provenance.clone())?;
+    let fused_after_frames = fuse_one_qubit_runs(framed.operations, framed.provenance, policy)?;
     let combined_phase = framed.phase_delta + fused_after_frames.phase_delta;
     let combined_changed = framed.changed || fused_after_frames.changed;
     if combined_changed && policy.strictly_better(&fused_after_frames.operations, &operations)? {
         return Ok(ValueRewrite {
             operations: fused_after_frames.operations,
+            provenance: fused_after_frames.provenance,
             phase_delta: combined_phase,
             changed: true,
         });
@@ -746,7 +1358,7 @@ fn optimize_transactional(
 
     // A neutral or harmful frame movement must not hide an independently
     // useful one-qubit fusion on the original sequence.
-    fuse_one_qubit_runs(operations, policy)
+    fuse_one_qubit_runs(operations, provenance, policy)
 }
 
 fn logical_one_qubit_cost(operations: &[ValueOperation]) -> LogicalOneQCost {
@@ -829,8 +1441,14 @@ fn compare_basis_cost(left: TargetBasisCost, right: TargetBasisCost) -> std::cmp
 /// strictly better exact-physical device cost than the original run.
 fn fuse_one_qubit_runs(
     operations: Vec<ValueOperation>,
+    provenance: Option<Vec<Option<usize>>>,
     policy: &LocalOptimizationPolicy,
 ) -> Result<ValueRewrite, CompilerError> {
+    debug_assert!(
+        provenance
+            .as_ref()
+            .is_none_or(|provenance| operations.len() == provenance.len())
+    );
     let runs = collect_one_qubit_runs(&operations);
     let mut replacements = HashMap::<usize, (Vec<usize>, Vec<ValueOperation>)>::new();
     let mut phase_delta = 0.0;
@@ -864,6 +1482,7 @@ fn fuse_one_qubit_runs(
     if replacements.is_empty() {
         return Ok(ValueRewrite {
             operations,
+            provenance,
             phase_delta: 0.0,
             changed: false,
         });
@@ -874,15 +1493,27 @@ fn fuse_one_qubit_runs(
         skipped.extend(orders.iter().copied().filter(|order| order != first));
     }
     let mut output = Vec::with_capacity(operations.len());
+    let mut output_provenance = provenance
+        .as_ref()
+        .map(|provenance| Vec::with_capacity(provenance.len()));
+    let mut source_orders = provenance.unwrap_or_default().into_iter();
     for (order, operation) in operations.into_iter().enumerate() {
+        let source_order = source_orders.next().flatten();
         if let Some((_, replacement)) = replacements.remove(&order) {
+            if let Some(output_provenance) = &mut output_provenance {
+                output_provenance.extend(std::iter::repeat_n(None, replacement.len()));
+            }
             output.extend(replacement);
         } else if !skipped.contains(&order) {
             output.push(operation);
+            if let Some(output_provenance) = &mut output_provenance {
+                output_provenance.push(source_order);
+            }
         }
     }
     Ok(ValueRewrite {
         operations: output,
+        provenance: output_provenance,
         phase_delta,
         changed: true,
     })
@@ -997,17 +1628,36 @@ impl QubitFrame {
 /// A pending frame occurs earlier in circuit time than the operation currently
 /// being visited. Moving it forward therefore conjugates it by that operation.
 /// Frames never cross structured control flow, labels, barriers, or resets.
-fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, CompilerError> {
+fn propagate_frames(
+    operations: Vec<ValueOperation>,
+    provenance: Option<Vec<Option<usize>>>,
+) -> Result<ValueRewrite, CompilerError> {
+    debug_assert!(
+        provenance
+            .as_ref()
+            .is_none_or(|provenance| operations.len() == provenance.len())
+    );
     let mut frames = BTreeMap::<Qubit, QubitFrame>::new();
     let mut output = Vec::with_capacity(operations.len());
+    let mut output_provenance = provenance
+        .as_ref()
+        .map(|provenance| Vec::with_capacity(provenance.len()));
+    let mut source_orders = provenance.unwrap_or_default().into_iter();
     let mut phase_delta = 0.0;
     let mut changed = false;
 
     for mut operation in operations {
+        let source_order = source_orders.next().flatten();
         if operation.label.is_none()
             && let Some((qubit, z_angle, phase)) = z_carrier(&operation)
         {
-            flush_pauli(qubit, &mut frames, &mut output, &mut phase_delta);
+            flush_pauli(
+                qubit,
+                &mut frames,
+                &mut output,
+                &mut output_provenance,
+                &mut phase_delta,
+            );
             frames.entry(qubit).or_default().z_angle += z_angle;
             phase_delta += phase;
             changed = true;
@@ -1016,7 +1666,7 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
         if operation.label.is_none()
             && let Some((qubit, x, z, phase)) = pauli_carrier(&operation)
         {
-            flush_z(qubit, &mut frames, &mut output);
+            flush_z(qubit, &mut frames, &mut output, &mut output_provenance);
             let frame = frames.entry(qubit).or_default();
             let extra_phase = frame.multiply_pauli(x, z);
             phase_delta += phase + f64::from(extra_phase) * FRAC_PI_2;
@@ -1041,6 +1691,9 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
             frames.insert(operation.qubits[0], right);
             frames.insert(operation.qubits[1], left);
             output.push(operation);
+            if let Some(output_provenance) = &mut output_provenance {
+                output_provenance.push(source_order);
+            }
             changed |= !left.is_empty() || !right.is_empty();
             continue;
         }
@@ -1058,7 +1711,7 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
         {
             let pair = [operation.qubits[0], operation.qubits[1]];
             if gate == StandardGate::CX {
-                flush_z(pair[1], &mut frames, &mut output);
+                flush_z(pair[1], &mut frames, &mut output, &mut output_provenance);
             }
             if pair.iter().any(|qubit| {
                 frames
@@ -1066,12 +1719,15 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
                     .is_some_and(|frame| frame.pauli_x || frame.pauli_z)
             }) {
                 for qubit in pair {
-                    flush_z(qubit, &mut frames, &mut output);
+                    flush_z(qubit, &mut frames, &mut output, &mut output_provenance);
                 }
                 phase_delta += propagate_clifford_paulis(gate, pair, &mut frames);
                 changed = true;
             }
             output.push(operation);
+            if let Some(output_provenance) = &mut output_provenance {
+                output_provenance.push(source_order);
+            }
             continue;
         }
 
@@ -1085,12 +1741,18 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
                 .any(|qubit| frames.get(qubit).is_some_and(|frame| frame.pauli_x));
             if !blocked {
                 output.push(operation);
+                if let Some(output_provenance) = &mut output_provenance {
+                    output_provenance.push(source_order);
+                }
                 continue;
             }
         }
 
         if operation.label.is_none() && absorb_z_into_xy_axis(&mut operation, &frames) {
             output.push(operation);
+            if let Some(output_provenance) = &mut output_provenance {
+                output_provenance.push(None);
+            }
             changed = true;
             continue;
         }
@@ -1101,12 +1763,21 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
         {
             for qubit in &operation.qubits {
                 if frames.get(qubit).is_some_and(|frame| frame.pauli_x) {
-                    flush_frame(*qubit, &mut frames, &mut output, &mut phase_delta);
+                    flush_frame(
+                        *qubit,
+                        &mut frames,
+                        &mut output,
+                        &mut output_provenance,
+                        &mut phase_delta,
+                    );
                 } else {
                     changed |= frames.remove(qubit).is_some_and(|frame| !frame.is_empty());
                 }
             }
             output.push(operation);
+            if let Some(output_provenance) = &mut output_provenance {
+                output_provenance.push(source_order);
+            }
             continue;
         }
 
@@ -1120,18 +1791,38 @@ fn propagate_frames(operations: Vec<ValueOperation>) -> Result<ValueRewrite, Com
                 ))
             );
         if global_boundary {
-            flush_all(&mut frames, &mut output, &mut phase_delta);
+            flush_all(
+                &mut frames,
+                &mut output,
+                &mut output_provenance,
+                &mut phase_delta,
+            );
         } else {
             for qubit in &operation.qubits {
-                flush_frame(*qubit, &mut frames, &mut output, &mut phase_delta);
+                flush_frame(
+                    *qubit,
+                    &mut frames,
+                    &mut output,
+                    &mut output_provenance,
+                    &mut phase_delta,
+                );
             }
         }
         output.push(operation);
+        if let Some(output_provenance) = &mut output_provenance {
+            output_provenance.push(source_order);
+        }
     }
-    flush_all(&mut frames, &mut output, &mut phase_delta);
+    flush_all(
+        &mut frames,
+        &mut output,
+        &mut output_provenance,
+        &mut phase_delta,
+    );
 
     Ok(ValueRewrite {
         operations: output,
+        provenance: output_provenance,
         phase_delta,
         changed,
     })
@@ -1303,11 +1994,12 @@ fn propagate_clifford_paulis(
 fn flush_all(
     frames: &mut BTreeMap<Qubit, QubitFrame>,
     output: &mut Vec<ValueOperation>,
+    provenance: &mut Option<Vec<Option<usize>>>,
     phase_delta: &mut f64,
 ) {
     let qubits = frames.keys().copied().collect::<Vec<_>>();
     for qubit in qubits {
-        flush_frame(qubit, frames, output, phase_delta);
+        flush_frame(qubit, frames, output, provenance, phase_delta);
     }
 }
 
@@ -1315,10 +2007,11 @@ fn flush_frame(
     qubit: Qubit,
     frames: &mut BTreeMap<Qubit, QubitFrame>,
     output: &mut Vec<ValueOperation>,
+    provenance: &mut Option<Vec<Option<usize>>>,
     phase_delta: &mut f64,
 ) {
-    flush_pauli(qubit, frames, output, phase_delta);
-    flush_z(qubit, frames, output);
+    flush_pauli(qubit, frames, output, provenance, phase_delta);
+    flush_z(qubit, frames, output, provenance);
     if frames.get(&qubit).is_some_and(|frame| frame.is_empty()) {
         frames.remove(&qubit);
     }
@@ -1328,6 +2021,7 @@ fn flush_pauli(
     qubit: Qubit,
     frames: &mut BTreeMap<Qubit, QubitFrame>,
     output: &mut Vec<ValueOperation>,
+    provenance: &mut Option<Vec<Option<usize>>>,
     phase_delta: &mut f64,
 ) {
     let Some(frame) = frames.get_mut(&qubit) else {
@@ -1349,6 +2043,9 @@ fn flush_pauli(
             params: SmallVec::new(),
             label: None,
         });
+        if let Some(provenance) = provenance {
+            provenance.push(None);
+        }
     }
     frame.pauli_x = false;
     frame.pauli_z = false;
@@ -1358,6 +2055,7 @@ fn flush_z(
     qubit: Qubit,
     frames: &mut BTreeMap<Qubit, QubitFrame>,
     output: &mut Vec<ValueOperation>,
+    provenance: &mut Option<Vec<Option<usize>>>,
 ) {
     let Some(frame) = frames.get_mut(&qubit) else {
         return;
@@ -1371,6 +2069,9 @@ fn flush_z(
             params: smallvec![ParameterValue::Fixed(frame.z_angle)],
             label: None,
         });
+        if let Some(provenance) = provenance {
+            provenance.push(None);
+        }
     }
     frame.z_angle = 0.0;
 }

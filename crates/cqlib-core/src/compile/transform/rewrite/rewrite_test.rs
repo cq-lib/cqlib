@@ -10,13 +10,16 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+use super::matcher::rule_preserves_two_qubit_connectivity;
 use super::{KnowledgeRewriter, RewriteConfig};
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, ClassicalExpr, Directive, Instruction, MCGate,
     Parameter, ParameterValue, Qubit, StandardGate,
 };
 use crate::compile::CompilerError;
+use crate::compile::knowledge::RuleLibrary;
 use crate::compile::knowledge::library::RuleKind;
+use crate::compile::knowledge::rule_dsl::load::load_rules_from_str;
 use crate::compile::test_utils::standard_ops;
 
 #[test]
@@ -31,6 +34,34 @@ fn cancels_adjacent_self_inverse_gates() {
     assert!(result.changed);
     assert!(result.circuit.operations().is_empty());
     assert!(result.stats.reached_fixpoint);
+}
+
+#[test]
+fn parameter_cached_replacements_remap_rule_local_qubits_per_match() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.rx(q0, Parameter::pi()).unwrap();
+    circuit.rx(q1, Parameter::pi()).unwrap();
+
+    let result = KnowledgeRewriter::production().run(&circuit).unwrap();
+    let x_qubits = result
+        .circuit
+        .operations()
+        .iter()
+        .filter_map(|operation| {
+            matches!(
+                operation.instruction,
+                Instruction::Standard(StandardGate::X)
+            )
+            .then_some(operation.qubits.as_slice())
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(x_qubits, vec![&[q0][..], &[q1][..]]);
+    assert!(result.diagnostics.condition_cache_hits > 0);
+    assert!(result.diagnostics.condition_cache_misses > 0);
+    assert_eq!(result.diagnostics.symbolic_fallbacks, 0);
 }
 
 #[test]
@@ -1227,18 +1258,20 @@ fn parallel_incremental_matches_full_scan_on_large_block() {
                 .run(&circuit)
                 .unwrap()
         });
-    let four_threads = rayon::ThreadPoolBuilder::new()
-        .num_threads(4)
-        .build()
-        .unwrap()
-        .install(|| {
-            KnowledgeRewriter::new(config)
-                .force_incremental()
-                .run(&circuit)
-                .unwrap()
-        });
-    assert_eq!(single_thread.circuit, four_threads.circuit);
-    assert_eq!(single_thread.stats, four_threads.stats);
+    for threads in [2, 4, 8] {
+        let parallel = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                KnowledgeRewriter::new(config.clone())
+                    .force_incremental()
+                    .run(&circuit)
+                    .unwrap()
+            });
+        assert_eq!(single_thread.circuit, parallel.circuit);
+        assert_eq!(single_thread.stats, parallel.stats);
+    }
 }
 
 #[test]
@@ -1377,7 +1410,13 @@ fn incremental_matches_full_scan_with_symbolic_parameters() {
     circuit.rz(q0, Parameter::symbol("theta")).unwrap();
     circuit.rz(q0, Parameter::symbol("theta")).unwrap();
 
-    assert_incremental_matches_full_scan(RewriteConfig::production(), &circuit);
+    let config = RewriteConfig::production();
+    assert_incremental_matches_full_scan(config.clone(), &circuit);
+    let incremental = KnowledgeRewriter::new(config)
+        .force_incremental()
+        .run(&circuit)
+        .unwrap();
+    assert!(incremental.diagnostics.symbolic_fallbacks > 0);
 }
 
 #[test]
@@ -1435,7 +1474,14 @@ fn incremental_matches_full_scan_when_dirty_ratio_forces_full_scan() {
         circuit.rz(q0, 0.0625 * (index % 4 + 1) as f64).unwrap();
     }
 
-    assert_incremental_matches_full_scan(RewriteConfig::production(), &circuit);
+    let config = RewriteConfig::production();
+    assert_incremental_matches_full_scan(config.clone(), &circuit);
+    let incremental = KnowledgeRewriter::new(config)
+        .force_incremental()
+        .run(&circuit)
+        .unwrap();
+    assert!(incremental.diagnostics.dirty_anchors > 0);
+    assert!(incremental.diagnostics.full_scan_fallbacks > 0);
 }
 
 #[test]
@@ -1462,4 +1508,155 @@ fn incremental_matches_full_scan_at_round_limits() {
         assert_eq!(incremental.changed, full.changed, "max_rounds={max_rounds}");
         assert_eq!(incremental.stats, full.stats, "max_rounds={max_rounds}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Two-qubit connectivity classification and the post-routing safety policy.
+// ---------------------------------------------------------------------------
+
+/// Parses a single-rule DSL source and returns its static two-qubit
+/// connectivity classification.
+fn classify_single_rule(dsl: &str) -> bool {
+    let rules = load_rules_from_str(dsl).expect("rule DSL should parse and lower");
+    assert_eq!(
+        rules.len(),
+        1,
+        "expected exactly one rule, got {}",
+        rules.len()
+    );
+    rule_preserves_two_qubit_connectivity(&rules[0])
+}
+
+#[test]
+fn connectivity_accepts_two_qubit_direction_flip() {
+    // CX 0 1 -> CX 1 0 keeps the same undirected pair {0,1}.
+    assert!(classify_single_rule(
+        "rule direction_flip { match { CX 0 1 } rewrite { CX 1 0 } }"
+    ));
+}
+
+#[test]
+fn connectivity_accepts_same_pair_gate_change() {
+    // CX 0 1 -> CZ 0 1 keeps the same undirected pair {0,1}.
+    assert!(classify_single_rule(
+        "rule gate_change { match { CX 0 1 } rewrite { CZ 0 1 } }"
+    ));
+}
+
+#[test]
+fn connectivity_rejects_bridge_pair() {
+    // The bridge collapse introduces the new pair {0,2}.
+    assert!(!classify_single_rule(
+        "rule bridge { match { CX 0 1, CX 1 2 } rewrite { CX 0 2 } }"
+    ));
+}
+
+#[test]
+fn connectivity_rejects_swap_bridge_pair() {
+    // SWAP 0 1, CX 0 2 -> CX 1 2 introduces the new pair {1,2}.
+    assert!(!classify_single_rule(
+        "rule swap_bridge { match { SWAP 0 1, CX 0 2 } rewrite { CX 1 2 } }"
+    ));
+}
+
+#[test]
+fn connectivity_accepts_single_qubit_replacement() {
+    // A target made only of one-qubit (and zero-qubit) operations adds no
+    // two-qubit support.
+    assert!(classify_single_rule(
+        "rule one_qubit { match { X 0, X 0 } rewrite { Z 0, GPhase(π) } }"
+    ));
+}
+
+#[test]
+fn connectivity_rejects_three_qubit_target() {
+    // A rewrite may not emit an operation on more than two qubits.
+    assert!(!classify_single_rule(
+        "rule three_qubit { match { CCX 0 1 2 } rewrite { CCX 0 1 2 } }"
+    ));
+}
+
+#[test]
+fn connectivity_rejects_shrinking_three_qubit_match_onto_subpair() {
+    // CCX 0 1 2 -> CX 0 2 must be rejected: the three-qubit match does not
+    // prove that {0,2} is a valid physical edge.
+    assert!(!classify_single_rule(
+        "rule shrink { match { CCX 0 1 2 } rewrite { CX 0 2 } }"
+    ));
+}
+
+#[test]
+fn builtin_library_has_exactly_six_connectivity_unsafe_production_rules() {
+    // Tripwire: any newly added production rule (Simplify / Cancel / Merge /
+    // Canonicalize) that introduces two-qubit connectivity must be classified
+    // unsafe and show up here. Decompose and Commute rules are intentionally
+    // excluded from the count: they also expand or move three-qubit gates and
+    // are therefore classified unsafe, but they never run in the post-routing
+    // production rewrite, so they are outside this contract.
+    let library = RuleLibrary::builtin_rules().expect("builtin rules should load");
+    let rules = library.rules();
+    let mut unsafe_names: Vec<&str> = Vec::new();
+    for kind in [
+        RuleKind::Simplify,
+        RuleKind::Cancel,
+        RuleKind::Merge,
+        RuleKind::Canonicalize,
+    ] {
+        for id in library.rules_by_kind(kind) {
+            let rule = &rules[id.as_usize()];
+            if !rule_preserves_two_qubit_connectivity(rule) {
+                unsafe_names.push(rule.name.as_str());
+            }
+        }
+    }
+    unsafe_names.sort_unstable();
+
+    let mut expected = vec![
+        "compose_cx_bridge_4cx",
+        "compose_cx_bridge_4cx_rev",
+        "compose_swap_cx_bridge",
+        "compose_swap_cx_bridge_far",
+        "compose_swap_cz_bridge",
+        "compose_swap_swap_swap",
+    ];
+    expected.sort_unstable();
+
+    assert_eq!(unsafe_names, expected);
+}
+
+#[test]
+fn preserve_connectivity_blocks_bridge_but_allows_same_pair_cancellation() {
+    let (q0, q1, q2) = (Qubit::new(0), Qubit::new(1), Qubit::new(2));
+
+    // Unrestricted production collapses the four-CX bridge to a single CX.
+    let mut bridge = Circuit::new(3);
+    bridge.cx(q0, q1).unwrap();
+    bridge.cx(q1, q2).unwrap();
+    bridge.cx(q0, q1).unwrap();
+    bridge.cx(q1, q2).unwrap();
+    let unrestricted = KnowledgeRewriter::new(RewriteConfig::production())
+        .run(&bridge)
+        .unwrap();
+    assert_eq!(standard_ops(&unrestricted.circuit), vec![StandardGate::CX]);
+
+    // With the policy enabled the bridge rule is filtered, so the four CX
+    // operations remain untouched (no safe rule applies to this pattern).
+    let preserved = KnowledgeRewriter::new(
+        RewriteConfig::production().with_preserve_two_qubit_connectivity(true),
+    )
+    .run(&bridge)
+    .unwrap();
+    assert_eq!(standard_ops(&preserved.circuit), vec![StandardGate::CX; 4]);
+
+    // Same-pair cancellation still fires under the policy.
+    let mut cancel = Circuit::new(2);
+    cancel.cx(q0, q1).unwrap();
+    cancel.cx(q0, q1).unwrap();
+    let cancelled = KnowledgeRewriter::new(
+        RewriteConfig::production().with_preserve_two_qubit_connectivity(true),
+    )
+    .run(&cancel)
+    .unwrap();
+    assert!(cancelled.changed);
+    assert!(cancelled.circuit.operations().is_empty());
 }

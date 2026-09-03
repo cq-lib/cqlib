@@ -18,22 +18,28 @@
 //! deterministic order, and records only the postconditions it can actually
 //! verify with the compiler capabilities currently implemented.
 //!
-//! The normal workflow follows the stable pass order:
+//! The shared workflow follows the stable pass order:
 //! canonicalize input, expand circuit-backed definitions, apply production
 //! knowledge rewrite, decompose unitary and multi-controlled gates,
 //! canonicalize again, optimize the decomposed circuit, optionally lower to a
 //! routing-compatible basis, optionally route on a device, optionally translate
 //! to the resolved target basis, and canonicalize the output representation. A
-//! device workflow then lowers every gate to exact ordered native capabilities,
-//! closes a bounded native-optimization loop, and validates the completed
-//! physical circuit before returning it.
+//! strict-device candidate suffix then lowers every gate to exact ordered native
+//! capabilities, closes a bounded native-optimization loop, and validates the
+//! completed physical circuit.
 //!
-//! The enhanced workflow uses the same required correctness stages but raises
-//! rewrite budgets, uses stronger SABRE trial settings, performs a
-//! post-routing cleanup pass, and adds a target-aware cleanup pass after
-//! target-basis translation. This keeps `Normal` suitable for predictable
-//! production compilation while giving `Enhanced` more chances to recover
-//! simplifications exposed by decomposition, routing, and lowering.
+//! The enhanced workflow uses the same correctness contract but raises rewrite,
+//! resynthesis, native-optimization, and SABRE search budgets, performs
+//! post-routing cleanup, and adds target-aware cleanup when an explicit target
+//! basis is present. For a strict [`CompileTarget::Device`], it also snapshots
+//! the immutable pre-routing prefix. Candidate zero first completes the entire
+//! routing-to-validation suffix; a bounded two-tier SABRE Pareto beam then
+//! explores alternative routes from the same prefix, with every candidate
+//! independently traversing that same suffix through device validation. An
+//! exploratory candidate replaces candidate zero only when it preserves the
+//! exact native-quality contract in every control-flow scope and strictly
+//! improves native two-qubit count or depth. Otherwise the validated candidate
+//! zero remains the result.
 //!
 //! Stages are deliberately ordered around compiler invariants. Early
 //! canonicalization gives later passes a stable representation, definition and
@@ -41,12 +47,17 @@
 //! routing runs before final target-basis cleanup because it may insert SWAPs,
 //! and output canonicalization removes representation noise before exact device
 //! lowering. Native optimization is re-legalized and costed on exact physical
-//! qargs; device validation remains terminal, with no transform after it.
+//! qargs. Validation is terminal within each finalized candidate suffix. In an
+//! enhanced strict-device workflow, `select.sabre_pareto_beam` is the final
+//! orchestration and reporting step; it applies no transform after validation
+//! and can select only an already validated candidate.
 
 use crate::circuit::{Circuit, ClassicalControlOp, Instruction, Operation, StandardGate};
 use crate::compile::CompilerError;
+use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::resource::ResourceLimits;
-use crate::compile::sabre::SabreConfig;
+use crate::compile::sabre::{RoutingTarget, SabreConfig};
+use crate::compile::transform::analysis::WorkflowCircuitAnalysis;
 use crate::compile::transform::decompose::unitary::{
     DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext, TwoQubitSynthesisTarget,
 };
@@ -54,16 +65,26 @@ use crate::compile::transform::decompose::{
     DecomposeDefinitions, DecomposeMcGates, DecomposeUnitaries, McGateDecomposeConfig,
     UnitaryDecomposeConfig,
 };
-use crate::compile::transform::native_optimization::NativeOptimizer;
-use crate::compile::transform::{
-    Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer, KnowledgeRewriter,
-    LayoutObjective, LowerToRoutingBasis, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks,
-    RewriteConfig, TargetBasisCostModel, TargetBasisLowerer, TransformOutcome, Transformer,
-    TwoQubitBlockResynthesisConfig, route_sabre, route_with_layout,
+use crate::compile::transform::layout::PhysicalLayoutGraph;
+use crate::compile::transform::native_optimization::{
+    NativeExactQualityCheckpoint, NativeOptimizationSummary, NativeOptimizer,
 };
-use crate::device::{Device, Topology};
-use std::borrow::Cow;
-use std::sync::Arc;
+use crate::compile::transform::resynthesis::{
+    WorkflowResynthesisSession, resynthesize_two_qubit_blocks_workflow,
+};
+use crate::compile::transform::transformer::{PassApplicability, WorkflowPass};
+use crate::compile::transform::{
+    CanonicalizeConfig, Canonicalizer, CircuitAnalysis, CommutativeCancellation, DeviceLowerer,
+    KnowledgeRewriteDiagnostics, KnowledgeRewriteSession, KnowledgeRewriter, LayoutObjective,
+    LowerToRoutingBasis, NativeQualityPolicy, OptimizeOneQubitRuns, ResynthesizeTwoQubitBlocks,
+    RewriteConfig, RewriteEdits, RewriteExecutionRecord, SabreParetoRouteCandidate,
+    TargetBasisCostModel, TargetBasisLowerer, TransformOutcome, Transformer,
+    TwoQubitBlockResynthesisConfig, VirtualPermutation, VirtualPermutationElisionStatus,
+    elide_virtual_permutations, prepare_sabre_pareto_routes_with_session_on_physical,
+    route_sabre_tracked_on_topology, route_sabre_tracked_with_session_on_physical,
+    route_with_layout_tracked_on_topology, route_with_layout_tracked_with_session_on_physical,
+};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::{
     CompileConfig, CompileMode, CompileResult, CompileTarget, DeviceCompilationMetadata,
@@ -85,16 +106,36 @@ pub struct WorkflowStepReport {
     pub reason: Option<String>,
 }
 
+/// Evidence that one exact circuit revision satisfies one canonicalization
+/// configuration. Any circuit mutation invalidates the evidence implicitly by
+/// advancing the revision.
+#[derive(Debug, Clone)]
+struct CanonicalizationProof {
+    circuit_revision: u64,
+    config: CanonicalizeConfig,
+}
+
 struct WorkflowState {
     current: Circuit,
-    analysis: CircuitAnalysis,
+    analysis: Option<WorkflowCircuitAnalysis>,
+    circuit_revision: u64,
+    canonical_proof: Option<CanonicalizationProof>,
+    rewrite_session: KnowledgeRewriteSession,
+    rewrite_diagnostics: KnowledgeRewriteDiagnostics,
+    collect_rewrite_diagnostics: bool,
     changed: bool,
     steps: Vec<WorkflowStepReport>,
-    prepared_target_basis: Option<PreparedTargetBasis>,
+    prepared_target_basis: Option<Arc<PreparedTargetBasis>>,
     two_qubit_target: TwoQubitSynthesisTarget,
+    virtual_permutation: Option<VirtualPermutation>,
     device_metadata: Option<DeviceCompilationMetadata>,
     one_qubit_optimizer: Option<OptimizeOneQubitRuns>,
     pending_one_qubit_resynthesis: bool,
+    resynthesis_session: WorkflowResynthesisSession,
+    routing_physical: Option<Arc<PhysicalLayoutGraph>>,
+    topology_routing_target: Option<Arc<RoutingTarget>>,
+    planning_session: Option<Arc<DevicePlanningSession>>,
+    native_quality_checkpoint: Option<NativeExactQualityCheckpoint>,
 }
 
 struct PreparedTargetBasis {
@@ -118,22 +159,344 @@ impl PreparedTargetBasis {
     }
 }
 
+/// Target-derived data shared by every run of one compiler workflow.
+///
+/// Circuit analysis, SABRE DAGs, interaction requirements, and route metadata
+/// deliberately remain in [`WorkflowState`] or the routing call that owns them.
+struct PreparedCompileTarget {
+    target_basis: Option<Arc<PreparedTargetBasis>>,
+    one_qubit_optimizer: Option<OptimizeOneQubitRuns>,
+    two_qubit_target: TwoQubitSynthesisTarget,
+    routing_physical: Option<Arc<PhysicalLayoutGraph>>,
+    topology_routing_target: Option<Arc<RoutingTarget>>,
+    planning_session: Option<Arc<DevicePlanningSession>>,
+}
+
+impl PreparedCompileTarget {
+    fn new(config: &CompileConfig) -> Result<Self, CompilerError> {
+        let target_basis = match &config.target {
+            CompileTarget::Basis(target_basis)
+            | CompileTarget::TopologyBasis {
+                basis: target_basis,
+                ..
+            } => {
+                validate_workflow_target_basis_config(target_basis)?;
+                Some(Arc::new(PreparedTargetBasis::new(target_basis.to_vec())?))
+            }
+            CompileTarget::Logical | CompileTarget::Device(_) => None,
+        };
+        let one_qubit_optimizer = match &config.target {
+            CompileTarget::Logical => Some(OptimizeOneQubitRuns::logical()),
+            CompileTarget::Basis(_) | CompileTarget::TopologyBasis { .. } => {
+                let prepared = target_basis.as_ref().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "explicit target basis was not prepared".to_string(),
+                    )
+                })?;
+                Some(OptimizeOneQubitRuns::basis_with_cost_model(Arc::clone(
+                    &prepared.cost_model,
+                )))
+            }
+            CompileTarget::Device(_) => None,
+        };
+        let two_qubit_target = target_basis
+            .as_ref()
+            .map_or_else(TwoQubitSynthesisTarget::unconstrained, |prepared| {
+                TwoQubitSynthesisTarget::from_cost_model(Arc::clone(&prepared.cost_model))
+            });
+        let (routing_physical, topology_routing_target, planning_session) = match &config.target {
+            CompileTarget::TopologyBasis { device_target, .. } => {
+                let physical = Arc::new(PhysicalLayoutGraph::from_device(&device_target.device)?);
+                let routing = Arc::new(RoutingTarget::from_physical(&physical)?);
+                (Some(physical), Some(routing), None)
+            }
+            CompileTarget::Device(target) => {
+                let physical = Arc::new(PhysicalLayoutGraph::from_device(&target.device)?);
+                let session = Arc::new(DevicePlanningSession::new(&target.device));
+                (Some(physical), None, Some(session))
+            }
+            CompileTarget::Logical | CompileTarget::Basis(_) => (None, None, None),
+        };
+        Ok(Self {
+            target_basis,
+            one_qubit_optimizer,
+            two_qubit_target,
+            routing_physical,
+            topology_routing_target,
+            planning_session,
+        })
+    }
+}
+
 impl WorkflowState {
+    /// Creates an isolated branch at the current workflow boundary. Immutable
+    /// target preparation is shared, while mutation-sensitive rewrite and
+    /// resynthesis sessions start fresh so one exploratory route cannot affect
+    /// candidate zero or a sibling candidate.
+    fn detached_clone(&self) -> Self {
+        Self {
+            current: self.current.clone(),
+            analysis: None,
+            circuit_revision: self.circuit_revision,
+            canonical_proof: self.canonical_proof.clone(),
+            rewrite_session: KnowledgeRewriteSession::default(),
+            rewrite_diagnostics: self.rewrite_diagnostics,
+            collect_rewrite_diagnostics: self.collect_rewrite_diagnostics,
+            changed: self.changed,
+            steps: self.steps.clone(),
+            prepared_target_basis: self.prepared_target_basis.clone(),
+            two_qubit_target: self.two_qubit_target.clone(),
+            virtual_permutation: self.virtual_permutation.clone(),
+            device_metadata: self.device_metadata.clone(),
+            one_qubit_optimizer: self.one_qubit_optimizer.clone(),
+            pending_one_qubit_resynthesis: self.pending_one_qubit_resynthesis,
+            resynthesis_session: WorkflowResynthesisSession::default(),
+            routing_physical: self.routing_physical.clone(),
+            topology_routing_target: self.topology_routing_target.clone(),
+            planning_session: self.planning_session.clone(),
+            native_quality_checkpoint: self.native_quality_checkpoint.clone(),
+        }
+    }
+
+    fn analysis(&mut self) -> &WorkflowCircuitAnalysis {
+        if self.analysis.is_none() {
+            self.analysis = Some(WorkflowCircuitAnalysis::analyze(&self.current));
+        }
+        self.analysis
+            .as_ref()
+            .expect("workflow analysis was initialized above")
+    }
+
+    fn skip_if_proven_noop(
+        &mut self,
+        stage: &'static str,
+        name: &'static str,
+        pass: &impl WorkflowPass,
+    ) -> bool {
+        let applicability = pass.applicability(self.analysis());
+        let PassApplicability::ProvenNoOp(reason) = applicability else {
+            return false;
+        };
+        self.record_skipped(stage, name, reason);
+        true
+    }
+
+    fn advance_circuit_revision(&mut self) {
+        self.circuit_revision = self.circuit_revision.wrapping_add(1);
+        if self.circuit_revision == 0 {
+            // Prevent a wrapped revision from aliasing an ancient proof.
+            self.rewrite_session.invalidate();
+            self.canonical_proof = None;
+        }
+    }
+
+    fn adopt_changed_circuit(&mut self, circuit: Circuit, edits: &RewriteEdits) {
+        let old_revision = self.circuit_revision;
+        let new_revision = old_revision.wrapping_add(1);
+        if new_revision == 0 {
+            self.rewrite_session.invalidate();
+            self.canonical_proof = None;
+        } else {
+            self.rewrite_session.apply_rewrite_edits(
+                old_revision,
+                new_revision,
+                &self.current,
+                &circuit,
+                edits,
+            );
+        }
+        self.analysis = None;
+        self.current = circuit;
+        self.circuit_revision = new_revision;
+        self.changed = true;
+    }
+
     fn apply_transform(
         &mut self,
         stage: &'static str,
         name: &'static str,
         transform: impl FnOnce(&Circuit, &CircuitAnalysis) -> Result<TransformOutcome, CompilerError>,
     ) -> Result<bool, CompilerError> {
-        let changed = match transform(&self.current, &self.analysis)? {
-            TransformOutcome::Unchanged => false,
-            TransformOutcome::Changed(circuit) => {
-                self.analysis = CircuitAnalysis::analyze(&circuit);
-                self.current = circuit;
-                self.changed = true;
+        let tracks_rewrite_edits = self.rewrite_session.tracks_rewrite_edits();
+        self.apply_transform_with_edits(stage, name, |circuit, analysis| {
+            let outcome = transform(circuit, analysis)?;
+            let edits = match &outcome {
+                TransformOutcome::Unchanged => RewriteEdits::linear(
+                    circuit.operations().len(),
+                    circuit.operations().len(),
+                    Vec::new(),
+                ),
+                TransformOutcome::Changed(after) if tracks_rewrite_edits => {
+                    RewriteEdits::between_linear_circuits(circuit, after)
+                }
+                TransformOutcome::Changed(_) => RewriteEdits::Unknown,
+            };
+            Ok((outcome, edits))
+        })
+    }
+
+    fn apply_transform_without_analysis_with_edits(
+        &mut self,
+        stage: &'static str,
+        name: &'static str,
+        transform: impl FnOnce(&Circuit) -> Result<(TransformOutcome, RewriteEdits), CompilerError>,
+    ) -> Result<bool, CompilerError> {
+        let changed = match transform(&self.current)? {
+            (TransformOutcome::Unchanged, _) => false,
+            (TransformOutcome::Changed(circuit), edits) => {
+                self.adopt_changed_circuit(circuit, &edits);
                 true
             }
         };
+        self.steps.push(WorkflowStepReport {
+            stage,
+            name,
+            changed,
+            skipped: false,
+            reason: None,
+        });
+        Ok(changed)
+    }
+
+    fn apply_transform_with_edits(
+        &mut self,
+        stage: &'static str,
+        name: &'static str,
+        transform: impl FnOnce(
+            &Circuit,
+            &CircuitAnalysis,
+        ) -> Result<(TransformOutcome, RewriteEdits), CompilerError>,
+    ) -> Result<bool, CompilerError> {
+        if self.analysis.is_none() {
+            self.analysis = Some(WorkflowCircuitAnalysis::analyze(&self.current));
+        }
+        let analysis = self
+            .analysis
+            .as_ref()
+            .expect("workflow analysis was initialized above")
+            .public();
+        let changed = match transform(&self.current, analysis)? {
+            (TransformOutcome::Unchanged, _) => false,
+            (TransformOutcome::Changed(circuit), edits) => {
+                self.adopt_changed_circuit(circuit, &edits);
+                true
+            }
+        };
+        self.steps.push(WorkflowStepReport {
+            stage,
+            name,
+            changed,
+            skipped: false,
+            reason: None,
+        });
+        Ok(changed)
+    }
+
+    fn apply_canonicalize(
+        &mut self,
+        stage: &'static str,
+        name: &'static str,
+        canonicalizer: &Canonicalizer,
+    ) -> Result<bool, CompilerError> {
+        if self.has_canonical_proof(canonicalizer.config()) {
+            // Proof reuse is an executed no-op, rather than a skipped workflow
+            // stage: the same postcondition is established without rerunning
+            // the canonicalizer.
+            self.steps.push(WorkflowStepReport {
+                stage,
+                name,
+                changed: false,
+                skipped: false,
+                reason: None,
+            });
+            return Ok(false);
+        }
+        let changed = self.apply_transform_without_analysis_with_edits(stage, name, |circuit| {
+            canonicalizer.transform_with_rewrite_edits(circuit)
+        })?;
+        self.canonical_proof = Some(CanonicalizationProof {
+            circuit_revision: self.circuit_revision,
+            config: canonicalizer.config().clone(),
+        });
+        Ok(changed)
+    }
+
+    fn has_canonical_proof(&self, config: &CanonicalizeConfig) -> bool {
+        self.canonical_proof.as_ref().is_some_and(|proof| {
+            proof.circuit_revision == self.circuit_revision && &proof.config == config
+        })
+    }
+
+    fn apply_knowledge_rewrite(
+        &mut self,
+        stage: &'static str,
+        name: &'static str,
+        config: RewriteConfig,
+    ) -> Result<bool, CompilerError> {
+        if self
+            .rewrite_session
+            .reusable_proof(self.circuit_revision, &config)
+            .is_some()
+        {
+            if self.collect_rewrite_diagnostics {
+                self.rewrite_diagnostics.merge(KnowledgeRewriteDiagnostics {
+                    direct_reuses: 1,
+                    ..KnowledgeRewriteDiagnostics::default()
+                });
+            }
+            self.steps.push(WorkflowStepReport {
+                stage,
+                name,
+                changed: false,
+                skipped: false,
+                reason: None,
+            });
+            return Ok(false);
+        }
+
+        let rewriter = KnowledgeRewriter::new(config.clone());
+        let proof_reach = rewriter.proof_reach()?;
+        let qubit_bijection_invariant = rewriter.proof_is_qubit_bijection_invariant()?;
+        let reconciliation = self
+            .rewrite_session
+            .take_reconciled_linear_state(self.circuit_revision, &config);
+        let (result, workspace) = rewriter.run_for_session(
+            &self.current,
+            reconciliation.state,
+            self.collect_rewrite_diagnostics,
+        )?;
+        if self.collect_rewrite_diagnostics && reconciliation.full_scan_fallback {
+            self.rewrite_diagnostics.full_scan_fallbacks = self
+                .rewrite_diagnostics
+                .full_scan_fallbacks
+                .saturating_add(1);
+        }
+        if self.collect_rewrite_diagnostics {
+            self.rewrite_diagnostics.merge(result.diagnostics);
+        }
+        let changed = result.changed;
+        if changed {
+            let circuit = result.circuit.ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "knowledge rewrite reported a change without an output circuit".to_string(),
+                )
+            })?;
+            self.analysis = None;
+            self.current = circuit;
+            self.advance_circuit_revision();
+            self.changed = true;
+        }
+        self.rewrite_session.record_execution(
+            &self.current,
+            self.circuit_revision,
+            RewriteExecutionRecord {
+                config,
+                proof_reach,
+                qubit_bijection_invariant,
+                reached_fixpoint: result.stats.reached_fixpoint,
+                workspace,
+            },
+        );
         self.steps.push(WorkflowStepReport {
             stage,
             name,
@@ -171,12 +534,29 @@ enum RewritePhase {
 /// Compiler optimization workflow built from completed compiler transforms.
 pub struct CompilerWorkflow {
     config: CompileConfig,
+    prepared_target: OnceLock<Arc<PreparedCompileTarget>>,
+    prepare_lock: Mutex<()>,
 }
 
 impl CompilerWorkflow {
     /// Creates a compiler workflow from a complete configuration.
+    ///
+    /// Target preparation is deferred until the first run. Use
+    /// [`Self::try_new`] when construction should validate and prepare the
+    /// complete target eagerly.
     pub const fn new(config: CompileConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            prepared_target: OnceLock::new(),
+            prepare_lock: Mutex::new(()),
+        }
+    }
+
+    /// Creates a workflow and eagerly prepares all target-derived invariants.
+    pub fn try_new(config: CompileConfig) -> Result<Self, CompilerError> {
+        let workflow = Self::new(config);
+        workflow.prepared_target()?;
+        Ok(workflow)
     }
 
     /// Returns the workflow configuration.
@@ -187,59 +567,97 @@ impl CompilerWorkflow {
     /// Runs the workflow over `circuit` and returns the rebuilt circuit plus
     /// execution metadata.
     pub fn run(&self, circuit: &Circuit) -> Result<CompileResult, CompilerError> {
-        let prepared_target_basis = self.prepare_target_basis()?;
-        let one_qubit_optimizer = match &self.config.target {
-            CompileTarget::Logical => Some(OptimizeOneQubitRuns::logical()),
-            CompileTarget::Basis(_) | CompileTarget::TopologyBasis { .. } => {
-                let prepared = prepared_target_basis.as_ref().ok_or_else(|| {
-                    CompilerError::InvariantViolation(
-                        "explicit target basis was not prepared".to_string(),
-                    )
-                })?;
-                Some(OptimizeOneQubitRuns::basis_with_cost_model(Arc::clone(
-                    &prepared.cost_model,
-                )))
-            }
-            CompileTarget::Device(_) => None,
-        };
-        let two_qubit_target = prepared_target_basis
-            .as_ref()
-            .map_or_else(TwoQubitSynthesisTarget::unconstrained, |prepared| {
-                TwoQubitSynthesisTarget::from_cost_model(Arc::clone(&prepared.cost_model))
-            });
+        self.run_owned(circuit.clone())
+    }
+
+    /// Runs the workflow by consuming `circuit`.
+    ///
+    /// This avoids the workflow's defensive input clone when the caller
+    /// already owns an isolated circuit value. The borrowed [`Self::run`]
+    /// entry point remains the compatibility path for callers that need to
+    /// retain their input.
+    pub fn run_owned(&self, circuit: Circuit) -> Result<CompileResult, CompilerError> {
+        self.run_internal(circuit, false).map(|(result, _)| result)
+    }
+
+    /// Runs the workflow and also returns aggregate rewrite diagnostics.
+    ///
+    /// This explicit entry point keeps benchmark-only attribution separate
+    /// from [`CompileResult`]'s stable semantic equality and normal API.
+    pub fn run_with_rewrite_diagnostics(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<(CompileResult, KnowledgeRewriteDiagnostics), CompilerError> {
+        self.run_owned_with_rewrite_diagnostics(circuit.clone())
+    }
+
+    /// Runs the workflow by consuming `circuit` and collects rewrite
+    /// diagnostics for benchmark attribution.
+    ///
+    /// This is the owned-input counterpart of
+    /// [`Self::run_with_rewrite_diagnostics`] and avoids its defensive clone.
+    pub fn run_owned_with_rewrite_diagnostics(
+        &self,
+        circuit: Circuit,
+    ) -> Result<(CompileResult, KnowledgeRewriteDiagnostics), CompilerError> {
+        self.run_internal(circuit, true)
+    }
+
+    fn run_internal(
+        &self,
+        circuit: Circuit,
+        collect_rewrite_diagnostics: bool,
+    ) -> Result<(CompileResult, KnowledgeRewriteDiagnostics), CompilerError> {
+        let prepared_target = self.prepared_target()?;
+        let analysis = WorkflowCircuitAnalysis::analyze(&circuit);
         let mut state = WorkflowState {
-            current: circuit.clone(),
-            analysis: CircuitAnalysis::analyze(circuit),
+            current: circuit,
+            analysis: Some(analysis),
+            circuit_revision: 0,
+            canonical_proof: None,
+            rewrite_session: KnowledgeRewriteSession::default(),
+            rewrite_diagnostics: KnowledgeRewriteDiagnostics::default(),
+            collect_rewrite_diagnostics,
             changed: false,
             steps: Vec::new(),
-            prepared_target_basis,
-            two_qubit_target,
+            prepared_target_basis: prepared_target.target_basis.clone(),
+            two_qubit_target: prepared_target.two_qubit_target.clone(),
+            virtual_permutation: None,
             device_metadata: None,
-            one_qubit_optimizer,
+            one_qubit_optimizer: prepared_target.one_qubit_optimizer.clone(),
             pending_one_qubit_resynthesis: false,
+            resynthesis_session: WorkflowResynthesisSession::default(),
+            routing_physical: prepared_target.routing_physical.clone(),
+            topology_routing_target: prepared_target.topology_routing_target.clone(),
+            planning_session: prepared_target.planning_session.clone(),
+            native_quality_checkpoint: None,
         };
 
         self.record_pre_init(&mut state);
-        self.validate_resources(circuit, &mut state)?;
+        self.validate_resources(&mut state)?;
         self.lower_init(&mut state)?;
         self.lower_decompose(&mut state)?;
         self.lower_optimize(&mut state)?;
         self.lower_routing_basis(&mut state)?;
+        let pareto_prefix = (self.config.mode == CompileMode::Enhanced
+            && self.strict_device_target().is_some())
+        .then(|| state.detached_clone());
         self.lower_physical(&mut state)?;
-        self.lower_target(&mut state)?;
-        self.lower_output(&mut state)?;
-        self.lower_device_instructions(&mut state)?;
-        self.canonicalize_native_input(&mut state)?;
-        self.optimize_native_instructions(&mut state)?;
-        self.validate_device(&mut state)?;
+        self.finish_post_routing(&mut state)?;
+        if let Some(prefix) = pareto_prefix {
+            self.apply_sabre_pareto_beam(&mut state, prefix)?;
+        }
 
-        Ok(CompileResult {
-            circuit: state.current,
-            changed: state.changed,
-            mode: self.config.mode,
-            steps: state.steps,
-            device_metadata: state.device_metadata,
-        })
+        Ok((
+            CompileResult {
+                circuit: state.current,
+                changed: state.changed,
+                mode: self.config.mode,
+                steps: state.steps,
+                device_metadata: state.device_metadata,
+            },
+            state.rewrite_diagnostics,
+        ))
     }
 
     /// Establishes a stable high-level IR before gate-specific lowering.
@@ -247,17 +665,13 @@ impl CompilerWorkflow {
     /// Definition expansion precedes the first rewrite pass so knowledge rules
     /// see the operations contained by user-defined gates.
     fn lower_init(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        state.apply_transform("init", "canonicalize.input", |circuit, analysis| {
-            Canonicalizer::production().transform(circuit, Some(analysis))
-        })?;
+        state.apply_canonicalize("init", "canonicalize.input", &Canonicalizer::production())?;
         self.apply_definition_decomposition(state)?;
         let rewrite_config = self.rewrite_config(RewritePhase::PreDecomposition)?;
-        state.apply_transform(
+        state.apply_knowledge_rewrite(
             "optimization",
             "optimize.pre_decomposition",
-            |circuit, analysis| {
-                KnowledgeRewriter::new(rewrite_config).transform(circuit, Some(analysis))
-            },
+            rewrite_config,
         )?;
         Ok(())
     }
@@ -269,16 +683,17 @@ impl CompilerWorkflow {
     fn lower_decompose(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         self.apply_unitary_decomposition(state)?;
         self.apply_mc_gate_decomposition(state)?;
-        state.apply_transform(
+        state.apply_canonicalize(
             "optimization",
             "canonicalize.after_decomposition",
-            |circuit, analysis| Canonicalizer::production().transform(circuit, Some(analysis)),
+            &Canonicalizer::production(),
         )?;
-        state.apply_transform(
+        state.apply_transform_without_analysis_with_edits(
             "optimization",
             "optimize.commutative_cancellation",
-            |circuit, analysis| CommutativeCancellation::new().transform(circuit, Some(analysis)),
+            |circuit| CommutativeCancellation::new().transform_with_rewrite_edits(circuit),
         )?;
+        self.apply_virtual_permutation_elision(state)?;
         self.apply_two_qubit_resynthesis(
             state,
             "optimization",
@@ -292,12 +707,10 @@ impl CompilerWorkflow {
 
     fn lower_optimize(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let rewrite_config = self.rewrite_config(RewritePhase::PostDecomposition)?;
-        state.apply_transform(
+        state.apply_knowledge_rewrite(
             "optimization",
             "optimize.post_decomposition",
-            |circuit, analysis| {
-                KnowledgeRewriter::new(rewrite_config).transform(circuit, Some(analysis))
-            },
+            rewrite_config,
         )?;
         self.close_one_qubit_resynthesis(state)
     }
@@ -314,11 +727,23 @@ impl CompilerWorkflow {
 
     /// Applies optional physical lowering from logical to physical qubits.
     fn lower_physical(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        self.apply_layout_and_routing(state)?;
+        self.apply_layout_and_routing(state)
+    }
+
+    /// Completes the shared lowering, optimization, and validation suffix after
+    /// the routing stage has either produced a routed circuit or been skipped.
+    fn finish_post_routing(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         if self.config.mode == CompileMode::Enhanced {
             self.apply_post_routing_resynthesis(state)?;
             self.apply_post_routing_cleanup(state)?;
         }
+        self.lower_target(state)?;
+        self.lower_output(state)?;
+        self.lower_device_instructions(state)?;
+        self.canonicalize_native_input(state)?;
+        self.optimize_native_instructions(state)?;
+        self.validate_device(state)?;
+        self.validate_topology_target(state)?;
         Ok(())
     }
 
@@ -330,12 +755,10 @@ impl CompilerWorkflow {
         self.apply_target_translation(state)?;
         if self.config.mode == CompileMode::Enhanced {
             if let Some(cleanup_config) = self.target_cleanup_config(state)? {
-                state.apply_transform(
+                state.apply_knowledge_rewrite(
                     "optimization",
                     "optimize.target_cleanup",
-                    |circuit, analysis| {
-                        KnowledgeRewriter::new(cleanup_config).transform(circuit, Some(analysis))
-                    },
+                    cleanup_config,
                 )?;
             } else {
                 state.record_skipped(
@@ -380,9 +803,11 @@ impl CompilerWorkflow {
     }
 
     fn lower_output(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
-        state.apply_transform("output", "canonicalize.output", |circuit, analysis| {
-            Canonicalizer::production().transform(circuit, Some(analysis))
-        })?;
+        state.apply_canonicalize(
+            "output",
+            "canonicalize.output",
+            &Canonicalizer::production(),
+        )?;
         Ok(())
     }
 
@@ -395,11 +820,16 @@ impl CompilerWorkflow {
             );
             return Ok(());
         };
-        let lowerer = DeviceLowerer::new(&target.device);
-        state.apply_transform(
+        let planning_session = state.planning_session.clone();
+        let lowerer = if let Some(session) = planning_session.as_deref() {
+            DeviceLowerer::with_session(&target.device, session)
+        } else {
+            DeviceLowerer::new(&target.device)
+        };
+        state.apply_transform_without_analysis_with_edits(
             "translation",
             "lower.device_instructions",
-            |circuit, analysis| lowerer.transform(circuit, Some(analysis)),
+            |circuit| Ok((lowerer.transform(circuit, None)?, RewriteEdits::Unknown)),
         )?;
         Ok(())
     }
@@ -413,13 +843,14 @@ impl CompilerWorkflow {
             );
             return Ok(());
         }
-        // The native optimizer canonicalizes its input on entry (paired with
-        // its entry device validation), so a separate workflow pass here would
-        // be an immediately duplicated full-circuit pass.
+        // The native optimizer owns this entry postcondition: it reuses an
+        // exact workflow proof for the current revision, or canonicalizes the
+        // input itself when device lowering invalidated that proof. A separate
+        // workflow pass here would duplicate one of those paths.
         state.record_skipped(
             "optimization",
             "canonicalize.native_input",
-            "native optimizer canonicalizes its input on entry",
+            "native optimizer establishes canonical input on entry",
         );
         Ok(())
     }
@@ -434,46 +865,75 @@ impl CompilerWorkflow {
             return Ok(());
         };
         let (max_rounds, max_stale_rounds) = match self.config.mode {
-            CompileMode::Normal => (2, 1),
-            CompileMode::Enhanced => (8, 3),
+            CompileMode::Normal => (
+                NativeOptimizer::NORMAL_MAX_ROUNDS,
+                NativeOptimizer::NORMAL_MAX_STALE_ROUNDS,
+            ),
+            CompileMode::Enhanced => (
+                NativeOptimizer::ENHANCED_MAX_ROUNDS,
+                NativeOptimizer::ENHANCED_MAX_STALE_ROUNDS,
+            ),
         };
-        let optimizer = NativeOptimizer::new(
+        let planning_session = state.planning_session.clone().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "strict device workflow has no planning session".to_string(),
+            )
+        })?;
+        let optimizer = NativeOptimizer::with_session(
             &target.device,
             self.two_qubit_resynthesis_config_for_state(state),
             max_rounds,
             max_stale_rounds,
+            Arc::clone(&planning_session),
+        )
+        .with_quality_policy(NativeQualityPolicy::BalancedDepth);
+        let input_is_canonical = state.has_canonical_proof(Canonicalizer::production().config());
+        let (result, exact_quality, native_stats) = if input_is_canonical {
+            optimizer.run_with_proven_canonical_input_exact_quality_and_stats(&state.current)?
+        } else {
+            optimizer.run_with_exact_quality_and_stats(&state.current)?
+        };
+        let changed = result.changed;
+        let reason = format!(
+            "quality_policy=balanced_depth; rounds={}; restored_best={}; native_2q_ops={}->{}; native_2q_depth={}->{}; native_depth={}->{}; native_ops={}->{}; predicted_log_error={:?}->{:?}; unavailable_error_count={}->{}; imputed_error_count={}->{}; quality_rejections=scope_shape:{},2q_ops:{},2q_depth:{},total_depth:{},error:{},makespan:{},rank:{}",
+            result.rounds,
+            result.restored_best,
+            result.before.native_two_qubit_ops,
+            result.after.native_two_qubit_ops,
+            result.before.native_two_qubit_depth,
+            result.after.native_two_qubit_depth,
+            result.before.total_native_depth,
+            result.after.total_native_depth,
+            result.before.native_total_ops,
+            result.after.native_total_ops,
+            result.before.predicted_log_error,
+            result.after.predicted_log_error,
+            result.before.unavailable_error_count,
+            result.after.unavailable_error_count,
+            result.before.imputed_error_count,
+            result.after.imputed_error_count,
+            native_stats.quality_scope_shape_rejections,
+            native_stats.quality_two_qubit_ops_rejections,
+            native_stats.quality_two_qubit_depth_rejections,
+            native_stats.quality_total_depth_rejections,
+            native_stats.quality_error_rejections,
+            native_stats.quality_makespan_rejections,
+            native_stats.quality_rank_rejections,
         );
-        let result = optimizer.run(&state.current)?;
-        if result.changed {
-            state.analysis = CircuitAnalysis::analyze(&result.circuit);
+        if changed {
+            state.analysis = None;
+            state.advance_circuit_revision();
         }
         state.current = result.circuit;
-        state.changed |= result.changed;
+        state.changed |= changed;
         state.steps.push(WorkflowStepReport {
             stage: "optimization",
             name: "optimize.native_fixed_point",
-            changed: result.changed,
+            changed,
             skipped: false,
-            reason: Some(format!(
-                "rounds={}; restored_best={}; native_2q_ops={}->{}; native_2q_depth={}->{}; native_depth={}->{}; native_ops={}->{}; predicted_log_error={:?}->{:?}; unavailable_error_count={}->{}; imputed_error_count={}->{}",
-                result.rounds,
-                result.restored_best,
-                result.before.native_two_qubit_ops,
-                result.after.native_two_qubit_ops,
-                result.before.native_two_qubit_depth,
-                result.after.native_two_qubit_depth,
-                result.before.total_native_depth,
-                result.after.total_native_depth,
-                result.before.native_total_ops,
-                result.after.native_total_ops,
-                result.before.predicted_log_error,
-                result.after.predicted_log_error,
-                result.before.unavailable_error_count,
-                result.after.unavailable_error_count,
-                result.before.imputed_error_count,
-                result.after.imputed_error_count,
-            )),
+            reason: Some(reason),
         });
+        state.native_quality_checkpoint = Some(exact_quality);
         Ok(())
     }
 
@@ -497,18 +957,59 @@ impl CompilerWorkflow {
         Ok(())
     }
 
+    /// Validates the final circuit against a topology-basis target.
+    ///
+    /// This validator is deliberately independent from SABRE target
+    /// preparation. It checks usable physical qubits, undirected connectivity,
+    /// and the explicit output basis without constructing a planning session or
+    /// native-plan catalog.
+    fn validate_topology_target(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
+        let CompileTarget::TopologyBasis {
+            device_target,
+            basis,
+        } = &self.config.target
+        else {
+            return Ok(());
+        };
+        let allowed = basis
+            .iter()
+            .filter_map(|instruction| match instruction {
+                Instruction::Standard(gate) => Some(*gate),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        validate_operations_in_target_basis(state.current.operations(), &allowed)?;
+        validate_operations_on_topology(state.current.operations(), &device_target.device)?;
+        state.steps.push(WorkflowStepReport {
+            stage: "validation",
+            name: "validate.topology",
+            changed: false,
+            skipped: false,
+            reason: None,
+        });
+        Ok(())
+    }
+
     /// Builds the rewrite configuration for a workflow phase.
     ///
     /// Rewrite phases use the production optimizer. Enhanced mode only
     /// increases bounded search budgets rather than changing correctness
     /// requirements.
+    ///
+    /// Compiler invariant: once a circuit has been physically routed, every
+    /// two-qubit operation acts on a device coupling edge, so any rewrite
+    /// phase that runs after routing must preserve undirected two-qubit
+    /// connectivity. New physical phases added to the workflow must opt into
+    /// this policy; pre-routing phases and basis-only cleanup (which never
+    /// routes) stay unrestricted.
     fn rewrite_config(&self, phase: RewritePhase) -> Result<RewriteConfig, CompilerError> {
-        let mut config = match phase {
-            RewritePhase::PreDecomposition
-            | RewritePhase::PostDecomposition
-            | RewritePhase::PostRouting
-            | RewritePhase::TargetCleanup => RewriteConfig::production(),
+        let preserve_connectivity = match phase {
+            RewritePhase::PreDecomposition | RewritePhase::PostDecomposition => false,
+            RewritePhase::PostRouting => true,
+            RewritePhase::TargetCleanup => self.routing_device_target().is_some(),
         };
+        let mut config =
+            RewriteConfig::production().with_preserve_two_qubit_connectivity(preserve_connectivity);
 
         if self.config.mode == CompileMode::Enhanced {
             config = config
@@ -537,22 +1038,33 @@ impl CompilerWorkflow {
         &self,
         state: &mut WorkflowState,
     ) -> Result<(), CompilerError> {
+        let decomposer = DecomposeDefinitions;
+        if state.skip_if_proven_noop("init", "decompose.definitions", &decomposer) {
+            return Ok(());
+        }
         state.apply_transform("init", "decompose.definitions", |circuit, analysis| {
-            DecomposeDefinitions.transform(circuit, Some(analysis))
+            decomposer.transform(circuit, Some(analysis))
         })?;
         Ok(())
     }
 
     fn apply_unitary_decomposition(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let config = self.unitary_decompose_config_for_state(state);
-        let decomposer = if let Some(target) = self
-            .strict_device_target()
-            .filter(|_| state.analysis.has_unitary_gates)
-        {
-            let context = DeviceTwoQubitSynthesisContext::build(
+        let scheduling_decomposer = DecomposeUnitaries::new(config.clone());
+        if state.skip_if_proven_noop("translation", "decompose.unitary", &scheduling_decomposer) {
+            return Ok(());
+        }
+        let decomposer = if let Some(target) = self.strict_device_target() {
+            let planning_session = state.planning_session.clone().ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "strict device workflow has no planning session".to_string(),
+                )
+            })?;
+            let context = DeviceTwoQubitSynthesisContext::build_with_session(
                 &target.device,
                 &state.current,
                 DeviceSynthesisPlacement::PreLayoutEnvelope,
+                planning_session,
             )?;
             DecomposeUnitaries::new_device_aware(config, context)
         } else {
@@ -573,8 +1085,12 @@ impl CompilerWorkflow {
 
     fn apply_mc_gate_decomposition(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let config = self.mc_gate_decompose_config();
+        let decomposer = DecomposeMcGates::new(config);
+        if state.skip_if_proven_noop("translation", "decompose.mc_gates", &decomposer) {
+            return Ok(());
+        }
         state.apply_transform("translation", "decompose.mc_gates", |circuit, analysis| {
-            DecomposeMcGates::new(config).transform(circuit, Some(analysis))
+            decomposer.transform(circuit, Some(analysis))
         })?;
         Ok(())
     }
@@ -587,19 +1103,31 @@ impl CompilerWorkflow {
         placement: DeviceSynthesisPlacement,
     ) -> Result<bool, CompilerError> {
         let config = self.two_qubit_resynthesis_config_for_state(state);
-        let resynthesizer = if let Some(target) = self
+        let device_context = if let Some(target) = self
             .strict_device_target()
             .filter(|_| ResynthesizeTwoQubitBlocks::is_applicable(&state.current))
         {
-            let context =
-                DeviceTwoQubitSynthesisContext::build(&target.device, &state.current, placement)?;
-            ResynthesizeTwoQubitBlocks::new_device_aware(config, context)
+            let planning_session = state.planning_session.clone().ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "strict device workflow has no planning session".to_string(),
+                )
+            })?;
+            let context = DeviceTwoQubitSynthesisContext::build_with_session(
+                &target.device,
+                &state.current,
+                placement,
+                planning_session,
+            )?;
+            Some(context)
         } else {
-            ResynthesizeTwoQubitBlocks::new(config)
+            None
         };
-        state.apply_transform(stage, name, |circuit, analysis| {
-            resynthesizer.transform(circuit, Some(analysis))
-        })
+        let mut session = std::mem::take(&mut state.resynthesis_session);
+        let result = state.apply_transform_without_analysis_with_edits(stage, name, |circuit| {
+            resynthesize_two_qubit_blocks_workflow(circuit, config, device_context, &mut session)
+        });
+        state.resynthesis_session = session;
+        result
     }
 
     fn apply_post_routing_resynthesis(
@@ -650,6 +1178,14 @@ impl CompilerWorkflow {
             return Ok(());
         }
 
+        if state.skip_if_proven_noop(
+            "translation",
+            "decompose.routing_basis",
+            &LowerToRoutingBasis::default(),
+        ) {
+            return Ok(());
+        }
+
         let preferred_basis = state
             .prepared_target_basis
             .as_ref()
@@ -683,18 +1219,14 @@ impl CompilerWorkflow {
     ///
     /// Detailed ancillary leasing is still enforced by the decomposition
     /// resource manager when a specific synthesis candidate is selected.
-    fn validate_resources(
-        &self,
-        circuit: &Circuit,
-        state: &mut WorkflowState,
-    ) -> Result<(), CompilerError> {
+    fn validate_resources(&self, state: &mut WorkflowState) -> Result<(), CompilerError> {
         let resource_limits = self.resource_limits();
         if let Some(max_total_qubits) = resource_limits.max_total_qubits
-            && circuit.qubits().len() > max_total_qubits
+            && state.current.num_qubits() > max_total_qubits
         {
             return Err(CompilerError::InvalidInput(format!(
                 "source circuit uses {} logical qubits but target capacity is {max_total_qubits}",
-                circuit.qubits().len()
+                state.current.num_qubits()
             )));
         }
         state.steps.push(WorkflowStepReport {
@@ -720,35 +1252,128 @@ impl CompilerWorkflow {
             return Ok(());
         };
 
-        let routing_device = self.routing_device(target)?;
-        let device = routing_device.as_ref();
+        let virtual_permutation = state.virtual_permutation.clone().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "routing started before virtual-permutation preparation".to_string(),
+            )
+        })?;
+
+        let device = &target.device;
         let config = sabre_config_for_mode(self.config.mode, target.seed);
-        let (route_changed, swap_count, trials_evaluated, supplied_layout) =
-            if let Some(initial_layout) = target.initial_layout.as_ref() {
-                let routed = route_with_layout(&state.current, device, initial_layout, &config)?;
-                let route_changed = routed.changed(&state.current);
-                let swap_count = routed.swap_count();
-                let trials_evaluated = routed.diagnostics().trials_evaluated;
-                state.device_metadata = Some(DeviceCompilationMetadata {
-                    initial_layout: routed.initial_layout().clone(),
-                    final_layout: routed.final_layout().clone(),
-                });
-                state.current = routed.into_circuit();
-                (route_changed, swap_count, trials_evaluated, true)
+        let (
+            routed_circuit,
+            route_edits,
+            route_changed,
+            swap_count,
+            trials_evaluated,
+            supplied_layout,
+        ) = if let Some(initial_layout) = target.initial_layout.as_ref() {
+            let routed = if let Some(session) = state.planning_session.as_deref() {
+                let physical = state.routing_physical.as_deref().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "strict-device routing has no prepared physical graph".to_string(),
+                    )
+                })?;
+                route_with_layout_tracked_with_session_on_physical(
+                    &state.current,
+                    device,
+                    physical,
+                    initial_layout,
+                    &config,
+                    session,
+                )?
             } else {
-                let objective = LayoutObjective::topology_only();
-                let routed = route_sabre(&state.current, device, &objective, &config)?;
-                let route_changed = routed.changed(&state.current);
-                let swap_count = routed.swap_count();
-                let trials_evaluated = routed.diagnostics().trials_evaluated;
-                state.device_metadata = Some(DeviceCompilationMetadata {
-                    initial_layout: routed.initial_layout().clone(),
-                    final_layout: routed.final_layout().clone(),
-                });
-                state.current = routed.into_routed().into_circuit();
-                (route_changed, swap_count, trials_evaluated, false)
+                let routing = state.topology_routing_target.as_deref().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "topology routing has no prepared routing target".to_string(),
+                    )
+                })?;
+                route_with_layout_tracked_on_topology(
+                    &state.current,
+                    routing,
+                    initial_layout,
+                    &config,
+                )?
             };
-        state.changed |= route_changed;
+            let route_changed = routed.routed().changed(&state.current);
+            let swap_count = routed.routed().swap_count();
+            let trials_evaluated = routed.routed().diagnostics().trials_evaluated;
+            let final_layout =
+                virtual_permutation.compose_final_layout(routed.routed().final_layout())?;
+            state.device_metadata = Some(DeviceCompilationMetadata {
+                initial_layout: routed.routed().initial_layout().clone(),
+                final_layout,
+                virtual_permutation: virtual_permutation.clone(),
+            });
+            let edits = routed.rewrite_edits(&state.current);
+            (
+                routed.into_routed().into_circuit(),
+                edits,
+                route_changed,
+                swap_count,
+                trials_evaluated,
+                true,
+            )
+        } else {
+            let objective = LayoutObjective::topology_only();
+            let routed = if let Some(session) = state.planning_session.as_deref() {
+                let physical = state.routing_physical.clone().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "strict-device routing has no prepared physical graph".to_string(),
+                    )
+                })?;
+                route_sabre_tracked_with_session_on_physical(
+                    &state.current,
+                    device,
+                    &objective,
+                    &config,
+                    physical,
+                    session,
+                )?
+            } else {
+                let physical = state.routing_physical.clone().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "topology routing has no prepared physical graph".to_string(),
+                    )
+                })?;
+                let routing = state.topology_routing_target.clone().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "topology routing has no prepared routing target".to_string(),
+                    )
+                })?;
+                route_sabre_tracked_on_topology(
+                    &state.current,
+                    &objective,
+                    &config,
+                    physical,
+                    routing,
+                )?
+            };
+            let route_changed = routed.routed().changed(&state.current);
+            let swap_count = routed.routed().swap_count();
+            let trials_evaluated = routed.routed().diagnostics().trials_evaluated;
+            let final_layout =
+                virtual_permutation.compose_final_layout(routed.routed().final_layout())?;
+            state.device_metadata = Some(DeviceCompilationMetadata {
+                initial_layout: routed.routed().initial_layout().clone(),
+                final_layout,
+                virtual_permutation: virtual_permutation.clone(),
+            });
+            let edits = routed.rewrite_edits(&state.current);
+            (
+                routed.into_routed().into_circuit(),
+                edits,
+                route_changed,
+                swap_count,
+                trials_evaluated,
+                false,
+            )
+        };
+        if route_changed {
+            state.adopt_changed_circuit(routed_circuit, &route_edits);
+        } else {
+            state.current = routed_circuit;
+        }
 
         let reason = if supplied_layout {
             format!(
@@ -761,7 +1386,6 @@ impl CompilerWorkflow {
                 swap_count, trials_evaluated
             )
         };
-
         state.steps.push(WorkflowStepReport {
             stage: "routing",
             name: "route.sabre",
@@ -769,6 +1393,267 @@ impl CompilerWorkflow {
             skipped: false,
             reason: Some(reason),
         });
+        Ok(())
+    }
+
+    /// Runs the bounded two-tier route beam after candidate zero has completed
+    /// the entire workflow. Every exploratory route starts from the immutable
+    /// pre-routing prefix and traverses the same post-routing, lowering,
+    /// native-optimization, and validation suffix. Candidate zero remains the
+    /// fallback unless a finalized branch strictly improves two-qubit count or
+    /// depth while preserving its exact native quality in every control-flow
+    /// scope.
+    fn apply_sabre_pareto_beam(
+        &self,
+        state: &mut WorkflowState,
+        prefix: WorkflowState,
+    ) -> Result<(), CompilerError> {
+        let target = self.strict_device_target().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "SABRE Pareto beam requires a strict device target".to_string(),
+            )
+        })?;
+        let baseline_quality = state.native_quality_checkpoint.clone().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "candidate zero completed without an exact native quality checkpoint".to_string(),
+            )
+        })?;
+        let baseline_summary = baseline_quality.summary();
+        let physical = prefix.routing_physical.clone().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "SABRE Pareto beam has no prepared physical graph".to_string(),
+            )
+        })?;
+        let planning_session = prefix.planning_session.as_deref().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "SABRE Pareto beam has no device planning session".to_string(),
+            )
+        })?;
+        let config = sabre_pareto_config(target.seed);
+        let mut search = match prepare_sabre_pareto_routes_with_session_on_physical(
+            &prefix.current,
+            &target.device,
+            &config,
+            physical,
+            planning_session,
+            target.initial_layout.as_ref(),
+        ) {
+            Ok(search) => search,
+            Err(error) if pareto_exploration_error_is_recoverable(&error) => {
+                state.steps.push(WorkflowStepReport {
+                    stage: "selection",
+                    name: "select.sabre_pareto_beam",
+                    changed: false,
+                    skipped: false,
+                    reason: Some(format!(
+                        "accepted=false; contract=exact_scope_pareto_with_2q_gain; candidate0_retained=true; finalized_candidates=1; {}; exploratory search unavailable: {error}",
+                        sabre_pareto_quality_log(baseline_summary, None),
+                    )),
+                });
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+
+        let mut finalized_candidates = 1usize;
+        let mut attempted_candidates = 0usize;
+        let mut discarded_candidates = 0usize;
+        let mut first_discarded_error = None::<String>;
+        let mut route_candidates = Vec::new();
+        let mut tiers_evaluated = 0usize;
+        for (tier, route_limit) in [(1usize, 8usize), (2, 20)] {
+            tiers_evaluated = tier;
+            match search.extend_to(route_limit, 3) {
+                Ok(candidates) => route_candidates
+                    .extend(candidates.into_iter().map(|candidate| (tier, candidate))),
+                Err(error) if pareto_exploration_error_is_recoverable(&error) => {
+                    discarded_candidates = discarded_candidates.saturating_add(1);
+                    first_discarded_error.get_or_insert_with(|| error.to_string());
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        let mut selected = None::<(
+            WorkflowState,
+            NativeExactQualityCheckpoint,
+            usize,
+            usize,
+            usize,
+        )>;
+        for (tier, candidate) in route_candidates {
+            let id = candidate.id;
+            attempted_candidates = attempted_candidates.saturating_add(1);
+            let branch = match self.finalize_sabre_pareto_candidate(&prefix, candidate) {
+                Ok(branch) => branch,
+                Err(error) if pareto_exploration_error_is_recoverable(&error) => {
+                    discarded_candidates = discarded_candidates.saturating_add(1);
+                    first_discarded_error.get_or_insert_with(|| error.to_string());
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            finalized_candidates = finalized_candidates.saturating_add(1);
+            let quality = branch.native_quality_checkpoint.clone().ok_or_else(|| {
+                CompilerError::InvariantViolation(
+                    "finalized SABRE Pareto candidate has no exact quality checkpoint".to_string(),
+                )
+            })?;
+            if !quality.strictly_dominates_with_two_qubit_gain(&baseline_quality) {
+                continue;
+            }
+            let replace = selected.as_ref().is_none_or(
+                |(_, incumbent, _, incumbent_layout, incumbent_route)| {
+                    let ordering = quality.compare_for_sabre_beam(incumbent);
+                    ordering.is_lt()
+                        || ordering.is_eq()
+                            && (id.layout_index, id.route_index)
+                                < (*incumbent_layout, *incumbent_route)
+                },
+            );
+            if replace {
+                selected = Some((branch, quality, tier, id.layout_index, id.route_index));
+            }
+        }
+
+        let winner_summary = selected
+            .as_ref()
+            .map(|(_, quality, _, _, _)| quality.summary());
+        let (changed, accepted, selected_tier, selected_layout, selected_route) =
+            if let Some((branch, _, tier, layout, route)) = selected {
+                let changed = branch.current != state.current
+                    || branch.device_metadata != state.device_metadata;
+                *state = branch;
+                (changed, true, Some(tier), Some(layout), Some(route))
+            } else {
+                (false, false, None, None, None)
+            };
+        state.steps.push(WorkflowStepReport {
+            stage: "selection",
+            name: "select.sabre_pareto_beam",
+            changed,
+            skipped: false,
+            reason: Some(format!(
+                "accepted={accepted}; contract=exact_scope_pareto_with_2q_gain; candidate0_retained={}; tiers_evaluated={tiers_evaluated}; finalized_candidates={finalized_candidates}; attempted_candidates={attempted_candidates}; discarded_candidates={discarded_candidates}; selected_tier={selected_tier:?}; selected_layout={selected_layout:?}; selected_route={selected_route:?}; {}; first_discarded_error={first_discarded_error:?}",
+                !accepted,
+                sabre_pareto_quality_log(baseline_summary, winner_summary),
+            )),
+        });
+        Ok(())
+    }
+
+    fn finalize_sabre_pareto_candidate(
+        &self,
+        prefix: &WorkflowState,
+        candidate: SabreParetoRouteCandidate,
+    ) -> Result<WorkflowState, CompilerError> {
+        let target = self.strict_device_target().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "SABRE Pareto candidate requires a strict device target".to_string(),
+            )
+        })?;
+        let mut branch = prefix.detached_clone();
+        let virtual_permutation = branch.virtual_permutation.clone().ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "SABRE Pareto candidate has no virtual permutation".to_string(),
+            )
+        })?;
+        let routed = candidate.routed;
+        let route_changed = routed.routed().changed(&prefix.current);
+        let swap_count = routed.routed().swap_count();
+        let trials_evaluated = routed.routed().diagnostics().trials_evaluated;
+        let final_layout =
+            virtual_permutation.compose_final_layout(routed.routed().final_layout())?;
+        branch.device_metadata = Some(DeviceCompilationMetadata {
+            initial_layout: routed.routed().initial_layout().clone(),
+            final_layout,
+            virtual_permutation,
+        });
+        let edits = routed.rewrite_edits(&prefix.current);
+        let routed_circuit = routed.into_routed().into_circuit();
+        if route_changed {
+            branch.adopt_changed_circuit(routed_circuit, &edits);
+        } else {
+            branch.current = routed_circuit;
+        }
+        branch.steps.push(WorkflowStepReport {
+            stage: "routing",
+            name: "route.sabre",
+            changed: route_changed,
+            skipped: false,
+            reason: Some(format!(
+                "exploratory Pareto route layout={} trial={}; inserted {swap_count} swap operations using {trials_evaluated} routing trials{}",
+                candidate.id.layout_index,
+                candidate.id.route_index,
+                if target.initial_layout.is_some() {
+                    " from supplied initial layout"
+                } else {
+                    ""
+                },
+            )),
+        });
+
+        self.finish_post_routing(&mut branch)?;
+        Ok(branch)
+    }
+
+    /// Removes static logical SWAPs before numeric two-qubit optimization can
+    /// absorb them into a strictly equivalent unitary realization.
+    ///
+    /// The resulting output permutation remains valid through later logical
+    /// rewrites because those stages preserve logical wire identity.
+    fn apply_virtual_permutation_elision(
+        &self,
+        state: &mut WorkflowState,
+    ) -> Result<(), CompilerError> {
+        if self.routing_device_target().is_none() {
+            state.record_skipped(
+                "optimization",
+                "optimize.virtual_permutation",
+                "no target device configured",
+            );
+            return Ok(());
+        }
+
+        let elision = elide_virtual_permutations(&state.current)?;
+        let elision_status = elision.status();
+        let elided_swap_count = elision.elided_swap_count();
+        state.virtual_permutation = Some(elision.virtual_permutation().clone());
+        match elision_status {
+            VirtualPermutationElisionStatus::Changed => {
+                let circuit = elision.into_changed_circuit().ok_or_else(|| {
+                    CompilerError::InvariantViolation(
+                        "changed virtual-permutation result did not contain a circuit".to_string(),
+                    )
+                })?;
+                let edits = RewriteEdits::between_linear_circuits(&state.current, &circuit);
+                state.adopt_changed_circuit(circuit, &edits);
+                state.steps.push(WorkflowStepReport {
+                    stage: "optimization",
+                    name: "optimize.virtual_permutation",
+                    changed: true,
+                    skipped: false,
+                    reason: Some(format!(
+                        "represented {elided_swap_count} logical swap operations as an output permutation"
+                    )),
+                });
+            }
+            VirtualPermutationElisionStatus::Unchanged => {
+                state.record_skipped(
+                    "optimization",
+                    "optimize.virtual_permutation",
+                    "no eligible logical swap operations",
+                );
+            }
+            VirtualPermutationElisionStatus::SkippedControlFlow => {
+                state.record_skipped(
+                    "optimization",
+                    "optimize.virtual_permutation",
+                    "structured control flow may have path-dependent output permutations",
+                );
+            }
+        }
         Ok(())
     }
 
@@ -783,13 +1668,7 @@ impl CompilerWorkflow {
         }
 
         let rewrite_config = self.rewrite_config(RewritePhase::PostRouting)?;
-        state.apply_transform(
-            "optimization",
-            "optimize.post_routing",
-            |circuit, analysis| {
-                KnowledgeRewriter::new(rewrite_config).transform(circuit, Some(analysis))
-            },
-        )?;
+        state.apply_knowledge_rewrite("optimization", "optimize.post_routing", rewrite_config)?;
         Ok(())
     }
 
@@ -798,8 +1677,8 @@ impl CompilerWorkflow {
         state: &mut WorkflowState,
         name: &'static str,
     ) -> Result<bool, CompilerError> {
-        state.apply_transform("optimization", name, |circuit, analysis| {
-            CommutativeCancellation::new().transform(circuit, Some(analysis))
+        state.apply_transform_without_analysis_with_edits("optimization", name, |circuit| {
+            CommutativeCancellation::new().transform_with_rewrite_edits(circuit)
         })
     }
 
@@ -816,9 +1695,10 @@ impl CompilerWorkflow {
             );
             return Ok(false);
         };
-        let result = state.apply_transform("optimization", name, |circuit, analysis| {
-            optimizer.transform(circuit, Some(analysis))
-        });
+        let result =
+            state.apply_transform_without_analysis_with_edits("optimization", name, |circuit| {
+                optimizer.transform_with_rewrite_edits(circuit)
+            });
         state.one_qubit_optimizer = Some(optimizer);
         result
     }
@@ -838,7 +1718,7 @@ impl CompilerWorkflow {
             CompileMode::Normal => 2,
             CompileMode::Enhanced => 4,
         };
-        let before = state.current.clone();
+        let before_revision = state.circuit_revision;
         let mut rounds = 0u8;
         let mut pending_resynthesis = state.pending_one_qubit_resynthesis;
         while rounds < max_rounds {
@@ -882,7 +1762,7 @@ impl CompilerWorkflow {
         state.steps.push(WorkflowStepReport {
             stage: "optimization",
             name: "optimize.one_qubit_fixed_point",
-            changed: state.current != before,
+            changed: state.circuit_revision != before_revision,
             skipped: false,
             reason: Some(format!("rounds={rounds}; max_rounds={max_rounds}")),
         });
@@ -904,12 +1784,7 @@ impl CompilerWorkflow {
         };
         let lowerer = Arc::clone(&prepared.lowerer);
 
-        if !lowerer.requires_lowering(&state.current) {
-            state.record_skipped(
-                "translation",
-                name,
-                "circuit already satisfies the explicit target basis",
-            );
+        if state.skip_if_proven_noop("translation", name, lowerer.as_ref()) {
             return Ok(());
         }
 
@@ -937,24 +1812,29 @@ impl CompilerWorkflow {
         validate_operations_in_target_basis(state.current.operations(), &allowed)
     }
 
-    /// Prepares one shared explicit-basis planning graph for this workflow run.
-    ///
-    /// Device capabilities are local and ordered, so they are handled by the
-    /// exact device-lowering stage.
-    fn prepare_target_basis(&self) -> Result<Option<PreparedTargetBasis>, CompilerError> {
-        let target_basis = match &self.config.target {
-            CompileTarget::Basis(target_basis)
-            | CompileTarget::TopologyBasis {
-                basis: target_basis,
-                ..
-            } => Some(target_basis),
-            CompileTarget::Logical | CompileTarget::Device(_) => None,
-        };
-        let Some(target_basis) = target_basis else {
-            return Ok(None);
-        };
-        validate_workflow_target_basis_config(target_basis)?;
-        PreparedTargetBasis::new(target_basis.to_vec()).map(Some)
+    fn prepared_target(&self) -> Result<&PreparedCompileTarget, CompilerError> {
+        if let Some(prepared) = self.prepared_target.get() {
+            return Ok(prepared);
+        }
+        let _guard = self
+            .prepare_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(prepared) = self.prepared_target.get() {
+            return Ok(prepared);
+        }
+        let prepared = Arc::new(PreparedCompileTarget::new(&self.config)?);
+        self.prepared_target.set(prepared).map_err(|_| {
+            CompilerError::InvariantViolation(
+                "compiler target was initialized concurrently while holding its preparation lock"
+                    .to_string(),
+            )
+        })?;
+        self.prepared_target.get().map(Arc::as_ref).ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "compiler target preparation completed without publishing its result".to_string(),
+            )
+        })
     }
 
     fn record_pre_init(&self, state: &mut WorkflowState) {
@@ -1007,62 +1887,6 @@ impl CompilerWorkflow {
             "no target device configured"
         }
     }
-
-    fn routing_device<'target>(
-        &self,
-        target: &'target DeviceCompileTarget,
-    ) -> Result<Cow<'target, Device>, CompilerError> {
-        if matches!(self.config.target, CompileTarget::Device(_)) {
-            return Ok(Cow::Borrowed(&target.device));
-        }
-
-        let qubits = target.device.qubits().collect::<Vec<_>>();
-        let couplings = target
-            .device
-            .topology()
-            .undirected_edges()
-            .flat_map(|(a, b)| {
-                [
-                    (a, b, "loose-topology".to_string()),
-                    (b, a, "loose-topology".to_string()),
-                ]
-            })
-            .collect::<Vec<_>>();
-        let topology = Topology::new(qubits.clone(), couplings).map_err(|error| {
-            CompilerError::InvariantViolation(format!(
-                "failed to construct loose routing topology: {error}"
-            ))
-        })?;
-        let mut device = Device::new(
-            format!("{} (loose topology)", target.device.name()),
-            qubits.into_iter().collect(),
-            topology,
-        )
-        .map_err(|error| {
-            CompilerError::InvariantViolation(format!(
-                "failed to construct loose routing device: {error}"
-            ))
-        })?;
-        device
-            .set_invalid_qubits(target.device.invalid_qubits().collect())
-            .map_err(|error| {
-                CompilerError::InvariantViolation(format!(
-                    "failed to copy loose routing availability: {error}"
-                ))
-            })?;
-        let gates = match &self.config.target {
-            CompileTarget::TopologyBasis { basis, .. } => basis.clone(),
-            CompileTarget::Logical | CompileTarget::Basis(_) | CompileTarget::Device(_) => {
-                unreachable!("strict and non-routing targets returned before loose device setup")
-            }
-        };
-        device.set_native_gates(gates).map_err(|error| {
-            CompilerError::InvariantViolation(format!(
-                "failed to configure loose routing instructions: {error}"
-            ))
-        })?;
-        Ok(Cow::Owned(device))
-    }
 }
 
 fn sabre_config_for_mode(mode: CompileMode, seed: Option<u32>) -> SabreConfig {
@@ -1082,6 +1906,53 @@ fn sabre_config_for_mode(mode: CompileMode, seed: Option<u32>) -> SabreConfig {
     }
 
     config
+}
+
+fn sabre_pareto_config(seed: Option<u32>) -> SabreConfig {
+    let mut config = sabre_config_for_mode(CompileMode::Enhanced, seed);
+    config.refinement_iterations = 4;
+    config.routing_trials = 20;
+    config
+}
+
+fn pareto_exploration_error_is_recoverable(error: &CompilerError) -> bool {
+    matches!(
+        error,
+        CompilerError::Circuit(_)
+            | CompilerError::InvalidInput(_)
+            | CompilerError::TransformFailed { .. }
+            | CompilerError::SabreRoutingFailed(_)
+            | CompilerError::DeviceLoweringFailed(_)
+            | CompilerError::DeviceValidationFailed(_)
+    )
+}
+
+fn sabre_pareto_quality_log(
+    candidate0: NativeOptimizationSummary,
+    winner: Option<NativeOptimizationSummary>,
+) -> String {
+    let Some(winner) = winner else {
+        return format!(
+            "candidate0_native_2q_ops={}; candidate0_native_2q_depth={}; candidate0_native_depth={}; candidate0_native_ops={}; winner_quality=None",
+            candidate0.native_two_qubit_ops,
+            candidate0.native_two_qubit_depth,
+            candidate0.total_native_depth,
+            candidate0.native_total_ops,
+        );
+    };
+    format!(
+        "native_2q_ops={}->{}; native_2q_depth={}->{}; native_depth={}->{}; native_ops={}->{}; predicted_log_error={:?}->{:?}",
+        candidate0.native_two_qubit_ops,
+        winner.native_two_qubit_ops,
+        candidate0.native_two_qubit_depth,
+        winner.native_two_qubit_depth,
+        candidate0.total_native_depth,
+        winner.total_native_depth,
+        candidate0.native_total_ops,
+        winner.native_total_ops,
+        candidate0.predicted_log_error,
+        winner.predicted_log_error,
+    )
 }
 
 fn validate_workflow_target_basis_config(
@@ -1150,6 +2021,83 @@ fn validate_operations_in_target_basis(
                 )));
             }
             _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_operations_on_topology(
+    operations: &[Operation],
+    device: &crate::device::Device,
+) -> Result<(), CompilerError> {
+    use crate::device::PhysicalQubit;
+
+    for operation in operations {
+        for qubit in operation.qubits.iter().copied() {
+            let physical = PhysicalQubit::from_qubit(qubit);
+            if !device.is_usable_qubit(physical) {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "topology-basis output references unusable physical qubit {physical}"
+                )));
+            }
+        }
+        match &operation.instruction {
+            Instruction::Standard(gate) if gate.num_qubits() == 2 => {
+                let [left, right] = operation.qubits.as_slice() else {
+                    return Err(CompilerError::InvariantViolation(format!(
+                        "two-qubit gate {gate:?} has {} physical arguments",
+                        operation.qubits.len()
+                    )));
+                };
+                let left = PhysicalQubit::from_qubit(*left);
+                let right = PhysicalQubit::from_qubit(*right);
+                if !device
+                    .topology()
+                    .supports_coupling_either_direction(left, right)
+                {
+                    return Err(CompilerError::InvariantViolation(format!(
+                        "topology-basis output gate {gate:?} uses non-adjacent physical qubits {left} and {right}"
+                    )));
+                }
+            }
+            Instruction::Standard(gate) if gate.num_qubits() > 2 => {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "topology-basis output contains undecomposed gate {gate:?}"
+                )));
+            }
+            Instruction::ClassicalControl(control) => match control {
+                ClassicalControlOp::If(op) => {
+                    validate_operations_on_topology(op.then_body().operations(), device)?;
+                    if let Some(body) = op.else_body() {
+                        validate_operations_on_topology(body.operations(), device)?;
+                    }
+                }
+                ClassicalControlOp::While(op) => {
+                    validate_operations_on_topology(op.body().operations(), device)?;
+                }
+                ClassicalControlOp::For(op) => {
+                    validate_operations_on_topology(op.body().operations(), device)?;
+                }
+                ClassicalControlOp::Switch(op) => {
+                    for case in op.cases() {
+                        validate_operations_on_topology(case.body().operations(), device)?;
+                    }
+                    if let Some(body) = op.default() {
+                        validate_operations_on_topology(body.operations(), device)?;
+                    }
+                }
+                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+            },
+            Instruction::McGate(_) | Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "topology-basis output contains undecomposed instruction {}",
+                    operation.instruction
+                )));
+            }
+            Instruction::Standard(_)
+            | Instruction::Directive(_)
+            | Instruction::ClassicalData(_)
+            | Instruction::Delay => {}
         }
     }
     Ok(())

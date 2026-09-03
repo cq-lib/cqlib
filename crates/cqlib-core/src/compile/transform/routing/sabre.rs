@@ -25,16 +25,25 @@
 //!   Returns [`SabreRouteResult`], which wraps a [`RoutedCircuit`] and adds
 //!   the layout score.
 
-use crate::circuit::Circuit;
+use crate::circuit::{Circuit, CircuitParam, Parameter, Qubit};
 use crate::compile::CompilerError;
+use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::sabre::{
-    SabreConfig, SabreRoutingDiagnostics, SabreRoutingResult, finish_sabre_route, sabre_route,
+    RouteOperationProvenance, RoutingTarget, SabreConfig, SabreRoutingDiagnostics,
+    SabreRoutingResult, finish_sabre_route, sabre_route as sabre_route_core,
+    sabre_route_with_provenance_and_session_on_physical, sabre_route_with_provenance_on_target,
 };
 use crate::compile::transform::layout::{
-    LayoutDiagnostics, LayoutObjective, LayoutScore, prepare_sabre_circuit,
-    prepare_sabre_device_target, sabre_route_selection_prepared,
+    LayoutDiagnostics, LayoutObjective, LayoutScore, PhysicalLayoutGraph, PreparedSabreCircuit,
+    PreparedSabreParetoSearch, PreparedSabreTarget, SabreParetoCandidateId, prepare_sabre_circuit,
+    prepare_sabre_device_target_with_session_and_physical, prepare_sabre_topology_target,
+    prepare_sabre_topology_target_with_prepared, sabre_route_selection_prepared,
 };
+use crate::compile::transform::{QubitBijection, RewriteEdits};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
+use std::collections::HashMap;
+use std::ops::Range;
+use std::sync::Arc;
 
 /// A physical circuit produced by routing, plus routing metadata.
 ///
@@ -90,7 +99,7 @@ impl RoutedCircuit {
     /// - a non-identity initial layout was selected.
     pub fn changed(&self, original: &Circuit) -> bool {
         if self.swap_count > 0
-            || original.qubits() != self.circuit.qubits()
+            || !original.has_same_qubits(&self.circuit)
             || original.global_phase() != self.circuit.global_phase()
         {
             return true;
@@ -108,6 +117,223 @@ impl RoutedCircuit {
         // the first difference and avoids the O(circuit size) temporary
         // strings a `Debug`-format comparison would allocate.
         !original.operations_structurally_equal(&self.circuit)
+    }
+}
+
+/// Routing result with source provenance retained only for compiler-workflow
+/// proof transfer. Public routing results intentionally do not carry this
+/// potentially circuit-sized metadata.
+pub(crate) struct TrackedRoutedCircuit {
+    routed: RoutedCircuit,
+    provenance: Vec<RouteOperationProvenance>,
+}
+
+pub(crate) struct SabreParetoRouteCandidate {
+    pub(crate) id: SabreParetoCandidateId,
+    pub(crate) routed: TrackedRoutedCircuit,
+}
+
+/// Stateful two-tier route search. It owns the prepared circuit/target pair so
+/// extending from eight to twenty trials never rebuilds refinement state or
+/// replays the first tier.
+pub(crate) struct SabreParetoRouteSearch {
+    source: Circuit,
+    prepared: PreparedSabreCircuit,
+    prepared_target: PreparedSabreTarget,
+    search: PreparedSabreParetoSearch,
+}
+
+impl SabreParetoRouteSearch {
+    pub(crate) fn extend_to(
+        &mut self,
+        route_limit: usize,
+        candidate_limit: usize,
+    ) -> Result<Vec<SabreParetoRouteCandidate>, CompilerError> {
+        let selections = self.search.extend_to(
+            &self.prepared,
+            &self.prepared_target,
+            route_limit,
+            candidate_limit,
+        )?;
+        selections
+            .into_iter()
+            .map(|candidate| {
+                let selection = candidate.selection;
+                let routed = finish_sabre_route(
+                    &self.source,
+                    self.prepared_target.routing_target(),
+                    selection.initial_layout,
+                    selection.trial,
+                    selection.selected_trial_index,
+                    selection.trials_evaluated,
+                )?;
+                Ok(SabreParetoRouteCandidate {
+                    id: candidate.id,
+                    routed: tracked_routed_circuit(routed),
+                })
+            })
+            .collect()
+    }
+}
+
+pub(crate) fn prepare_sabre_pareto_routes_with_session_on_physical(
+    circuit: &Circuit,
+    device: &Device,
+    config: &SabreConfig,
+    physical: Arc<PhysicalLayoutGraph>,
+    planning_session: &DevicePlanningSession,
+    supplied_layout: Option<&Layout>,
+) -> Result<SabreParetoRouteSearch, CompilerError> {
+    let prepared = prepare_sabre_circuit(circuit)?;
+    let prepared_target = prepare_sabre_device_target_with_session_and_physical(
+        &prepared,
+        device,
+        physical,
+        planning_session,
+    )?;
+    let search = PreparedSabreParetoSearch::new(
+        &prepared,
+        &prepared_target,
+        &LayoutObjective::topology_only(),
+        config,
+        supplied_layout,
+    )?;
+    Ok(SabreParetoRouteSearch {
+        source: circuit.clone(),
+        prepared,
+        prepared_target,
+        search,
+    })
+}
+
+impl TrackedRoutedCircuit {
+    pub(crate) fn routed(&self) -> &RoutedCircuit {
+        &self.routed
+    }
+
+    pub(crate) fn into_routed(self) -> RoutedCircuit {
+        self.routed
+    }
+
+    pub(crate) fn rewrite_edits(&self, original: &Circuit) -> RewriteEdits {
+        let provenance = self
+            .provenance
+            .iter()
+            .map(|entry| match entry {
+                RouteOperationProvenance::Source(order) => Some(*order),
+                RouteOperationProvenance::Inserted => None,
+            })
+            .collect::<Vec<_>>();
+        let edits = RewriteEdits::from_route_provenance(original.operations().len(), &provenance);
+        let RewriteEdits::Linear {
+            old_len,
+            new_len,
+            replacements,
+        } = edits
+        else {
+            return RewriteEdits::Unknown;
+        };
+        let Some(clean_gap_bijections) = routed_clean_gap_bijections(
+            original,
+            self.routed.circuit(),
+            &provenance,
+            &replacements,
+        ) else {
+            return RewriteEdits::Unknown;
+        };
+        RewriteEdits::linear_modulo_qubit_bijection(
+            old_len,
+            new_len,
+            replacements,
+            clean_gap_bijections,
+        )
+    }
+}
+
+fn routed_clean_gap_bijections(
+    original: &Circuit,
+    routed: &Circuit,
+    provenance: &[Option<usize>],
+    replacements: &[crate::compile::transform::OperationReplacement],
+) -> Option<Vec<QubitBijection>> {
+    if provenance.len() != routed.operations().len() {
+        return None;
+    }
+    let mut bijections = Vec::with_capacity(replacements.len().saturating_add(1));
+    let mut old_cursor = 0usize;
+    let mut new_cursor = 0usize;
+    for replacement in replacements {
+        bijections.push(routed_gap_bijection(
+            original,
+            routed,
+            provenance,
+            old_cursor..replacement.old.start,
+            new_cursor..replacement.new.start,
+        )?);
+        old_cursor = replacement.old.end;
+        new_cursor = replacement.new.end;
+    }
+    bijections.push(routed_gap_bijection(
+        original,
+        routed,
+        provenance,
+        old_cursor..original.operations().len(),
+        new_cursor..routed.operations().len(),
+    )?);
+    Some(bijections)
+}
+
+fn routed_gap_bijection(
+    original: &Circuit,
+    routed: &Circuit,
+    provenance: &[Option<usize>],
+    old: Range<usize>,
+    new: Range<usize>,
+) -> Option<QubitBijection> {
+    if old.len() != new.len() {
+        return None;
+    }
+    let mut forward = HashMap::<Qubit, Qubit>::new();
+    let mut reverse = HashMap::<Qubit, Qubit>::new();
+    for (old_order, new_order) in old.zip(new) {
+        if provenance.get(new_order).copied().flatten() != Some(old_order) {
+            return None;
+        }
+        let source = &original.operations()[old_order];
+        let target = &routed.operations()[new_order];
+        if source.instruction != target.instruction
+            || source.label != target.label
+            || source.qubits.len() != target.qubits.len()
+            || source.params.len() != target.params.len()
+            || !source
+                .params
+                .iter()
+                .zip(&target.params)
+                .all(|(left, right)| resolve_param(original, left) == resolve_param(routed, right))
+        {
+            return None;
+        }
+        for (&logical, &physical) in source.qubits.iter().zip(&target.qubits) {
+            if forward
+                .insert(logical, physical)
+                .is_some_and(|old| old != physical)
+                || reverse
+                    .insert(physical, logical)
+                    .is_some_and(|old| old != logical)
+            {
+                return None;
+            }
+        }
+    }
+    let mut pairs = forward.into_iter().collect::<Vec<_>>();
+    pairs.sort_by_key(|(source, target)| (*source, *target));
+    Some(QubitBijection { pairs })
+}
+
+fn resolve_param(circuit: &Circuit, parameter: &CircuitParam) -> Option<Parameter> {
+    match parameter {
+        CircuitParam::Fixed(value) => Some(Parameter::from(*value)),
+        CircuitParam::Index(index) => circuit.parameters().get_index(*index as usize).cloned(),
     }
 }
 
@@ -135,8 +361,9 @@ impl SabreRouteResult {
 
     /// Observed score of the selected initial layout, when available.
     ///
-    /// SABRE selects the winner by predicted native route quality; this score
-    /// is diagnostic and is not the route-selection key.
+    /// SABRE selects the winner by predicted route quality under the prepared
+    /// routing cost model; this score is diagnostic and is not the
+    /// route-selection key.
     pub fn layout_score(&self) -> Option<&LayoutScore> {
         self.layout_score.as_ref()
     }
@@ -181,6 +408,7 @@ impl SabreRouteResult {
 
 struct SabreRoutingResultWithScore {
     routing: SabreRoutingResult,
+    provenance: Vec<RouteOperationProvenance>,
     layout_score: Option<LayoutScore>,
     layout_diagnostics: LayoutDiagnostics,
 }
@@ -190,10 +418,82 @@ fn sabre_layout_and_route(
     device: &Device,
     objective: &LayoutObjective,
     config: &SabreConfig,
+    retain_provenance: bool,
 ) -> Result<SabreRoutingResultWithScore, CompilerError> {
     let prepared = prepare_sabre_circuit(circuit)?;
-    let prepared_target = prepare_sabre_device_target(&prepared, device)?;
-    let selection = sabre_route_selection_prepared(&prepared, &prepared_target, objective, config)?;
+    let prepared_target = prepare_sabre_topology_target(&prepared, device)?;
+    finish_sabre_layout_and_route(
+        circuit,
+        &prepared,
+        &prepared_target,
+        objective,
+        config,
+        retain_provenance,
+    )
+}
+
+fn sabre_layout_and_route_on_topology(
+    circuit: &Circuit,
+    objective: &LayoutObjective,
+    config: &SabreConfig,
+    retain_provenance: bool,
+    physical: Arc<PhysicalLayoutGraph>,
+    routing: Arc<RoutingTarget>,
+) -> Result<SabreRoutingResultWithScore, CompilerError> {
+    let prepared = prepare_sabre_circuit(circuit)?;
+    let prepared_target =
+        prepare_sabre_topology_target_with_prepared(&prepared, physical, routing)?;
+    finish_sabre_layout_and_route(
+        circuit,
+        &prepared,
+        &prepared_target,
+        objective,
+        config,
+        retain_provenance,
+    )
+}
+
+fn sabre_layout_and_route_with_session_on_physical(
+    circuit: &Circuit,
+    device: &Device,
+    objective: &LayoutObjective,
+    config: &SabreConfig,
+    retain_provenance: bool,
+    physical: Arc<PhysicalLayoutGraph>,
+    planning_session: &DevicePlanningSession,
+) -> Result<SabreRoutingResultWithScore, CompilerError> {
+    let prepared = prepare_sabre_circuit(circuit)?;
+    let prepared_target = prepare_sabre_device_target_with_session_and_physical(
+        &prepared,
+        device,
+        physical,
+        planning_session,
+    )?;
+    finish_sabre_layout_and_route(
+        circuit,
+        &prepared,
+        &prepared_target,
+        objective,
+        config,
+        retain_provenance,
+    )
+}
+
+fn finish_sabre_layout_and_route(
+    circuit: &Circuit,
+    prepared: &PreparedSabreCircuit,
+    prepared_target: &PreparedSabreTarget,
+    objective: &LayoutObjective,
+    config: &SabreConfig,
+    retain_provenance: bool,
+) -> Result<SabreRoutingResultWithScore, CompilerError> {
+    let selection = sabre_route_selection_prepared(
+        prepared,
+        prepared_target,
+        objective,
+        config,
+        retain_provenance,
+    )?;
     let routed = finish_sabre_route(
         circuit,
         prepared_target.routing_target(),
@@ -203,7 +503,8 @@ fn sabre_layout_and_route(
         selection.trials_evaluated,
     )?;
     Ok(SabreRoutingResultWithScore {
-        routing: routed,
+        routing: routed.routing,
+        provenance: routed.provenance,
         layout_score: Some(selection.score),
         layout_diagnostics: selection.diagnostics,
     })
@@ -222,14 +523,59 @@ pub fn route_with_layout(
     initial_layout: &Layout,
     config: &SabreConfig,
 ) -> Result<RoutedCircuit, CompilerError> {
-    let result = sabre_route(circuit, device, initial_layout, config)?;
+    let routing = sabre_route_core(circuit, device, initial_layout, config)?;
     Ok(RoutedCircuit {
-        circuit: result.circuit,
-        initial_layout: result.initial_layout,
-        final_layout: result.final_layout,
-        swap_count: result.swap_count,
-        diagnostics: result.diagnostics,
+        circuit: routing.circuit,
+        initial_layout: routing.initial_layout,
+        final_layout: routing.final_layout,
+        swap_count: routing.swap_count,
+        diagnostics: routing.diagnostics,
     })
+}
+
+pub(crate) fn route_with_layout_tracked_on_topology(
+    circuit: &Circuit,
+    target: &RoutingTarget,
+    initial_layout: &Layout,
+    config: &SabreConfig,
+) -> Result<TrackedRoutedCircuit, CompilerError> {
+    let result = sabre_route_with_provenance_on_target(circuit, target, initial_layout, config)?;
+    Ok(tracked_routed_circuit(result))
+}
+
+pub(crate) fn route_with_layout_tracked_with_session_on_physical(
+    circuit: &Circuit,
+    device: &Device,
+    physical: &PhysicalLayoutGraph,
+    initial_layout: &Layout,
+    config: &SabreConfig,
+    planning_session: &DevicePlanningSession,
+) -> Result<TrackedRoutedCircuit, CompilerError> {
+    let result = sabre_route_with_provenance_and_session_on_physical(
+        circuit,
+        device,
+        physical,
+        initial_layout,
+        config,
+        planning_session,
+    )?;
+    Ok(tracked_routed_circuit(result))
+}
+
+fn tracked_routed_circuit(
+    result: crate::compile::sabre::TrackedSabreRoutingResult,
+) -> TrackedRoutedCircuit {
+    let routing = result.routing;
+    TrackedRoutedCircuit {
+        routed: RoutedCircuit {
+            circuit: routing.circuit,
+            initial_layout: routing.initial_layout,
+            final_layout: routing.final_layout,
+            swap_count: routing.swap_count,
+            diagnostics: routing.diagnostics,
+        },
+        provenance: result.provenance,
+    }
 }
 
 /// Selects a SABRE initial layout and routes `circuit` for `device`.
@@ -248,25 +594,27 @@ pub fn route_with_layout(
 ///
 /// # Limitations
 ///
-/// This transform checks exact-qargs native-plan feasibility while routing, but
-/// it does not emit those native plans or perform target-basis lowering. It also
-/// does not select a compiler workflow. Callers should run required
-/// decomposition, device lowering, and basis translation passes explicitly.
+/// This public transform routes against usable physical connectivity. It does
+/// not enforce native-operation direction or implementation feasibility, emit
+/// native plans, or perform target-basis lowering. Callers that require an
+/// exact device contract should use the compiler workflow; otherwise they
+/// should run the required decomposition and basis translation passes
+/// explicitly.
 ///
 /// # Errors
 ///
 /// Returns [`CompilerError::InvalidInput`] for invalid SABRE configuration,
 /// insufficient usable physical qubits, unreachable routing requirements, or
 /// unsupported circuit operations such as undecomposed gates that touch more
-/// than two qubits. Bounded layout-search and native-feasibility failures are
-/// returned as [`CompilerError::SabreRoutingFailed`].
+/// than two qubits. Bounded layout-search failures are returned as
+/// [`CompilerError::SabreRoutingFailed`].
 pub fn route_sabre(
     circuit: &Circuit,
     device: &Device,
     objective: &LayoutObjective,
     config: &SabreConfig,
 ) -> Result<SabreRouteResult, CompilerError> {
-    let result = sabre_layout_and_route(circuit, device, objective, config)?;
+    let result = sabre_layout_and_route(circuit, device, objective, config, false)?;
 
     Ok(SabreRouteResult {
         routed: RoutedCircuit {
@@ -278,6 +626,56 @@ pub fn route_sabre(
         },
         layout_score: result.layout_score,
         layout_diagnostics: result.layout_diagnostics,
+    })
+}
+
+pub(crate) fn route_sabre_tracked_on_topology(
+    circuit: &Circuit,
+    objective: &LayoutObjective,
+    config: &SabreConfig,
+    physical: Arc<PhysicalLayoutGraph>,
+    routing: Arc<RoutingTarget>,
+) -> Result<TrackedRoutedCircuit, CompilerError> {
+    let result =
+        sabre_layout_and_route_on_topology(circuit, objective, config, true, physical, routing)?;
+    Ok(TrackedRoutedCircuit {
+        routed: RoutedCircuit {
+            circuit: result.routing.circuit,
+            initial_layout: result.routing.initial_layout,
+            final_layout: result.routing.final_layout,
+            swap_count: result.routing.swap_count,
+            diagnostics: result.routing.diagnostics,
+        },
+        provenance: result.provenance,
+    })
+}
+
+pub(crate) fn route_sabre_tracked_with_session_on_physical(
+    circuit: &Circuit,
+    device: &Device,
+    objective: &LayoutObjective,
+    config: &SabreConfig,
+    physical: Arc<PhysicalLayoutGraph>,
+    planning_session: &DevicePlanningSession,
+) -> Result<TrackedRoutedCircuit, CompilerError> {
+    let result = sabre_layout_and_route_with_session_on_physical(
+        circuit,
+        device,
+        objective,
+        config,
+        true,
+        physical,
+        planning_session,
+    )?;
+    Ok(TrackedRoutedCircuit {
+        routed: RoutedCircuit {
+            circuit: result.routing.circuit,
+            initial_layout: result.routing.initial_layout,
+            final_layout: result.routing.final_layout,
+            swap_count: result.routing.swap_count,
+            diagnostics: result.routing.diagnostics,
+        },
+        provenance: result.provenance,
     })
 }
 

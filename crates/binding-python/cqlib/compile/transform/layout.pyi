@@ -352,13 +352,13 @@ class PreparedSabreCircuit:
     def __copy__(self) -> PreparedSabreCircuit: ...
     def __deepcopy__(self, memo: dict[int, object]) -> PreparedSabreCircuit: ...
 
-class PreparedSabreDeviceTarget:
-    """Exact device-side SABRE data prepared for one circuit."""
+class PreparedSabreTarget:
+    """Prepared SABRE target with fixed routing semantics."""
 
     @property
     def physical(self) -> PhysicalLayoutGraph: ...
-    def __copy__(self) -> PreparedSabreDeviceTarget: ...
-    def __deepcopy__(self, memo: dict[int, object]) -> PreparedSabreDeviceTarget: ...
+    def __copy__(self) -> PreparedSabreTarget: ...
+    def __deepcopy__(self, memo: dict[int, object]) -> PreparedSabreTarget: ...
 
 def analyze_circuit_for_layout(circuit: Circuit) -> CircuitLayoutAnalysis:
     """Analyze logical qubits and weighted interactions once.
@@ -372,10 +372,25 @@ def prepare_sabre_circuit(circuit: Circuit) -> PreparedSabreCircuit:
     """Prepare reusable circuit-side data for repeated SABRE searches."""
     ...
 
+def prepare_sabre_topology_target(
+    prepared: PreparedSabreCircuit,
+    device: Device,
+) -> PreparedSabreTarget:
+    """Prepare topology-only device data for one circuit.
+
+    This path considers physical connectivity and does not construct native
+    implementation plans.
+
+    Raises:
+        CompilerConfigError: If the device or circuit requirements are invalid.
+    """
+    ...
+
 def prepare_sabre_device_target(
-    prepared: PreparedSabreCircuit, device: Device
-) -> PreparedSabreDeviceTarget:
-    """Prepare exact device-side data for one prepared circuit.
+    prepared: PreparedSabreCircuit,
+    device: Device,
+) -> PreparedSabreTarget:
+    """Prepare exact device-native data for one circuit.
 
     Raises:
         CompilerConfigError: If the device or circuit requirements are invalid.
@@ -385,7 +400,7 @@ def prepare_sabre_device_target(
 
 def sabre_layout_prepared(
     prepared: PreparedSabreCircuit,
-    prepared_target: PreparedSabreDeviceTarget,
+    prepared_target: PreparedSabreTarget,
     objective: LayoutObjective | None = None,
     config: SabreConfig | None = None,
 ) -> LayoutResult:
@@ -394,8 +409,8 @@ def sabre_layout_prepared(
     Like :func:`sabre_layout`, this performs fused refinement and routing
     search. Every configured refinement iteration completes before the
     resulting layout is routed; complete routes are never created for
-    intermediate refinement states, and trials are ranked by predicted
-    native route quality.
+    intermediate refinement states, and trials are ranked by predicted route
+    quality under the prepared target's routing cost model.
     ``objective`` contributes candidate generation and the diagnostic score in
     the result, but is not the route-selection key.
 
@@ -495,6 +510,7 @@ def vf2_perfect_layout(
 def sabre_layout(
     circuit: Circuit,
     device: Device,
+    *,
     objective: LayoutObjective | None = None,
     config: SabreConfig | None = None,
 ) -> LayoutResult:
@@ -528,9 +544,10 @@ __all__ = [
     "DistanceTable",
     "PhysicalLayoutGraph",
     "PreparedSabreCircuit",
-    "PreparedSabreDeviceTarget",
+    "PreparedSabreTarget",
     "analyze_circuit_for_layout",
     "prepare_sabre_circuit",
+    "prepare_sabre_topology_target",
     "prepare_sabre_device_target",
     "sabre_layout_prepared",
     "trivial_layout_prepared",

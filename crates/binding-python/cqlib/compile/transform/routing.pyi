@@ -61,8 +61,9 @@ class SabreRouteResult:
     def layout_score(self) -> LayoutScore | None:
         """Observed score of the selected initial layout, when available.
 
-        SABRE selects the winning layout by predicted native route quality;
-        this score is diagnostic and is not the route-selection key.
+        SABRE selects the winning layout by predicted route quality under the
+        prepared routing cost model; this score is diagnostic and is not the
+        route-selection key.
         """
         ...
     @property
@@ -101,6 +102,7 @@ def route_with_layout(
     circuit: Circuit,
     device: Device,
     initial_layout: Layout,
+    *,
     config: SabreConfig | None = None,
 ) -> RoutedCircuit:
     """Route ``circuit`` from a caller-supplied initial layout.
@@ -118,6 +120,7 @@ def route_with_layout(
 def route_sabre(
     circuit: Circuit,
     device: Device,
+    *,
     objective: LayoutObjective | None = None,
     config: SabreConfig | None = None,
 ) -> SabreRouteResult:

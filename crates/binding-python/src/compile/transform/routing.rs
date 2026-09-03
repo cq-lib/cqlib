@@ -184,8 +184,9 @@ impl PySabreRouteResult {
 
     /// Observed score of the selected initial layout, when available.
     ///
-    /// SABRE selects the winner by predicted native route quality; this score
-    /// is diagnostic and is not the route-selection key.
+    /// SABRE selects the winner by predicted route quality under the prepared
+    /// routing cost model; this score is diagnostic and is not the
+    /// route-selection key.
     #[getter]
     fn layout_score(&self) -> Option<PyLayoutScore> {
         self.inner.layout_score().cloned().map(Into::into)

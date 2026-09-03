@@ -10,8 +10,11 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from cqlib.circuit import Circuit, Instruction
 from cqlib.compile.commutation import CommutationConfig
+from cqlib.device import Device
 from .decompose import TwoQubitUnitaryDecomposeBasis
 from .result import TransformResult
 
@@ -87,8 +90,24 @@ def resynthesize_two_qubit_blocks(
     """Resynthesize strictly improving fixed numeric two-qubit blocks."""
     ...
 
+def resynthesize_two_qubit_blocks_for_device(
+    circuit: Circuit,
+    device: Device,
+    *,
+    placement: Literal["pre_layout_envelope", "exact_physical"] = "pre_layout_envelope",
+    config: TwoQubitBlockResynthesisConfig | None = None,
+) -> TransformResult:
+    """Resynthesize using the device-aware workflow cost policy.
+
+    ``pre_layout_envelope`` treats circuit qubits as logical and requires a
+    candidate to remain suitable over possible placements. ``exact_physical``
+    requires an already routed physical circuit.
+    """
+    ...
+
 __all__ = [
     "TwoQubitBlockResynthesisConfig",
     "ResynthesizeTwoQubitBlocks",
     "resynthesize_two_qubit_blocks",
+    "resynthesize_two_qubit_blocks_for_device",
 ]

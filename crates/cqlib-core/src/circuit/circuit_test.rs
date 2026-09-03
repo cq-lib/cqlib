@@ -28,6 +28,7 @@ use crate::circuit::{
 use smallvec::smallvec;
 use std::collections::HashSet;
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 fn control_operation(op: ClassicalControlOp) -> Operation {
     Operation {
@@ -2386,7 +2387,7 @@ fn circuit_equality_resolves_reordered_parameter_tables() {
 
     let mut right = left.clone();
     right.parameters.swap_indices(0, 1);
-    for operation in &mut right.data {
+    for operation in Arc::make_mut(&mut right.data) {
         for parameter in &mut operation.params {
             if let CircuitParam::Index(index) = parameter {
                 *index = 1 - *index;
@@ -2395,6 +2396,20 @@ fn circuit_equality_resolves_reordered_parameter_tables() {
     }
 
     assert_eq!(left, right);
+}
+
+#[test]
+fn static_circuit_clone_shares_operations_until_mutation() {
+    let mut circuit = Circuit::new(1);
+    circuit.x(Qubit::new(0)).unwrap();
+
+    let mut cloned = circuit.clone();
+    assert!(Arc::ptr_eq(&circuit.data, &cloned.data));
+
+    cloned.h(Qubit::new(0)).unwrap();
+    assert!(!Arc::ptr_eq(&circuit.data, &cloned.data));
+    assert_eq!(circuit.operations().len(), 1);
+    assert_eq!(cloned.operations().len(), 2);
 }
 
 #[test]

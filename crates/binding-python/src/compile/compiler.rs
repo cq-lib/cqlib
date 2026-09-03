@@ -21,10 +21,11 @@ use cqlib_core::circuit::Instruction;
 use cqlib_core::compile::resource::ResourcePolicy;
 use cqlib_core::compile::{
     CompileConfig, CompileMode, CompileResult, CompileTarget, CompilerWorkflow,
-    DeviceCompilationMetadata, DeviceCompileTarget, WorkflowStepReport, compile,
+    DeviceCompilationMetadata, DeviceCompileTarget, WorkflowStepReport, compile_owned,
 };
 use pyo3::exceptions::PyUserWarning;
 use pyo3::prelude::*;
+use std::collections::HashMap;
 
 fn convert_target_basis(items: Vec<PyTargetBasisItem>) -> PyResult<Vec<Instruction>> {
     if items.is_empty() {
@@ -426,6 +427,10 @@ impl PyCompileMode {
     }
 
     /// Returns the enhanced compiler mode.
+    ///
+    /// This raises optimization and routing effort, adds target-aware cleanup,
+    /// and enables validated SABRE Pareto route selection for strict device
+    /// targets.
     #[staticmethod]
     fn enhanced() -> Self {
         Self {
@@ -568,10 +573,24 @@ impl PyDeviceCompilationMetadata {
         self.inner.final_layout.clone().into()
     }
 
+    /// Original logical output to rewritten logical output mapping accumulated
+    /// before physical layout.
+    #[getter]
+    fn virtual_permutation(&self) -> HashMap<u32, u32> {
+        self.inner
+            .virtual_permutation
+            .original_output_to_rewritten_output()
+            .iter()
+            .map(|(original, rewritten)| (original.id(), rewritten.id()))
+            .collect()
+    }
+
     fn __repr__(&self) -> String {
         format!(
-            "DeviceCompilationMetadata(initial_layout={:?}, final_layout={:?})",
-            self.inner.initial_layout, self.inner.final_layout
+            "DeviceCompilationMetadata(initial_layout={:?}, final_layout={:?}, virtual_permutation={:?})",
+            self.inner.initial_layout,
+            self.inner.final_layout,
+            self.virtual_permutation()
         )
     }
 
@@ -684,6 +703,11 @@ impl PyCompileResult {
         self.inner.mode.into()
     }
 
+    /// Returns reports for the retained output path in workflow order.
+    ///
+    /// Enhanced strict-device runs summarize discarded Pareto branches in the
+    /// final `select.sabre_pareto_beam` report instead of returning every branch
+    /// as a complete step sequence.
     #[getter]
     fn steps(&self) -> Vec<PyWorkflowStepReport> {
         self.inner
@@ -752,7 +776,7 @@ impl PyCompilerWorkflow {
             None => build_compile_config(None, None, None)?,
         };
         Ok(Self {
-            inner: CompilerWorkflow::new(config),
+            inner: CompilerWorkflow::try_new(config).map_err(compiler_error_to_py_err)?,
         })
     }
 
@@ -764,7 +788,7 @@ impl PyCompilerWorkflow {
     /// Runs the workflow without modifying the input circuit.
     fn run(&self, py: Python<'_>, circuit: PyRef<'_, PyCircuit>) -> PyResult<PyCompileResult> {
         let circuit = circuit.inner.clone();
-        py.detach(|| self.inner.run(&circuit))
+        py.detach(|| self.inner.run_owned(circuit))
             .map(PyCompileResult::from)
             .map_err(compiler_error_to_py_err)
     }
@@ -793,7 +817,7 @@ pub fn py_compile(
     let config = build_compile_config(mode, target, resource_policy)?;
     let circuit = circuit.inner.clone();
 
-    py.detach(move || compile(&circuit, config))
+    py.detach(move || compile_owned(circuit, config))
         .map(PyCompileResult::from)
         .map_err(compiler_error_to_py_err)
 }

@@ -22,7 +22,8 @@ use super::commutation::{CachedCommutation, OperationView};
 use super::config::TwoQubitBlockResynthesisConfig;
 use super::dag_collector::collect_two_qubit_blocks_dag;
 use super::incremental::{NativeResynthesisSession, NativeScopeId, NativeScopeSegment};
-use super::selector::{BlockPatch, select_patches_with_device};
+use super::maximal_run::collect_maximal_two_qubit_runs;
+use super::selector::{BlockPatch, select_patches_with_device_policy};
 use super::synthesis_cache::{TwoQubitSynthesisCache, TwoQubitSynthesisCacheStats};
 use crate::circuit::{
     Circuit, CircuitParam, ClassicalControlOp, Instruction, Operation, Parameter, ParameterValue,
@@ -30,11 +31,17 @@ use crate::circuit::{
     ValueSwitchCase,
 };
 use crate::compile::CompilerError;
-use crate::compile::transform::decompose::unitary::DeviceTwoQubitSynthesisContext;
+use crate::compile::device_planning::DevicePlanningSession;
+use crate::compile::transform::NativeQualityPolicy;
+use crate::compile::transform::decompose::unitary::{
+    DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
+};
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
-use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
+use crate::compile::transform::{CircuitAnalysis, RewriteEdits, TransformOutcome, Transformer};
+use crate::device::Device;
 use smallvec::smallvec;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 const TRANSFORM_NAME: &str = "resynthesize.two_qubit_blocks";
 const PHASE_EPS: f64 = 1e-12;
@@ -42,9 +49,9 @@ const PHASE_EPS: f64 = 1e-12;
 /// Transformer that numerically resynthesizes fixed standard-gate two-qubit
 /// blocks.
 ///
-/// Use [`TwoQubitBlockResynthesisConfig::normal`] for the default compiler
-/// budget and [`TwoQubitBlockResynthesisConfig::enhanced`] when extra
-/// compile-time can be traded for larger local blocks.
+/// Use [`TwoQubitBlockResynthesisConfig::normal`] for the default supplemental
+/// search budget and [`TwoQubitBlockResynthesisConfig::enhanced`] when extra
+/// compile-time can be traded for larger commutation-aware local blocks.
 #[derive(Debug, Clone)]
 pub struct ResynthesizeTwoQubitBlocks {
     config: TwoQubitBlockResynthesisConfig,
@@ -60,6 +67,7 @@ impl ResynthesizeTwoQubitBlocks {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new_device_aware(
         config: TwoQubitBlockResynthesisConfig,
         device_context: DeviceTwoQubitSynthesisContext,
@@ -72,6 +80,20 @@ impl ResynthesizeTwoQubitBlocks {
 
     pub(crate) fn is_applicable(circuit: &Circuit) -> bool {
         has_fixed_numeric_two_qubit_standard(circuit.operations(), circuit)
+    }
+
+    /// Runs resynthesis and returns the exact top-level operation provenance
+    /// consumed by a later workflow rewrite session.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn transform_with_rewrite_edits(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
+        resynthesize_two_qubit_blocks_with_device_and_edits(
+            circuit,
+            self.config.clone(),
+            self.device_context.clone(),
+        )
     }
 }
 
@@ -111,24 +133,128 @@ pub fn resynthesize_two_qubit_blocks(
     resynthesize_two_qubit_blocks_with_device(circuit, config, None)
 }
 
+/// Interpretation of circuit qubits for device-aware two-qubit resynthesis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceResynthesisPlacement {
+    /// Circuit qubits are logical and candidates must work across placement domains.
+    PreLayoutEnvelope,
+    /// Circuit qubits are routed physical identifiers on exact device locations.
+    ExactPhysical,
+}
+
+impl From<DeviceResynthesisPlacement> for DeviceSynthesisPlacement {
+    fn from(value: DeviceResynthesisPlacement) -> Self {
+        match value {
+            DeviceResynthesisPlacement::PreLayoutEnvelope => Self::PreLayoutEnvelope,
+            DeviceResynthesisPlacement::ExactPhysical => Self::ExactPhysical,
+        }
+    }
+}
+
+/// Runs one device-aware numeric resynthesis pass on `circuit`.
+///
+/// This explicit diagnostic/custom-pipeline entry point builds a run-local
+/// immutable planning session. The production compiler workflow instead
+/// shares its planning session across phases; both paths use the same device
+/// cost model and strict-improvement policy.
+pub fn resynthesize_two_qubit_blocks_for_device(
+    circuit: &Circuit,
+    device: &Device,
+    placement: DeviceResynthesisPlacement,
+    config: TwoQubitBlockResynthesisConfig,
+) -> Result<TransformOutcome, CompilerError> {
+    if !ResynthesizeTwoQubitBlocks::is_applicable(circuit) {
+        return Ok(TransformOutcome::Unchanged);
+    }
+    let planning_session = Arc::new(DevicePlanningSession::new(device));
+    let device_context = DeviceTwoQubitSynthesisContext::build_with_session(
+        device,
+        circuit,
+        placement.into(),
+        planning_session,
+    )?;
+    resynthesize_two_qubit_blocks_with_device(circuit, config, Some(device_context))
+}
+
+/// Workflow-scoped synthesis artifacts shared by ordinary resynthesis passes.
+///
+/// Only target-independent numeric artifacts (currently exact KAK results)
+/// survive a namespace change. Physical candidates, block decisions, and
+/// native-round worksets retain their stricter lifetimes.
+#[derive(Debug)]
+pub(crate) struct WorkflowResynthesisSession {
+    synthesis_cache: TwoQubitSynthesisCache,
+}
+
+impl Default for WorkflowResynthesisSession {
+    fn default() -> Self {
+        Self {
+            synthesis_cache: TwoQubitSynthesisCache::new_workflow_session(),
+        }
+    }
+}
+
+pub(crate) fn resynthesize_two_qubit_blocks_workflow(
+    circuit: &Circuit,
+    config: TwoQubitBlockResynthesisConfig,
+    device_context: Option<DeviceTwoQubitSynthesisContext>,
+    session: &mut WorkflowResynthesisSession,
+) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
+    resynthesize_two_qubit_blocks_with_cache(
+        circuit,
+        config,
+        device_context,
+        &mut session.synthesis_cache,
+    )
+}
+
 fn resynthesize_two_qubit_blocks_with_device(
     circuit: &Circuit,
     config: TwoQubitBlockResynthesisConfig,
     device_context: Option<DeviceTwoQubitSynthesisContext>,
 ) -> Result<TransformOutcome, CompilerError> {
+    resynthesize_two_qubit_blocks_with_device_and_edits(circuit, config, device_context)
+        .map(|(outcome, _)| outcome)
+}
+
+fn resynthesize_two_qubit_blocks_with_device_and_edits(
+    circuit: &Circuit,
+    config: TwoQubitBlockResynthesisConfig,
+    device_context: Option<DeviceTwoQubitSynthesisContext>,
+) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
+    let mut synthesis_cache = TwoQubitSynthesisCache::default();
+    resynthesize_two_qubit_blocks_with_cache(circuit, config, device_context, &mut synthesis_cache)
+}
+
+fn resynthesize_two_qubit_blocks_with_cache(
+    circuit: &Circuit,
+    config: TwoQubitBlockResynthesisConfig,
+    device_context: Option<DeviceTwoQubitSynthesisContext>,
+    synthesis_cache: &mut TwoQubitSynthesisCache,
+) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
     if !has_fixed_numeric_two_qubit_standard(circuit.operations(), circuit) {
-        return Ok(TransformOutcome::Unchanged);
+        synthesis_cache.begin_selection_pass();
+        return Ok((
+            TransformOutcome::Unchanged,
+            RewriteEdits::linear(
+                circuit.operations().len(),
+                circuit.operations().len(),
+                Vec::new(),
+            ),
+        ));
     }
 
+    synthesis_cache.ensure_namespace(&config, device_context.as_ref());
     let pass = ResynthesisPass {
         source: circuit,
         rebuild: CircuitRebuildContext::new(circuit),
         config,
         device_context,
-        synthesis_cache: TwoQubitSynthesisCache::default(),
+        synthesis_cache,
         incremental: None,
+        quality_policy: NativeQualityPolicy::EntanglerFirst,
     };
-    pass.run()
+    pass.run_with_edits()
 }
 
 pub(crate) fn resynthesize_two_qubit_blocks_incremental(
@@ -136,66 +262,100 @@ pub(crate) fn resynthesize_two_qubit_blocks_incremental(
     config: TwoQubitBlockResynthesisConfig,
     device_context: DeviceTwoQubitSynthesisContext,
     session: &mut NativeResynthesisSession,
+    quality_policy: NativeQualityPolicy,
 ) -> Result<TransformOutcome, CompilerError> {
     session.begin_round(&config);
+    let mut synthesis_cache = std::mem::take(&mut session.synthesis_cache);
+    synthesis_cache.ensure_namespace(&config, Some(&device_context));
     let result = ResynthesisPass {
         source: circuit,
         rebuild: CircuitRebuildContext::new(circuit),
         config,
         device_context: Some(device_context),
-        synthesis_cache: TwoQubitSynthesisCache::default(),
+        synthesis_cache: &mut synthesis_cache,
         incremental: Some(session),
+        quality_policy,
     }
     .run();
+    session.synthesis_cache = synthesis_cache;
     if result.is_ok() {
         session.finish_round();
     }
     result
 }
 
-struct ResynthesisPass<'a, 'session> {
+struct ResynthesisPass<'a, 'session, 'cache> {
     source: &'a Circuit,
     rebuild: CircuitRebuildContext,
     config: TwoQubitBlockResynthesisConfig,
     device_context: Option<DeviceTwoQubitSynthesisContext>,
-    synthesis_cache: TwoQubitSynthesisCache,
+    synthesis_cache: &'cache mut TwoQubitSynthesisCache,
     incremental: Option<&'session mut NativeResynthesisSession>,
+    quality_policy: NativeQualityPolicy,
 }
 
 struct SequenceRewrite {
     operations: Vec<ValueOperation>,
+    /// Output-to-input correspondence for this sequence. Replacements are
+    /// `None`; preserved source operations retain their original order.
+    provenance: Vec<Option<usize>>,
     phase_delta: f64,
     changed: bool,
 }
 
-impl<'a, 'session> ResynthesisPass<'a, 'session> {
+impl<'a, 'session, 'cache> ResynthesisPass<'a, 'session, 'cache> {
     fn run(self) -> Result<TransformOutcome, CompilerError> {
         self.run_with_stats().map(|(result, _)| result)
     }
 
+    fn run_with_edits(self) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
+        self.run_with_edits_and_stats()
+            .map(|(outcome, edits, _)| (outcome, edits))
+    }
+
     fn run_with_stats(
-        mut self,
+        self,
     ) -> Result<(TransformOutcome, TwoQubitSynthesisCacheStats), CompilerError> {
+        self.run_with_edits_and_stats()
+            .map(|(outcome, _, stats)| (outcome, stats))
+    }
+
+    fn run_with_edits_and_stats(
+        mut self,
+    ) -> Result<(TransformOutcome, RewriteEdits, TwoQubitSynthesisCacheStats), CompilerError> {
+        self.synthesis_cache.begin_selection_pass();
         let root_classical = self.rebuild.root_classical().clone();
         let rewrite = self.process_sequence(
             self.source.operations(),
             &root_classical,
             &NativeScopeId::default(),
         )?;
-        let mut global_phase = self.source.global_phase();
-        if rewrite.phase_delta.abs() > PHASE_EPS {
-            global_phase = global_phase + Parameter::from(rewrite.phase_delta);
-        }
-        let circuit =
-            self.rebuild
-                .finish(self.source.qubits(), rewrite.operations, global_phase)?;
         let stats = self.synthesis_cache.stats();
+        let edits = if rewrite.changed {
+            RewriteEdits::from_operation_provenance(
+                self.source.operations().len(),
+                &rewrite.provenance,
+            )
+        } else {
+            RewriteEdits::linear(
+                self.source.operations().len(),
+                self.source.operations().len(),
+                Vec::new(),
+            )
+        };
         let outcome = if rewrite.changed {
+            let mut global_phase = self.source.global_phase();
+            if rewrite.phase_delta.abs() > PHASE_EPS {
+                global_phase = global_phase + Parameter::from(rewrite.phase_delta);
+            }
+            let circuit =
+                self.rebuild
+                    .finish(self.source.qubits(), rewrite.operations, global_phase)?;
             TransformOutcome::Changed(circuit)
         } else {
             TransformOutcome::Unchanged
         };
-        Ok((outcome, stats))
+        Ok((outcome, edits, stats))
     }
 
     fn process_sequence(
@@ -206,26 +366,84 @@ impl<'a, 'session> ResynthesisPass<'a, 'session> {
     ) -> Result<SequenceRewrite, CompilerError> {
         let views = self.build_views(operations)?;
         let mut commutation = CachedCommutation::new(self.config.commutation.clone());
-        let blocks = if let Some(incremental) = self.incremental.as_deref_mut() {
-            incremental.collect_blocks(
-                scope,
-                self.source,
-                operations,
-                &views,
-                &mut commutation,
-                &self.config,
-            )?
+        // Exact unchanged scopes reuse maximal runs. Changed scopes prepare
+        // only operation identity here; bounded-DAG collection remains lazy
+        // until maximal patches prove insufficient below.
+        let maximal_blocks = if let Some(incremental) = self.incremental.as_deref_mut() {
+            if let Some(maximal) =
+                incremental.reuse_unchanged_maximal_blocks(scope, self.source, operations)?
+            {
+                maximal
+            } else {
+                incremental.prepare_scope_for_maximal(
+                    scope,
+                    self.source,
+                    operations,
+                    &self.config,
+                )?;
+                incremental.collect_maximal_blocks(scope, &views)?
+            }
         } else {
-            collect_two_qubit_blocks_dag(&views, &mut commutation, &self.config)?
+            collect_maximal_two_qubit_runs(&views)
         };
-        let patches = select_patches_with_device(
-            blocks,
+        let maximal_keys = maximal_blocks
+            .iter()
+            .map(|block| block.matched_orders.clone())
+            .collect::<HashSet<_>>();
+        let mut patches = select_patches_with_device_policy(
+            maximal_blocks,
             &views,
             &commutation,
             &self.config,
             self.device_context.as_ref(),
-            &mut self.synthesis_cache,
+            self.synthesis_cache,
+            self.quality_policy,
         )?;
+        let protected_orders = patches
+            .iter()
+            .flat_map(|patch| patch.matched_orders.iter().copied())
+            .collect::<HashSet<_>>();
+
+        // The maximal path owns every run it improves. The bounded collector
+        // remains a fallback for unprofitable maximal runs and for blocks that
+        // require legal commutation crossing, but it must not resynthesize an
+        // identical maximal block or overlap an accepted maximal patch.
+        let needs_bounded_collection = views.iter().enumerate().any(|(order, view)| {
+            super::dag_collector::is_two_qubit_anchor(view, &self.config)
+                && !protected_orders.contains(&order)
+        });
+        if needs_bounded_collection {
+            let mut bounded_blocks = if let Some(incremental) = self.incremental.as_deref_mut() {
+                incremental.collect_blocks(
+                    scope,
+                    self.source,
+                    operations,
+                    &views,
+                    &mut commutation,
+                    &self.config,
+                )?
+            } else {
+                collect_two_qubit_blocks_dag(&views, &mut commutation, &self.config)?
+            };
+            bounded_blocks.retain(|block| {
+                !maximal_keys.contains(&block.matched_orders)
+                    && !block
+                        .matched_orders
+                        .iter()
+                        .chain(&block.crossed_orders)
+                        .any(|order| protected_orders.contains(order))
+            });
+            patches.extend(select_patches_with_device_policy(
+                bounded_blocks,
+                &views,
+                &commutation,
+                &self.config,
+                self.device_context.as_ref(),
+                self.synthesis_cache,
+                self.quality_policy,
+            )?);
+            patches.sort_by_key(|patch| patch.first_order);
+        }
 
         if patches.is_empty() {
             return self.preserve_sequence(operations, classical_remap, scope);
@@ -235,9 +453,11 @@ impl<'a, 'session> ResynthesisPass<'a, 'session> {
         for patch in &patches {
             phase_delta += patch.synthesis_phase;
         }
-        let rebuilt = self.emit_patched_sequence(operations, classical_remap, patches, scope)?;
+        let (rebuilt, provenance) =
+            self.emit_patched_sequence(operations, classical_remap, patches, scope)?;
         Ok(SequenceRewrite {
             operations: rebuilt,
+            provenance,
             phase_delta,
             changed: true,
         })
@@ -282,15 +502,18 @@ impl<'a, 'session> ResynthesisPass<'a, 'session> {
         let mut output = Vec::with_capacity(operations.len());
         let mut phase_delta = 0.0;
         let mut changed = false;
+        let mut provenance = Vec::with_capacity(operations.len());
         for (order, operation) in operations.iter().enumerate() {
             let (rebuilt, body_phase, body_changed) =
                 self.rebuild_operation(operation, classical_remap, scope, order)?;
             output.push(rebuilt);
+            provenance.push((!body_changed).then_some(order));
             phase_delta += body_phase;
             changed |= body_changed;
         }
         Ok(SequenceRewrite {
             operations: output,
+            provenance,
             phase_delta,
             changed,
         })
@@ -302,7 +525,7 @@ impl<'a, 'session> ResynthesisPass<'a, 'session> {
         classical_remap: &ClassicalRemap,
         patches: Vec<BlockPatch>,
         scope: &NativeScopeId,
-    ) -> Result<Vec<ValueOperation>, CompilerError> {
+    ) -> Result<(Vec<ValueOperation>, Vec<Option<usize>>), CompilerError> {
         let mut patches_by_first = HashMap::new();
         let mut skipped = HashSet::new();
         for patch in patches {
@@ -321,24 +544,27 @@ impl<'a, 'session> ResynthesisPass<'a, 'session> {
         }
 
         let mut output = Vec::with_capacity(operations.len());
+        let mut provenance = Vec::with_capacity(operations.len());
         for (order, operation) in operations.iter().enumerate() {
             if let Some(patch) = patches_by_first.remove(&order) {
+                provenance.extend(std::iter::repeat_n(None, patch.replacement.len()));
                 output.extend(patch.replacement);
                 continue;
             }
             if skipped.contains(&order) {
                 continue;
             }
-            let (rebuilt, _, _) =
+            let (rebuilt, _, body_changed) =
                 self.rebuild_operation(operation, classical_remap, scope, order)?;
             output.push(rebuilt);
+            provenance.push((!body_changed).then_some(order));
         }
         debug_assert!(
             patches_by_first.is_empty(),
             "{} unemitted resynthesis patches",
             patches_by_first.len()
         );
-        Ok(output)
+        Ok((output, provenance))
     }
 
     fn rebuild_operation(

@@ -150,6 +150,28 @@ impl CachedCommutation {
             .is_some_and(|commutation| !self.exact_only || commutation.is_exact())
     }
 
+    /// Rechecks an exact source crossing while reusing a collector proof when
+    /// one is already cached. A forged or independently materialized block
+    /// still falls back to the exact checker.
+    pub(crate) fn commute_ops_rechecked(
+        &self,
+        lhs: &OperationView<'_>,
+        rhs: &OperationView<'_>,
+    ) -> bool {
+        if lhs.order == rhs.order {
+            return true;
+        }
+        let key = if lhs.order <= rhs.order {
+            (lhs.order, rhs.order)
+        } else {
+            (rhs.order, lhs.order)
+        };
+        self.cache
+            .get(&key)
+            .copied()
+            .unwrap_or_else(|| self.commute_ops_skip_cache(lhs, rhs))
+    }
+
     fn replacement_commutes_with_op(
         &self,
         operation: &OperationView<'_>,

@@ -27,12 +27,15 @@
 //!
 //! [`CompileMode::Normal`] selects conservative production defaults.
 //! [`CompileMode::Enhanced`] keeps the same semantic contract but spends more
-//! rewrite and routing effort and runs additional cleanup around routing and
-//! target lowering.
+//! rewrite, resynthesis, native-optimization, and routing effort, runs additional
+//! cleanup around routing and target lowering, and, for a strict device target,
+//! selects among fully lowered and validated routes with a bounded SABRE Pareto
+//! beam.
 
 use super::workflow::CompilerWorkflow;
 use crate::circuit::{Circuit, Instruction};
 use crate::compile::resource::ResourcePolicy;
+use crate::compile::transform::VirtualPermutation;
 use crate::compile::{CompilerError, WorkflowStepReport};
 use crate::device::{Device, Layout};
 
@@ -42,8 +45,9 @@ pub enum CompileMode {
     /// Conservative logical optimization using production pass defaults.
     #[default]
     Normal,
-    /// A richer staged workflow with stronger pass budgets and target-aware
-    /// cleanup when target constraints are available.
+    /// A richer staged workflow with stronger pass budgets, target-aware
+    /// cleanup, and validated SABRE Pareto route selection for strict device
+    /// targets.
     Enhanced,
 }
 
@@ -109,8 +113,12 @@ pub struct DeviceCompileTarget {
 pub struct DeviceCompilationMetadata {
     /// Logical-to-physical layout before routing begins.
     pub initial_layout: Layout,
-    /// Logical-to-physical layout after all routed swaps.
+    /// Original logical-output-to-physical layout after all routed swaps and
+    /// pre-layout virtual permutations.
     pub final_layout: Layout,
+    /// Original logical output to rewritten logical output mapping accumulated
+    /// before physical layout. The initial circuit inputs remain identity-mapped.
+    pub virtual_permutation: VirtualPermutation,
 }
 
 /// Result returned by [`compile`].
@@ -122,7 +130,11 @@ pub struct CompileResult {
     pub changed: bool,
     /// Workflow mode used for this run.
     pub mode: CompileMode,
-    /// Step-level execution report in run order.
+    /// Step-level report for the retained output path, in workflow order.
+    ///
+    /// Enhanced strict-device compilation may evaluate other route branches.
+    /// Discarded branches are summarized by `select.sabre_pareto_beam` rather
+    /// than retained as complete step sequences here.
     pub steps: Vec<WorkflowStepReport>,
     /// Physical-layout data when compilation used device-topology routing.
     pub device_metadata: Option<DeviceCompilationMetadata>,
@@ -146,10 +158,10 @@ impl CompileResult {
 
 /// Runs the configured compiler workflow over `circuit`.
 ///
-/// The returned result records the optimized circuit and step-level reports in
-/// execution order. A device target additionally returns its initial and final
-/// layouts. Errors are reported when a configured target, native realization,
-/// or final device validation cannot be satisfied.
+/// The returned result records the optimized circuit and step-level reports for
+/// the retained output path in workflow order. A device target additionally
+/// returns its initial and final layouts. Errors are reported when a configured
+/// target, native realization, or candidate validation cannot be satisfied.
 ///
 /// # Examples
 ///
@@ -177,7 +189,18 @@ impl CompileResult {
 /// assert_eq!(result.circuit.qubits().len(), 2);
 /// ```
 pub fn compile(circuit: &Circuit, config: CompileConfig) -> Result<CompileResult, CompilerError> {
-    CompilerWorkflow::new(config).run(circuit)
+    CompilerWorkflow::try_new(config)?.run(circuit)
+}
+
+/// Runs the configured compiler workflow by consuming `circuit`.
+///
+/// This is equivalent to [`compile`] but avoids cloning the complete input
+/// circuit when the caller no longer needs it.
+pub fn compile_owned(
+    circuit: Circuit,
+    config: CompileConfig,
+) -> Result<CompileResult, CompilerError> {
+    CompilerWorkflow::try_new(config)?.run_owned(circuit)
 }
 
 #[cfg(test)]

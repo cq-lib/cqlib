@@ -21,10 +21,11 @@ use cqlib_core::compile::sabre::SabreConfig;
 use cqlib_core::compile::transform::layout::{DistanceTable, PhysicalLayoutGraph};
 use cqlib_core::compile::transform::{
     CircuitLayoutAnalysis, Interaction, InteractionGraph, LayoutDiagnostics, LayoutObjective,
-    LayoutResult, LayoutScore, PreparedSabreCircuit, PreparedSabreDeviceTarget, Vf2EdgeRequirement,
+    LayoutResult, LayoutScore, PreparedSabreCircuit, PreparedSabreTarget, Vf2EdgeRequirement,
     Vf2LayoutConfig, analyze_circuit_for_layout, greedy_layout, greedy_layout_prepared,
-    prepare_sabre_circuit, prepare_sabre_device_target, sabre_layout, sabre_layout_prepared,
-    trivial_layout, trivial_layout_prepared, vf2_perfect_layout, vf2_perfect_layout_prepared,
+    prepare_sabre_circuit, prepare_sabre_device_target, prepare_sabre_topology_target,
+    sabre_layout, sabre_layout_prepared, trivial_layout, trivial_layout_prepared,
+    vf2_perfect_layout, vf2_perfect_layout_prepared,
 };
 use pyo3::prelude::*;
 
@@ -44,13 +45,17 @@ pub(crate) fn register_layout_module(parent: &Bound<'_, PyModule>) -> PyResult<(
     m.add_class::<PyDistanceTable>()?;
     m.add_class::<PyPhysicalLayoutGraph>()?;
     m.add_class::<PyPreparedSabreCircuit>()?;
-    m.add_class::<PyPreparedSabreDeviceTarget>()?;
+    m.add_class::<PyPreparedSabreTarget>()?;
     m.add_function(pyo3::wrap_pyfunction!(py_trivial_layout, &m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(py_greedy_layout, &m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(py_vf2_perfect_layout, &m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(py_sabre_layout, &m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(py_analyze_circuit_for_layout, &m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(py_prepare_sabre_circuit, &m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(
+        py_prepare_sabre_topology_target,
+        &m
+    )?)?;
     m.add_function(pyo3::wrap_pyfunction!(py_prepare_sabre_device_target, &m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(py_sabre_layout_prepared, &m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(py_trivial_layout_prepared, &m)?)?;
@@ -429,8 +434,8 @@ impl PyLayoutDiagnostics {
 ///
 /// The score is the observed objective value of the selected layout.
 /// Individual algorithms may use a different selection key; in particular,
-/// SABRE selects its winner by predicted native route quality and reports
-/// this score for diagnostics.
+/// SABRE selects its winner by predicted route quality under the prepared
+/// routing cost model and reports this score for diagnostics.
 #[pyclass(
     name = "LayoutResult",
     module = "cqlib.compile.transform.layout",
@@ -1045,23 +1050,23 @@ impl PyPreparedSabreCircuit {
 
 /// Device-side SABRE data prepared for one circuit's requirements.
 #[pyclass(
-    name = "PreparedSabreDeviceTarget",
+    name = "PreparedSabreTarget",
     module = "cqlib.compile.transform.layout",
     skip_from_py_object
 )]
 #[derive(Clone, Debug)]
-pub struct PyPreparedSabreDeviceTarget {
-    inner: PreparedSabreDeviceTarget,
+pub struct PyPreparedSabreTarget {
+    inner: PreparedSabreTarget,
 }
 
-impl From<PreparedSabreDeviceTarget> for PyPreparedSabreDeviceTarget {
-    fn from(inner: PreparedSabreDeviceTarget) -> Self {
+impl From<PreparedSabreTarget> for PyPreparedSabreTarget {
+    fn from(inner: PreparedSabreTarget) -> Self {
         Self { inner }
     }
 }
 
 #[pymethods]
-impl PyPreparedSabreDeviceTarget {
+impl PyPreparedSabreTarget {
     #[getter]
     fn physical(&self) -> PyPhysicalLayoutGraph {
         self.inner.physical().clone().into()
@@ -1069,7 +1074,7 @@ impl PyPreparedSabreDeviceTarget {
 
     fn __repr__(&self) -> String {
         format!(
-            "PreparedSabreDeviceTarget(physical_qubits={})",
+            "PreparedSabreTarget(physical_qubits={})",
             self.inner.physical().physical_qubits().len()
         )
     }
@@ -1105,12 +1110,25 @@ fn py_prepare_sabre_circuit(
         .map_err(compiler_error_to_py_err)
 }
 
+#[pyfunction(name = "prepare_sabre_topology_target")]
+fn py_prepare_sabre_topology_target(
+    py: Python<'_>,
+    prepared: PyRef<'_, PyPreparedSabreCircuit>,
+    device: PyRef<'_, PyDevice>,
+) -> PyResult<PyPreparedSabreTarget> {
+    let prepared = prepared.inner.clone();
+    let device = device.inner.clone();
+    py.detach(move || prepare_sabre_topology_target(&prepared, &device))
+        .map(Into::into)
+        .map_err(compiler_error_to_py_err)
+}
+
 #[pyfunction(name = "prepare_sabre_device_target")]
 fn py_prepare_sabre_device_target(
     py: Python<'_>,
     prepared: PyRef<'_, PyPreparedSabreCircuit>,
     device: PyRef<'_, PyDevice>,
-) -> PyResult<PyPreparedSabreDeviceTarget> {
+) -> PyResult<PyPreparedSabreTarget> {
     let prepared = prepared.inner.clone();
     let device = device.inner.clone();
     py.detach(move || prepare_sabre_device_target(&prepared, &device))
@@ -1123,7 +1141,7 @@ fn py_prepare_sabre_device_target(
 fn py_sabre_layout_prepared(
     py: Python<'_>,
     prepared: PyRef<'_, PyPreparedSabreCircuit>,
-    prepared_target: PyRef<'_, PyPreparedSabreDeviceTarget>,
+    prepared_target: PyRef<'_, PyPreparedSabreTarget>,
     objective: Option<PyLayoutObjective>,
     config: Option<PySabreConfig>,
 ) -> PyResult<PyLayoutResult> {

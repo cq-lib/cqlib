@@ -16,7 +16,9 @@ use crate::circuit::test_utils::assert_matrix_approx_eq;
 use crate::circuit::{
     Circuit, ClassicalControlOp, ClassicalExpr, Instruction, Parameter, Qubit, StandardGate,
 };
-use crate::compile::transform::{ResolvedTransform, TransformerTestExt};
+use crate::compile::transform::{
+    ResolvedTransform, RewriteEdits, TransformOutcome, TransformerTestExt,
+};
 
 const EPSILON: f64 = 1e-9;
 
@@ -35,6 +37,38 @@ fn standard_ops(circuit: &Circuit) -> Vec<StandardGate> {
             _ => None,
         })
         .collect()
+}
+
+#[test]
+fn reports_exact_deletions_around_preserved_commuting_operations() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.x(q0).unwrap();
+    circuit.h(q1).unwrap();
+    circuit.x(q0).unwrap();
+
+    let (outcome, edits) = CommutativeCancellation::new()
+        .transform_with_rewrite_edits(&circuit)
+        .unwrap();
+    let TransformOutcome::Changed(changed) = outcome else {
+        panic!("expected cancellation to change the circuit");
+    };
+    assert_eq!(standard_ops(&changed), vec![StandardGate::H]);
+    let RewriteEdits::Linear {
+        old_len,
+        new_len,
+        replacements,
+    } = edits
+    else {
+        panic!("expected exact linear edits");
+    };
+    assert_eq!((old_len, new_len), (3, 1));
+    assert_eq!(replacements.len(), 2);
+    assert_eq!(replacements[0].old, 0..1);
+    assert_eq!(replacements[0].new, 0..0);
+    assert_eq!(replacements[1].old, 2..3);
+    assert_eq!(replacements[1].new, 1..1);
 }
 
 /// Exact unitary comparison including global phase.

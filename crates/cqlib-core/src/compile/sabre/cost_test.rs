@@ -13,7 +13,7 @@
 
 use super::*;
 use crate::circuit::{Instruction, StandardGate};
-use crate::compile::device_planning::{DeviceGateState, NativePlanCatalog};
+use crate::compile::device_planning::{DeviceGateState, DevicePlanningSession, NativePlanCatalog};
 use crate::device::{Device, InstructionProp, PhysicalQubit, QubitProp};
 use smallvec::smallvec;
 
@@ -22,6 +22,14 @@ fn available_metric<T: Copy>(metric: MetricAvailability<T>) -> Option<T> {
         MetricAvailability::Available(value) => Some(value),
         MetricAvailability::Disabled | MetricAvailability::Inconsistent => None,
     }
+}
+
+fn build_catalog(
+    device: &Device,
+    roots: impl IntoIterator<Item = DeviceGateState>,
+) -> NativePlanCatalog {
+    let session = DevicePlanningSession::new(device);
+    NativePlanCatalog::build_with_session(&session, roots).unwrap()
 }
 
 #[test]
@@ -138,7 +146,7 @@ fn estimator_imputes_missing_calibration_from_the_same_gate() {
         .unwrap();
     let known = DeviceGateState::standard(StandardGate::H, smallvec![p0]);
     let missing = DeviceGateState::standard(StandardGate::H, smallvec![p1]);
-    let catalog = NativePlanCatalog::build(&device, [known, missing.clone()]).unwrap();
+    let catalog = build_catalog(&device, [known, missing.clone()]);
     let estimator = CalibrationEstimator::from_device(&device, &[p0, p1]);
 
     let cost = estimator.cost(catalog.summary(&missing).unwrap());
@@ -172,7 +180,7 @@ fn device_estimator_uses_calibration_outside_the_prepared_catalog_roots() {
         )
         .unwrap();
     let missing = DeviceGateState::standard(StandardGate::H, smallvec![p1]);
-    let catalog = NativePlanCatalog::build(&device, [missing.clone()]).unwrap();
+    let catalog = build_catalog(&device, [missing.clone()]);
 
     let device_estimator = CalibrationEstimator::from_device(&device, &[p0, p1]);
     let summary = catalog.summary(&missing).unwrap();
@@ -190,7 +198,7 @@ fn estimator_disables_a_metric_when_the_device_has_no_samples() {
         .with_native_gates(vec![Instruction::Standard(StandardGate::H)])
         .unwrap();
     let root = DeviceGateState::standard(StandardGate::H, smallvec![p0]);
-    let catalog = NativePlanCatalog::build(&device, [root.clone()]).unwrap();
+    let catalog = build_catalog(&device, [root.clone()]);
     let estimator = CalibrationEstimator::from_device(&device, &[p0]);
 
     let cost = estimator.cost(catalog.summary(&root).unwrap());

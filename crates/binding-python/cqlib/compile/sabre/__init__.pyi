@@ -24,7 +24,7 @@ Example::
         circuit,
         Device.line("line3", 3),
         Layout.from_pairs([(0, 0), (1, 2)], physical_count=3),
-        SabreConfig(routing_trials=1, seed=7),
+        config=SabreConfig(routing_trials=1, seed=7),
     )
 """
 

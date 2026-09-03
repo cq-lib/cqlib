@@ -370,7 +370,7 @@ impl UnitaryGate {
                 .re
                 .get_symbols()
                 .into_iter()
-                .chain(value.im.get_symbols().into_iter())
+                .chain(value.im.get_symbols())
             {
                 if !seen.contains(symbol.as_str()) {
                     return Err(CircuitError::InvalidOperation(format!(

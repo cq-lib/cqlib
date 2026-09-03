@@ -172,9 +172,10 @@ def sabre_route(
     circuit: Circuit,
     device: Device,
     initial_layout: Layout,
+    *,
     config: SabreConfig | None = None,
 ) -> SabreRoutingResult:
-    """Route from a supplied layout using device-aware SABRE.
+    """Route from a supplied layout using topology-aware SABRE.
 
     Raises:
         CompilerConfigError: If the configuration or inputs are invalid.
@@ -195,9 +196,11 @@ def normalize_initial_layout(
     ...
 
 def validate_reachable_interactions(
-    circuit: Circuit, device: Device, initial_layout: Layout
+    circuit: Circuit,
+    device: Device,
+    initial_layout: Layout,
 ) -> None:
-    """Validate exact movement and terminal reachability without routing.
+    """Validate topology movement and terminal reachability without routing.
 
     Raises:
         CompilerConfigError: If the inputs are invalid.

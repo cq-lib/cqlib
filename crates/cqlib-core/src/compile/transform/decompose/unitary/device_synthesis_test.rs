@@ -13,9 +13,10 @@
 use super::*;
 use crate::circuit::{MCGate, ParameterValue, UnitaryGate};
 use crate::compile::device_planning::cost::MetricAvailability;
+use crate::compile::test_utils::build_device_synthesis_context;
 use crate::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis;
 use crate::compile::transform::decompose::unitary::unitary_2q::{
-    plan_numeric_2q_unitary_for_device, select_device_unitary_candidate,
+    plan_numeric_2q_unitary_for_device, take_best_device_unitary_candidate,
 };
 use crate::device::{EdgeProp, InstructionProp};
 
@@ -52,15 +53,17 @@ fn pre_layout_prefers_broad_family_over_single_calibrated_edge() {
     circuit
         .unitary(gate, vec![Qubit::new(0), Qubit::new(3)])
         .unwrap();
-    let context = DeviceTwoQubitSynthesisContext::build(
+    let context = build_device_synthesis_context(
         &device,
         &circuit,
         DeviceSynthesisPlacement::PreLayoutEnvelope,
     )
     .unwrap();
     let qubits = [Qubit::new(0), Qubit::new(3)];
-    let candidates = plan_numeric_2q_unitary_for_device(&matrix, qubits, &context).unwrap();
-    let selected = select_device_unitary_candidate(candidates, qubits, &context).unwrap();
+    let mut candidates = plan_numeric_2q_unitary_for_device(&matrix, qubits, &context).unwrap();
+    let selected = take_best_device_unitary_candidate(&mut candidates, &context)
+        .unwrap()
+        .candidate;
 
     assert_eq!(selected.backend, TwoQubitUnitaryDecomposeBasis::Cx);
     assert!(selected.operations.iter().all(|operation| {
@@ -75,6 +78,97 @@ fn pre_layout_prefers_broad_family_over_single_calibrated_edge() {
             .iter()
             .all(|param| matches!(param, ParameterValue::Fixed(_)))
     }));
+}
+
+#[test]
+fn pre_layout_evaluation_derives_all_fields_from_one_pair_scan() {
+    let device = Device::bidirectional_line("single-pair-scan", 3)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::H),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(3);
+    circuit.cx(q0, q1).unwrap();
+    let context = build_device_synthesis_context(
+        &device,
+        &circuit,
+        DeviceSynthesisPlacement::PreLayoutEnvelope,
+    )
+    .unwrap();
+    let operations = vec![ValueOperation::from_standard(
+        StandardGate::CX,
+        [q0, q1],
+        [],
+    )];
+
+    let evaluation = context.evaluate_pre_layout(&operations, [q0, q1]).unwrap();
+
+    let expected_pair_costs = context
+        .data
+        .eligible_pairs
+        .iter()
+        .filter_map(|pair| {
+            context
+                .cost_on_pair_diagnostic(&operations, [q0, q1], *pair, None)
+                .ok()
+                .map(|cost| (*pair, cost))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let expected_domain = expected_pair_costs
+        .keys()
+        .copied()
+        .collect::<OrderedPairDomain>();
+    let expected_worst = expected_pair_costs
+        .values()
+        .copied()
+        .max_by(|left, right| left.compare(*right))
+        .unwrap();
+    assert_eq!(evaluation.domain, expected_domain);
+    assert_eq!(evaluation.coverage, context.coverage_key(&expected_domain));
+    assert_eq!(evaluation.worst_cost, expected_worst);
+    assert_eq!(
+        evaluation.worst_cost_on_domain(&expected_domain),
+        Some(expected_worst)
+    );
+}
+
+#[test]
+fn parameter_independent_physical_cost_cache_reuses_distinct_angles() {
+    let device = Device::bidirectional_line("parameter-independent-cost", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::RZ),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap()
+        .with_default_single_qubit_error(0.001)
+        .with_default_two_qubit_error(0.01);
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.rz(q0, 0.1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    let context =
+        build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
+    let sequence = |angle| {
+        vec![
+            ValueOperation::from_standard(StandardGate::RZ, [q0], [ParameterValue::Fixed(angle)]),
+            ValueOperation::from_standard(StandardGate::CX, [q0, q1], []),
+        ]
+    };
+
+    let first = context
+        .exact_cost_diagnostic(&sequence(0.1), [q0, q1])
+        .unwrap();
+    let second = context
+        .exact_cost_diagnostic(&sequence(-2.7), [q0, q1])
+        .unwrap();
+    assert_eq!(first, second);
 }
 
 #[test]
@@ -93,6 +187,54 @@ fn equal_physical_cost_is_not_a_strict_improvement() {
 }
 
 #[test]
+fn exact_schedule_profile_detects_equal_scalar_but_prefix_sensitive_depth() {
+    let device = Device::bidirectional_line("schedule-profile", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::RZ),
+            Instruction::Standard(StandardGate::CX),
+        ])
+        .unwrap();
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit.rz(q0, 0.1).unwrap();
+    circuit.cx(q0, q1).unwrap();
+    let context =
+        build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
+    let rz = |qubit, angle| {
+        ValueOperation::from_standard(StandardGate::RZ, [qubit], [ParameterValue::Fixed(angle)])
+    };
+    let source = vec![rz(q0, 0.1), rz(q0, 0.2)];
+    let different_tail = vec![rz(q1, 0.1), rz(q1, 0.2)];
+    let shorter_same_tail = vec![rz(q0, 0.3)];
+
+    assert_eq!(
+        context.exact_cost_diagnostic(&source, [q0, q1]).unwrap(),
+        context
+            .exact_cost_diagnostic(&different_tail, [q0, q1])
+            .unwrap()
+    );
+    let source_profile = context
+        .exact_schedule_profile_diagnostic(&source, [q0, q1])
+        .unwrap();
+    let different_tail_profile = context
+        .exact_schedule_profile_diagnostic(&different_tail, [q0, q1])
+        .unwrap();
+    let shorter_same_tail_profile = context
+        .exact_schedule_profile_diagnostic(&shorter_same_tail, [q0, q1])
+        .unwrap();
+
+    assert_eq!(different_tail_profile.dominance(&source_profile), None);
+    assert_eq!(source_profile.dominance(&source_profile), Some(false));
+    assert_eq!(
+        shorter_same_tail_profile.dominance(&source_profile),
+        Some(true)
+    );
+}
+
+#[test]
 fn exact_sequence_cost_supports_one_qubit_only_circuits() {
     let device = Device::line("one-qubit-sequence", 1)
         .unwrap()
@@ -102,12 +244,9 @@ fn exact_sequence_cost_supports_one_qubit_only_circuits() {
     let q0 = Qubit::new(0);
     let mut circuit = Circuit::new(1);
     circuit.u(q0, 0.3, -0.2, 0.7).unwrap();
-    let context = DeviceTwoQubitSynthesisContext::build(
-        &device,
-        &circuit,
-        DeviceSynthesisPlacement::ExactPhysical,
-    )
-    .unwrap();
+    let context =
+        build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
     let operations = vec![ValueOperation {
         instruction: ValueInstruction::from_instruction(Instruction::Standard(StandardGate::U)),
         qubits: smallvec![q0],
@@ -119,7 +258,7 @@ fn exact_sequence_cost_supports_one_qubit_only_circuits() {
         label: None,
     }];
 
-    let cost = context.exact_sequence_cost(&operations).unwrap();
+    let cost = context.exact_sequence_cost_diagnostic(&operations).unwrap();
 
     assert_eq!(cost.native_two_qubit_ops, 0);
     assert_eq!(cost.native_total_ops, 1);
@@ -127,7 +266,7 @@ fn exact_sequence_cost_supports_one_qubit_only_circuits() {
 }
 
 #[test]
-fn exact_sequence_cost_distinguishes_unprepared_and_unsupported() {
+fn exact_sequence_cost_lazily_prepares_and_distinguishes_unsupported() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let device = Device::line("diagnostic", 2)
@@ -135,26 +274,20 @@ fn exact_sequence_cost_distinguishes_unprepared_and_unsupported() {
         .with_native_gates(vec![Instruction::Standard(StandardGate::FSIM)])
         .unwrap();
     let empty = Circuit::new(2);
-    let context = DeviceTwoQubitSynthesisContext::build(
-        &device,
-        &empty,
-        DeviceSynthesisPlacement::ExactPhysical,
-    )
-    .unwrap();
+    let context =
+        build_device_synthesis_context(&device, &empty, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
     let fsim = ValueOperation::from_standard(
         StandardGate::FSIM,
         [q0, q1],
         [ParameterValue::Fixed(0.2), ParameterValue::Fixed(-0.3)],
     );
-    assert!(matches!(
-        context.exact_sequence_cost_diagnostic(&[fsim]),
-        Err(DeviceContextCostFailure::Unprepared(_))
-    ));
+    assert!(context.exact_sequence_cost_diagnostic(&[fsim]).is_ok());
 
     let unsupported_device = Device::line("unsupported", 2).unwrap();
     let mut circuit = Circuit::new(2);
     circuit.cx(q0, q1).unwrap();
-    let unsupported_context = DeviceTwoQubitSynthesisContext::build(
+    let unsupported_context = build_device_synthesis_context(
         &unsupported_device,
         &circuit,
         DeviceSynthesisPlacement::ExactPhysical,
@@ -184,7 +317,7 @@ fn exact_sequence_cost_reports_wrong_placement_and_invalid_operations() {
         .with_native_gates(vec![Instruction::Standard(StandardGate::U)])
         .unwrap();
     let circuit = Circuit::new(1);
-    let pre_layout = DeviceTwoQubitSynthesisContext::build(
+    let pre_layout = build_device_synthesis_context(
         &device,
         &circuit,
         DeviceSynthesisPlacement::PreLayoutEnvelope,
@@ -195,12 +328,9 @@ fn exact_sequence_cost_reports_wrong_placement_and_invalid_operations() {
         Err(DeviceContextCostFailure::WrongPlacement)
     ));
 
-    let exact = DeviceTwoQubitSynthesisContext::build(
-        &device,
-        &circuit,
-        DeviceSynthesisPlacement::ExactPhysical,
-    )
-    .unwrap();
+    let exact =
+        build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
     let measurement = ValueOperation {
         instruction: ValueInstruction::from_instruction(Instruction::Directive(
             crate::circuit::Directive::Measure,
@@ -230,12 +360,9 @@ fn exact_context_prepares_mc_gate_source_root() {
         )
         .unwrap();
     let device = Device::line("mc-root", 2).unwrap();
-    let context = DeviceTwoQubitSynthesisContext::build(
-        &device,
-        &circuit,
-        DeviceSynthesisPlacement::ExactPhysical,
-    )
-    .unwrap();
+    let context =
+        build_device_synthesis_context(&device, &circuit, DeviceSynthesisPlacement::ExactPhysical)
+            .unwrap();
     let operation = ValueOperation {
         instruction: ValueInstruction::from_instruction(instruction),
         qubits: smallvec![q0, q1],
@@ -247,4 +374,74 @@ fn exact_context_prepares_mc_gate_source_root() {
         Ok(_) | Err(DeviceContextCostFailure::Unsupported(_)) => {}
         other => panic!("exact McGate source root was not prepared: {other:?}"),
     }
+}
+
+#[test]
+fn pre_layout_context_reuses_movement_plan_batches() {
+    let device = Device::line("sparse-pre-layout-catalog", 128)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::SWAP)])
+        .unwrap();
+    let circuit = Circuit::new(2);
+    let session = Arc::new(DevicePlanningSession::new(&device));
+
+    DeviceTwoQubitSynthesisContext::build_with_session(
+        &device,
+        &circuit,
+        DeviceSynthesisPlacement::PreLayoutEnvelope,
+        Arc::clone(&session),
+    )
+    .unwrap();
+    let movement = DeviceGateState::standard(
+        StandardGate::SWAP,
+        smallvec![PhysicalQubit::new(126), PhysicalQubit::new(127)],
+    );
+    let first_plans = session.prepare([movement.clone()]).unwrap();
+    let first = first_plans.selected_plan(&movement).unwrap();
+    let unrelated = DeviceGateState::standard(
+        StandardGate::RXX,
+        smallvec![PhysicalQubit::new(126), PhysicalQubit::new(127)],
+    );
+    assert!(first_plans.availability(&unrelated).is_none());
+
+    DeviceTwoQubitSynthesisContext::build_with_session(
+        &device,
+        &circuit,
+        DeviceSynthesisPlacement::PreLayoutEnvelope,
+        Arc::clone(&session),
+    )
+    .unwrap();
+    let second = session
+        .prepare([movement.clone()])
+        .unwrap()
+        .selected_plan(&movement)
+        .unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+}
+
+#[test]
+fn exact_context_plans_sparse_circuit_roots_on_a_wide_device() {
+    let device = Device::line("sparse-exact-catalog", 128)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::CX)])
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let session = Arc::new(DevicePlanningSession::new(&device));
+
+    let context = DeviceTwoQubitSynthesisContext::build_with_session(
+        &device,
+        &circuit,
+        DeviceSynthesisPlacement::ExactPhysical,
+        Arc::clone(&session),
+    )
+    .unwrap();
+
+    let operation = ValueOperation {
+        instruction: ValueInstruction::from_instruction(Instruction::Standard(StandardGate::CX)),
+        qubits: smallvec![Qubit::new(0), Qubit::new(1)],
+        params: smallvec![],
+        label: None,
+    };
+    assert!(context.exact_sequence_cost_diagnostic(&[operation]).is_ok());
 }

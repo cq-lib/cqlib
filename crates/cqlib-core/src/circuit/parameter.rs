@@ -277,6 +277,19 @@ impl Parameter {
         Ok(Self { expr })
     }
 
+    /// Returns the numeric value of this parameter without symbolic
+    /// simplification, if it can be determined directly.
+    ///
+    /// Plain number nodes are read at zero cost; other constant expressions
+    /// (e.g. `pi/2`) fall back to evaluation.  Non-finite values and
+    /// expressions with unbound symbols return `None`.
+    fn numeric_value(&self) -> Option<f64> {
+        self.expr
+            .as_number()
+            .filter(|n| n.is_finite())
+            .or_else(|| self.evaluate(&None).ok())
+    }
+
     /// Returns the canonical storage form of this parameter expression.
     ///
     /// The parameter is first simplified. If the simplified expression has no
@@ -327,6 +340,17 @@ impl Parameter {
         } else {
             Ok(false)
         }
+    }
+
+    /// Returns whether this is already the canonical numeric `+0.0` node.
+    ///
+    /// Unlike [`Parameter::is_exact_zero`], this does not evaluate constant
+    /// expressions and deliberately rejects `-0.0`. Compiler hot paths use it
+    /// only to skip work that is provably an exact representation no-op.
+    pub(crate) fn is_canonical_positive_zero(&self) -> bool {
+        self.expr
+            .as_number()
+            .is_some_and(|value| value.to_bits() == 0.0_f64.to_bits())
     }
 
     /// Computes the symbolic partial derivative of this expression with
@@ -603,9 +627,27 @@ impl Parameter {
 
     /// Returns whether two parameters are provably equal modulo `modulus`.
     ///
-    /// Numeric modulo checks are used only when the expression difference and
-    /// modulus can both be evaluated without extra bindings.
+    /// Fully numeric parameters take a fast path with plain floating-point
+    /// math, without building or simplifying a symbolic difference expression.
+    /// Only expressions with unbound symbols fall back to the symbolic path,
+    /// where the expression difference and modulus must both evaluate without
+    /// extra bindings for the numeric modulo check to apply.
     pub fn provably_equal_modulo(&self, other: &Self, modulus: &Self, tolerance: f64) -> bool {
+        if let (Some(lhs), Some(rhs)) = (self.numeric_value(), other.numeric_value()) {
+            let diff_value = lhs - rhs;
+            if diff_value.abs() <= tolerance {
+                return true;
+            }
+            let Some(modulus_value) = modulus.numeric_value() else {
+                return false;
+            };
+            if modulus_value.abs() <= tolerance {
+                return false;
+            }
+            let ratio = diff_value / modulus_value;
+            return (ratio - ratio.round()).abs() <= tolerance;
+        }
+
         let raw_diff = self.clone() - other.clone();
         let diff = raw_diff.simplify().unwrap_or(raw_diff);
         if diff.provably_equal(&Self::from(0.0), tolerance) {

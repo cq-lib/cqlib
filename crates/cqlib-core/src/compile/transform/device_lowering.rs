@@ -17,8 +17,9 @@
 //! transform runs after routing and closes the remaining ISA gap: every
 //! gate-like operation is either retained as an exact native capability or
 //! lowered through a finite, recursively verified plan whose leaves are exact
-//! device capabilities. A separate terminal device verifier remains the final
-//! workflow safety boundary.
+//! device capabilities. A separate device verifier remains the terminal safety
+//! boundary for each finalized candidate. Enhanced workflow selection may run
+//! afterward, but it only chooses among candidates that crossed that boundary.
 //!
 //! Emission fuses buffered one-qubit runs on each qubit before they reach the
 //! output: exact peephole merges (`RZ` accumulation, `X2P`/`X2M` pairs,
@@ -34,8 +35,9 @@ use crate::circuit::{
 };
 use crate::compile::CompilerError;
 use crate::compile::device_planning::{
-    DeviceGateState, DevicePhysicalCost, DevicePlanner, DevicePlannerError, DirectionTemplate,
-    NativePlanLeaf, PlanChoice, PlanId, PlanTemplate,
+    DeviceGateState, DevicePhysicalCost, DevicePlanSnapshot, DevicePlanningSession,
+    DirectionTemplate, NativePlanAvailability, NativePlanLeaf, PlanChoice, PlanTemplate,
+    SelectedNativePlan,
 };
 use crate::compile::knowledge::{
     ConcreteOperationView, KnowledgeInstructionKey, RuleLibrary, instantiate_target,
@@ -51,6 +53,7 @@ use num_complex::Complex64;
 use smallvec::{SmallVec, smallvec};
 use std::collections::{BTreeMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, PI};
+use std::sync::Arc;
 
 const PHASE_EPS: f64 = 1e-12;
 
@@ -67,12 +70,27 @@ pub(super) struct LowerableOperation {
 #[derive(Debug, Clone, Copy)]
 pub struct DeviceLowerer<'a> {
     device: &'a Device,
+    planning_session: Option<&'a DevicePlanningSession>,
 }
 
 impl<'a> DeviceLowerer<'a> {
     /// Creates a lowerer borrowing one immutable device capability model.
     pub const fn new(device: &'a Device) -> Self {
-        Self { device }
+        Self {
+            device,
+            planning_session: None,
+        }
+    }
+
+    /// Reuses a compile-scoped calibration snapshot and prepared root cache.
+    pub(crate) const fn with_session(
+        device: &'a Device,
+        planning_session: &'a DevicePlanningSession,
+    ) -> Self {
+        Self {
+            device,
+            planning_session: Some(planning_session),
+        }
     }
 
     /// Returns the device whose exact capabilities define lowering leaves.
@@ -119,8 +137,14 @@ impl Transformer for DeviceLowerer<'_> {
         }
         planner_roots.sort();
         planner_roots.dedup();
-        let planner = DevicePlanner::build(self.device, library, planner_roots.iter().cloned())
-            .map_err(DevicePlannerError::into_compiler_error)?;
+        let owned_session;
+        let planning_session = if let Some(session) = self.planning_session {
+            session
+        } else {
+            owned_session = DevicePlanningSession::new(self.device);
+            &owned_session
+        };
+        let plans = planning_session.prepare(planner_roots.iter().cloned())?;
         // Fast path: when no phase folding is pending, the planner selects the
         // native leaf for every circuit root state, and no potentially
         // fusible one-qubit run exists, lowering (and fused emission) is a
@@ -129,16 +153,14 @@ impl Transformer for DeviceLowerer<'_> {
         // further when a cheaper direction or template realization exists.
         let all_roots_native = roots.iter().all(|state| {
             matches!(
-                planner
-                    .selected_plan_for(state)
-                    .and_then(|plan| planner.choice_for_plan(plan)),
+                plans.selected_plan(state).map(|plan| plan.choice),
                 Some(PlanChoice::Native)
             )
         });
         if !scan.has_gphase && all_roots_native && !has_fusible_one_qubit_run(circuit) {
             return Ok(TransformOutcome::Unchanged);
         }
-        DeviceCircuitLowerer::run(circuit, self.device, library, &planner)
+        DeviceCircuitLowerer::run(circuit, self.device, library, &plans)
     }
 }
 
@@ -146,7 +168,7 @@ struct DeviceCircuitLowerer<'a> {
     source: &'a Circuit,
     device: &'a Device,
     library: &'a RuleLibrary,
-    planner: &'a DevicePlanner<'a>,
+    plans: &'a DevicePlanSnapshot,
     rebuild: CircuitRebuildContext,
     changed: bool,
     /// Pending native one-qubit leaves buffered per qubit for run fusion.
@@ -161,7 +183,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
         source: &'a Circuit,
         device: &'a Device,
         library: &'a RuleLibrary,
-        planner: &'a DevicePlanner<'a>,
+        plans: &'a DevicePlanSnapshot,
     ) -> Result<TransformOutcome, CompilerError> {
         let rebuild = CircuitRebuildContext::new(source);
         let root_classical = rebuild.root_classical().clone();
@@ -169,7 +191,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
             source,
             device,
             library,
-            planner,
+            plans,
             rebuild,
             changed: false,
             pending: BTreeMap::new(),
@@ -277,10 +299,15 @@ impl<'a> DeviceCircuitLowerer<'a> {
                     operation.instruction
                 ))
             })?;
-        let Some(plan) = self.planner.selected_plan_for(&state) else {
-            return Err(CompilerError::DeviceLoweringFailed(
-                self.planner.failure_for(&state),
-            ));
+        let Some(plan) = self.plans.selected_plan(&state) else {
+            return match self.plans.availability(&state) {
+                Some(NativePlanAvailability::Unsupported(failure)) => Err(
+                    CompilerError::DeviceLoweringFailed(failure.as_ref().clone()),
+                ),
+                _ => Err(CompilerError::InvariantViolation(format!(
+                    "prepared device state has no selected plan or failure: {state:?}"
+                ))),
+            };
         };
         self.lower_gate_like_with_plan(operation, state, plan, target)
     }
@@ -289,21 +316,16 @@ impl<'a> DeviceCircuitLowerer<'a> {
         &mut self,
         operation: LowerableOperation,
         state: DeviceGateState,
-        plan: PlanId,
+        plan: Arc<SelectedNativePlan>,
         target: &mut LoweringTarget<'_>,
     ) -> Result<(), CompilerError> {
-        let planned_state = self.planner.state_for_plan(plan).ok_or_else(|| {
-            CompilerError::InvariantViolation(format!("unknown selected device plan {plan:?}"))
-        })?;
-        if planned_state != &state {
+        if plan.state != state {
             return Err(CompilerError::InvariantViolation(format!(
-                "device plan {plan:?} targets {planned_state:?}, but lowering requested {state:?}"
+                "device plan targets {:?}, but lowering requested {state:?}",
+                plan.state
             )));
         }
-        let choice = self.planner.choice_for_plan(plan).ok_or_else(|| {
-            CompilerError::InvariantViolation(format!("device plan {plan:?} has no choice"))
-        })?;
-        match choice {
+        match plan.choice {
             PlanChoice::Native => {
                 if !self
                     .device
@@ -326,15 +348,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
             }
             PlanChoice::Template(template) => {
                 self.changed = true;
-                let child_plans = self
-                    .planner
-                    .children_for_plan(plan)
-                    .ok_or_else(|| {
-                        CompilerError::InvariantViolation(format!(
-                            "device plan {plan:?} has no child plan list"
-                        ))
-                    })?
-                    .to_vec();
+                let child_plans = plan.children.to_vec();
                 let replacements = match template {
                     PlanTemplate::Rule(rule_id) => {
                         let rule = self.library.get(rule_id).ok_or_else(|| {
@@ -359,7 +373,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
                     }
                     let child = children.next().ok_or_else(|| {
                         CompilerError::InvariantViolation(format!(
-                            "device plan {plan:?} emitted more non-phase children than planned"
+                            "device plan for {state:?} emitted more non-phase children than planned"
                         ))
                     })?;
                     let ordered_qargs = replacement
@@ -380,7 +394,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
                 }
                 if children.next().is_some() {
                     return Err(CompilerError::InvariantViolation(format!(
-                        "device plan {plan:?} emitted fewer non-phase children than planned"
+                        "device plan for {state:?} emitted fewer non-phase children than planned"
                     )));
                 }
             }
@@ -633,10 +647,8 @@ impl<'a> DeviceCircuitLowerer<'a> {
                     let native_x_better = self
                         .plan_info(StandardGate::X, PhysicalQubit::from_qubit(qubit))
                         .is_some_and(|info| {
-                            matches!(
-                                self.planner.choice_for_plan(info.plan),
-                                Some(PlanChoice::Native)
-                            ) && info.leaf_count == 1
+                            matches!(info.plan.choice, PlanChoice::Native)
+                                && info.leaf_count == 1
                                 && pair_cost
                                     .is_some_and(|pair| info.cost.strictly_better_than(pair))
                         });
@@ -679,7 +691,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
             .into_iter()
             .map(|operation| self.native_leaf(operation))
             .collect::<Option<Vec<_>>>()?;
-        Some(self.planner.leaves_physical_cost(&leaves))
+        Some(self.plans.leaves_physical_cost(&leaves))
     }
 
     /// Selects the shortest exact fused form for one buffered run, or `None`
@@ -747,9 +759,9 @@ impl<'a> DeviceCircuitLowerer<'a> {
     fn plan_info(&self, gate: StandardGate, physical: PhysicalQubit) -> Option<FusionPlanInfo> {
         let state =
             DeviceGateState::from_instruction(&Instruction::Standard(gate), smallvec![physical])?;
-        let plan = self.planner.selected_plan_for(&state)?;
-        let cost = self.planner.cost_for_plan(plan)?;
-        let leaf_count = self.planner.leaf_count_for_plan(plan)?;
+        let plan = self.plans.selected_plan(&state)?;
+        let cost = plan.physical_cost;
+        let leaf_count = plan.summary.leaves.len();
         Some(FusionPlanInfo {
             plan,
             cost,
@@ -763,7 +775,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
             .iter()
             .map(|operation| self.native_leaf(operation))
             .collect::<Option<Vec<_>>>()?;
-        Some(self.planner.leaves_physical_cost(&leaves))
+        Some(self.plans.leaves_physical_cost(&leaves))
     }
 
     /// Builds the native plan leaf for one buffered operation, including its
@@ -796,7 +808,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
         gate: StandardGate,
         qubit: Qubit,
         params: SmallVec<[ParameterValue; 3]>,
-        plan: PlanId,
+        plan: Arc<SelectedNativePlan>,
         target: &mut LoweringTarget<'_>,
     ) -> Result<(), CompilerError> {
         let instruction = Instruction::Standard(gate);
@@ -845,18 +857,18 @@ enum FusedForm {
     Rz {
         angle: f64,
         phase: f64,
-        plan: PlanId,
+        plan: Arc<SelectedNativePlan>,
     },
     /// The run is a general `U` up to its decomposition's global phase.
     U {
         decomposition: crate::compile::transform::decompose::unitary::OneQubitUnitaryDecomposition,
-        plan: PlanId,
+        plan: Arc<SelectedNativePlan>,
     },
 }
 
 /// Planner data needed to decide whether one fused realization is admissible.
 struct FusionPlanInfo {
-    plan: PlanId,
+    plan: Arc<SelectedNativePlan>,
     cost: DevicePhysicalCost,
     leaf_count: usize,
 }

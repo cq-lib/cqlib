@@ -19,8 +19,10 @@ use crate::circuit::{
     ValueOperation, WhileOp,
 };
 use crate::compile::CompilerError;
+use crate::compile::transform::RewriteEdits;
 use crate::compile::transform::transformer::{TransformOutcome, Transformer};
 use smallvec::{SmallVec, smallvec};
+use std::borrow::Cow;
 
 use super::config::CanonicalizeConfig;
 use super::ops::{canonicalize_operation_qubits, is_strict_noop, push_operation};
@@ -82,6 +84,71 @@ impl Canonicalizer {
     /// let _changed = result.changed;
     /// ```
     pub fn run(&self, circuit: &Circuit) -> Result<CanonicalizeResult, CompilerError> {
+        self.run_with_rewrite_edits(circuit)
+            .map(|(result, _)| result)
+    }
+
+    pub(crate) fn transform_with_rewrite_edits(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<(TransformOutcome, RewriteEdits), CompilerError> {
+        self.validate_run(circuit)?;
+        if self.is_verified_canonical(circuit) {
+            return Ok((
+                TransformOutcome::Unchanged,
+                RewriteEdits::linear(
+                    circuit.operations().len(),
+                    circuit.operations().len(),
+                    Vec::new(),
+                ),
+            ));
+        }
+
+        let (result, edits) = self.run_with_rewrite_edits_validated(circuit)?;
+        Ok((
+            if result.changed {
+                TransformOutcome::Changed(result.circuit)
+            } else {
+                TransformOutcome::Unchanged
+            },
+            edits,
+        ))
+    }
+
+    fn run_with_rewrite_edits(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<(CanonicalizeResult, RewriteEdits), CompilerError> {
+        self.validate_run(circuit)?;
+        if self.is_verified_canonical(circuit) {
+            return Ok((
+                CanonicalizeResult {
+                    circuit: circuit.clone(),
+                    changed: false,
+                    rounds: 1,
+                },
+                RewriteEdits::linear(
+                    circuit.operations().len(),
+                    circuit.operations().len(),
+                    Vec::new(),
+                ),
+            ));
+        }
+
+        self.run_with_rewrite_edits_validated(circuit)
+    }
+
+    fn is_verified_canonical(&self, circuit: &Circuit) -> bool {
+        verify_circuit(
+            circuit,
+            VerifyMode::Output {
+                config: &self.config,
+            },
+        )
+        .is_ok()
+    }
+
+    fn validate_run(&self, circuit: &Circuit) -> Result<(), CompilerError> {
         verify_circuit(circuit, VerifyMode::Input)?;
 
         if self.config.round_limit() == 0 {
@@ -89,18 +156,24 @@ impl Canonicalizer {
                 "canonicalize round_limit must be greater than zero".to_string(),
             ));
         }
+        Ok(())
+    }
 
+    fn run_with_rewrite_edits_validated(
+        &self,
+        circuit: &Circuit,
+    ) -> Result<(CanonicalizeResult, RewriteEdits), CompilerError> {
         // A single pass can expose new canonicalization opportunities. For
         // example, parameter simplification can turn `theta - theta` into a
         // fixed zero, which then lets the next pass remove a rotation. The loop
         // therefore proves a stable representation before reporting success.
-        let mut current = rebuild_circuit_from_value_operations(
-            circuit,
-            value_operations_from(circuit)?,
-            circuit.global_phase(),
-        )?;
+        let mut current = Cow::Borrowed(circuit);
+        let mut provenance = (0..circuit.operations().len())
+            .map(Some)
+            .collect::<Vec<_>>();
         for round in 1..=self.config.round_limit() {
-            let next = CanonicalizeRound::new(&current, &self.config).run()?;
+            let (next, next_provenance) =
+                CanonicalizeRound::new(current.as_ref(), &self.config, &provenance).run()?;
             verify_circuit(
                 &next,
                 VerifyMode::Output {
@@ -108,15 +181,32 @@ impl Canonicalizer {
                 },
             )?;
 
-            if current == next {
-                return Ok(CanonicalizeResult {
-                    circuit: next,
-                    changed: circuit != &current,
-                    rounds: round,
-                });
+            if current.as_ref() == &next {
+                let changed = circuit != &next;
+                let edits = if changed {
+                    RewriteEdits::from_operation_provenance(
+                        circuit.operations().len(),
+                        &next_provenance,
+                    )
+                } else {
+                    RewriteEdits::linear(
+                        circuit.operations().len(),
+                        circuit.operations().len(),
+                        Vec::new(),
+                    )
+                };
+                return Ok((
+                    CanonicalizeResult {
+                        circuit: next,
+                        changed,
+                        rounds: round,
+                    },
+                    edits,
+                ));
             }
 
-            current = next;
+            current = Cow::Owned(next);
+            provenance = next_provenance;
         }
 
         Err(CompilerError::InvariantViolation(format!(
@@ -155,42 +245,77 @@ pub fn canonicalize_circuit(circuit: &Circuit) -> Result<CanonicalizeResult, Com
 struct CanonicalizeRound<'a> {
     source: &'a Circuit,
     config: &'a CanonicalizeConfig,
+    source_provenance: &'a [Option<usize>],
     target: Circuit,
     top_phase: Parameter,
 }
 
 impl<'a> CanonicalizeRound<'a> {
-    fn new(source: &'a Circuit, config: &'a CanonicalizeConfig) -> Self {
+    fn new(
+        source: &'a Circuit,
+        config: &'a CanonicalizeConfig,
+        source_provenance: &'a [Option<usize>],
+    ) -> Self {
         Self {
             source,
             config,
+            source_provenance,
             target: Circuit::from_qubits(source.qubits()).expect("source qubits are unique"),
             top_phase: source.global_phase(),
         }
     }
 
-    fn run(mut self) -> Result<Circuit, CompilerError> {
-        self.top_phase = compiler_parameter(self.top_phase.canonicalized())?;
+    fn run(mut self) -> Result<(Circuit, Vec<Option<usize>>), CompilerError> {
+        self.top_phase = self.canonicalize_parameter(self.top_phase.clone())?;
+        if !self.source.operations().is_empty() && !self.top_phase.is_canonical_positive_zero() {
+            // The previous operation loop normalized `current + 0` once for
+            // every source operation, including operations with no phase
+            // contribution. Preserve that representation for tiny numeric
+            // residues with one up-front normalization instead of repeating
+            // the same symbolic work for every operation.
+            self.top_phase =
+                self.canonicalize_parameter(self.top_phase.clone() + Parameter::from(0.0))?;
+        }
         let mut top_level = Vec::with_capacity(self.source.operations().len());
+        let mut provenance = Vec::with_capacity(self.source.operations().len());
 
         // Top-level `GPhase` operations are not retained as operations. Their
         // phase contribution is accumulated here and materialized into
         // `Circuit::global_phase` after all operations have been rebuilt.
-        for operation in self.source.operations() {
+        for (source_order, operation) in self.source.operations().iter().enumerate() {
             let rewritten = self.rewrite_operation(operation, ScopeKind::TopLevel)?;
-            self.top_phase =
-                compiler_parameter((self.top_phase + rewritten.phase).canonicalized())?;
+            let preserves_source = rewritten.preserves_source;
+            self.top_phase = self.accumulate_phase(self.top_phase.clone(), rewritten.phase)?;
             for operation in rewritten.operations {
+                let old_len = top_level.len();
                 push_operation(&mut top_level, operation, self.config);
+                match top_level.len().saturating_sub(old_len) {
+                    1 => provenance.push(
+                        preserves_source
+                            .then_some(self.source_provenance[source_order])
+                            .flatten(),
+                    ),
+                    0 => {
+                        // Adjacent barrier folding makes the retained output
+                        // depend on both source operations.
+                        if let Some(last) = provenance.last_mut() {
+                            *last = None;
+                        }
+                    }
+                    _ => unreachable!("canonicalization emits at most one operation per input"),
+                }
             }
         }
 
-        let phase = compiler_parameter(self.top_phase.canonicalized())?;
+        let phase = self.canonicalize_parameter(self.top_phase.clone())?;
         let operations = top_level
             .into_iter()
             .map(|operation| self.value_operation(operation))
             .collect::<Result<Vec<_>, _>>()?;
-        rebuild_circuit_from_value_operations(self.source, operations, phase)
+        Ok((
+            rebuild_circuit_from_value_operations(self.source, operations, phase)?,
+            provenance,
+        ))
     }
 
     fn canonicalize_body(&mut self, body: &[Operation]) -> Result<Vec<Operation>, CompilerError> {
@@ -202,13 +327,13 @@ impl<'a> CanonicalizeRound<'a> {
         // The canonical body representation keeps it as one leading `GPhase`.
         for operation in body {
             let rewritten = self.rewrite_operation(operation, ScopeKind::ControlFlowBody)?;
-            body_phase = compiler_parameter((body_phase + rewritten.phase).canonicalized())?;
+            body_phase = self.accumulate_phase(body_phase, rewritten.phase)?;
             for operation in rewritten.operations {
                 push_operation(&mut out, operation, self.config);
             }
         }
 
-        body_phase = compiler_parameter(body_phase.canonicalized())?;
+        body_phase = self.canonicalize_parameter(body_phase)?;
         if !compiler_parameter(body_phase.is_exact_zero())? {
             let param = self.intern_parameter(body_phase)?;
             out.insert(
@@ -225,11 +350,32 @@ impl<'a> CanonicalizeRound<'a> {
         Ok(out)
     }
 
+    fn canonicalize_parameter(&mut self, parameter: Parameter) -> Result<Parameter, CompilerError> {
+        if parameter.is_canonical_positive_zero() {
+            return Ok(parameter);
+        }
+        compiler_parameter(parameter.canonicalized())
+    }
+
+    fn accumulate_phase(
+        &mut self,
+        current: Parameter,
+        contribution: Parameter,
+    ) -> Result<Parameter, CompilerError> {
+        if contribution.is_canonical_positive_zero() {
+            return Ok(current);
+        }
+        self.canonicalize_parameter(current + contribution)
+    }
+
     fn rewrite_operation(
         &mut self,
         operation: &Operation,
         scope: ScopeKind,
     ) -> Result<RewriteResult, CompilerError> {
+        let operation_instruction = operation.instruction.clone();
+        let operation_qubits = operation.qubits.clone();
+        let operation_label = operation.label.clone();
         let mut instruction = operation.instruction.clone();
         if self.config.canonicalizes_instruction_form() {
             instruction = instruction.canonicalize_form();
@@ -266,7 +412,8 @@ impl<'a> CanonicalizeRound<'a> {
         }
 
         let params = semantic_params
-            .into_iter()
+            .iter()
+            .cloned()
             .map(|param| self.intern_parameter(param))
             .collect::<Result<SmallVec<[CircuitParam; 1]>, _>>()?;
 
@@ -293,7 +440,17 @@ impl<'a> CanonicalizeRound<'a> {
             operation.qubits = control.used_qubits().into_iter().collect();
         }
 
-        Ok(RewriteResult::keep(operation))
+        let resolved_output_params = operation
+            .params
+            .iter()
+            .map(|parameter| self.target.resolve_parameter(parameter))
+            .collect::<Result<Vec<_>, _>>()?;
+        let preserves_source = operation.instruction == operation_instruction
+            && operation.qubits == operation_qubits
+            && operation.label == operation_label
+            && resolved_output_params == semantic_params;
+
+        Ok(RewriteResult::keep(operation, preserves_source))
     }
 
     fn rewrite_control_flow_instruction(
@@ -409,20 +566,6 @@ fn compiler_parameter<T>(
     result.map_err(|error| CompilerError::Circuit(CircuitError::InvalidParameter(error)))
 }
 
-/// Converts a circuit operation list into value-level operations without
-/// remapping classical handles.
-fn value_operations_from(circuit: &Circuit) -> Result<Vec<ValueOperation>, CompilerError> {
-    circuit
-        .operations()
-        .iter()
-        .cloned()
-        .map(|operation| {
-            storage_operation_to_value(operation, &|param| circuit.parameter_value(param))
-                .map_err(CompilerError::Circuit)
-        })
-        .collect()
-}
-
 /// Rebuilds a circuit while preserving runtime classical tables and handles.
 fn rebuild_circuit_from_value_operations(
     source: &Circuit,
@@ -450,13 +593,15 @@ enum ScopeKind {
 struct RewriteResult {
     operations: Vec<Operation>,
     phase: Parameter,
+    preserves_source: bool,
 }
 
 impl RewriteResult {
-    fn keep(operation: Operation) -> Self {
+    fn keep(operation: Operation, preserves_source: bool) -> Self {
         Self {
             operations: vec![operation],
             phase: Parameter::from(0.0),
+            preserves_source,
         }
     }
 
@@ -464,6 +609,7 @@ impl RewriteResult {
         Self {
             operations: Vec::new(),
             phase: Parameter::from(0.0),
+            preserves_source: false,
         }
     }
 
@@ -471,6 +617,7 @@ impl RewriteResult {
         Self {
             operations: Vec::new(),
             phase,
+            preserves_source: false,
         }
     }
 }
