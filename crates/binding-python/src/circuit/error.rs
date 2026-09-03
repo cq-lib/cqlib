@@ -16,8 +16,9 @@
 //! they are converted into a small cqlib-specific exception hierarchy so callers
 //! can catch errors by domain without depending on Rust enum representations.
 
+use cqlib_core::circuit::error::CircuitError as CoreCircuitError;
 use pyo3::create_exception;
-use pyo3::exceptions::PyException;
+use pyo3::exceptions::{PyException, PyIndexError};
 use pyo3::prelude::*;
 
 create_exception!(cqlib.circuit, CqlibError, PyException);
@@ -32,4 +33,47 @@ pub(crate) fn register_errors(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("ParameterError", module.py().get_type::<ParameterError>())?;
     module.add("QubitError", module.py().get_type::<QubitError>())?;
     Ok(())
+}
+
+/// Converts a core circuit error to the appropriate Python exception.
+///
+/// Container-index failures raise the builtin `IndexError` so index-taking
+/// circuit methods obey the Python sequence protocol; every other failure
+/// remains a `CircuitError`.
+pub(crate) fn circuit_error_to_py_err(error: CoreCircuitError) -> PyErr {
+    let message = error.to_string();
+    match error {
+        CoreCircuitError::OperationIndexOutOfBounds { .. } => PyIndexError::new_err(message),
+        _ => CircuitError::new_err(message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_circuit_error_variants() {
+        Python::initialize();
+        Python::attach(|py| {
+            let out_of_bounds =
+                circuit_error_to_py_err(CoreCircuitError::OperationIndexOutOfBounds {
+                    index: 3,
+                    len: 1,
+                });
+            assert!(out_of_bounds.is_instance_of::<PyIndexError>(py));
+            assert!(!out_of_bounds.is_instance_of::<CircuitError>(py));
+
+            let parameter_index =
+                circuit_error_to_py_err(CoreCircuitError::InvalidParameterIndex(7));
+            assert!(parameter_index.is_instance_of::<CircuitError>(py));
+
+            let still_in_use =
+                circuit_error_to_py_err(CoreCircuitError::ClassicalValueStillInUse {
+                    index: 0,
+                    context: "operation 1".to_owned(),
+                });
+            assert!(still_in_use.is_instance_of::<CircuitError>(py));
+        });
+    }
 }

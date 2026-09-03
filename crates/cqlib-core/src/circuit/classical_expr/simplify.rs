@@ -300,14 +300,13 @@ fn simplify_binary(
             op: ClassicalUnaryOp::Not,
             expr: x,
         } = b.kind()
+            && a == x
         {
-            if a == x {
-                return match op {
-                    ClassicalBinaryOp::And => ty.zero_literal(),
-                    ClassicalBinaryOp::Or | ClassicalBinaryOp::Xor => ty.one_literal(),
-                }
-                .ok();
+            return match op {
+                ClassicalBinaryOp::And => ty.zero_literal(),
+                ClassicalBinaryOp::Or | ClassicalBinaryOp::Xor => ty.one_literal(),
             }
+            .ok();
         }
     }
 

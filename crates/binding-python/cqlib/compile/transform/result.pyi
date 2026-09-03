@@ -31,4 +31,6 @@ class TransformResult:
     def __copy__(self) -> TransformResult: ...
     def __deepcopy__(self, memo: dict[int, object]) -> TransformResult: ...
 
-__all__: list[str]
+__all__ = [
+    "TransformResult",
+]

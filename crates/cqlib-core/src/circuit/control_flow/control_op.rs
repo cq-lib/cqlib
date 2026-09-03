@@ -15,8 +15,33 @@ use crate::circuit::{ClassicalValue, ClassicalVar, Qubit};
 use std::collections::BTreeSet;
 use std::fmt;
 
+/// Stable category of a classical control-flow operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ClassicalControlKind {
+    If,
+    While,
+    For,
+    Switch,
+    Break,
+    Continue,
+}
+
+impl ClassicalControlKind {
+    /// Returns the stable snake-case operation name.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::If => "if",
+            Self::While => "while",
+            Self::For => "for",
+            Self::Switch => "switch",
+            Self::Break => "break",
+            Self::Continue => "continue",
+        }
+    }
+}
+
 /// Expression-based classical control-flow operation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ClassicalControlOp {
     /// Conditional branch.
     If(IfOp),
@@ -33,6 +58,23 @@ pub enum ClassicalControlOp {
 }
 
 impl ClassicalControlOp {
+    /// Returns the stable category of this control-flow operation.
+    pub const fn kind(&self) -> ClassicalControlKind {
+        match self {
+            Self::If(_) => ClassicalControlKind::If,
+            Self::While(_) => ClassicalControlKind::While,
+            Self::For(_) => ClassicalControlKind::For,
+            Self::Switch(_) => ClassicalControlKind::Switch,
+            Self::Break => ClassicalControlKind::Break,
+            Self::Continue => ClassicalControlKind::Continue,
+        }
+    }
+
+    /// Returns the stable snake-case operation name.
+    pub const fn name(&self) -> &'static str {
+        self.kind().name()
+    }
+
     /// Returns classical variables read by the operation's controlling expressions.
     pub fn classical_var_reads(&self) -> BTreeSet<ClassicalVar> {
         match self {
@@ -118,14 +160,7 @@ impl ClassicalControlOp {
 
 impl fmt::Display for ClassicalControlOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::If(_) => write!(f, "if"),
-            Self::While(_) => write!(f, "while"),
-            Self::For(_) => write!(f, "for"),
-            Self::Switch(_) => write!(f, "switch"),
-            Self::Break => write!(f, "break"),
-            Self::Continue => write!(f, "continue"),
-        }
+        f.write_str(self.name())
     }
 }
 

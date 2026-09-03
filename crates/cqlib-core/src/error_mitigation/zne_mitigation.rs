@@ -17,7 +17,7 @@ use crate::qis::Hamiltonian;
 use std::collections::HashSet;
 
 /// Extrapolation methods supported by [`ZNEMitigation::extrapolate`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExtrapolateMethod {
     Polynomial,
     Exponential,
@@ -364,12 +364,12 @@ impl ZNEMitigation {
         level: usize,
         gate_set: &[Instruction],
     ) -> Result<Circuit, CircuitError> {
-        let gate_names: HashSet<String> = gate_set.iter().map(|gate| gate.to_string()).collect();
+        let gate_names: HashSet<String> = gate_set.iter().map(Instruction::name).collect();
         let mut folded = Circuit::from_qubits(self.circuit.qubits())?;
 
         for op in self.circuit.operations() {
             self.append_operation(&mut folded, &self.circuit, op)?;
-            if gate_names.contains(&op.instruction.to_string()) {
+            if gate_names.contains(&op.instruction.name()) {
                 for _ in 0..level {
                     let inv = self.invert_operation(op)?;
                     self.append_operation(&mut folded, &inv.0, &inv.1)?;

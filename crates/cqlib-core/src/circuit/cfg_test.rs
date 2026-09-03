@@ -19,6 +19,16 @@ use rustworkx_core::petgraph::prelude::NodeIndex;
 use smallvec::smallvec;
 
 #[test]
+fn cfg_try_from_round_trip_matches_inherent_api() {
+    let mut circuit = Circuit::new(1);
+    circuit.h(Qubit::new(0)).unwrap();
+
+    let cfg = CircuitCFG::try_from(&circuit).unwrap();
+    let recovered = Circuit::try_from(&cfg).unwrap();
+    assert_eq!(recovered, circuit);
+}
+
+#[test]
 fn basic_block_tracks_operations_and_terminator() {
     let mut block = BasicBlock::new().with_label("entry");
     assert!(block.is_empty());

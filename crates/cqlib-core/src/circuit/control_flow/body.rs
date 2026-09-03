@@ -10,12 +10,12 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-use crate::circuit::{ClassicalDataOp, ClassicalValue, Directive, Instruction, Operation, Qubit};
+use crate::circuit::{ClassicalValue, Operation, Qubit};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Structured control-flow body.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ControlBody {
     operations: Arc<Vec<Operation>>,
 }
@@ -46,26 +46,14 @@ impl ControlBody {
     pub fn has_measurement(&self) -> bool {
         self.operations()
             .iter()
-            .any(|operation| match &operation.instruction {
-                Instruction::Directive(Directive::Measure)
-                | Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
-                | Instruction::ClassicalData(ClassicalDataOp::MeasureBits { .. }) => true,
-                Instruction::ClassicalControl(control) => control.has_measurement(),
-                _ => false,
-            })
+            .any(|operation| operation.instruction.has_measurement())
     }
 
     /// Returns true when this body reads `value`.
     pub fn reads_value(&self, value: ClassicalValue) -> bool {
         self.operations()
             .iter()
-            .any(|operation| match &operation.instruction {
-                Instruction::ClassicalData(ClassicalDataOp::Store {
-                    value: expression, ..
-                }) => expression.values().contains(&value),
-                Instruction::ClassicalControl(control) => control.reads_value(value),
-                _ => false,
-            })
+            .any(|operation| operation.instruction.reads_value(value))
     }
 }
 

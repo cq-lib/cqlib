@@ -65,7 +65,7 @@ pub(crate) fn extract_parameter_value(value: &Bound<'_, PyAny>) -> PyResult<Para
 /// for op in circuit.operations():
 ///     print(f"Gate: {op.name}, Qubits: {op.num_qubits}")
 /// ```
-#[pyclass(name = "Operation", module = "cqlib.circuit")]
+#[pyclass(name = "Operation", module = "cqlib.circuit", skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyOperation {
     pub(crate) operation: Operation,
@@ -198,9 +198,30 @@ impl PyOperation {
     fn __str__(&self) -> String {
         format!("{}", self.operation.instruction)
     }
+
+    /// Compares two operations by storage-level structure.
+    ///
+    /// Classical handles embedded in classical-data/control instructions
+    /// carry the owning circuit's process-local identity, so operations from
+    /// different circuits are generally unequal.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyOperation>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyRef<'_, PyOperation>>()?;
+        Ok(self.operation == other.operation)
+    }
+
+    fn __copy__(&self) -> Self {
+        self.clone()
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
 }
 
-#[pyclass(name = "ValueOperation", module = "cqlib.circuit")]
+#[pyclass(name = "ValueOperation", module = "cqlib.circuit", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyValueOperation {
     pub(crate) inner: ValueOperation,
@@ -342,6 +363,66 @@ impl PyValueOperation {
     }
 
     #[getter]
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+
+    #[getter]
+    fn num_qubits(&self) -> usize {
+        self.inner.num_qubits()
+    }
+
+    #[getter]
+    fn num_params(&self) -> usize {
+        self.inner.num_params()
+    }
+
+    #[getter]
+    fn instruction_type(&self) -> &'static str {
+        self.inner.instruction_type()
+    }
+
+    #[getter]
+    fn is_standard(&self) -> bool {
+        self.inner.is_standard()
+    }
+
+    #[getter]
+    fn is_mcgate(&self) -> bool {
+        self.inner.is_mcgate()
+    }
+
+    #[getter]
+    fn is_unitary(&self) -> bool {
+        self.inner.is_unitary()
+    }
+
+    #[getter]
+    fn is_circuit_gate(&self) -> bool {
+        self.inner.is_circuit_gate()
+    }
+
+    #[getter]
+    fn is_directive(&self) -> bool {
+        self.inner.is_directive()
+    }
+
+    #[getter]
+    fn is_classical_data(&self) -> bool {
+        self.inner.is_classical_data()
+    }
+
+    #[getter]
+    fn is_classical_control(&self) -> bool {
+        self.inner.is_classical_control()
+    }
+
+    #[getter]
+    fn is_delay(&self) -> bool {
+        self.inner.is_delay()
+    }
+
+    #[getter]
     fn label(&self) -> Option<String> {
         self.inner.label.as_ref().map(|s| s.to_string())
     }
@@ -384,6 +465,14 @@ impl PyValueOperation {
 
     fn __repr__(&self) -> String {
         format!("ValueOperation(\"{}\")", self.inner)
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyValueOperation>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyValueOperation>()?;
+        Ok(self.inner == other.inner)
     }
 
     fn __copy__(&self) -> Self {

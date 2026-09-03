@@ -5,7 +5,7 @@
 **高性能量子计算 SDK —— 基于 Rust 构建，跨语言支持**
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.txt)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.89%2B-orange.svg)](https://www.rust-lang.org)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
 [![C](https://img.shields.io/badge/c-11%2B-lightgrey.svg)](https://en.cppreference.com/w/c/11)
 
@@ -136,13 +136,13 @@ int main(void) {
 
 | 语言     | 最低版本 | 绑定技术              |
 |--------|------|-------------------|
-| Rust   | 1.85 | 原生                |
+| Rust   | 1.89 | 原生                |
 | Python | 3.10 | PyO3 (abi3-py310) |
 | C      | 11   | cbindgen          |
 
 ## 从源码构建
 
-**前置条件：** Rust 1.85+，Python 3.10+（用于 Python 绑定）
+**前置条件：** Rust 1.89+，Python 3.10+（用于 Python 绑定）
 
 ```bash
 git clone https://gitee.com/cq-lib/cqlib.git
@@ -163,7 +163,7 @@ cargo build --release -p binding-c
 
 ```bash
 cargo test --all
-pytest tests/python/
+pytest crates/binding-python/tests/
 ```
 
 ## 文档
@@ -184,7 +184,3 @@ pytest tests/python/
 ## 许可证
 
 Cqlib 采用 [Apache License, Version 2.0](LICENSE.txt) 许可证。
-
----
-
-*版权所有 (C) 2025–2026 中国电信量子集团。保留所有权利。*

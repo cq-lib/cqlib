@@ -202,6 +202,24 @@ impl DensityMatrix {
         Self { data, num_qubits }
     }
 
+    /// Creates the maximally mixed state $I / 2^N$.
+    ///
+    /// The returned density matrix has equal probability on every
+    /// computational-basis state and zero off-diagonal entries. A zero-qubit
+    /// system is represented by the one-dimensional density matrix `[1]`.
+    ///
+    /// Like every dense density-matrix constructor, this allocates $O(4^N)$
+    /// complex values.
+    pub fn maximally_mixed(num_qubits: usize) -> Self {
+        let dim = 1 << num_qubits;
+        let mut data = vec![Complex64::new(0.0, 0.0); dim * dim];
+        let probability = Complex64::new(1.0 / dim as f64, 0.0);
+        for index in 0..dim {
+            data[index * dim + index] = probability;
+        }
+        Self { data, num_qubits }
+    }
+
     /// Creates a density matrix from an initial statevector (pure state).
     ///
     /// Internally computes the outer product $\rho = |\psi\rangle\langle\psi|$.

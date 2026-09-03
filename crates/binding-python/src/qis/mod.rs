@@ -43,6 +43,7 @@ pub fn register_qis_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     qis_module.add_class::<pauli::PyPhase>()?;
     qis_module.add_class::<pauli::PyPauli>()?;
     qis_module.add_class::<pauli::PyPauliString>()?;
+    qis_module.add_class::<pauli::PyPauliStringIter>()?;
 
     // Register state submodule
     state::register_state_module(&qis_module)?;

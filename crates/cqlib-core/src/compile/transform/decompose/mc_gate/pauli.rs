@@ -32,9 +32,9 @@ use super::mcx::{
     decompose_mcx_1_dirty, decompose_mcx_2_clean, decompose_mcx_2_dirty, decompose_mcx_n_clean,
     decompose_mcx_n_dirty, decompose_mcx_no_aux, decompose_mcx_small,
 };
+use super::validation::find_duplicate_qubit;
 use crate::circuit::{Qubit, StandardGate, operation::ValueOperation};
 use crate::compile::error::CompilerError;
-use crate::util::qubit::find_duplicate_qubit;
 
 const DECOMPOSE_PAULI_NAME: &str = "decompose.pauli";
 

@@ -42,7 +42,11 @@ use crate::qis::hamiltonian::PyHamiltonian;
 ///     >>> s1 = EvolutionStrategy.exact()
 ///     >>> s2 = EvolutionStrategy.auto(steps=10)
 ///     >>> s3 = EvolutionStrategy.trotter(TrotterMode.second_order(), steps=5)
-#[pyclass(name = "EvolutionStrategy", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "EvolutionStrategy",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyEvolutionStrategy {
     pub(crate) inner: EvolutionStrategy,
@@ -170,30 +174,7 @@ impl PyEvolutionStrategy {
     }
 
     fn __eq__(&self, other: &PyEvolutionStrategy) -> bool {
-        use cqlib_core::qis::evolution::TrotterMode;
-        match (&self.inner, &other.inner) {
-            (EvolutionStrategy::Exact, EvolutionStrategy::Exact) => true,
-            (EvolutionStrategy::Auto { steps: a }, EvolutionStrategy::Auto { steps: b }) => a == b,
-            (
-                EvolutionStrategy::Trotter {
-                    mode: ma,
-                    steps: sa,
-                },
-                EvolutionStrategy::Trotter {
-                    mode: mb,
-                    steps: sb,
-                },
-            ) => {
-                sa == sb
-                    && match (ma, mb) {
-                        (TrotterMode::FirstOrder, TrotterMode::FirstOrder) => true,
-                        (TrotterMode::SecondOrder, TrotterMode::SecondOrder) => true,
-                        (TrotterMode::Randomized(a), TrotterMode::Randomized(b)) => a == b,
-                        _ => false,
-                    }
-            }
-            _ => false,
-        }
+        self.inner == other.inner
     }
 
     fn __copy__(&self) -> Self {
@@ -236,7 +217,12 @@ impl PyEvolutionStrategy {
 ///     ...     print("Mathematically exact decomposition")
 ///     ... else:
 ///     ...     print(f"Trotter with {info.steps} steps, mode={info.trotter_mode}")
-#[pyclass(name = "EvolutionInfo", module = "cqlib.circuit.ansatz", get_all)]
+#[pyclass(
+    name = "EvolutionInfo",
+    module = "cqlib.circuit.ansatz",
+    get_all,
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyEvolutionInfo {
     /// ``True`` iff the decomposition is mathematically exact.
@@ -349,7 +335,11 @@ impl PyEvolutionInfo {
 /// >>> circuit2 = ansatz2.build_circuit("ignored")
 /// >>> # circuit2 has one symbolic parameter "tau"
 /// ```
-#[pyclass(name = "PauliEvolutionAnsatz", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "PauliEvolutionAnsatz",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyPauliEvolutionAnsatz {
     pub(crate) inner: PauliEvolutionAnsatz,
@@ -427,7 +417,7 @@ impl PyPauliEvolutionAnsatz {
     /// Examples:
     ///     >>> ansatz = ansatz.with_time_param_name("tau")
     ///     >>> circuit = ansatz.build_circuit("ignored")
-    ///     >>> circuit.symbols  # ("tau",)
+    ///     >>> circuit.symbols  # ["tau"]
     fn with_time_param_name(&self, name: &str) -> Self {
         Self {
             inner: self.inner.clone().with_time_param_name(name),

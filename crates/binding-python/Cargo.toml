@@ -1,9 +1,10 @@
 [package]
 name = "binding-python"
-version.workspace = true
+version = "1.4.0-beta1"
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license-file.workspace = true
+publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
@@ -11,11 +12,12 @@ name = "_native"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pyo3 = { version = "0.27", features = ["abi3-py310", "num-complex", "chrono"] }
+pyo3 = { version = "0.29", features = ["abi3-py310", "num-complex", "chrono"] }
 chrono = "0.4"
-cqlib-core = { path = "../cqlib-core", version = '0.1.0' }
+cqlib-core = { path = "../cqlib-core", version = '0.1.0-beta.1' }
 num-complex.workspace = true
 numpy.workspace = true
+rustworkx-core.workspace = true
 smallvec.workspace = true
 time.workspace = true
 

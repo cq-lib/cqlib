@@ -10,6 +10,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+use super::test_utils::assert_value_operations_equal;
 use super::{
     mc_su2::{Su2RotationAxis, decompose_mc_su2_n_clean, decompose_mc_su2_no_aux},
     rotation::{decompose_rotation_n_clean, decompose_rotation_no_aux},
@@ -17,7 +18,6 @@ use super::{
 use crate::circuit::value_instruction::ValueInstruction;
 use crate::circuit::{Instruction, Parameter, ParameterValue, Qubit, StandardGate};
 use crate::compile::error::CompilerError;
-use crate::util::test_utils::assert_value_operations_equal;
 #[test]
 fn standard_rotation_fast_paths_are_preserved() {
     let control = Qubit::new(0);

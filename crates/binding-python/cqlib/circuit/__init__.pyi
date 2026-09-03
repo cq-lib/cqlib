@@ -71,7 +71,12 @@ from numpy.typing import NDArray
 
 from .bit import Qubit as Qubit
 from .circuit import Circuit as Circuit
-from .circuit import ParamLike as ParamLike, QubitInput as QubitInput, QubitLike as QubitLike, QubitList as QubitList
+from .circuit import (
+    ParamLike as ParamLike,
+    QubitInput as QubitInput,
+    QubitLike as QubitLike,
+    QubitList as QubitList,
+)
 from .classical import (
     CircuitId as CircuitId,
     ClassicalType as ClassicalType,
@@ -84,6 +89,12 @@ from .control_flow import (
     ClassicalControlOp as ClassicalControlOp,
     ValueControlBody as ValueControlBody,
     ValueSwitchCase as ValueSwitchCase,
+)
+from .dag import (
+    CircuitDag as CircuitDag,
+    DagControlFlow as DagControlFlow,
+    DagSwitchCase as DagSwitchCase,
+    DagWire as DagWire,
 )
 from .gates import (
     CircuitGate as CircuitGate,
@@ -106,6 +117,7 @@ from .symbolic_matrix import (
 
 __all__ = [
     "Circuit",
+    "CircuitDag",
     "CircuitId",
     "CircuitError",
     "ClassicalControlOp",
@@ -114,6 +126,9 @@ __all__ = [
     "ClassicalValue",
     "ClassicalVar",
     "CqlibError",
+    "DagControlFlow",
+    "DagSwitchCase",
+    "DagWire",
     "Instruction",
     "Measurement",
     "Parameter",
@@ -137,18 +152,22 @@ __all__ = [
 
 class CqlibError(Exception):
     """Base class for all cqlib-specific exceptions."""
+
     ...
 
 class CircuitError(CqlibError):
     """Raised when a circuit operation fails validation (arity, qubit, type)."""
+
     ...
 
 class ParameterError(CqlibError):
     """Raised when a parameter expression is invalid or cannot be evaluated."""
+
     ...
 
 class QubitError(CqlibError):
     """Raised when a qubit identifier is invalid (negative, out of range)."""
+
     ...
 
 def circuit_to_matrix(

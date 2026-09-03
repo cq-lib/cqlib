@@ -11,12 +11,12 @@
 // that they have been altered from the originals.
 
 use super::swap::{decompose_swap_n_clean, decompose_swap_no_aux};
-use crate::circuit::{Qubit, StandardGate, circuit_to_matrix};
-use crate::compile::error::CompilerError;
-use crate::util::test_utils::{
+use super::test_utils::{
     EPSILON, assert_selected_matrix_columns_approx_eq, assert_standard_operation,
     assert_value_operations_only_use_qubits, circuit_from_value_operations, mc_gate_matrix,
 };
+use crate::circuit::{Qubit, StandardGate, circuit_to_matrix};
+use crate::compile::error::CompilerError;
 
 #[test]
 fn zero_controls_emit_original_standard_swap_and_ignore_clean_ancillas() {

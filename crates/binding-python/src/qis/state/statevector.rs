@@ -14,6 +14,7 @@
 
 use crate::circuit::{PyMeasurement, PyStandardGate, circuit_impl::PyCircuit};
 use crate::device::result::{PyExecutionResult, PyOutcome};
+use crate::qis::pauli::PyPauliString;
 use crate::qis::qis_error_to_py_err;
 use crate::qis::state::outcome_probabilities_to_py;
 use cqlib_core::qis::state::statevector::Statevector;
@@ -49,7 +50,7 @@ use pyo3::types::{PyComplex, PyList};
 /// probs = sv.probabilities()
 /// print(probs)  # [0.5, 0.0, 0.0, 0.5]
 /// ```
-#[pyclass(name = "Statevector", module = "cqlib.qis.state")]
+#[pyclass(name = "Statevector", module = "cqlib.qis.state", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyStatevector {
     pub(crate) inner: Statevector,
@@ -161,8 +162,10 @@ impl PyStatevector {
     ///     >>> circuit.cx(0, 1)
     ///     >>> sv = Statevector.from_circuit(circuit)
     #[staticmethod]
-    fn from_circuit(circuit: &PyCircuit) -> PyResult<Self> {
-        let inner = Statevector::from_circuit(&circuit.inner).map_err(qis_error_to_py_err)?;
+    fn from_circuit(py: Python<'_>, circuit: &PyCircuit) -> PyResult<Self> {
+        let inner = py
+            .detach(|| Statevector::from_circuit(&circuit.inner))
+            .map_err(qis_error_to_py_err)?;
         Ok(Self { inner })
     }
 
@@ -174,9 +177,8 @@ impl PyStatevector {
     /// Raises:
     ///     ValueError: If the circuit qubit count does not match this state
     ///         or contains unsupported operations
-    fn apply_circuit(&mut self, circuit: &PyCircuit) -> PyResult<()> {
-        self.inner
-            .apply_circuit(&circuit.inner)
+    fn apply_circuit(&mut self, py: Python<'_>, circuit: &PyCircuit) -> PyResult<()> {
+        py.detach(|| self.inner.apply_circuit(&circuit.inner))
             .map_err(qis_error_to_py_err)
     }
 
@@ -192,14 +194,12 @@ impl PyStatevector {
     ///
     /// Raises:
     ///     ValueError: If the qubit counts don't match or the observable type is invalid
-    fn expectation(&self, observable: &Bound<'_, PyAny>) -> PyResult<f64> {
+    fn expectation(&self, py: Python<'_>, observable: &Bound<'_, PyAny>) -> PyResult<f64> {
         if let Ok(h) = observable.extract::<crate::qis::hamiltonian::PyHamiltonian>() {
-            self.inner
-                .expectation(&h.inner)
+            py.detach(|| self.inner.expectation(&h.inner))
                 .map_err(qis_error_to_py_err)
         } else if let Ok(ps) = observable.extract::<crate::qis::pauli::PyPauliString>() {
-            self.inner
-                .expectation(&ps.inner)
+            py.detach(|| self.inner.expectation(&ps.inner))
                 .map_err(qis_error_to_py_err)
         } else {
             Err(PyValueError::new_err(
@@ -229,8 +229,8 @@ impl PyStatevector {
     ///
     /// Returns:
     ///     A list of probabilities (floats) with length 2^num_qubits.
-    fn probabilities(&self) -> Vec<f64> {
-        self.inner.probabilities()
+    fn probabilities(&self, py: Python<'_>) -> Vec<f64> {
+        py.detach(|| self.inner.probabilities())
     }
 
     /// Applies a standard gate to the statevector.
@@ -242,13 +242,13 @@ impl PyStatevector {
     #[pyo3(signature = (gate, qubits, params=None))]
     fn apply_standard_gate(
         &mut self,
+        py: Python<'_>,
         gate: &PyStandardGate,
         qubits: Vec<usize>,
         params: Option<Vec<f64>>,
     ) -> PyResult<()> {
         let p = params.unwrap_or_default();
-        self.inner
-            .apply_standard_gate(gate.inner, &qubits, &p)
+        py.detach(|| self.inner.apply_standard_gate(gate.inner, &qubits, &p))
             .map_err(qis_error_to_py_err)
     }
 
@@ -375,6 +375,17 @@ impl PyStatevector {
     /// Applies a global phase to the statevector.
     fn apply_gphase(&mut self, phi: f64) -> PyResult<()> {
         self.inner.apply_gphase(phi).map_err(qis_error_to_py_err)
+    }
+
+    /// Applies the native Pauli-string rotation exp(-i * theta / 2 * P).
+    ///
+    /// Args:
+    ///     pauli: Hermitian Pauli string acting on all statevector qubits.
+    ///     theta: Rotation angle in radians.
+    fn apply_pauli_rotation(&mut self, pauli: &PyPauliString, theta: f64) -> PyResult<()> {
+        self.inner
+            .apply_pauli_rotation(&pauli.inner, theta)
+            .map_err(qis_error_to_py_err)
     }
 
     /// Applies the SWAP gate between two qubits.
@@ -518,9 +529,10 @@ impl PyStatevector {
     ///
     /// Args:
     ///     qubit: Target qubit index
-    ///     matrix: 2x2 complex matrix as a NumPy array or nested list
+    ///     matrix: 2x2 complex matrix as a NumPy 2D array
     fn apply_single_qubit_gate<'py>(
         &mut self,
+        py: Python<'_>,
         qubit: usize,
         matrix: &Bound<'py, PyAny>,
     ) -> PyResult<()> {
@@ -543,8 +555,7 @@ impl PyStatevector {
             return Err(PyValueError::new_err("matrix must be a 2x2 numpy array"));
         };
 
-        self.inner
-            .apply_single_qubit_gate(qubit, mat)
+        py.detach(|| self.inner.apply_single_qubit_gate(qubit, mat))
             .map_err(qis_error_to_py_err)?;
         Ok(())
     }
@@ -557,6 +568,7 @@ impl PyStatevector {
     ///     matrix: 4x4 complex matrix as a NumPy array
     fn apply_double_qubits_gate<'py>(
         &mut self,
+        py: Python<'_>,
         q0: usize,
         q1: usize,
         matrix: &Bound<'py, PyAny>,
@@ -580,8 +592,7 @@ impl PyStatevector {
             return Err(PyValueError::new_err("matrix must be a 4x4 numpy array"));
         };
 
-        self.inner
-            .apply_two_qubit_gate(q0, q1, mat)
+        py.detach(|| self.inner.apply_two_qubit_gate(q0, q1, mat))
             .map_err(qis_error_to_py_err)?;
         Ok(())
     }
@@ -596,6 +607,7 @@ impl PyStatevector {
     ///     ValueError: If the matrix dimensions don't match qubit count
     fn apply_unitary_gate<'py>(
         &mut self,
+        py: Python<'_>,
         qubits: Vec<usize>,
         matrix: &Bound<'py, PyAny>,
     ) -> PyResult<()> {
@@ -620,8 +632,7 @@ impl PyStatevector {
         }
 
         let flat: numpy::ndarray::Array2<Complex64> = readonly.as_array().to_owned();
-        self.inner
-            .apply_unitary_gate(&qubits, &flat)
+        py.detach(|| self.inner.apply_unitary_gate(&qubits, &flat))
             .map_err(qis_error_to_py_err)
     }
 
@@ -632,33 +643,38 @@ impl PyStatevector {
     ///
     /// Raises:
     ///     IndexError: If qubit index is out of bounds.
-    fn reset(&mut self, qubit: usize) -> PyResult<()> {
-        self.inner.reset(qubit).map_err(qis_error_to_py_err)
+    fn reset(&mut self, py: Python<'_>, qubit: usize) -> PyResult<()> {
+        py.detach(|| self.inner.reset(qubit))
+            .map_err(qis_error_to_py_err)
     }
 
     /// Measures one qubit and collapses the state.
-    fn measure(&mut self, qubit: usize) -> PyResult<bool> {
-        self.inner.measure(qubit).map_err(qis_error_to_py_err)
+    fn measure(&mut self, py: Python<'_>, qubit: usize) -> PyResult<bool> {
+        py.detach(|| self.inner.measure(qubit))
+            .map_err(qis_error_to_py_err)
     }
 
     /// Measures all qubits and collapses the state.
-    fn measure_all(&mut self) -> PyOutcome {
-        PyOutcome::from(self.inner.measure_all())
+    fn measure_all(&mut self, py: Python<'_>) -> PyOutcome {
+        PyOutcome::from(py.detach(|| self.inner.measure_all()))
     }
 
     /// Samples measurement outcomes without mutating this state.
-    fn sample_shots(&self, shots: usize) -> Vec<PyOutcome> {
-        self.inner
-            .sample_shots(shots)
+    fn sample_shots(&self, py: Python<'_>, shots: usize) -> Vec<PyOutcome> {
+        py.detach(|| self.inner.sample_shots(shots))
             .into_iter()
             .map(PyOutcome::from)
             .collect()
     }
 
     /// Samples measurement outcomes according to a circuit measurement receipt.
-    fn sample(&self, measurement: &PyMeasurement, shots: usize) -> PyResult<PyExecutionResult> {
-        self.inner
-            .sample(&measurement.inner, shots)
+    fn sample(
+        &self,
+        py: Python<'_>,
+        measurement: &PyMeasurement,
+        shots: usize,
+    ) -> PyResult<PyExecutionResult> {
+        py.detach(|| self.inner.sample(&measurement.inner, shots))
             .map(PyExecutionResult::from)
             .map_err(qis_error_to_py_err)
     }
@@ -666,10 +682,10 @@ impl PyStatevector {
     /// Returns marginal probabilities according to a circuit measurement receipt.
     fn probs(
         &self,
+        py: Python<'_>,
         measurement: &PyMeasurement,
     ) -> PyResult<std::collections::HashMap<PyOutcome, f64>> {
-        self.inner
-            .probs(&measurement.inner)
+        py.detach(|| self.inner.probs(&measurement.inner))
             .map(outcome_probabilities_to_py)
             .map_err(qis_error_to_py_err)
     }

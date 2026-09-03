@@ -49,16 +49,16 @@
 //! ```
 
 use crate::circuit::PyStandardGate;
-use crate::circuit::bit::PyIntOrQubit;
+use crate::device::qubit::PyPhysicalQubitLike;
+use crate::device::validate_probability;
 use crate::qis::pauli::PyPauli;
-use cqlib_core::circuit::Parameter;
+use crate::utils::hash_value;
+use cqlib_core::circuit::{Parameter, Qubit};
 use cqlib_core::device::{NoiseModel, OperationKey, ReadoutError, SingleQubitNoise, TwoQubitNoise};
 use num_complex::Complex64;
 use numpy::{PyArray2, ToPyArray};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// Single-qubit quantum noise channel.
 ///
@@ -90,7 +90,7 @@ use std::hash::{Hash, Hasher};
 /// # Validate noise parameters
 /// assert noise.is_valid()  # True if probabilities are in [0, 1]
 /// ```
-#[pyclass(name = "SingleQubitNoise", module = "cqlib.device")]
+#[pyclass(name = "SingleQubitNoise", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PySingleQubitNoise {
     pub(crate) inner: SingleQubitNoise,
@@ -118,10 +118,11 @@ impl PySingleQubitNoise {
     ///
     /// * `p` - Bit-flip probability in range [0.0, 1.0]
     #[staticmethod]
-    fn bit_flip(p: f64) -> Self {
-        Self {
+    fn bit_flip(p: f64) -> PyResult<Self> {
+        validate_probability(p, "p")?;
+        Ok(Self {
             inner: SingleQubitNoise::BitFlip(p),
-        }
+        })
     }
 
     /// Creates a phase-flip noise channel.
@@ -132,10 +133,11 @@ impl PySingleQubitNoise {
     ///
     /// * `p` - Phase-flip probability in range [0.0, 1.0]
     #[staticmethod]
-    fn phase_flip(p: f64) -> Self {
-        Self {
+    fn phase_flip(p: f64) -> PyResult<Self> {
+        validate_probability(p, "p")?;
+        Ok(Self {
             inner: SingleQubitNoise::PhaseFlip(p),
-        }
+        })
     }
 
     /// Creates a general Pauli noise channel.
@@ -152,10 +154,19 @@ impl PySingleQubitNoise {
     ///
     /// Must satisfy px + py + pz ≤ 1.0
     #[staticmethod]
-    fn pauli(px: f64, py: f64, pz: f64) -> Self {
-        Self {
-            inner: SingleQubitNoise::Pauli { px, py, pz },
+    fn pauli(px: f64, py: f64, pz: f64) -> PyResult<Self> {
+        validate_probability(px, "px")?;
+        validate_probability(py, "py")?;
+        validate_probability(pz, "pz")?;
+        if px + py + pz > 1.0 {
+            return Err(PyValueError::new_err(format!(
+                "px + py + pz must not exceed 1, got {}",
+                px + py + pz
+            )));
         }
+        Ok(Self {
+            inner: SingleQubitNoise::Pauli { px, py, pz },
+        })
     }
 
     /// Creates a depolarizing noise channel.
@@ -167,10 +178,11 @@ impl PySingleQubitNoise {
     ///
     /// * `p` - Total depolarization probability in range [0.0, 1.0]
     #[staticmethod]
-    fn depolarizing(p: f64) -> Self {
-        Self {
+    fn depolarizing(p: f64) -> PyResult<Self> {
+        validate_probability(p, "p")?;
+        Ok(Self {
             inner: SingleQubitNoise::Depolarizing(p),
-        }
+        })
     }
 
     /// Creates an amplitude damping channel.
@@ -185,10 +197,11 @@ impl PySingleQubitNoise {
     ///
     /// After time t, γ = 1 - exp(-t/T1). For small t/T1, γ ≈ t/T1.
     #[staticmethod]
-    fn amplitude_damping(gamma: f64) -> Self {
-        Self {
+    fn amplitude_damping(gamma: f64) -> PyResult<Self> {
+        validate_probability(gamma, "gamma")?;
+        Ok(Self {
             inner: SingleQubitNoise::AmplitudeDamping(gamma),
-        }
+        })
     }
 
     /// Creates a phase damping channel.
@@ -203,10 +216,11 @@ impl PySingleQubitNoise {
     ///
     /// After time t, λ = 1 - exp(-t/T2). For small t/T2, λ ≈ t/T2.
     #[staticmethod]
-    fn phase_damping(lambda_: f64) -> Self {
-        Self {
+    fn phase_damping(lambda_: f64) -> PyResult<Self> {
+        validate_probability(lambda_, "lambda_")?;
+        Ok(Self {
             inner: SingleQubitNoise::PhaseDamping(lambda_),
-        }
+        })
     }
 
     /// Validates that noise parameters are physically valid.
@@ -256,6 +270,14 @@ impl PySingleQubitNoise {
             }
         }
     }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PySingleQubitNoise>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PySingleQubitNoise>()?;
+        Ok(self.inner == other.inner)
+    }
 }
 
 /// Two-qubit quantum noise channel.
@@ -282,7 +304,7 @@ impl PySingleQubitNoise {
 /// q1_noise = SingleQubitNoise.depolarizing(0.001)
 /// independent = TwoQubitNoise.independent(q0_noise, q1_noise)
 /// ```
-#[pyclass(name = "TwoQubitNoise", module = "cqlib.device")]
+#[pyclass(name = "TwoQubitNoise", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PyTwoQubitNoise {
     pub(crate) inner: TwoQubitNoise,
@@ -311,10 +333,11 @@ impl PyTwoQubitNoise {
     ///
     /// * `p` - Total depolarization probability in range [0.0, 1.0]
     #[staticmethod]
-    fn depolarizing(p: f64) -> Self {
-        Self {
+    fn depolarizing(p: f64) -> PyResult<Self> {
+        validate_probability(p, "p")?;
+        Ok(Self {
             inner: TwoQubitNoise::Depolarizing(p),
-        }
+        })
     }
 
     /// Creates independent single-qubit noise on both qubits.
@@ -346,6 +369,7 @@ impl PyTwoQubitNoise {
     #[staticmethod]
     #[pyo3(signature = (op_q0, op_q1, p))]
     fn correlated_pauli(op_q0: PyPauli, op_q1: PyPauli, p: f64) -> PyResult<Self> {
+        validate_probability(p, "p")?;
         Ok(Self {
             inner: TwoQubitNoise::CorrelatedPauli {
                 op_q0: op_q0.inner,
@@ -406,6 +430,14 @@ impl PyTwoQubitNoise {
             ),
         }
     }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyTwoQubitNoise>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyTwoQubitNoise>()?;
+        Ok(self.inner == other.inner)
+    }
 }
 
 /// Asymmetric readout error model.
@@ -432,7 +464,7 @@ impl PyTwoQubitNoise {
 ///
 /// assert error.is_valid()  # Both probabilities in [0, 1]
 /// ```
-#[pyclass(name = "ReadoutError", module = "cqlib.device")]
+#[pyclass(name = "ReadoutError", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PyReadoutError {
     pub(crate) inner: ReadoutError,
@@ -463,13 +495,15 @@ impl PyReadoutError {
     ///
     /// Both probabilities must be in range [0.0, 1.0].
     #[new]
-    fn new(p_0_given_1: f64, p_1_given_0: f64) -> Self {
-        Self {
+    fn new(p_0_given_1: f64, p_1_given_0: f64) -> PyResult<Self> {
+        validate_probability(p_0_given_1, "p_0_given_1")?;
+        validate_probability(p_1_given_0, "p_1_given_0")?;
+        Ok(Self {
             inner: ReadoutError {
                 p_0_given_1,
                 p_1_given_0,
             },
-        }
+        })
     }
 
     /// Returns P(meas 0 | prep 1), the false-negative probability.
@@ -506,6 +540,14 @@ impl PyReadoutError {
             self.p_1_given_0()
         )
     }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyReadoutError>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyReadoutError>()?;
+        Ok(self.inner == other.inner)
+    }
 }
 
 /// Key for looking up noise parameters in a noise model.
@@ -529,7 +571,7 @@ impl PyReadoutError {
 /// print(key.gate)    # StandardGate.H
 /// print(key.qubits)  # [0]
 /// ```
-#[pyclass(name = "OperationKey", module = "cqlib.device")]
+#[pyclass(name = "OperationKey", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyOperationKey {
     pub(crate) inner: OperationKey,
@@ -555,11 +597,12 @@ impl PyOperationKey {
     ///
     /// * `gate` - The quantum gate
     /// * `q0` - The target qubit
+    ///
     #[staticmethod]
-    fn new_single(gate: PyStandardGate, q0: PyIntOrQubit) -> PyResult<Self> {
-        Ok(Self {
-            inner: OperationKey::new_single(gate.inner, q0.into()),
-        })
+    fn new_single(gate: PyStandardGate, q0: PyPhysicalQubitLike) -> Self {
+        Self {
+            inner: OperationKey::new_single(gate.inner, Qubit::from(q0)),
+        }
     }
 
     /// Creates a key for a two-qubit operation.
@@ -574,9 +617,13 @@ impl PyOperationKey {
     ///
     /// Raises `ValueError` if q0 and q1 are the same qubit.
     #[staticmethod]
-    fn new_double(gate: PyStandardGate, q0: PyIntOrQubit, q1: PyIntOrQubit) -> PyResult<Self> {
-        let q0 = q0.into();
-        let q1 = q1.into();
+    fn new_double(
+        gate: PyStandardGate,
+        q0: PyPhysicalQubitLike,
+        q1: PyPhysicalQubitLike,
+    ) -> PyResult<Self> {
+        let q0 = Qubit::from(q0);
+        let q1 = Qubit::from(q1);
         let inner = OperationKey::new_double(gate.inner, q0, q1)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(Self { inner })
@@ -597,12 +644,17 @@ impl PyOperationKey {
     #[staticmethod]
     fn new_triple(
         gate: PyStandardGate,
-        q0: PyIntOrQubit,
-        q1: PyIntOrQubit,
-        q2: PyIntOrQubit,
+        q0: PyPhysicalQubitLike,
+        q1: PyPhysicalQubitLike,
+        q2: PyPhysicalQubitLike,
     ) -> PyResult<Self> {
-        let inner = OperationKey::new_triple(gate.inner, q0.into(), q1.into(), q2.into())
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let inner = OperationKey::new_triple(
+            gate.inner,
+            Qubit::from(q0),
+            Qubit::from(q1),
+            Qubit::from(q2),
+        )
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(Self { inner })
     }
 
@@ -639,9 +691,7 @@ impl PyOperationKey {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {
@@ -690,7 +740,7 @@ impl PyOperationKey {
 /// key = OperationKey.new_single(StandardGate.H, 0)
 /// errors = model.get_single_qubit_errors(key)
 /// ```
-#[pyclass(name = "NoiseModel", module = "cqlib.device")]
+#[pyclass(name = "NoiseModel", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Debug, Default)]
 pub struct PyNoiseModel {
     pub(crate) inner: NoiseModel,
@@ -728,9 +778,13 @@ impl PyNoiseModel {
     /// # Errors
     ///
     /// Raises `ValueError` if the error probabilities are invalid.
-    fn add_readout_error(&mut self, qubit: PyIntOrQubit, error: PyReadoutError) -> PyResult<()> {
+    fn add_readout_error(
+        &mut self,
+        qubit: PyPhysicalQubitLike,
+        error: PyReadoutError,
+    ) -> PyResult<()> {
         self.inner
-            .add_readout_error(qubit.into(), error.inner)
+            .add_readout_error(Qubit::from(qubit), error.inner)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
@@ -750,11 +804,11 @@ impl PyNoiseModel {
     fn add_single_qubit_error(
         &mut self,
         gate: PyStandardGate,
-        qubit: PyIntOrQubit,
+        qubit: PyPhysicalQubitLike,
         noise: PySingleQubitNoise,
     ) -> PyResult<()> {
         self.inner
-            .add_single_qubit_error(gate.inner, qubit.into(), noise.inner)
+            .add_single_qubit_error(gate.inner, Qubit::from(qubit), noise.inner)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
@@ -773,22 +827,21 @@ impl PyNoiseModel {
     fn add_two_qubit_error(
         &mut self,
         gate: PyStandardGate,
-        q0: PyIntOrQubit,
-        q1: PyIntOrQubit,
+        q0: PyPhysicalQubitLike,
+        q1: PyPhysicalQubitLike,
         noise: PyTwoQubitNoise,
     ) -> PyResult<()> {
         self.inner
-            .add_two_qubit_error(gate.inner, q0.into(), q1.into(), noise.inner)
+            .add_two_qubit_error(gate.inner, Qubit::from(q0), Qubit::from(q1), noise.inner)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
     /// Returns the readout error for a qubit, if any.
-    fn get_readout_error(&self, qubit: PyIntOrQubit) -> PyResult<Option<PyReadoutError>> {
-        Ok(self
-            .inner
-            .get_readout_error(&qubit.into())
+    fn get_readout_error(&self, qubit: PyPhysicalQubitLike) -> Option<PyReadoutError> {
+        self.inner
+            .get_readout_error(&Qubit::from(qubit))
             .copied()
-            .map(PyReadoutError::from))
+            .map(PyReadoutError::from)
     }
 
     /// Returns all single-qubit noise channels for an operation.

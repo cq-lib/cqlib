@@ -92,6 +92,40 @@ impl SingleQubitNoise {
         }
     }
 
+    fn validate(&self) -> Result<(), NoiseError> {
+        let probability = |value: f64, context: &str| {
+            if value.is_finite() && (0.0..=1.0).contains(&value) {
+                Ok(())
+            } else {
+                Err(NoiseError::InvalidProbability {
+                    value,
+                    context: context.to_string(),
+                })
+            }
+        };
+        match *self {
+            Self::BitFlip(p) => probability(p, "bit-flip probability"),
+            Self::PhaseFlip(p) => probability(p, "phase-flip probability"),
+            Self::Depolarizing(p) => probability(p, "single-qubit depolarizing probability"),
+            Self::AmplitudeDamping(p) => probability(p, "amplitude-damping probability"),
+            Self::PhaseDamping(p) => probability(p, "phase-damping probability"),
+            Self::Pauli { px, py, pz } => {
+                probability(px, "Pauli X probability")?;
+                probability(py, "Pauli Y probability")?;
+                probability(pz, "Pauli Z probability")?;
+                let total = px + py + pz;
+                if total <= 1.0 {
+                    Ok(())
+                } else {
+                    Err(NoiseError::InvalidProbability {
+                        value: total,
+                        context: "sum of Pauli probabilities".to_string(),
+                    })
+                }
+            }
+        }
+    }
+
     /// Returns the Kraus operators for the single-qubit noise channel.
     pub fn to_kraus(&self) -> Vec<Array2<Complex64>> {
         match *self {
@@ -170,6 +204,29 @@ impl TwoQubitNoise {
         }
     }
 
+    fn validate(&self) -> Result<(), NoiseError> {
+        match *self {
+            Self::Depolarizing(p) => SingleQubitNoise::Depolarizing(p).validate().map_err(|_| {
+                NoiseError::InvalidProbability {
+                    value: p,
+                    context: "two-qubit depolarizing probability".to_string(),
+                }
+            }),
+            Self::CorrelatedPauli { p, .. } => {
+                SingleQubitNoise::BitFlip(p).validate().map_err(|_| {
+                    NoiseError::InvalidProbability {
+                        value: p,
+                        context: "correlated-Pauli probability".to_string(),
+                    }
+                })
+            }
+            Self::Independent { q0_noise, q1_noise } => {
+                q0_noise.validate()?;
+                q1_noise.validate()
+            }
+        }
+    }
+
     /// Returns the Kraus operators for the two-qubit noise channel.
     pub fn to_kraus(&self) -> Vec<Array2<Complex64>> {
         match self {
@@ -234,6 +291,21 @@ impl ReadoutError {
     /// Checks if the probabilities are valid.
     pub fn is_valid(&self) -> bool {
         (0.0..=1.0).contains(&self.p_0_given_1) && (0.0..=1.0).contains(&self.p_1_given_0)
+    }
+
+    fn validate(&self) -> Result<(), NoiseError> {
+        for (value, context) in [
+            (self.p_0_given_1, "readout P(0|1)"),
+            (self.p_1_given_0, "readout P(1|0)"),
+        ] {
+            if !(value.is_finite() && (0.0..=1.0).contains(&value)) {
+                return Err(NoiseError::InvalidProbability {
+                    value,
+                    context: context.to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -354,12 +426,13 @@ impl NoiseModel {
         qubit: Qubit,
         error: ReadoutError,
     ) -> Result<(), NoiseError> {
-        if !error.is_valid() {
-            return Err(NoiseError::InvalidProbability {
-                value: -1.0,
-                context: format!("ReadoutError for qubit {:?}", qubit),
-            });
-        }
+        error.validate().map_err(|error| match error {
+            NoiseError::InvalidProbability { value, context } => NoiseError::InvalidProbability {
+                value,
+                context: format!("{context} for qubit {qubit:?}"),
+            },
+            other => other,
+        })?;
         self.readout_errors.insert(qubit, error);
         Ok(())
     }
@@ -371,12 +444,13 @@ impl NoiseModel {
         qubit: Qubit,
         noise: SingleQubitNoise,
     ) -> Result<(), NoiseError> {
-        if !noise.is_valid() {
-            return Err(NoiseError::InvalidProbability {
-                value: -1.0,
-                context: format!("SingleQubitNoise for gate {:?}", gate),
-            });
-        }
+        noise.validate().map_err(|error| match error {
+            NoiseError::InvalidProbability { value, context } => NoiseError::InvalidProbability {
+                value,
+                context: format!("{context} for gate {gate:?}"),
+            },
+            other => other,
+        })?;
         let key = OperationKey::new_single(gate, qubit);
         self.single_gate_errors.entry(key).or_default().push(noise);
         Ok(())
@@ -390,12 +464,13 @@ impl NoiseModel {
         q1: Qubit,
         noise: TwoQubitNoise,
     ) -> Result<(), NoiseError> {
-        if !noise.is_valid() {
-            return Err(NoiseError::InvalidProbability {
-                value: -1.0,
-                context: format!("TwoQubitNoise for gate {:?}", gate),
-            });
-        }
+        noise.validate().map_err(|error| match error {
+            NoiseError::InvalidProbability { value, context } => NoiseError::InvalidProbability {
+                value,
+                context: format!("{context} for gate {gate:?}"),
+            },
+            other => other,
+        })?;
         let key = OperationKey::new_double(gate, q0, q1)?;
         self.two_gate_errors.entry(key).or_default().push(noise);
         Ok(())
@@ -414,5 +489,73 @@ impl NoiseModel {
     /// Retrieves the list of two-qubit errors for a given operation key.
     pub fn get_two_qubit_errors(&self, key: &OperationKey) -> Option<&Vec<TwoQubitNoise>> {
         self.two_gate_errors.get(key)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::circuit::gate::standard_gate::StandardGate;
+
+    #[test]
+    fn operation_keys_allow_effective_controlled_arity_and_reject_collisions() {
+        let q0 = Qubit::new(0);
+        let q1 = Qubit::new(1);
+
+        assert_eq!(
+            OperationKey::new_single(StandardGate::CX, q0).qubits(),
+            &[0]
+        );
+        assert_eq!(
+            OperationKey::new_double(StandardGate::H, q0, q1)
+                .unwrap()
+                .qubits(),
+            &[0, 1]
+        );
+        assert_eq!(
+            OperationKey::new_triple(StandardGate::CX, q0, q1, Qubit::new(2))
+                .unwrap()
+                .qubits(),
+            &[0, 1, 2]
+        );
+        assert!(matches!(
+            OperationKey::new_double(StandardGate::CX, q0, q0),
+            Err(NoiseError::QubitCollision { .. })
+        ));
+        assert!(matches!(
+            OperationKey::new_triple(StandardGate::CCX, q0, q1, q1),
+            Err(NoiseError::QubitCollision { .. })
+        ));
+    }
+
+    #[test]
+    fn noise_errors_report_the_actual_invalid_probability() {
+        let mut model = NoiseModel::new();
+
+        match model.add_single_qubit_error(
+            StandardGate::H,
+            Qubit::new(0),
+            SingleQubitNoise::BitFlip(-0.25),
+        ) {
+            Err(NoiseError::InvalidProbability { value, context }) => {
+                assert_eq!(value, -0.25);
+                assert!(context.contains("bit-flip"));
+            }
+            result => panic!("unexpected result: {result:?}"),
+        }
+
+        match model.add_readout_error(
+            Qubit::new(0),
+            ReadoutError {
+                p_0_given_1: 1.5,
+                p_1_given_0: 0.0,
+            },
+        ) {
+            Err(NoiseError::InvalidProbability { value, context }) => {
+                assert_eq!(value, 1.5);
+                assert!(context.contains("P(0|1)"));
+            }
+            result => panic!("unexpected result: {result:?}"),
+        }
     }
 }

@@ -12,6 +12,8 @@
 
 from typing import List, Tuple, Union, final, Sequence, Dict
 
+import numpy as np
+
 from cqlib.circuit import Circuit
 
 from . import TrotterMode
@@ -176,6 +178,24 @@ class Hamiltonian:
 
     def all_terms_commute(self) -> bool:
         """Returns ``True`` if all Pauli terms mutually commute."""
+        ...
+
+    def to_matrix(self) -> np.ndarray:
+        """Computes the dense matrix representation as a NumPy array.
+
+        Evaluates H = Σ_k c_k P_k by summing each term's Pauli string matrix
+        (in little-endian qubit order, including Pauli phases) multiplied by
+        its coefficient. An empty Hamiltonian yields the zero matrix.
+
+        Memory usage is O(4^N); intended for small-system analysis and verification.
+
+        Returns:
+            A NumPy array of shape (2^num_qubits, 2^num_qubits) with complex128 dtype.
+
+        Raises:
+            ValueError: If a term's qubit count does not match the Hamiltonian's
+                (defensive; the public constructors already reject such terms).
+        """
         ...
 
     def expectation_statevector(self, sv: Statevector) -> float:

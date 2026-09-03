@@ -19,21 +19,20 @@
 use crate::circuit::error::{CircuitError as PyCircuitError, ParameterError as PyParameterError};
 use crate::circuit::gate::PyMcGate;
 use crate::circuit::parameter::PyParameter;
+use crate::utils::hash_value;
 use cqlib_core::circuit::CircuitError as CoreCircuitError;
 use cqlib_core::circuit::Parameter;
 use cqlib_core::circuit::error::ParameterError;
 use cqlib_core::circuit::gate::{MCGate, StandardGate};
 use num_complex::Complex64;
 use numpy::{PyArray2, ToPyArray};
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::RwLock;
 
 /// Native standard gate with optional bound symbolic parameters.
-#[pyclass(name = "StandardGate", module = "cqlib.circuit.gates")]
+#[pyclass(name = "StandardGate", module = "cqlib.circuit.gates", from_py_object)]
 #[derive(Debug)]
 pub struct PyStandardGate {
     pub inner: StandardGate,
@@ -61,6 +60,43 @@ impl PyStandardGate {
         Err(PyTypeError::new_err(
             "StandardGate cannot be instantiated directly. Use static attributes like StandardGate.H or StandardGate.RX",
         ))
+    }
+
+    /// Returns all standard gate definitions in enum order.
+    ///
+    /// The returned gates are unbound definitions. Parametric gates can be
+    /// called to bind concrete or symbolic parameters.
+    #[staticmethod]
+    fn all() -> Vec<Self> {
+        StandardGate::all()
+            .iter()
+            .copied()
+            .map(|gate| PyStandardGate::from(gate, Vec::new()))
+            .collect()
+    }
+
+    /// Resolves a standard-gate name to its unbound definition.
+    ///
+    /// Matching is case-insensitive against the canonical gate names, so
+    /// `StandardGate.from_name('cx')` returns `StandardGate.CX`.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Canonical gate name (e.g. `'H'`, `'X2P'`, `'Phase'`).
+    ///
+    /// # Raises
+    ///
+    /// * `ValueError` - If `name` does not match any standard gate.
+    #[staticmethod]
+    fn from_name(name: &str) -> PyResult<Self> {
+        standard_gate_from_name(name).map_or_else(
+            || {
+                Err(PyValueError::new_err(format!(
+                    "unknown standard gate name: {name:?}"
+                )))
+            },
+            |gate| Ok(Self::from(gate, Vec::new())),
+        )
     }
 
     /// Binds parameters to the gate.
@@ -134,10 +170,14 @@ impl PyStandardGate {
 
     fn __repr__(&self) -> String {
         if self.params.is_empty() {
-            format!("{:?}", self.inner)
+            format!("StandardGate.{}", self.inner.name())
         } else {
             let params_str: Vec<String> = self.params.iter().map(|p| p.to_string()).collect();
-            format!("{:?}({})", self.inner, params_str.join(", "))
+            format!(
+                "StandardGate.{}({})",
+                self.inner.name(),
+                params_str.join(", ")
+            )
         }
     }
 
@@ -162,10 +202,7 @@ impl PyStandardGate {
         if let Some(hash) = *guard {
             return hash;
         }
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        self.params.hash(&mut hasher);
-        let hash = hasher.finish();
+        let hash = hash_value(&(&self.inner, &self.params));
 
         *guard = Some(hash);
         hash
@@ -323,32 +360,6 @@ impl PyStandardGate {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::PyStandardGate;
-    use cqlib_core::circuit::{Parameter, StandardGate};
-
-    #[test]
-    fn control_preserves_bound_parameters() {
-        let theta = Parameter::symbol("theta");
-        let gate = PyStandardGate::from(StandardGate::RX, vec![theta.clone()]);
-        let controlled = gate.control(2);
-
-        assert_eq!(controlled.inner.num_ctrl_qubits(), 2);
-        assert_eq!(controlled.params, vec![theta]);
-    }
-
-    #[test]
-    fn inverse_uses_exact_bound_parameter_count() {
-        let theta = Parameter::symbol("theta");
-        let gate = PyStandardGate::from(StandardGate::RX, vec![theta.clone()]);
-        let inverse = gate.inverse().unwrap();
-
-        assert_eq!(inverse.inner, StandardGate::RX);
-        assert_eq!(inverse.params, vec![-theta]);
-    }
-}
-
 /// Registers static gate attributes on the `StandardGate` class.
 ///
 /// Adds all standard gates (H, X, RX, CX, etc.) as class attributes
@@ -430,5 +441,59 @@ impl PyStandardGate {
             params,
             hash: RwLock::new(None),
         }
+    }
+}
+
+/// Resolves a case-insensitive standard-gate name to its gate definition.
+///
+/// Canonical names come from [`StandardGate::name`] (e.g. `"H"`, `"Phase"`),
+/// so `"h"` and `"PHASE"` resolve identically. This is the single shared
+/// lookup used by `StandardGate.from_name` and every Python API that accepts
+/// basis entries as strings.
+pub(crate) fn standard_gate_from_name(name: &str) -> Option<StandardGate> {
+    StandardGate::all()
+        .iter()
+        .copied()
+        .find(|gate| gate.name().eq_ignore_ascii_case(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PyStandardGate;
+    use cqlib_core::circuit::{Parameter, StandardGate};
+
+    #[test]
+    fn control_preserves_bound_parameters() {
+        let theta = Parameter::symbol("theta");
+        let gate = PyStandardGate::from(StandardGate::RX, vec![theta.clone()]);
+        let controlled = gate.control(2);
+
+        assert_eq!(controlled.inner.num_ctrl_qubits(), 2);
+        assert_eq!(controlled.params, vec![theta]);
+    }
+
+    #[test]
+    fn inverse_uses_exact_bound_parameter_count() {
+        let theta = Parameter::symbol("theta");
+        let gate = PyStandardGate::from(StandardGate::RX, vec![theta.clone()]);
+        let inverse = gate.inverse().unwrap();
+
+        assert_eq!(inverse.inner, StandardGate::RX);
+        assert_eq!(inverse.params, vec![-theta]);
+    }
+
+    #[test]
+    fn all_mirrors_core_standard_gate_order() {
+        let gates = PyStandardGate::all();
+
+        assert_eq!(gates.len(), StandardGate::all().len());
+        assert!(
+            gates
+                .iter()
+                .zip(StandardGate::all())
+                .all(
+                    |(py_gate, core_gate)| py_gate.inner == *core_gate && py_gate.params.is_empty()
+                )
+        );
     }
 }

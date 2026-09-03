@@ -97,10 +97,15 @@ class VerifyResult:
     comparison. ``inconclusive`` means satisfying samples could not be built.
     """
     @property
-    def status(self) -> Literal["equivalent", "sampled_equal", "not_equivalent", "inconclusive"]: ...
+    def status(
+        self,
+    ) -> Literal["equivalent", "sampled_equal", "not_equivalent", "inconclusive"]: ...
     @property
     def passed(self) -> bool:
         """Whether status is ``equivalent`` or ``sampled_equal``."""
+        ...
+    def is_verified(self) -> bool:
+        """Return whether equivalence verification succeeded."""
         ...
     @property
     def num_bindings(self) -> int | None:
@@ -125,7 +130,13 @@ class Rule:
     Construction is intentionally separate from validation. Call
     :meth:`validate`, or add the rule to a library, before using it.
     """
-    def __init__(self, name: str, operations: Sequence[RuleItem], target: Sequence[RuleItem], conditions: Sequence[Condition] | None = None) -> None: ...
+    def __init__(
+        self,
+        name: str,
+        operations: Sequence[RuleItem],
+        target: Sequence[RuleItem],
+        conditions: Sequence[Condition] | None = None,
+    ) -> None: ...
     @property
     def name(self) -> str: ...
     @property
@@ -171,4 +182,9 @@ class Rule:
     def __copy__(self) -> Rule: ...
     def __deepcopy__(self, memo: dict) -> Rule: ...
 
-__all__: list[str]
+__all__ = [
+    "RuleItem",
+    "Condition",
+    "Rule",
+    "VerifyResult",
+]

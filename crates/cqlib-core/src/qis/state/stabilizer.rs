@@ -163,6 +163,7 @@
 //! assert!(matches!(result, Err(QisError::NonCliffordGate(_))));
 //! ```
 
+use super::aligned_buffer::AlignedBuffer;
 use crate::circuit::circuit_impl::Circuit;
 use crate::circuit::circuit_param::CircuitParam;
 use crate::circuit::error::CircuitError;
@@ -174,7 +175,6 @@ use crate::device::{ExecutionResult, Outcome};
 use crate::qis::error::QisError;
 use crate::qis::pauli::{Pauli, PauliString, Phase};
 use crate::qis::state::{ClassicalState, RuntimeValue};
-use crate::util::aligned::AlignedBuffer;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
@@ -1341,7 +1341,7 @@ impl StabilizerState {
     /// or execute the circuit IR. The [`Measurement`] already carries the qubits
     /// and their result bit order:
     /// - `measurement.qubits()[i]` becomes bit `i` in each [`Outcome`].
-    /// - [`Outcome::to_string`] displays the most-significant result bit first,
+    /// - [`Outcome::to_bitstring`] displays the most-significant result bit first,
     ///   so string order is the reverse of `measurement.qubits()`.
     ///
     /// # Example
@@ -1362,7 +1362,8 @@ impl StabilizerState {
     /// assert!(result
     ///     .counts()
     ///     .keys()
-    ///     .all(|bits| bits.to_string(out.width()) == "00" || bits.to_string(out.width()) == "11"));
+    ///     .all(|bits| bits.to_bitstring(out.width()) == "00"
+    ///         || bits.to_bitstring(out.width()) == "11"));
     /// ```
     pub fn sample(
         &self,
@@ -1840,8 +1841,7 @@ impl StabilizerState {
         // Build the query symplectic vector from the PauliString.
         let mut qx = vec![0u64; n_words];
         let mut qz = vec![0u64; n_words];
-        for q in 0..n {
-            let p = pauli.get_pauli(q);
+        for (q, p) in pauli.iter().enumerate() {
             match p {
                 Pauli::X | Pauli::Y => qx[q / 64] |= 1u64 << (q % 64),
                 _ => {}
@@ -1906,7 +1906,7 @@ impl StabilizerState {
                     let zi = mat[pivot_row * row_stride + n_words + w];
                     sum += Self::g_phase_word(xh, zh, xi, zi);
                 }
-                mat_phase[r] = (((sum % 4) + 4) % 4) as i32;
+                mat_phase[r] = ((sum % 4) + 4) % 4;
                 for w in 0..row_stride {
                     mat[r * row_stride + w] ^= mat[pivot_row * row_stride + w];
                 }
@@ -1924,7 +1924,7 @@ impl StabilizerState {
                     let zi = mat[pivot_row * row_stride + n_words + w];
                     sum += Self::g_phase_word(xh, zh, xi, zi);
                 }
-                q_phase = (((sum % 4) + 4) % 4) as i32;
+                q_phase = ((sum % 4) + 4) % 4;
                 for w in 0..n_words {
                     qx[w] ^= mat[pivot_row * row_stride + w];
                     qz[w] ^= mat[pivot_row * row_stride + n_words + w];

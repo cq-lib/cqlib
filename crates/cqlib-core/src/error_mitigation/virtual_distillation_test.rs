@@ -200,8 +200,7 @@ fn test_run_vd_returns_mu_and_var() {
                 Instruction::Standard(StandardGate::SWAP)
             ));
 
-            if hamiltonian_arg.is_some() {
-                let expanded_hamiltonian = hamiltonian_arg.unwrap();
+            if let Some(expanded_hamiltonian) = hamiltonian_arg {
                 assert_eq!(expanded_hamiltonian.num_qubits, 2);
                 assert_eq!(expanded_hamiltonian.terms.len(), 1);
                 let (term, _coeff) = &expanded_hamiltonian.terms[0];

@@ -11,9 +11,10 @@
 // that they have been altered from the originals.
 
 use super::{compiler_error, into_py_operations};
-use crate::circuit::PyValueOperation;
 use crate::circuit::bit::{PyIntListOrQubitList, PyIntOrQubit};
 use crate::circuit::operation::extract_parameter_value;
+use crate::circuit::{PyStandardGate, PyValueOperation};
+use crate::utils::hash_value;
 use cqlib_core::circuit::{ParameterValue, Qubit};
 use cqlib_core::compile::transform::decompose::mc_gate::{
     Su2RotationAxis, decompose_mc_su2_n_clean, decompose_mc_su2_no_aux,
@@ -23,7 +24,8 @@ use pyo3::prelude::*;
 /// Axis of a multi-controlled special-unitary rotation.
 #[pyclass(
     name = "Su2RotationAxis",
-    module = "cqlib.compile.transform.decompose.mc_gate"
+    module = "cqlib.compile.transform.decompose.mc_gate",
+    from_py_object
 )]
 #[derive(Clone, Copy, Debug)]
 pub struct PySu2RotationAxis {
@@ -53,6 +55,16 @@ impl PySu2RotationAxis {
         }
     }
 
+    #[getter]
+    fn rotation_gate(&self) -> PyStandardGate {
+        PyStandardGate::from(self.inner.rotation_gate(), Vec::new())
+    }
+
+    #[getter]
+    fn controlled_rotation_gate(&self) -> PyStandardGate {
+        PyStandardGate::from(self.inner.controlled_rotation_gate(), Vec::new())
+    }
+
     fn __repr__(&self) -> &'static str {
         match self.inner {
             Su2RotationAxis::X => "Su2RotationAxis.x()",
@@ -65,12 +77,8 @@ impl PySu2RotationAxis {
         self.inner == other.inner
     }
 
-    fn __hash__(&self) -> u8 {
-        match self.inner {
-            Su2RotationAxis::X => 0,
-            Su2RotationAxis::Y => 1,
-            Su2RotationAxis::Z => 2,
-        }
+    fn __hash__(&self) -> u64 {
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {

@@ -58,7 +58,7 @@
 //!
 //! let mut counts = HashMap::new();
 //! for outcome in state.sample_shots(1000) {
-//!     *counts.entry(outcome.to_string(2)).or_insert(0usize) += 1;
+//!     *counts.entry(outcome.to_bitstring(2)).or_insert(0usize) += 1;
 //! }
 //!
 //! // Bell-state samples only contain the correlated outcomes.
@@ -89,7 +89,7 @@ pub use error::{PauliStringParseError, QisError};
 pub use evolution::{PauliEvolution, TrotterMode};
 pub use hamiltonian::Hamiltonian;
 pub use observable::Observable;
-pub use pauli::{Pauli, PauliString, Phase};
+pub use pauli::{Pauli, PauliIter, PauliString, Phase};
 pub use state::density_matrix::DensityMatrix;
 pub use state::density_matrix_noise::DensityMatrixNoise;
 pub use state::stabilizer::StabilizerState;

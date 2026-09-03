@@ -11,15 +11,34 @@
 // that they have been altered from the originals.
 
 use super::{Su2RotationAxis, decompose_mc_su2_no_aux};
+use crate::circuit::test_utils::assert_matrix_approx_eq;
 use crate::circuit::{Parameter, ParameterValue, Qubit, StandardGate, circuit_to_matrix};
 use crate::compile::error::CompilerError;
-use crate::util::test_utils::{
-    EPSILON, assert_fixed_parameter_operation, assert_matrix_approx_eq, assert_standard_operation,
-    assert_value_operations_only_use_qubits, circuit_from_value_operations, controlled_rotation,
-    mc_gate_matrix, rotation,
+use crate::compile::transform::decompose::mc_gate::test_utils::{
+    EPSILON, assert_fixed_parameter_operation, assert_standard_operation,
+    assert_value_operations_only_use_qubits, circuit_from_value_operations, mc_gate_matrix,
 };
 use ndarray::Array1;
 use num_complex::Complex64;
+
+#[test]
+fn rotation_axis_maps_to_standard_gates() {
+    assert_eq!(Su2RotationAxis::X.rotation_gate(), StandardGate::RX);
+    assert_eq!(Su2RotationAxis::Y.rotation_gate(), StandardGate::RY);
+    assert_eq!(Su2RotationAxis::Z.rotation_gate(), StandardGate::RZ);
+    assert_eq!(
+        Su2RotationAxis::X.controlled_rotation_gate(),
+        StandardGate::CRX
+    );
+    assert_eq!(
+        Su2RotationAxis::Y.controlled_rotation_gate(),
+        StandardGate::CRY
+    );
+    assert_eq!(
+        Su2RotationAxis::Z.controlled_rotation_gate(),
+        StandardGate::CRZ
+    );
+}
 
 #[test]
 fn zero_controls_emit_standard_rotations() {
@@ -29,7 +48,7 @@ fn zero_controls_emit_standard_rotations() {
             decompose_mc_su2_no_aux(axis, &ParameterValue::Fixed(0.75), &[], target).unwrap();
 
         assert_eq!(operations.len(), 1);
-        assert_fixed_parameter_operation(&operations[0], rotation(axis), &[target], 0.75);
+        assert_fixed_parameter_operation(&operations[0], axis.rotation_gate(), &[target], 0.75);
     }
 }
 
@@ -45,7 +64,7 @@ fn one_control_emits_standard_controlled_rotations() {
         assert_eq!(operations.len(), 1);
         assert_fixed_parameter_operation(
             &operations[0],
-            controlled_rotation(axis),
+            axis.controlled_rotation_gate(),
             &[control, target],
             0.75,
         );
@@ -147,7 +166,7 @@ fn decompositions_match_mcgate_rotation_matrices() {
             let expected = mc_gate_matrix(
                 num_controls + 1,
                 controls.len() as u8,
-                rotation(axis),
+                axis.rotation_gate(),
                 qubits,
                 [ParameterValue::Fixed(theta)],
             );
@@ -174,7 +193,7 @@ fn decomposition_preserves_superposed_control_semantics() {
     let expected = mc_gate_matrix(
         4,
         controls.len() as u8,
-        rotation(Su2RotationAxis::Y),
+        Su2RotationAxis::Y.rotation_gate(),
         qubits,
         [ParameterValue::Fixed(0.731)],
     );

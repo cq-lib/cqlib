@@ -15,16 +15,22 @@
 from .._native import compile as _compile_module
 
 CompileMode = _compile_module.CompileMode
+DeviceCompileTarget = _compile_module.DeviceCompileTarget
+CompileTarget = _compile_module.CompileTarget
 CompileConfig = _compile_module.CompileConfig
 WorkflowStepReport = _compile_module.WorkflowStepReport
+DeviceCompilationMetadata = _compile_module.DeviceCompilationMetadata
 CompileResult = _compile_module.CompileResult
 CompilerWorkflow = _compile_module.CompilerWorkflow
 compile = _compile_module.compile
 
 __all__ = [
     "CompileMode",
+    "DeviceCompileTarget",
+    "CompileTarget",
     "CompileConfig",
     "WorkflowStepReport",
+    "DeviceCompilationMetadata",
     "CompileResult",
     "CompilerWorkflow",
     "compile",

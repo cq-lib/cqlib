@@ -22,12 +22,35 @@
 //! not make the graph invalid; callers decide whether topology-only scoring is
 //! acceptable or whether fidelity data is required.
 
+use crate::circuit::{Instruction, StandardGate};
 use crate::compile::CompilerError;
 use crate::device::{Device, PhysicalQubit, Topology};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 type DirectedQubitPair = (PhysicalQubit, PhysicalQubit);
-type TwoQubitErrorMap = BTreeMap<DirectedQubitPair, f64>;
+type TwoQubitGateMap = BTreeMap<DirectedQubitPair, Vec<TwoQubitGateStatus>>;
+
+/// Resolved native capability and calibration for one gate on one directed edge.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(super) enum TwoQubitGateStatus {
+    #[default]
+    Unsupported,
+    Uncalibrated,
+    Calibrated(f64),
+}
+
+impl TwoQubitGateStatus {
+    pub(super) fn is_supported(self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
+
+    pub(super) fn error(self) -> Option<f64> {
+        match self {
+            Self::Calibrated(error) => Some(error),
+            Self::Unsupported | Self::Uncalibrated => None,
+        }
+    }
+}
 
 /// Compiler-local physical graph with usable qubits, distances, and calibration data.
 ///
@@ -44,8 +67,10 @@ pub struct PhysicalLayoutGraph {
     distances: DistanceTable,
     directed_couplings: BTreeSet<DirectedQubitPair>,
     readout_errors: BTreeMap<PhysicalQubit, f64>,
-    two_qubit_errors: TwoQubitErrorMap,
+    two_qubit_gates: TwoQubitGateMap,
+    native_two_qubit_gates: Vec<bool>,
     has_readout_error_data: bool,
+    has_native_two_qubit_capabilities: bool,
     has_two_qubit_error_data: bool,
 }
 
@@ -71,7 +96,7 @@ impl PhysicalLayoutGraph {
         let directed_couplings = collect_directed_couplings(device.topology(), &usable);
         let (readout_errors, has_readout_error_data) =
             collect_readout_errors(device, &physical_qubits)?;
-        let two_qubit_error_data = collect_two_qubit_errors(device, &usable)?;
+        let two_qubit_data = collect_two_qubit_data(device, &usable)?;
 
         Ok(Self {
             physical_qubits,
@@ -80,9 +105,11 @@ impl PhysicalLayoutGraph {
             distances,
             directed_couplings,
             readout_errors,
-            two_qubit_errors: two_qubit_error_data.errors,
+            two_qubit_gates: two_qubit_data.gates,
+            native_two_qubit_gates: two_qubit_data.native_gates,
             has_readout_error_data,
-            has_two_qubit_error_data: two_qubit_error_data.has_data,
+            has_native_two_qubit_capabilities: two_qubit_data.has_native_capabilities,
+            has_two_qubit_error_data: two_qubit_data.has_error_data,
         })
     }
 
@@ -129,6 +156,21 @@ impl PhysicalLayoutGraph {
         self.adjacency[a_index].contains(&b_index)
     }
 
+    /// Returns every usable undirected topology edge exactly once as dense
+    /// physical indices.
+    pub(super) fn undirected_edges_by_index(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.adjacency
+            .iter()
+            .enumerate()
+            .flat_map(|(left, neighbors)| {
+                neighbors
+                    .iter()
+                    .copied()
+                    .filter(move |right| left < *right)
+                    .map(move |right| (left, right))
+            })
+    }
+
     /// Returns the readout error for a physical qubit, if known.
     pub fn readout_error(&self, qubit: PhysicalQubit) -> Option<f64> {
         self.readout_errors.get(&qubit).copied()
@@ -139,32 +181,61 @@ impl PhysicalLayoutGraph {
             .and_then(|qubit| self.readout_error(qubit))
     }
 
-    /// Returns the directed two-qubit error for a coupling, if known.
-    pub fn two_qubit_error_directed(
+    /// Returns whether `gate` is a native capability on the directed edge.
+    pub fn supports_two_qubit_gate_directed(
         &self,
         control: PhysicalQubit,
         target: PhysicalQubit,
-    ) -> Option<f64> {
-        self.two_qubit_errors.get(&(control, target)).copied()
+        gate: StandardGate,
+    ) -> bool {
+        self.two_qubit_gate_status(control, target, gate)
+            .is_supported()
     }
 
-    /// Returns the lowest known two-qubit error in either coupling direction.
-    pub fn two_qubit_error_undirected(&self, a: PhysicalQubit, b: PhysicalQubit) -> Option<f64> {
-        match (
-            self.two_qubit_error_directed(a, b),
-            self.two_qubit_error_directed(b, a),
-        ) {
-            (Some(ab), Some(ba)) => Some(ab.min(ba)),
-            (Some(ab), None) => Some(ab),
-            (None, Some(ba)) => Some(ba),
-            (None, None) => None,
+    /// Returns the calibrated error for `gate` on the directed edge.
+    ///
+    /// `None` means either that the gate is unsupported or that it is supported
+    /// without a known calibration. Use
+    /// [`Self::supports_two_qubit_gate_directed`] to distinguish those states.
+    pub fn two_qubit_gate_error_directed(
+        &self,
+        control: PhysicalQubit,
+        target: PhysicalQubit,
+        gate: StandardGate,
+    ) -> Option<f64> {
+        self.two_qubit_gate_status(control, target, gate).error()
+    }
+
+    pub(super) fn two_qubit_gate_status(
+        &self,
+        control: PhysicalQubit,
+        target: PhysicalQubit,
+        gate: StandardGate,
+    ) -> TwoQubitGateStatus {
+        self.two_qubit_gates
+            .get(&(control, target))
+            .and_then(|gates| gates.get(gate as usize))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(super) fn two_qubit_gate_status_by_index(
+        &self,
+        control: usize,
+        target: usize,
+        gate: StandardGate,
+    ) -> TwoQubitGateStatus {
+        match (self.physical_at(control), self.physical_at(target)) {
+            (Some(control), Some(target)) => self.two_qubit_gate_status(control, target, gate),
+            _ => TwoQubitGateStatus::Unsupported,
         }
     }
 
-    pub(super) fn two_qubit_error_undirected_by_index(&self, a: usize, b: usize) -> Option<f64> {
-        let a = self.physical_at(a)?;
-        let b = self.physical_at(b)?;
-        self.two_qubit_error_undirected(a, b)
+    pub(super) fn is_two_qubit_gate_native_anywhere(&self, gate: StandardGate) -> bool {
+        self.native_two_qubit_gates
+            .get(gate as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Returns whether there is a directed coupling from `control` to `target`.
@@ -195,6 +266,11 @@ impl PhysicalLayoutGraph {
     /// Returns whether readout-error data is available.
     pub fn has_readout_error_data(&self) -> bool {
         self.has_readout_error_data
+    }
+
+    /// Returns whether any usable directed edge has native two-qubit capabilities.
+    pub(crate) fn has_native_two_qubit_capabilities(&self) -> bool {
+        self.has_native_two_qubit_capabilities
     }
 
     /// Returns whether two-qubit error data is available.
@@ -268,11 +344,6 @@ impl DistanceTable {
     }
 }
 
-/// Builds the compiler-local physical layout graph for `device`.
-pub fn build_physical_layout_graph(device: &Device) -> Result<PhysicalLayoutGraph, CompilerError> {
-    PhysicalLayoutGraph::from_device(device)
-}
-
 fn build_physical_index(physical_qubits: &[PhysicalQubit]) -> BTreeMap<PhysicalQubit, usize> {
     physical_qubits
         .iter()
@@ -342,45 +413,75 @@ fn collect_directed_couplings(
     couplings
 }
 
-struct TwoQubitErrors {
-    errors: TwoQubitErrorMap,
-    has_data: bool,
+struct TwoQubitData {
+    gates: TwoQubitGateMap,
+    native_gates: Vec<bool>,
+    has_native_capabilities: bool,
+    has_error_data: bool,
 }
 
-fn collect_two_qubit_errors(
+fn collect_two_qubit_data(
     device: &Device,
     usable: &BTreeSet<PhysicalQubit>,
-) -> Result<TwoQubitErrors, CompilerError> {
-    let default_error = device.default_two_qubit_error();
-    if let Some(error) = default_error {
+) -> Result<TwoQubitData, CompilerError> {
+    if let Some(error) = device.default_two_qubit_error() {
         validate_probability(error, "default two-qubit error")?;
     }
 
-    let mut errors = BTreeMap::new();
-    let mut has_specific_data = false;
+    let mut gates = BTreeMap::new();
+    let mut native_gates = vec![false; StandardGate::all().len()];
+    let mut has_native_capabilities = false;
+    let mut has_error_data = false;
     for control in usable {
         for target in device.topology().successors(*control) {
             if !usable.contains(&target) {
                 continue;
             }
-            let specific = device.edge_properties(*control, target).and_then(|edge| {
-                edge.native_instructions()
-                    .iter()
-                    .map(|instruction| instruction.error_rate())
-                    .min_by(|a, b| a.total_cmp(b))
-            });
-            if let Some(error) = specific {
-                validate_probability(error, "edge two-qubit error")?;
-                has_specific_data = true;
-                errors.insert((*control, target), error);
-            } else if let Some(error) = default_error {
-                errors.insert((*control, target), error);
+
+            let edge = device.edge_properties(*control, target);
+            if let Some(edge) = edge {
+                for property in edge.native_instructions() {
+                    validate_probability(property.error_rate(), "edge two-qubit error")?;
+                }
+            }
+
+            let mut edge_gates = None;
+            for gate in StandardGate::all()
+                .iter()
+                .copied()
+                .filter(|gate| gate.num_qubits() == 2)
+            {
+                let instruction = Instruction::Standard(gate);
+                if !device.supports_native_instruction(&instruction, &[*control, target]) {
+                    continue;
+                }
+
+                has_native_capabilities = true;
+                native_gates[gate as usize] = true;
+                let status = match device.two_qubit_error(*control, target, &instruction) {
+                    Some(error) => {
+                        validate_probability(error, "gate-specific two-qubit error")?;
+                        has_error_data = true;
+                        TwoQubitGateStatus::Calibrated(error)
+                    }
+                    None => TwoQubitGateStatus::Uncalibrated,
+                };
+                edge_gates.get_or_insert_with(|| {
+                    vec![TwoQubitGateStatus::Unsupported; StandardGate::all().len()]
+                })[gate as usize] = status;
+            }
+            if let Some(edge_gates) = edge_gates {
+                gates.insert((*control, target), edge_gates);
             }
         }
     }
 
-    let has_data = has_specific_data || default_error.is_some();
-    Ok(TwoQubitErrors { errors, has_data })
+    Ok(TwoQubitData {
+        gates,
+        native_gates,
+        has_native_capabilities,
+        has_error_data,
+    })
 }
 
 fn validate_probability(value: f64, name: &str) -> Result<(), CompilerError> {

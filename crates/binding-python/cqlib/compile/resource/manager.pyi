@@ -82,4 +82,6 @@ class ResourceManager:
         """Check consistency and require every lease to be released."""
         ...
 
-__all__: list[str]
+__all__ = [
+    "ResourceManager",
+]

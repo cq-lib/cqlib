@@ -1976,13 +1976,13 @@ fn test_measure_out_of_bounds() {
 #[test]
 fn test_measure_deterministic_zero_and_one() {
     let mut zero = Statevector::new(1);
-    assert_eq!(zero.measure(0).unwrap(), false);
+    assert!(!zero.measure(0).unwrap());
     assert_complex_eq(zero.data[0], c(1.0, 0.0), "|0> remains |0>");
     assert_complex_eq(zero.data[1], c(0.0, 0.0), "|1> amplitude remains zero");
 
     let mut one = Statevector::new(1);
     one.apply_x(0).unwrap();
-    assert_eq!(one.measure(0).unwrap(), true);
+    assert!(one.measure(0).unwrap());
     assert_complex_eq(one.data[0], c(0.0, 0.0), "|0> amplitude remains zero");
     assert_complex_eq(one.data[1], c(1.0, 0.0), "|1> remains |1>");
 }
@@ -2201,4 +2201,54 @@ fn test_probabilities_large_20_qubit_uniform_superposition() {
     assert!((sum - 1.0).abs() < 1e-9);
     assert!((probs[0] - expected).abs() < 1e-12);
     assert!((probs[(1 << n) - 1] - expected).abs() < 1e-12);
+}
+
+#[test]
+fn test_apply_pauli_rotation_matches_gate_decomposition() {
+    use crate::qis::pauli::{Pauli, PauliString};
+
+    let mut native = Statevector::new(4);
+    native.apply_h(0).unwrap();
+    native.apply_rx(1, 0.37).unwrap();
+    native.apply_ry(2, -0.21).unwrap();
+    native.apply_cx(0, 3).unwrap();
+    let mut decomposed = native.clone();
+
+    let mut pauli = PauliString::new(4);
+    pauli.set_pauli(0, Pauli::X);
+    pauli.set_pauli(1, Pauli::Y);
+    pauli.set_pauli(3, Pauli::Z);
+    let theta = 0.413;
+
+    native.apply_pauli_rotation(&pauli, theta).unwrap();
+
+    // Same decomposition used by cqlib-vqe 1.3.x.
+    decomposed.apply_h(0).unwrap();
+    decomposed.apply_rx(1, std::f64::consts::FRAC_PI_2).unwrap();
+    decomposed.apply_cx(0, 1).unwrap();
+    decomposed.apply_cx(1, 3).unwrap();
+    decomposed.apply_rz(3, theta).unwrap();
+    decomposed.apply_cx(1, 3).unwrap();
+    decomposed.apply_cx(0, 1).unwrap();
+    decomposed.apply_h(0).unwrap();
+    decomposed
+        .apply_rx(1, -std::f64::consts::FRAC_PI_2)
+        .unwrap();
+
+    for (actual, expected) in native.data().iter().zip(decomposed.data()) {
+        assert!(
+            (actual - expected).norm() < 1e-12,
+            "{actual:?} != {expected:?}"
+        );
+    }
+}
+
+#[test]
+fn test_apply_pauli_rotation_rejects_imaginary_global_phase() {
+    use crate::qis::pauli::{PauliString, Phase};
+
+    let mut state = Statevector::new(1);
+    let mut pauli = PauliString::new(1);
+    pauli.phase = Phase::I;
+    assert!(state.apply_pauli_rotation(&pauli, 0.2).is_err());
 }

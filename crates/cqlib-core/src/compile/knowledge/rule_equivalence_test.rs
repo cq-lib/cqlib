@@ -19,10 +19,23 @@ use smallvec::smallvec;
 use std::f64::consts::PI;
 
 fn assert_verify_passed(result: VerifyResult) {
-    match result {
-        VerifyResult::Equivalent | VerifyResult::SampledEqual { .. } => {}
-        other => panic!("expected verification to pass, got {other:?}"),
-    }
+    assert!(
+        result.is_verified(),
+        "expected verification to pass, got {result:?}"
+    );
+}
+
+#[test]
+fn verify_result_classifies_successful_outcomes() {
+    assert!(VerifyResult::Equivalent.is_verified());
+    assert!(VerifyResult::SampledEqual { num_bindings: 3 }.is_verified());
+    assert!(!VerifyResult::NotEquivalent.is_verified());
+    assert!(
+        !VerifyResult::Inconclusive {
+            reason: "no bindings".to_string(),
+        }
+        .is_verified()
+    );
 }
 
 #[test]

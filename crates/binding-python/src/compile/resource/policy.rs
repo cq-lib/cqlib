@@ -14,7 +14,11 @@ use cqlib_core::compile::resource::{ResourceLimits, ResourcePolicy};
 use pyo3::prelude::*;
 
 /// Python wrapper for ancillary-resource permissions.
-#[pyclass(name = "ResourcePolicy", module = "cqlib.compile.resource")]
+#[pyclass(
+    name = "ResourcePolicy",
+    module = "cqlib.compile.resource",
+    from_py_object
+)]
 #[derive(Clone, Copy, Debug)]
 pub struct PyResourcePolicy {
     pub(crate) inner: ResourcePolicy,
@@ -81,7 +85,11 @@ impl PyResourcePolicy {
 }
 
 /// Python wrapper for hard target-derived resource limits.
-#[pyclass(name = "ResourceLimits", module = "cqlib.compile.resource")]
+#[pyclass(
+    name = "ResourceLimits",
+    module = "cqlib.compile.resource",
+    from_py_object
+)]
 #[derive(Clone, Copy, Debug)]
 pub struct PyResourceLimits {
     pub(crate) inner: ResourceLimits,

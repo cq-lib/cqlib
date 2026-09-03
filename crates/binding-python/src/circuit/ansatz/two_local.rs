@@ -30,7 +30,11 @@ use crate::circuit::gate::PyStandardGate;
 ///     >>> t = EntanglementTopology.linear()
 ///     >>> t = EntanglementTopology.full()
 ///     >>> t = EntanglementTopology.custom([(0, 1), (1, 2)])
-#[pyclass(name = "EntanglementTopology", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "EntanglementTopology",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyEntanglementTopology {
     pub(crate) inner: EntanglementTopology,
@@ -156,7 +160,11 @@ impl PyEntanglementTopology {
 ///     >>> circuit = ansatz.build_circuit("theta")
 ///     >>> ansatz.num_parameters()
 ///     18
-#[pyclass(name = "TwoLocal", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "TwoLocal",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyTwoLocal {
     pub(crate) inner: TwoLocal,

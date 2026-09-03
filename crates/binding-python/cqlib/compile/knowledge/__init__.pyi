@@ -30,4 +30,22 @@ from .rule import Rule as Rule
 from .rule import RuleItem as RuleItem
 from .rule import VerifyResult as VerifyResult
 
-__all__: list[str]
+__all__ = [
+    "RuleItem",
+    "Condition",
+    "Rule",
+    "VerifyResult",
+    "RuleId",
+    "RuleKind",
+    "RuleMetadata",
+    "RuleLibrary",
+    "MatchBindings",
+    "loads",
+    "load",
+    "dumps",
+    "dump",
+    "match_rule_item",
+    "conditions_hold",
+    "instantiate_target",
+    "rule_matches_operations",
+]

@@ -408,13 +408,13 @@ impl DensityMatrixNoise {
             } else if qubits.len() == 2 {
                 let q0 = Qubit::new(qubits[0] as u32);
                 let q1 = Qubit::new(qubits[1] as u32);
-                if let Ok(key) = OperationKey::new_double(gate, q0, q1) {
-                    if let Some(errors) = noise_model.get_two_qubit_errors(&key) {
-                        for error in errors {
-                            let kraus_ops = error.to_kraus();
-                            let flat_ops = self.convert_kraus_ops(&kraus_ops);
-                            self.state.apply_kraus(&flat_ops, qubits)?;
-                        }
+                if let Ok(key) = OperationKey::new_double(gate, q0, q1)
+                    && let Some(errors) = noise_model.get_two_qubit_errors(&key)
+                {
+                    for error in errors {
+                        let kraus_ops = error.to_kraus();
+                        let flat_ops = self.convert_kraus_ops(&kraus_ops);
+                        self.state.apply_kraus(&flat_ops, qubits)?;
                     }
                 }
             } else if qubits.len() == 3 {
@@ -667,10 +667,7 @@ impl DensityMatrixNoise {
         Ok(())
     }
 
-    /// Applies the XY2P gate (√XY+) with optional noise.
-    ///
-    /// A native gate for certain superconducting platforms representing
-    /// a partial iSWAP-like rotation in the XY plane.
+    /// Applies a positive half-pi single-qubit XY-plane rotation with optional noise.
     ///
     /// # Arguments
     ///
@@ -682,7 +679,7 @@ impl DensityMatrixNoise {
         Ok(())
     }
 
-    /// Applies the XY2M gate (√XY-) with optional noise.
+    /// Applies a negative half-pi single-qubit XY-plane rotation with optional noise.
     ///
     /// The Hermitian conjugate of XY2P.
     ///

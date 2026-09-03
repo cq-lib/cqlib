@@ -231,3 +231,243 @@ rule identity_y2p_x2m {
     match { Y2P 0, X2M 0 }
     rewrite { S 0, H 0, GPhase(π/4) }
 }
+
+rule compose_cx_rz_cx_to_rzz {
+    match { CX 0 1, RZ(theta) 1, CX 0 1 }
+    rewrite { RZZ(theta) 0 1 }
+}
+
+rule compose_cx_phase_cx_to_rzz {
+    match { CX 0 1, Phase(theta) 1, CX 0 1 }
+    rewrite { RZZ(theta) 0 1, GPhase(theta/2) }
+}
+
+rule compose_cz_rx_cz_to_rzx {
+    match { CZ 0 1, RX(theta) 1, CZ 0 1 }
+    rewrite { RZX(theta) 0 1 }
+}
+
+rule compose_cz_rx_cz_to_rzx_swapped {
+    match { CZ 0 1, RX(theta) 0, CZ 0 1 }
+    rewrite { RZX(theta) 1 0 }
+}
+
+rule compose_cx_cz_to_cy {
+    match { CX 0 1, CZ 0 1 }
+    rewrite { Phase(π/2) 0, CY 0 1 }
+}
+
+rule compose_cx_cz_to_cy_cz_swapped {
+    match { CX 0 1, CZ 1 0 }
+    rewrite { Phase(π/2) 0, CY 0 1 }
+}
+
+rule compose_cz_cx_to_cy {
+    match { CZ 0 1, CX 0 1 }
+    rewrite { Phase(-π/2) 0, CY 0 1 }
+}
+
+rule compose_cz_cx_to_cy_cz_swapped {
+    match { CZ 1 0, CX 0 1 }
+    rewrite { Phase(-π/2) 0, CY 0 1 }
+}
+
+rule identity_cx_to_hczh {
+    match { CX 0 1 }
+    rewrite { H 1, CZ 0 1, H 1 }
+}
+
+rule identity_rz_to_phase_gphase {
+    match { RZ(a) 0 }
+    rewrite { Phase(a) 0, GPhase(-a/2) }
+}
+
+rule identity_hx2ph_to_s {
+    match { H 0, X2P 0, H 0 }
+    rewrite { S 0, GPhase(-π/4) }
+}
+
+rule identity_hx2mh_to_sdg {
+    match { H 0, X2M 0, H 0 }
+    rewrite { SDG 0, GPhase(π/4) }
+}
+
+rule identity_hy2ph_to_y2m {
+    match { H 0, Y2P 0, H 0 }
+    rewrite { Y2M 0 }
+}
+
+rule identity_hy2mh_to_y2p {
+    match { H 0, Y2M 0, H 0 }
+    rewrite { Y2P 0 }
+}
+
+rule identity_sysdg_to_x {
+    match { S 0, Y 0, SDG 0 }
+    rewrite { X 0 }
+}
+
+rule identity_sdg_xs_to_y {
+    match { SDG 0, X 0, S 0 }
+    rewrite { Y 0 }
+}
+
+rule identity_xy_to_z_phase {
+    match { X 0, Y 0 }
+    rewrite { Z 0, GPhase(-π/2) }
+}
+
+rule identity_yx_to_z_phase {
+    match { Y 0, X 0 }
+    rewrite { Z 0, GPhase(π/2) }
+}
+
+rule identity_yz_to_x_phase {
+    match { Y 0, Z 0 }
+    rewrite { X 0, GPhase(-π/2) }
+}
+
+rule identity_zy_to_x_phase {
+    match { Z 0, Y 0 }
+    rewrite { X 0, GPhase(π/2) }
+}
+
+rule identity_hth_to_rx {
+    match { H 0, T 0, H 0 }
+    rewrite { RX(π/4) 0, GPhase(π/8) }
+}
+
+rule identity_htdgh_to_rx {
+    match { H 0, TDG 0, H 0 }
+    rewrite { RX(-π/4) 0, GPhase(-π/8) }
+}
+
+rule compose_cx_bridge_4cx {
+    match { CX 0 1, CX 1 2, CX 0 1, CX 1 2 }
+    rewrite { CX 0 2 }
+}
+
+rule compose_cx_bridge_4cx_rev {
+    match { CX 1 2, CX 0 1, CX 1 2, CX 0 1 }
+    rewrite { CX 0 2 }
+}
+
+rule compose_swap_cx_bridge {
+    match { SWAP 0 1, CX 1 2, SWAP 0 1 }
+    rewrite { CX 0 2 }
+}
+
+rule compose_swap_cx_bridge_far {
+    match { SWAP 0 1, CX 0 2, SWAP 0 1 }
+    rewrite { CX 1 2 }
+}
+
+rule compose_swap_cz_bridge {
+    match { SWAP 0 1, CZ 1 2, SWAP 0 1 }
+    rewrite { CZ 0 2 }
+}
+
+rule compose_swap_swap_swap {
+    match { SWAP 0 1, SWAP 0 2, SWAP 0 1 }
+    rewrite { SWAP 1 2 }
+}
+
+rule compose_cx3_to_swap {
+    match { CX 0 1, CX 1 0, CX 0 1 }
+    rewrite { SWAP 0 1 }
+}
+
+rule compose_cx3_to_swap_rev {
+    match { CX 1 0, CX 0 1, CX 1 0 }
+    rewrite { SWAP 0 1 }
+}
+
+rule compose_swap_cx_swap_to_cx_flip {
+    match { SWAP 0 1, CX 0 1, SWAP 0 1 }
+    rewrite { CX 1 0 }
+}
+
+rule compose_swap_cz_swap_to_cz {
+    match { SWAP 0 1, CZ 0 1, SWAP 0 1 }
+    rewrite { CZ 0 1 }
+}
+
+rule compose_swap_crz_swap {
+    match { SWAP 0 1, CRZ(a) 0 1, SWAP 0 1 }
+    rewrite { CRZ(a) 1 0 }
+}
+
+rule compose_swap_crx_swap {
+    match { SWAP 0 1, CRX(a) 0 1, SWAP 0 1 }
+    rewrite { CRX(a) 1 0 }
+}
+
+rule compose_hh_cx_hh_to_cx_flip {
+    match { H 0, H 1, CX 0 1, H 0, H 1 }
+    rewrite { CX 1 0 }
+}
+
+rule compose_h1_cz_h1_to_cx {
+    match { H 1, CZ 0 1, H 1 }
+    rewrite { CX 0 1 }
+}
+
+rule compose_h0_cz_h0_to_cx_flip {
+    match { H 0, CZ 0 1, H 0 }
+    rewrite { CX 1 0 }
+}
+
+rule compose_h0_cx_h0_to_cz {
+    match { H 0, CX 1 0, H 0 }
+    rewrite { CZ 0 1 }
+}
+
+rule compose_h1_cx_h1_to_cz {
+    match { H 1, CX 0 1, H 1 }
+    rewrite { CZ 0 1 }
+}
+
+rule compose_y2m_cz_y2p_to_cx {
+    match { Y2M 1, CZ 0 1, Y2P 1 }
+    rewrite { CX 0 1 }
+}
+
+rule compose_y2p_cz_y2m_to_z_cx {
+    match { Y2P 1, CZ 0 1, Y2M 1 }
+    rewrite { Z 0, CX 0 1 }
+}
+
+rule compose_x2p_cz_x2m_to_cy {
+    match { X2P 1, CZ 0 1, X2M 1 }
+    rewrite { CY 0 1 }
+}
+
+rule compose_cx_rx_cx_to_rxx {
+    match { CX 0 1, RX(a) 0, CX 0 1 }
+    rewrite { RXX(a) 0 1 }
+}
+
+rule move_x_ctrl_cx {
+    match { X 0, CX 0 1 }
+    rewrite { CX 0 1, X 0, X 1 }
+}
+
+rule move_z_tgt_cx {
+    match { Z 1, CX 0 1 }
+    rewrite { CX 0 1, Z 0, Z 1 }
+}
+
+rule move_y_ctrl_cx {
+    match { Y 0, CX 0 1 }
+    rewrite { CX 0 1, Y 0, X 1 }
+}
+
+rule move_x0_cz {
+    match { X 0, CZ 0 1 }
+    rewrite { CZ 0 1, X 0, Z 1 }
+}
+
+rule move_x1_cz {
+    match { X 1, CZ 0 1 }
+    rewrite { CZ 0 1, Z 0, X 1 }
+}

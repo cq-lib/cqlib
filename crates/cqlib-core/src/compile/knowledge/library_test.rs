@@ -809,6 +809,22 @@ fn builtin_rules_loads_expected_rule_groups() {
     assert!(library.get_by_name("identity_hxh_to_z").is_some());
     assert!(library.get_by_name("specialize_rx_pi_to_x").is_some());
     assert!(library.get_by_name("decompose_ccx_to_cx").is_some());
+    assert!(library.get_by_name("decompose_ccx_to_u_cx").is_some());
+    assert!(library.get_by_name("decompose_ccx_to_u_cz").is_some());
+    assert!(library.get_by_name("decompose_ccx_to_rz_x2p_cx").is_some());
+    assert!(
+        library
+            .get_by_name("decompose_ccx_to_rz_x2p_x_cz")
+            .is_some()
+    );
+    assert!(library.get_by_name("decompose_ccx_to_rx_ry_cx").is_some());
+    assert!(library.get_by_name("decompose_ccx_to_rx_ry_cz").is_some());
+    assert!(library.get_by_name("decompose_ccx_to_rx_ry_rxx").is_some());
+    assert!(
+        library
+            .get_by_name("decompose_ccx_to_rz_x2p_x_rzz")
+            .is_some()
+    );
     assert!(library.get_by_name("decompose_mcx1_to_cx").is_some());
     assert!(library.get_by_name("comm_s_sdg").is_some());
 

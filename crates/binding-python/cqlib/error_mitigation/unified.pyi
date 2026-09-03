@@ -131,4 +131,12 @@ class ErrorMitigation:
     def __copy__(self) -> ErrorMitigation: ...
     def __deepcopy__(self, memo: dict) -> ErrorMitigation: ...
 
-__all__: list[str]
+__all__ = [
+    "Estimator",
+    "ErrorMitigationError",
+    "MitigationMethod",
+    "RunArgs",
+    "ProcessArgs",
+    "MitigatedResult",
+    "ErrorMitigation",
+]

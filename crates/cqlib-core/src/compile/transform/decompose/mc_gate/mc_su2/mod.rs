@@ -79,6 +79,8 @@
 //! # Ok::<(), cqlib_core::compile::error::CompilerError>(())
 //! ```
 
+use crate::circuit::StandardGate;
+
 mod clean_accumulator;
 mod no_auxiliary;
 mod utils;
@@ -94,7 +96,7 @@ pub use no_auxiliary::decompose_mc_su2_no_aux;
 pub(super) const DECOMPOSE_MC_SU2_NAME: &str = "decompose.mc_su2";
 
 /// Axis of a single-qubit special-unitary rotation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Su2RotationAxis {
     /// Rotation around the Pauli-X axis.
     X,
@@ -102,4 +104,24 @@ pub enum Su2RotationAxis {
     Y,
     /// Rotation around the Pauli-Z axis.
     Z,
+}
+
+impl Su2RotationAxis {
+    /// Returns the single-qubit rotation gate for this axis.
+    pub fn rotation_gate(self) -> StandardGate {
+        match self {
+            Self::X => StandardGate::RX,
+            Self::Y => StandardGate::RY,
+            Self::Z => StandardGate::RZ,
+        }
+    }
+
+    /// Returns the controlled rotation gate for this axis.
+    pub fn controlled_rotation_gate(self) -> StandardGate {
+        match self {
+            Self::X => StandardGate::CRX,
+            Self::Y => StandardGate::CRY,
+            Self::Z => StandardGate::CRZ,
+        }
+    }
 }

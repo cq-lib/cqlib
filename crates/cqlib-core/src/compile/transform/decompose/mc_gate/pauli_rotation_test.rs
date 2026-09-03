@@ -12,15 +12,15 @@
 
 use super::pauli_rotation::{decompose_pauli_rotation_n_clean, decompose_pauli_rotation_no_aux};
 use super::rzz::{decompose_mc_rzz_n_clean, decompose_mc_rzz_no_aux};
+use super::test_utils::{
+    EPSILON, assert_selected_matrix_columns_equal_up_to_global_phase, assert_standard_operation,
+    assert_value_operations_equal, circuit_from_value_operations, mc_gate_matrix,
+};
 use crate::circuit::value_instruction::ValueInstruction;
 use crate::circuit::{
     Instruction, ParameterValue, Qubit, StandardGate, circuit_to_matrix, operation::ValueOperation,
 };
 use crate::compile::error::CompilerError;
-use crate::util::test_utils::{
-    EPSILON, assert_selected_matrix_columns_equal_up_to_global_phase, assert_standard_operation,
-    assert_value_operations_equal, circuit_from_value_operations, mc_gate_matrix,
-};
 use std::f64::consts::PI;
 
 fn assert_is_rx(operation: &ValueOperation, qubit: Qubit, angle: f64) {

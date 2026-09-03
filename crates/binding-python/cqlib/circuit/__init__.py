@@ -35,6 +35,10 @@ from .gates import (
 
 Parameter = _circuit_module.Parameter
 Circuit = _circuit_module.Circuit
+CircuitDag = _circuit_module.CircuitDag
+DagControlFlow = _circuit_module.DagControlFlow
+DagSwitchCase = _circuit_module.DagSwitchCase
+DagWire = _circuit_module.DagWire
 Qubit = _circuit_module.Qubit
 Instruction = _circuit_module.Instruction
 ValueInstruction = _circuit_module.ValueInstruction
@@ -58,6 +62,7 @@ circuit_to_matrix = _circuit_module.circuit_to_matrix
 
 __all__ = [
     "Circuit",
+    "CircuitDag",
     "CircuitId",
     "CircuitError",
     "ClassicalControlOp",
@@ -66,6 +71,9 @@ __all__ = [
     "ClassicalValue",
     "ClassicalVar",
     "CqlibError",
+    "DagControlFlow",
+    "DagSwitchCase",
+    "DagWire",
     "Instruction",
     "Measurement",
     "Parameter",

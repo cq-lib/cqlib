@@ -16,7 +16,7 @@ use crate::circuit::{CircuitError, ClassicalType, ClassicalValue, ClassicalVar, 
 use std::collections::BTreeSet;
 
 /// Loop controlled by a boolean classical expression.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WhileOp {
     condition: ClassicalExpr,
     body: ControlBody,

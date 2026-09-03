@@ -1,3 +1,15 @@
+# This code is part of Cqlib.
+#
+# (C) Copyright China Telecom Quantum Group 2026
+#
+# This code is licensed under the Apache License, Version 2.0. You may
+# obtain a copy of this license in the LICENSE.txt file in the root directory
+# of this source tree or at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Any modifications or derivative works of this code must retain this
+# copyright notice, and modified files need to carry a notice indicating
+# that they have been altered from the originals.
+
 """Strongly typed qubit identifiers for device-facing APIs.
 
 Circuit operations use :class:`cqlib.Qubit` as logical wire identifiers.
@@ -38,7 +50,6 @@ Key Usage
 
 from cqlib import Qubit
 
-
 class LogicalQubit:
     """Logical qubit identifier used when crossing into device-facing code.
 
@@ -76,6 +87,10 @@ class LogicalQubit:
         """Returns the numeric qubit identifier."""
 
     @property
+    def index(self) -> int:
+        """Returns the qubit identifier as an index (parity with ``Qubit.index``)."""
+
+    @property
     def qubit(self) -> Qubit:
         """Returns the underlying circuit :class:`cqlib.Qubit`.
 
@@ -84,7 +99,12 @@ class LogicalQubit:
 
     def __copy__(self) -> "LogicalQubit": ...
     def __deepcopy__(self, memo: dict) -> "LogicalQubit": ...
-
+    def __eq__(self, value: object) -> bool: ...
+    def __hash__(self) -> int: ...
+    def __lt__(self, value: object) -> bool: ...
+    def __le__(self, value: object) -> bool: ...
+    def __gt__(self, value: object) -> bool: ...
+    def __ge__(self, value: object) -> bool: ...
 
 class PhysicalQubit:
     """Physical qubit identifier representing a hardware position on a device.
@@ -124,6 +144,10 @@ class PhysicalQubit:
         """Returns the numeric hardware-qubit identifier."""
 
     @property
+    def index(self) -> int:
+        """Returns the hardware-qubit identifier as an index (parity with ``Qubit.index``)."""
+
+    @property
     def qubit(self) -> Qubit:
         """Returns the underlying circuit :class:`cqlib.Qubit`.
 
@@ -132,3 +156,9 @@ class PhysicalQubit:
 
     def __copy__(self) -> "PhysicalQubit": ...
     def __deepcopy__(self, memo: dict) -> "PhysicalQubit": ...
+    def __eq__(self, value: object) -> bool: ...
+    def __hash__(self) -> int: ...
+    def __lt__(self, value: object) -> bool: ...
+    def __le__(self, value: object) -> bool: ...
+    def __gt__(self, value: object) -> bool: ...
+    def __ge__(self, value: object) -> bool: ...

@@ -9,3 +9,11 @@ IX = "IX"
 IZ = "IZ"
 XY = "XY"
 canonicalizer = "canonicalizer"
+mch = "mch"
+MCH = "MCH"
+paeth = "paeth"
+pngs = "pngs"
+PNGs = "PNGs"
+
+[default.extend-identifiers]
+PNGs = "PNGs"

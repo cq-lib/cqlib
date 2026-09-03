@@ -53,6 +53,7 @@ use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Write;
+use std::str::FromStr;
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -85,8 +86,10 @@ pub enum OutcomeError {
 /// Qubit Index:      MSB    LSB               LSB of next chunk
 /// ```
 ///
-/// Note: While stored as Little-Endian, string representations (like `to_string`)
-/// are typically printed in standard binary format (Big-Endian visual, MSB left).
+/// Note: while stored as little-endian chunks, bitstrings are written in standard
+/// binary form (MSB left). The original input width is not stored: parsing `"001"`
+/// and `"1"` produces the same outcome. Callers must provide the desired output
+/// width to [`Outcome::to_bitstring`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Outcome(pub SmallVec<[u64; 4]>);
@@ -107,6 +110,19 @@ impl Outcome {
         let mut chunks = SmallVec::from_elem(0u64, width.div_ceil(BITS_PER_CHUNK));
         for index in indices {
             if index < width {
+                chunks[index / BITS_PER_CHUNK] |= 1u64 << (index % BITS_PER_CHUNK);
+            }
+        }
+        Self(chunks)
+    }
+
+    /// Creates an outcome from bits in little-endian order.
+    ///
+    /// `bits[0]` becomes bit index 0, the least-significant bit.
+    pub(crate) fn from_lsb_bits(bits: &[bool]) -> Self {
+        let mut chunks = SmallVec::from_elem(0u64, bits.len().div_ceil(BITS_PER_CHUNK));
+        for (index, value) in bits.iter().copied().enumerate() {
+            if value {
                 chunks[index / BITS_PER_CHUNK] |= 1u64 << (index % BITS_PER_CHUNK);
             }
         }
@@ -173,10 +189,11 @@ impl Outcome {
         }
     }
 
-    /// Formats the outcome as a binary string with given width.
+    /// Formats the outcome as a binary string with the requested width.
     ///
-    /// Output is big-endian (MSB left), padded with leading zeros.
-    pub fn to_string(&self, num_qubits: usize) -> String {
+    /// Output is big-endian (MSB left), padded with leading zeros. If the
+    /// requested width is smaller than the stored value, high bits are truncated.
+    pub fn to_bitstring(&self, num_qubits: usize) -> String {
         if num_qubits == 0 {
             return String::new();
         }
@@ -207,8 +224,16 @@ impl Outcome {
     }
 }
 
+impl FromStr for Outcome {
+    type Err = OutcomeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_bitstring(s)
+    }
+}
+
 /// Execution status of a quantum job.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Status {
     /// Task has been submitted and is queued for execution.
     Queued,
@@ -360,6 +385,7 @@ impl ExecutionResult {
         t: Option<OffsetDateTime>,
     ) -> &mut Self {
         self.counts = counts;
+        self.probabilities = None;
         self.status = Status::Completed;
         self.finished_at = t.or(Some(OffsetDateTime::now_utc()));
         self

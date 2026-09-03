@@ -13,6 +13,7 @@
 //! Tests for Pauli operators and Pauli strings.
 
 use crate::qis::pauli::{Pauli, PauliString, Phase};
+use ndarray::arr2;
 use num_complex::Complex64;
 
 #[test]
@@ -789,4 +790,71 @@ fn try_get_pauli_returns_correct_operator() {
     assert_eq!(ps.try_get_pauli(0).unwrap(), Pauli::X);
     assert_eq!(ps.try_get_pauli(1).unwrap(), Pauli::Y);
     assert_eq!(ps.try_get_pauli(2).unwrap(), Pauli::Z);
+}
+
+#[test]
+fn pauli_string_to_matrix_uses_little_endian_tensor_order() {
+    let pauli: PauliString = "ZX".parse().unwrap();
+    let expected = arr2(&[
+        [
+            Complex64::new(0.0, 0.0),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        ],
+        [
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        ],
+        [
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(-1.0, 0.0),
+        ],
+        [
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(-1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        ],
+    ]);
+
+    assert_eq!(pauli.to_matrix(), expected);
+}
+
+#[test]
+fn pauli_string_to_matrix_includes_each_global_phase() {
+    let base: PauliString = "Y".parse().unwrap();
+    let base_matrix = Pauli::Y.to_matrix();
+
+    for phase in [Phase::Plus, Phase::I, Phase::Minus, Phase::MinusI] {
+        let mut pauli = base.clone();
+        pauli.phase = phase;
+        assert_eq!(
+            pauli.to_matrix(),
+            base_matrix.mapv(|value| value * phase.to_complex())
+        );
+    }
+}
+
+#[test]
+fn zero_qubit_pauli_string_to_matrix_is_its_phase() {
+    let mut pauli = PauliString::new(0);
+    pauli.phase = Phase::MinusI;
+
+    assert_eq!(pauli.to_matrix(), arr2(&[[Complex64::new(0.0, -1.0)]]));
+}
+
+#[test]
+fn pauli_iterator_follows_ascending_qubit_indices() {
+    let pauli: PauliString = "XYZI".parse().unwrap();
+    let expected = (0..pauli.num_qubits)
+        .map(|index| pauli.get_pauli(index))
+        .collect::<Vec<_>>();
+
+    assert_eq!(pauli.iter().collect::<Vec<_>>(), expected);
+    assert_eq!((&pauli).into_iter().collect::<Vec<_>>(), expected);
 }

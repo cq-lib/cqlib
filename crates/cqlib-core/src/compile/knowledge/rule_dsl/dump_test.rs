@@ -130,7 +130,7 @@ fn dump_gphase_roundtrip() {
 
     let dumped = rules
         .iter()
-        .map(|r| dump_rule_to_string(r))
+        .map(dump_rule_to_string)
         .collect::<Vec<_>>()
         .join("\n");
     let reparsed = load_rules_from_str(&dumped).unwrap();
@@ -159,7 +159,7 @@ fn dump_multi_controlled_gate_roundtrip() {
 
     let dumped = rules
         .iter()
-        .map(|r| dump_rule_to_string(r))
+        .map(dump_rule_to_string)
         .collect::<Vec<_>>()
         .join("\n");
     assert!(dumped.contains("MCX[3] 0 1 2 3"));

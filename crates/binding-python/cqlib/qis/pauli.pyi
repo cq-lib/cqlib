@@ -61,6 +61,7 @@ class Phase:
         ...
 
     def __eq__(self, other: object) -> bool: ...
+    def __hash__(self) -> int: ...
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
 
@@ -220,6 +221,55 @@ class PauliString:
         """
         ...
 
+    def to_matrix(self) -> np.ndarray:
+        """Returns the dense matrix representation as a NumPy array.
+
+        The matrix is the tensor product of the single-qubit Pauli operators
+        in little-endian order: qubit 0 is the least-significant tensor factor,
+        i.e. the string expands as P_{N-1} ⊗ ... ⊗ P_0. The global phase is included.
+
+        Memory usage is O(4^N); intended for small-system analysis and verification.
+
+        Returns:
+            A NumPy array of shape (2^num_qubits, 2^num_qubits) with complex128 dtype.
+        """
+        ...
+
+    def support(self) -> List[int]:
+        """Returns the qubit indices where the Pauli is not identity, in ascending order.
+
+        Returns:
+            A sorted list of qubit indices supporting a non-identity Pauli (X, Y, or Z).
+        """
+        ...
+
+    def __len__(self) -> int:
+        """Returns the number of qubits (the number of single-qubit Pauli operators)."""
+        ...
+
+    def __iter__(self) -> "PauliStringIter":
+        """Returns an iterator over single-qubit Pauli operators in ascending qubit index.
+
+        Identity operators are included. Iteration uses snapshot semantics: modifications
+        to the PauliString after creating the iterator do not affect the iteration.
+
+        Equivalent to calling `get_pauli(i)` for i in range(num_qubits), but lazy.
+        """
+        ...
+
+    def __getitem__(self, index: int) -> Pauli:
+        """Returns the Pauli operator at the given qubit index.
+
+        Supports negative indexing: index -1 refers to the highest qubit index.
+
+        Args:
+            index: Qubit index (negative values count from the end)
+
+        Raises:
+            IndexError: If index is out of bounds
+        """
+        ...
+
     def expectation(self, probs: Dict[str, float]) -> float:
         """Computes the expectation value given a probability distribution.
 
@@ -299,3 +349,28 @@ class PauliString:
     def __str__(self) -> str: ...
     def __repr__(self) -> str: ...
     def copy(self) -> "PauliString": ...
+
+@final
+class PauliStringIter:
+    """Lazy iterator over the single-qubit Pauli operators of a PauliString.
+
+    Created by `PauliString.__iter__`. Yields `Pauli` objects in ascending
+    qubit index order (identities included), raising StopIteration when exhausted.
+
+    Iteration uses snapshot semantics: modifications to the parent PauliString
+    after creating the iterator do not affect the iteration.
+    """
+
+    def __next__(self) -> Pauli:
+        """Returns the next Pauli operator, or raises StopIteration when exhausted."""
+        ...
+
+    def __iter__(self) -> "PauliStringIter":
+        """Returns the iterator itself (iterators are iterable)."""
+        ...
+
+    def __length_hint__(self) -> int:
+        """Returns the number of remaining items."""
+        ...
+
+    def __repr__(self) -> str: ...

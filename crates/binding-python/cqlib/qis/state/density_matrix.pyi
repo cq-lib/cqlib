@@ -138,6 +138,28 @@ class DensityMatrix:
         """
         ...
 
+    @staticmethod
+    def maximally_mixed(num_qubits: int) -> "DensityMatrix":
+        """Creates the maximally mixed state I / 2^N.
+
+        The result is a diagonal matrix with entries 1/2^N on the diagonal,
+        representing a uniform classical mixture over all computational basis
+        states. For zero qubits this yields the 1x1 matrix [1].
+
+        Args:
+            num_qubits: Number of qubits in the system
+
+        Returns:
+            A new DensityMatrix instance in the maximally mixed state
+
+        Examples:
+            >>> from cqlib.qis.state import DensityMatrix
+            >>> dm = DensityMatrix.maximally_mixed(1)
+            >>> dm.probabilities()
+            [0.5, 0.5]
+        """
+        ...
+
     def apply_circuit(self, circuit: Circuit) -> None:
         """Applies a circuit to this density matrix in place."""
         ...
@@ -588,11 +610,10 @@ class DensityMatrix:
     def is_positive_semidefinite(self, tol: float = 1e-10) -> bool:
         """Checks if the density matrix is positive semidefinite.
 
-        Uses the Gershgorin circle theorem for an approximate check:
-        If for each row i, |ρ_ii| >= sum_{j≠i} |ρ_ij|, then all eigenvalues are non-negative.
-
-        Note: This is a sufficient but not necessary condition. A matrix that fails this
-        check might still be positive semidefinite, but one that passes definitely is.
+        Computes eigenvalues via a self-adjoint eigenvalue decomposition and
+        checks that every eigenvalue satisfies λᵢ ≥ -tol. For Hermitian matrices
+        this check is definitive; non-Hermitian inputs (or matrices containing
+        NaN/Inf) return ``False``.
 
         Args:
             tol: Tolerance for floating-point comparison (default: 1e-10)

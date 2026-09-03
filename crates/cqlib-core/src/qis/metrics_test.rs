@@ -14,15 +14,6 @@ use crate::qis::metrics::*;
 use crate::qis::state::{DensityMatrix, Statevector};
 use num_complex::Complex64;
 
-fn maximally_mixed_dm(num_qubits: usize) -> DensityMatrix {
-    let dim = 1 << num_qubits;
-    let mut data = vec![Complex64::new(0.0, 0.0); dim * dim];
-    for i in 0..dim {
-        data[i * dim + i] = Complex64::new(1.0 / dim as f64, 0.0);
-    }
-    DensityMatrix::from_density_matrix_state(num_qubits, data).unwrap()
-}
-
 #[test]
 fn test_purity_pure() {
     let sv = Statevector::new(2);
@@ -33,7 +24,7 @@ fn test_purity_pure() {
 #[test]
 fn test_purity_mixed() {
     // Identity state I / 2 (Maximally mixed for 1 qubit)
-    let dm = maximally_mixed_dm(1);
+    let dm = DensityMatrix::maximally_mixed(1);
     let purity = purity_mixed(&dm).unwrap();
     assert!((purity - 0.5).abs() < 1e-10); // Tr( (I/2)^2 ) = 1/4 + 1/4 = 0.5
 }
@@ -74,7 +65,7 @@ fn test_state_fidelity_pure_mixed() {
     let dm_pure = DensityMatrix::new(1);
 
     // Maximally mixed density matrix I / 2
-    let dm_mixed = maximally_mixed_dm(1);
+    let dm_mixed = DensityMatrix::maximally_mixed(1);
 
     let fid_pure = state_fidelity_pure_mixed(&sv, &dm_pure).unwrap();
     assert!((fid_pure - 1.0).abs() < 1e-10);
@@ -92,7 +83,7 @@ fn test_entropy_pure() {
 
 #[test]
 fn test_entropy_mixed() {
-    let dm = maximally_mixed_dm(1);
+    let dm = DensityMatrix::maximally_mixed(1);
     let ent = entropy(&dm).unwrap();
     // 1 qubit maximally mixed state entropy is 1.0 (using log2)
     assert!((ent - 1.0).abs() < 1e-10);
@@ -257,7 +248,7 @@ fn test_purity_mixed_multiqubit() {
     // Maximally mixed state for n qubits has purity = 1/2^n
     for n in 1..=4 {
         let dim = 1 << n;
-        let dm = maximally_mixed_dm(n);
+        let dm = DensityMatrix::maximally_mixed(n);
 
         let purity = purity_mixed(&dm).unwrap();
         let expected = 1.0 / (dim as f64);
@@ -292,7 +283,7 @@ fn test_fidelity_superposition_state() {
 fn test_entropy_completely_mixed() {
     // n-qubit maximally mixed state has entropy = n
     for n in 1..=4 {
-        let dm = maximally_mixed_dm(n);
+        let dm = DensityMatrix::maximally_mixed(n);
 
         let ent = entropy(&dm).unwrap();
         // Using log2, entropy should be n

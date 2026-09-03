@@ -13,22 +13,14 @@
 use super::*;
 use crate::circuit::Operation;
 use crate::circuit::ansatz::Ansatz;
-use crate::circuit::gate::instruction::Instruction;
 use crate::circuit::gate::standard_gate::StandardGate;
 
-fn standard_gate(op: &Operation) -> Option<StandardGate> {
-    match &op.instruction {
-        Instruction::Standard(gate) => Some(*gate),
-        _ => None,
-    }
-}
-
 fn is_gate_on_qubit(op: &Operation, gate: StandardGate, qubit: usize) -> bool {
-    standard_gate(op) == Some(gate) && op.qubits.len() == 1 && op.qubits[0].index() == qubit
+    op.standard_gate() == Some(gate) && op.qubits.len() == 1 && op.qubits[0].index() == qubit
 }
 
 fn is_two_qubit_gate(op: &Operation, gate: StandardGate, control: usize, target: usize) -> bool {
-    standard_gate(op) == Some(gate)
+    op.standard_gate() == Some(gate)
         && op.qubits.len() == 2
         && op.qubits[0].index() == control
         && op.qubits[1].index() == target

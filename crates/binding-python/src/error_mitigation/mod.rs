@@ -17,57 +17,68 @@ pub mod error;
 use crate::circuit::{PyCircuit, PyInstruction};
 use crate::error_mitigation::error::error_mitigation_error_to_py_err;
 use crate::qis::hamiltonian::PyHamiltonian;
+use crate::utils::hash_value;
 use cqlib_core::circuit::Instruction;
 use cqlib_core::error_mitigation::{
     ErrorMitigation, ExtrapolateMethod, MitigatedResult, MitigationMethod, ProcessArgs, RunArgs,
     VirtualDistillation, VirtualDistillationConfig, ZNEMitigation, ZneConfig,
 };
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
-use std::cell::RefCell;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
 
-type EstimatorErrorCell = RefCell<Option<PyErr>>;
+type EstimatorErrorCell = Mutex<Option<PyErr>>;
 
 fn convert_gate_set(gate_set: Option<Vec<PyInstruction>>) -> Option<Vec<Instruction>> {
     gate_set.map(|gates| gates.into_iter().map(|gate| gate.inner).collect())
 }
 
 fn call_python_estimator(
-    estimator: &Bound<'_, PyAny>,
+    estimator: &Py<PyAny>,
     error: &EstimatorErrorCell,
     circuit: &cqlib_core::circuit::Circuit,
     hamiltonian: Option<&cqlib_core::qis::Hamiltonian>,
     shots: Option<usize>,
 ) -> (f64, f64) {
-    if error.borrow().is_some() {
+    if error.lock().is_ok_and(|error| error.is_some()) {
         return (f64::NAN, f64::NAN);
     }
 
-    let py_circuit = PyCircuit::from(circuit.clone());
-    let py_hamiltonian = hamiltonian.cloned().map(PyHamiltonian::from);
-    match estimator
-        .call1((py_circuit, py_hamiltonian, shots))
-        .and_then(|value| value.extract::<(f64, f64)>())
-    {
+    let result = Python::attach(|py| {
+        let py_circuit = PyCircuit::from(circuit.clone());
+        let py_hamiltonian = hamiltonian.cloned().map(PyHamiltonian::from);
+        estimator
+            .bind(py)
+            .call1((py_circuit, py_hamiltonian, shots))
+            .and_then(|value| value.extract::<(f64, f64)>())
+    });
+    match result {
         Ok(result) => result,
         Err(py_error) => {
-            *error.borrow_mut() = Some(py_error);
+            if let Ok(mut error) = error.lock() {
+                *error = Some(py_error);
+            }
             (f64::NAN, f64::NAN)
         }
     }
 }
 
 fn take_estimator_error(error: EstimatorErrorCell) -> PyResult<()> {
-    if let Some(error) = error.into_inner() {
+    let error = error
+        .into_inner()
+        .map_err(|_| PyRuntimeError::new_err("estimator error channel was poisoned"))?;
+    if let Some(error) = error {
         Err(error)
     } else {
         Ok(())
     }
 }
 
-#[pyclass(name = "ExtrapolateMethod", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "ExtrapolateMethod",
+    module = "cqlib.error_mitigation",
+    from_py_object
+)]
 #[derive(Clone, Copy, Debug)]
 pub struct PyExtrapolateMethod {
     inner: ExtrapolateMethod,
@@ -110,12 +121,7 @@ impl PyExtrapolateMethod {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        match self.inner {
-            ExtrapolateMethod::Polynomial => 0_u8.hash(&mut hasher),
-            ExtrapolateMethod::Exponential => 1_u8.hash(&mut hasher),
-        }
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {
@@ -127,7 +133,7 @@ impl PyExtrapolateMethod {
     }
 }
 
-#[pyclass(name = "ZneConfig", module = "cqlib.error_mitigation")]
+#[pyclass(name = "ZneConfig", module = "cqlib.error_mitigation", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyZneConfig {
     inner: ZneConfig,
@@ -164,7 +170,11 @@ impl PyZneConfig {
     }
 }
 
-#[pyclass(name = "VirtualDistillationConfig", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "VirtualDistillationConfig",
+    module = "cqlib.error_mitigation",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyVirtualDistillationConfig {
     inner: VirtualDistillationConfig,
@@ -201,7 +211,11 @@ impl PyVirtualDistillationConfig {
     }
 }
 
-#[pyclass(name = "MitigationMethod", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "MitigationMethod",
+    module = "cqlib.error_mitigation",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyMitigationMethod {
     inner: MitigationMethod,
@@ -259,7 +273,7 @@ impl PyMitigationMethod {
     }
 }
 
-#[pyclass(name = "RunArgs", module = "cqlib.error_mitigation")]
+#[pyclass(name = "RunArgs", module = "cqlib.error_mitigation", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyRunArgs {
     inner: RunArgs,
@@ -323,7 +337,11 @@ impl PyRunArgs {
     }
 }
 
-#[pyclass(name = "ProcessArgs", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "ProcessArgs",
+    module = "cqlib.error_mitigation",
+    from_py_object
+)]
 #[derive(Clone, Copy, Debug)]
 pub struct PyProcessArgs {
     inner: ProcessArgs,
@@ -380,7 +398,11 @@ impl PyProcessArgs {
     }
 }
 
-#[pyclass(name = "MitigatedResult", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "MitigatedResult",
+    module = "cqlib.error_mitigation",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyMitigatedResult {
     inner: MitigatedResult,
@@ -424,7 +446,11 @@ impl PyMitigatedResult {
     }
 }
 
-#[pyclass(name = "ZNEMitigation", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "ZNEMitigation",
+    module = "cqlib.error_mitigation",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyZNEMitigation {
     inner: ZNEMitigation,
@@ -455,26 +481,31 @@ impl PyZNEMitigation {
     }
 
     #[pyo3(signature = (gate_set=None))]
-    fn fold_circuits(&self, gate_set: Option<Vec<PyInstruction>>) -> PyResult<Vec<PyCircuit>> {
+    fn fold_circuits(
+        &self,
+        py: Python<'_>,
+        gate_set: Option<Vec<PyInstruction>>,
+    ) -> PyResult<Vec<PyCircuit>> {
         let gate_set = convert_gate_set(gate_set);
-        self.inner
-            .fold_circuits(gate_set.as_deref())
+        py.detach(|| self.inner.fold_circuits(gate_set.as_deref()))
             .map(|circuits| circuits.into_iter().map(PyCircuit::from).collect())
             .map_err(|error| crate::circuit::error::CircuitError::new_err(error.to_string()))
     }
 
     fn run_em_sequence(
         &self,
+        py: Python<'_>,
         gate_set: Option<Vec<PyInstruction>>,
         hamiltonian: PyRef<'_, PyHamiltonian>,
         estimator: &Bound<'_, PyAny>,
     ) -> PyResult<Vec<f64>> {
-        self.run_em_sequence_with_shots(gate_set, hamiltonian, None, estimator)
+        self.run_em_sequence_with_shots(py, gate_set, hamiltonian, None, estimator)
     }
 
     #[pyo3(signature = (gate_set, hamiltonian, shots, estimator))]
     fn run_em_sequence_with_shots(
         &self,
+        py: Python<'_>,
         gate_set: Option<Vec<PyInstruction>>,
         hamiltonian: PyRef<'_, PyHamiltonian>,
         shots: Option<usize>,
@@ -485,39 +516,46 @@ impl PyZNEMitigation {
         }
 
         let gate_set = convert_gate_set(gate_set);
-        let estimator_error = RefCell::new(None);
-        let result = self.inner.run_em_sequence_with_shots(
-            gate_set.as_deref(),
-            &hamiltonian.inner,
-            shots,
-            &|circuit, hamiltonian, shots| {
-                call_python_estimator(estimator, &estimator_error, circuit, hamiltonian, shots)
-            },
-        );
+        let hamiltonian = hamiltonian.inner.clone();
+        let estimator = estimator.clone().unbind();
+        let estimator_error = Mutex::new(None);
+        let result = py.detach(|| {
+            self.inner.run_em_sequence_with_shots(
+                gate_set.as_deref(),
+                &hamiltonian,
+                shots,
+                &|circuit, hamiltonian, shots| {
+                    call_python_estimator(&estimator, &estimator_error, circuit, hamiltonian, shots)
+                },
+            )
+        });
         take_estimator_error(estimator_error)?;
         result.map_err(error_mitigation_error_to_py_err)
     }
 
     fn extrapolate(
         &self,
+        py: Python<'_>,
         noisy_results: Vec<f64>,
         method: PyExtrapolateMethod,
         degree: usize,
     ) -> PyResult<f64> {
-        self.inner
-            .extrapolate(&noisy_results, method.inner, degree)
+        py.detach(|| self.inner.extrapolate(&noisy_results, method.inner, degree))
             .map_err(error_mitigation_error_to_py_err)
     }
 
-    fn poly_extrapolate(&self, noisy_results: Vec<f64>, degree: usize) -> PyResult<f64> {
-        self.inner
-            .poly_extrapolate(&noisy_results, degree)
+    fn poly_extrapolate(
+        &self,
+        py: Python<'_>,
+        noisy_results: Vec<f64>,
+        degree: usize,
+    ) -> PyResult<f64> {
+        py.detach(|| self.inner.poly_extrapolate(&noisy_results, degree))
             .map_err(error_mitigation_error_to_py_err)
     }
 
-    fn exp_extrapolate(&self, noisy_results: Vec<f64>) -> PyResult<f64> {
-        self.inner
-            .exp_extrapolate(&noisy_results)
+    fn exp_extrapolate(&self, py: Python<'_>, noisy_results: Vec<f64>) -> PyResult<f64> {
+        py.detach(|| self.inner.exp_extrapolate(&noisy_results))
             .map_err(error_mitigation_error_to_py_err)
     }
 
@@ -538,7 +576,11 @@ impl PyZNEMitigation {
     }
 }
 
-#[pyclass(name = "VirtualDistillation", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "VirtualDistillation",
+    module = "cqlib.error_mitigation",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyVirtualDistillation {
     inner: VirtualDistillation,
@@ -564,15 +606,15 @@ impl PyVirtualDistillation {
             .map_err(error_mitigation_error_to_py_err)
     }
 
-    fn build_copy_swap_circuit(&self) -> PyResult<PyCircuit> {
-        self.inner
-            .build_copy_swap_circuit()
+    fn build_copy_swap_circuit(&self, py: Python<'_>) -> PyResult<PyCircuit> {
+        py.detach(|| self.inner.build_copy_swap_circuit())
             .map(PyCircuit::from)
             .map_err(|error| crate::circuit::error::CircuitError::new_err(error.to_string()))
     }
 
     fn run_denominator_circuit(
         &self,
+        py: Python<'_>,
         shots: usize,
         estimator: &Bound<'_, PyAny>,
     ) -> PyResult<(f64, f64)> {
@@ -580,18 +622,21 @@ impl PyVirtualDistillation {
             return Err(PyTypeError::new_err("estimator must be callable"));
         }
 
-        let estimator_error = RefCell::new(None);
-        let result = self
-            .inner
-            .run_denominator_circuit(shots, &|circuit, hamiltonian, shots| {
-                call_python_estimator(estimator, &estimator_error, circuit, hamiltonian, shots)
-            });
+        let estimator = estimator.clone().unbind();
+        let estimator_error = Mutex::new(None);
+        let result = py.detach(|| {
+            self.inner
+                .run_denominator_circuit(shots, &|circuit, hamiltonian, shots| {
+                    call_python_estimator(&estimator, &estimator_error, circuit, hamiltonian, shots)
+                })
+        });
         take_estimator_error(estimator_error)?;
         result.map_err(|error| crate::circuit::error::CircuitError::new_err(error.to_string()))
     }
 
     fn run_numerator_circuit(
         &self,
+        py: Python<'_>,
         hamiltonian: PyRef<'_, PyHamiltonian>,
         shots: usize,
         estimator: &Bound<'_, PyAny>,
@@ -600,20 +645,22 @@ impl PyVirtualDistillation {
             return Err(PyTypeError::new_err("estimator must be callable"));
         }
 
-        let estimator_error = RefCell::new(None);
-        let result = self.inner.run_numerator_circuit(
-            &hamiltonian.inner,
-            shots,
-            &|circuit, hamiltonian, shots| {
-                call_python_estimator(estimator, &estimator_error, circuit, hamiltonian, shots)
-            },
-        );
+        let hamiltonian = hamiltonian.inner.clone();
+        let estimator = estimator.clone().unbind();
+        let estimator_error = Mutex::new(None);
+        let result = py.detach(|| {
+            self.inner
+                .run_numerator_circuit(&hamiltonian, shots, &|circuit, hamiltonian, shots| {
+                    call_python_estimator(&estimator, &estimator_error, circuit, hamiltonian, shots)
+                })
+        });
         take_estimator_error(estimator_error)?;
         result.map_err(error_mitigation_error_to_py_err)
     }
 
     fn run_vd(
         &self,
+        py: Python<'_>,
         hamiltonian: PyRef<'_, PyHamiltonian>,
         shots_numerator: usize,
         shots_denominator: usize,
@@ -623,15 +670,19 @@ impl PyVirtualDistillation {
             return Err(PyTypeError::new_err("estimator must be callable"));
         }
 
-        let estimator_error = RefCell::new(None);
-        let result = self.inner.run_vd(
-            &hamiltonian.inner,
-            shots_numerator,
-            shots_denominator,
-            &|circuit, hamiltonian, shots| {
-                call_python_estimator(estimator, &estimator_error, circuit, hamiltonian, shots)
-            },
-        );
+        let hamiltonian = hamiltonian.inner.clone();
+        let estimator = estimator.clone().unbind();
+        let estimator_error = Mutex::new(None);
+        let result = py.detach(|| {
+            self.inner.run_vd(
+                &hamiltonian,
+                shots_numerator,
+                shots_denominator,
+                &|circuit, hamiltonian, shots| {
+                    call_python_estimator(&estimator, &estimator_error, circuit, hamiltonian, shots)
+                },
+            )
+        });
         take_estimator_error(estimator_error)?;
         result.map_err(error_mitigation_error_to_py_err)
     }
@@ -649,7 +700,11 @@ impl PyVirtualDistillation {
     }
 }
 
-#[pyclass(name = "ErrorMitigation", module = "cqlib.error_mitigation")]
+#[pyclass(
+    name = "ErrorMitigation",
+    module = "cqlib.error_mitigation",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyErrorMitigation {
     inner: ErrorMitigation,
@@ -666,6 +721,7 @@ impl PyErrorMitigation {
 
     fn run(
         &mut self,
+        py: Python<'_>,
         hamiltonian: PyRef<'_, PyHamiltonian>,
         run_args: PyRunArgs,
         estimator: &Bound<'_, PyAny>,
@@ -674,21 +730,28 @@ impl PyErrorMitigation {
             return Err(PyTypeError::new_err("estimator must be callable"));
         }
 
-        let estimator_error = RefCell::new(None);
-        let result = self.inner.run(
-            &hamiltonian.inner,
-            run_args.inner,
-            &|circuit, hamiltonian, shots| {
-                call_python_estimator(estimator, &estimator_error, circuit, hamiltonian, shots)
-            },
-        );
+        let hamiltonian = hamiltonian.inner.clone();
+        let estimator = estimator.clone().unbind();
+        let estimator_error = Mutex::new(None);
+        let result = py.detach(|| {
+            self.inner.run(
+                &hamiltonian,
+                run_args.inner,
+                &|circuit, hamiltonian, shots| {
+                    call_python_estimator(&estimator, &estimator_error, circuit, hamiltonian, shots)
+                },
+            )
+        });
         take_estimator_error(estimator_error)?;
         result.map_err(error_mitigation_error_to_py_err)
     }
 
-    fn get_mitigated(&mut self, process_args: PyProcessArgs) -> PyResult<PyMitigatedResult> {
-        self.inner
-            .get_mitigated(process_args.inner)
+    fn get_mitigated(
+        &mut self,
+        py: Python<'_>,
+        process_args: PyProcessArgs,
+    ) -> PyResult<PyMitigatedResult> {
+        py.detach(|| self.inner.get_mitigated(process_args.inner))
             .map(PyMitigatedResult::from)
             .map_err(error_mitigation_error_to_py_err)
     }

@@ -69,6 +69,31 @@ rule decompose_xy2m_to_rz_ry {
     rewrite { RZ(π/2 - phi) 0, RY(-π/2) 0, RZ(phi - π/2) 0 }
 }
 
+rule decompose_rxy_to_rx_ry {
+    match { RXY(theta, phi) 0 }
+    rewrite { RX(-π/2) 0, RY(-phi) 0, RX(theta) 0, RY(phi) 0, RX(π/2) 0 }
+}
+
+rule decompose_xy_to_rx_ry {
+    match { XY(phi) 0 }
+    rewrite { RX(-π/2) 0, RY(-phi) 0, RX(π) 0, RY(phi) 0, RX(π/2) 0 }
+}
+
+rule decompose_xy2p_to_rx_ry {
+    match { XY2P(phi) 0 }
+    rewrite { RX(-π/2) 0, RY(-phi) 0, RX(π/2) 0, RY(phi) 0, RX(π/2) 0 }
+}
+
+rule decompose_xy2m_to_rx_ry {
+    match { XY2M(phi) 0 }
+    rewrite { RX(-π/2) 0, RY(-phi) 0, RX(-π/2) 0, RY(phi) 0, RX(π/2) 0 }
+}
+
+rule decompose_u_to_rx_ry {
+    match { U(theta, phi, lambda) 0 }
+    rewrite { RX(-π/2) 0, RY(lambda - π/2) 0, RX(theta) 0, RY(phi + π/2) 0, RX(π/2) 0, GPhase((phi + lambda) / 2) }
+}
+
 rule decompose_rx_to_ry {
     match { RX(theta) 0 }
     rewrite { RZ(π/2) 0, RY(theta) 0, RZ(-π/2) 0 }

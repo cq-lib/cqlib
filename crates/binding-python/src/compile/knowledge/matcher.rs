@@ -32,7 +32,11 @@ fn operation_parts(
 }
 
 /// Symbolic parameter and qubit bindings produced by a structural rule match.
-#[pyclass(name = "MatchBindings", module = "cqlib.compile.knowledge")]
+#[pyclass(
+    name = "MatchBindings",
+    module = "cqlib.compile.knowledge",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug, Default)]
 pub struct PyMatchBindings {
     pub(crate) inner: MatchBindings,

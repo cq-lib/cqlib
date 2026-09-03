@@ -12,7 +12,6 @@
 
 use super::*;
 use crate::compile::knowledge::rule::Condition;
-use crate::compile::knowledge::rule_equivalence::VerifyResult;
 
 #[test]
 fn load_rules_from_str_ok() {
@@ -271,10 +270,12 @@ fn load_commutation_rule_file() {
             | "comm_rzx_x2p_1"
             | "comm_rzx_rzx" => {
                 let result = rule.verify_by_sampling(10, 1e-8).unwrap();
-                match result {
-                    VerifyResult::Equivalent | VerifyResult::SampledEqual { .. } => {}
-                    other => panic!("rule {} failed verification: {:?}", rule.name, other),
-                }
+                assert!(
+                    result.is_verified(),
+                    "rule {} failed verification: {:?}",
+                    rule.name,
+                    result
+                );
             }
             _ => {}
         }

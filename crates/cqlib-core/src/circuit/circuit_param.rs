@@ -48,6 +48,20 @@ pub enum CircuitParam {
     Fixed(f64),
 }
 
+impl PartialEq for CircuitParam {
+    /// Compares the circuit-local storage form: two parameters are equal only
+    /// when both are fixed with the same value, or both are indices into the
+    /// same parameter-table position. Indices from different circuits compare
+    /// by table position, not by the parameter they resolve to.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Index(lhs), Self::Index(rhs)) => lhs == rhs,
+            (Self::Fixed(lhs), Self::Fixed(rhs)) => lhs == rhs,
+            _ => false,
+        }
+    }
+}
+
 impl From<f64> for CircuitParam {
     fn from(v: f64) -> Self {
         Self::Fixed(v)
@@ -81,6 +95,20 @@ pub enum ParameterValue {
     Param(Parameter),
     /// A fixed floating-point value.
     Fixed(f64),
+}
+
+impl PartialEq for ParameterValue {
+    /// Compares the construction form: two values are equal only when both
+    /// are symbolic with structurally equal expressions, or both are fixed
+    /// with the same value. A symbolic parameter and its evaluated fixed
+    /// value compare unequal even when numerically identical.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Param(lhs), Self::Param(rhs)) => lhs == rhs,
+            (Self::Fixed(lhs), Self::Fixed(rhs)) => lhs == rhs,
+            _ => false,
+        }
+    }
 }
 
 impl From<f64> for ParameterValue {

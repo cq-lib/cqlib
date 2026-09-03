@@ -22,7 +22,7 @@ use crate::circuit::error::CircuitError;
 use crate::circuit::gate::{FrozenCircuit, Instruction, StandardGate, UnitaryGate};
 use crate::circuit::parameter::Parameter;
 use crate::circuit::symbolic_matrix::{SymbolicMatrix, standard_gate_symbolic_matrix};
-use crate::util::test_utils::{assert_is_unitary, assert_matrix_approx_eq};
+use crate::circuit::test_utils::{assert_is_unitary, assert_matrix_approx_eq};
 use ndarray::array;
 use num_complex::Complex64;
 use std::f64::consts::{PI, SQRT_2};

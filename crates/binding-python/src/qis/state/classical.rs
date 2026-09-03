@@ -14,12 +14,13 @@
 
 use crate::circuit::classical::{PyClassicalType, PyClassicalValue, PyClassicalVar};
 use crate::device::result::PyOutcome;
+use crate::utils::hash_value;
 use cqlib_core::qis::state::{ClassicalState, RuntimeValue};
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 
 /// A typed runtime classical value produced during circuit execution.
-#[pyclass(name = "RuntimeValue", module = "cqlib.qis.state")]
+#[pyclass(name = "RuntimeValue", module = "cqlib.qis.state", skip_from_py_object)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PyRuntimeValue {
     pub(crate) inner: RuntimeValue,
@@ -93,6 +94,19 @@ impl PyRuntimeValue {
         }
     }
 
+    /// Compares two runtime values by value: same kind, width, and payload.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyRuntimeValue>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyRef<'_, PyRuntimeValue>>()?;
+        Ok(self.inner == other.inner)
+    }
+
+    fn __hash__(&self) -> u64 {
+        hash_value(&self.inner)
+    }
+
     fn __copy__(&self) -> Self {
         self.clone()
     }
@@ -111,14 +125,18 @@ impl PyRuntimeValue {
             RuntimeValue::BitVec { width, bits } => format!(
                 "RuntimeValue.bit_vec(width={}, bits='{}')",
                 width,
-                bits.to_string(*width as usize)
+                bits.to_bitstring(*width as usize)
             ),
         }
     }
 }
 
 /// Runtime classical state produced while executing a circuit.
-#[pyclass(name = "ClassicalState", module = "cqlib.qis.state")]
+#[pyclass(
+    name = "ClassicalState",
+    module = "cqlib.qis.state",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyClassicalState {
     pub(crate) inner: ClassicalState,

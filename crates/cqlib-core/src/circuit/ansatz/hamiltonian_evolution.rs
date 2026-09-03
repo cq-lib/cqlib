@@ -99,7 +99,7 @@ use rand::rngs::StdRng;
 ///
 /// The strategy determines whether the resulting circuit is an exact or approximate
 /// implementation of $e^{-iHt}$.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvolutionStrategy {
     /// **Automatically detect** the best strategy:
     ///

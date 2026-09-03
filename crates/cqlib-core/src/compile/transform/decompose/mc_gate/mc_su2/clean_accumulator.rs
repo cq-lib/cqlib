@@ -17,10 +17,7 @@
 //! and uncomputes the accumulator. The MCX operations use the existing
 //! many-clean-ancilla V-chain.
 
-use super::{
-    DECOMPOSE_MC_SU2_NAME, Su2RotationAxis,
-    utils::{standard_controlled_rotation, standard_rotation, validate_distinct_qubits},
-};
+use super::{DECOMPOSE_MC_SU2_NAME, Su2RotationAxis, utils::validate_distinct_qubits};
 use crate::circuit::{ParameterValue, Qubit, operation::ValueOperation};
 use crate::compile::error::CompilerError;
 use crate::compile::transform::decompose::mc_gate::mcx::decompose_mcx_n_clean;
@@ -51,9 +48,9 @@ pub fn decompose_mc_su2_n_clean(
     if controls.len() <= 1 {
         validate_distinct_qubits(&[controls, &target_group])?;
         let gate = if controls.is_empty() {
-            standard_rotation(axis)
+            axis.rotation_gate()
         } else {
-            standard_controlled_rotation(axis)
+            axis.controlled_rotation_gate()
         };
         return Ok(vec![ValueOperation::from_standard(
             gate,
@@ -83,7 +80,7 @@ pub fn decompose_mc_su2_n_clean(
     let mut operations = Vec::with_capacity(2 * mcx.len() + 1);
     operations.extend(mcx.iter().cloned());
     operations.push(ValueOperation::from_standard(
-        standard_controlled_rotation(axis),
+        axis.controlled_rotation_gate(),
         [accumulator, target],
         [theta.clone()],
     ));

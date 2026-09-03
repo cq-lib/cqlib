@@ -12,7 +12,122 @@
 
 use super::*;
 
-use crate::circuit::Circuit;
+use crate::circuit::{
+    Circuit, CircuitId, ClassicalExpr, ClassicalType, ClassicalValue, ClassicalVar,
+};
+
+#[test]
+fn standard_gate_query_distinguishes_instruction_kinds() {
+    assert_eq!(
+        Instruction::Standard(StandardGate::H).standard_gate(),
+        Some(StandardGate::H)
+    );
+    assert_eq!(
+        Instruction::Directive(Directive::Barrier).standard_gate(),
+        None
+    );
+}
+
+#[test]
+fn stable_names_cover_every_instruction_category() {
+    let circuit_id = CircuitId::new();
+    let measured = ClassicalValue::new(circuit_id, 0, ClassicalType::Bit);
+    let circuit_gate = CircuitGate::new("composite", FrozenCircuit::new(Circuit::new(1))).unwrap();
+    let cases = [
+        (Instruction::Standard(StandardGate::CX), "CX", "standard"),
+        (
+            Instruction::McGate(Box::new(MCGate::new(2, StandardGate::X))),
+            "C2-X",
+            "mcgate",
+        ),
+        (
+            Instruction::UnitaryGate(Box::new(UnitaryGate::new("oracle", 1, 0))),
+            "oracle",
+            "unitary",
+        ),
+        (
+            Instruction::CircuitGate(Box::new(circuit_gate)),
+            "composite",
+            "circuit",
+        ),
+        (
+            Instruction::Directive(Directive::Barrier),
+            "barrier",
+            "directive",
+        ),
+        (
+            Instruction::ClassicalData(ClassicalDataOp::MeasureBit { result: measured }),
+            "measure_bit",
+            "classical_data",
+        ),
+        (
+            Instruction::ClassicalControl(ClassicalControlOp::Break),
+            "break",
+            "classical_control",
+        ),
+        (Instruction::Delay, "delay", "delay"),
+    ];
+
+    for (instruction, expected_name, expected_type) in cases {
+        assert_eq!(instruction.name(), expected_name);
+        assert_eq!(instruction.instruction_type(), expected_type);
+        assert_eq!(instruction.to_string(), expected_name);
+    }
+
+    assert_eq!(MCGate::new(0, StandardGate::H).name(), "H");
+    assert_eq!(Directive::Measure.name(), "measure");
+    assert_eq!(Directive::Reset.name(), "reset");
+}
+
+#[test]
+fn quantum_gate_classification_excludes_side_effecting_instructions() {
+    let circuit_id = CircuitId::new();
+    let measured = ClassicalValue::new(circuit_id, 0, ClassicalType::Bit);
+
+    for instruction in [
+        Instruction::Standard(StandardGate::H),
+        Instruction::McGate(Box::new(MCGate::new(2, StandardGate::X))),
+        Instruction::UnitaryGate(Box::new(UnitaryGate::new("u", 1, 0))),
+        Instruction::CircuitGate(Box::new(
+            CircuitGate::new("c", FrozenCircuit::new(Circuit::new(1))).unwrap(),
+        )),
+    ] {
+        assert!(instruction.is_quantum_gate());
+    }
+
+    for instruction in [
+        Instruction::Directive(Directive::Measure),
+        Instruction::Directive(Directive::Reset),
+        Instruction::Directive(Directive::Barrier),
+        Instruction::ClassicalData(ClassicalDataOp::MeasureBit { result: measured }),
+        Instruction::ClassicalControl(ClassicalControlOp::Continue),
+        Instruction::Delay,
+    ] {
+        assert!(!instruction.is_quantum_gate());
+    }
+}
+
+#[test]
+fn reports_measurements_and_classical_value_reads() {
+    let circuit_id = CircuitId::new();
+    let result = ClassicalValue::new(circuit_id, 0, ClassicalType::Bit);
+    let target = ClassicalVar::new(circuit_id, 0, ClassicalType::Bit);
+
+    let measurement = Instruction::ClassicalData(ClassicalDataOp::MeasureBit { result });
+    assert!(measurement.has_measurement());
+    assert!(!measurement.reads_value(result));
+
+    let store = Instruction::ClassicalData(ClassicalDataOp::Store {
+        target,
+        value: ClassicalExpr::value(result),
+    });
+    assert!(!store.has_measurement());
+    assert!(store.reads_value(result));
+
+    let gate = Instruction::Standard(StandardGate::X);
+    assert!(!gate.has_measurement());
+    assert!(!gate.reads_value(result));
+}
 
 #[test]
 fn canonicalize_form_collapses_supported_mc_gate_forms() {

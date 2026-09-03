@@ -82,7 +82,8 @@ use crate::ir::qasm2::ast::{
 use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Component, Path, PathBuf};
 
 /// Trait for abstracting file system access during OpenQASM parsing.
 ///
@@ -137,9 +138,10 @@ const CQLIB_BUILTIN_EXTENSION_GATES: &[&str] = &[
 
 /// Gate names declared by OpenQASM 2.0 qelib1.inc.
 ///
-/// User sources may call these gates after including qelib1.inc, but may not
-/// redefine them. OpenQASM identifiers are case-sensitive, so this list uses
-/// the exact lowercase spellings present in the bundled file.
+/// Cqlib treats qelib1 gates as compatibility builtins: user sources may call
+/// them without an explicit include, and may not redefine them. OpenQASM
+/// identifiers are case-sensitive, so this list uses the exact lowercase
+/// spellings present in qelib1.inc.
 const QELIB1_RESERVED_GATE_NAMES: &[&str] = &[
     "u3", "u2", "u1", "cx", "id", "x", "y", "z", "h", "s", "sdg", "t", "tdg", "rx", "ry", "rz",
     "cz", "cy", "ch", "ccx", "crz", "cu1", "cu3",
@@ -165,7 +167,7 @@ pub fn load<P: AsRef<Path>>(path: P) -> Result<Circuit, QasmParseError> {
     // Pass the parent directory as the base path for includes
     let base_path = path.parent().map(|p| p.to_path_buf());
 
-    parse_qasm_with_context(&content, base_path, resolver)
+    parse_qasm_file_with_context(&content, normalize_path(path), base_path, resolver)
 }
 
 /// Parse an OpenQASM 2.0 file and convert it to a [`Circuit`].
@@ -194,14 +196,93 @@ fn parse_qasm_with_context(
     base_path: Option<PathBuf>,
     resolver: Box<dyn QasmSourceResolver>,
 ) -> Result<Circuit, QasmParseError> {
+    parse_qasm_source_with_context(source, None, base_path, resolver)
+}
+
+fn parse_qasm_file_with_context(
+    source: &str,
+    root_path: PathBuf,
+    base_path: Option<PathBuf>,
+    resolver: Box<dyn QasmSourceResolver>,
+) -> Result<Circuit, QasmParseError> {
+    parse_qasm_source_with_context(source, Some(root_path), base_path, resolver)
+}
+
+fn parse_qasm_source_with_context(
+    source: &str,
+    root_path: Option<PathBuf>,
+    base_path: Option<PathBuf>,
+    resolver: Box<dyn QasmSourceResolver>,
+) -> Result<Circuit, QasmParseError> {
+    if let Some(literal) = first_oversized_integer_literal(source) {
+        return Err(QasmParseError::ParseError(format!(
+            "Integer literal '{literal}' exceeds supported i64 range"
+        )));
+    }
+
     let parser = parser::MainParser::new();
-    let program = match parser.parse(source) {
+    let parsed = catch_unwind(AssertUnwindSafe(|| parser.parse(source))).map_err(|payload| {
+        let message = if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else if let Some(message) = payload.downcast_ref::<&'static str>() {
+            (*message).to_string()
+        } else {
+            "OpenQASM 2.0 parser panicked".to_string()
+        };
+        QasmParseError::ParseError(message)
+    })?;
+    let program = match parsed {
         Ok(program) => program,
         Err(e) => return Err(QasmParseError::ParseError(format!("{:?}", e))),
     };
+    if (program.version - 2.0).abs() > f64::EPSILON {
+        return Err(QasmParseError::UnsupportedVersion(program.version));
+    }
 
-    let mut converter = AstToCircuit::new(base_path, resolver);
+    let mut converter = AstToCircuit::new_with_root(base_path, root_path, resolver);
     converter.convert(&program)
+}
+
+fn first_oversized_integer_literal(source: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            index += 1;
+            while index < bytes.len() && bytes[index] != b'"' {
+                index += 1;
+            }
+            index += usize::from(index < bytes.len());
+            continue;
+        }
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            index += 2;
+            while index < bytes.len() && bytes[index] != b'\n' && bytes[index] != b'\r' {
+                index += 1;
+            }
+            continue;
+        }
+        if !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        let prev = start.checked_sub(1).and_then(|idx| bytes.get(idx)).copied();
+        let next = bytes.get(index).copied();
+        if matches!(prev, Some(b'.' | b'e' | b'E')) || matches!(next, Some(b'.' | b'e' | b'E')) {
+            continue;
+        }
+
+        let literal = &source[start..index];
+        if literal.parse::<i64>().is_err() {
+            return Some(literal.to_string());
+        }
+    }
+    None
 }
 
 /// Errors that can occur during OpenQASM parsing and conversion.
@@ -236,6 +317,14 @@ pub enum QasmParseError {
     EvaluationError(String),
     /// Circular gate dependency detected (gate calls itself directly or indirectly)
     CircularGateDependency { gate: String, dependency: String },
+    /// Unsupported OpenQASM version for this loader
+    UnsupportedVersion(f64),
+    /// Duplicate declaration or namespace conflict
+    DuplicateDeclaration(String),
+    /// Include cycle detected
+    IncludeCycle(Vec<PathBuf>),
+    /// Opaque gate invocation is not representable in the Circuit IR
+    UnsupportedOpaqueGate(String),
 }
 
 impl std::fmt::Display for QasmParseError {
@@ -278,6 +367,25 @@ impl std::fmt::Display for QasmParseError {
                     gate, dependency
                 )
             }
+            QasmParseError::UnsupportedVersion(version) => {
+                write!(f, "Unsupported OpenQASM version {version}; expected 2.0")
+            }
+            QasmParseError::DuplicateDeclaration(s) => {
+                write!(f, "Duplicate declaration: {}", s)
+            }
+            QasmParseError::IncludeCycle(stack) => {
+                write!(f, "Include cycle detected: ")?;
+                for (index, path) in stack.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, " -> ")?;
+                    }
+                    write!(f, "{}", path.display())?;
+                }
+                Ok(())
+            }
+            QasmParseError::UnsupportedOpaqueGate(s) => {
+                write!(f, "Opaque gate '{}' cannot be invoked", s)
+            }
         }
     }
 }
@@ -319,8 +427,12 @@ struct AstToCircuit {
     creg_vars: HashMap<String, ClassicalVar>,
     /// Custom gate definitions (name -> definition)
     custom_gates: HashMap<String, CustomGateDef>,
+    /// User declarations across the OpenQASM namespace.
+    declarations: HashMap<String, DeclarationKind>,
     /// Base path for resolving relative include paths
     base_path: Option<PathBuf>,
+    /// Optional path of the top-level file being loaded.
+    root_path: Option<PathBuf>,
     /// Parsed include cache (path -> AST) to avoid re-parsing
     file_cache: HashMap<PathBuf, OpenQASMProgram>,
     /// Current gate expansion depth (for recursion limiting)
@@ -332,6 +444,14 @@ struct AstToCircuit {
     /// File system abstraction
     resolver: Box<dyn QasmSourceResolver>,
     qelib1_included: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeclarationKind {
+    QReg,
+    CReg,
+    Gate,
+    Opaque,
 }
 
 /// A custom gate definition that stores either AST or compiled CircuitGate
@@ -350,28 +470,45 @@ struct CustomGateDef {
 }
 
 impl AstToCircuit {
+    #[cfg(test)]
     fn new(base_path: Option<PathBuf>, resolver: Box<dyn QasmSourceResolver>) -> Self {
-        Self {
+        Self::new_with_root(base_path, None, resolver)
+    }
+
+    fn new_with_root(
+        base_path: Option<PathBuf>,
+        root_path: Option<PathBuf>,
+        resolver: Box<dyn QasmSourceResolver>,
+    ) -> Self {
+        let mut converter = Self {
             qregs: HashMap::new(),
             qreg_order: Vec::new(),
             cregs: HashMap::new(),
             creg_order: Vec::new(),
             creg_vars: HashMap::new(),
             custom_gates: HashMap::new(),
+            declarations: HashMap::new(),
             base_path,
+            root_path,
             file_cache: HashMap::new(),
             recursion_depth: 0,
             max_recursion_depth: DEFAULT_MAX_RECURSION_DEPTH,
             compiling_gates: HashSet::new(),
             resolver,
             qelib1_included: false,
-        }
+        };
+        converter
+            .register_qelib1_include()
+            .expect("built-in qelib1 gate construction should not fail");
+        converter
     }
 
     fn convert(&mut self, program: &OpenQASMProgram) -> Result<Circuit, QasmParseError> {
         // Phase 1: Discovery
         // Recursively traverse includes to find all qregs and gate definitions
-        self.discovery_pass(program)?;
+        let current_dir = self.base_path.clone();
+        let mut include_stack = self.initial_include_stack();
+        self.discovery_pass_with_context(program, current_dir.as_deref(), &mut include_stack)?;
 
         // Phase 1.5: Compile all custom gates
         // This must happen after all gate definitions are discovered
@@ -417,9 +554,20 @@ impl AstToCircuit {
 
         // Phase 2: Generation
         // Process operations
-        self.generation_pass(program, &mut circuit, &reg_start_map)?;
+        let mut include_stack = self.initial_include_stack();
+        self.generation_pass(
+            program,
+            &mut circuit,
+            &reg_start_map,
+            current_dir.as_deref(),
+            &mut include_stack,
+        )?;
 
         Ok(circuit)
+    }
+
+    fn initial_include_stack(&self) -> Vec<PathBuf> {
+        self.root_path.iter().cloned().collect()
     }
 
     /// Compile all custom gate definitions
@@ -483,17 +631,17 @@ impl AstToCircuit {
         let result = (|| {
             // Ensure dependencies are compiled
             for stmt in &body {
-                if let Statement::CustomGate(dep_name, _, _) = stmt {
-                    if self.custom_gates.contains_key(dep_name) {
-                        // Check if this dependency creates a cycle
-                        if self.compiling_gates.contains(dep_name) {
-                            return Err(QasmParseError::CircularGateDependency {
-                                gate: name.to_string(),
-                                dependency: dep_name.to_string(),
-                            });
-                        }
-                        self.compile_gate_if_needed(dep_name)?;
+                if let Statement::CustomGate(dep_name, _, _) = stmt
+                    && self.custom_gates.contains_key(dep_name)
+                {
+                    // Check if this dependency creates a cycle
+                    if self.compiling_gates.contains(dep_name) {
+                        return Err(QasmParseError::CircularGateDependency {
+                            gate: name.to_string(),
+                            dependency: dep_name.to_string(),
+                        });
                     }
+                    self.compile_gate_if_needed(dep_name)?;
                 }
             }
 
@@ -604,8 +752,12 @@ impl AstToCircuit {
         qubits: &[&str],
         circuit: Circuit,
     ) -> Result<CustomGateDef, QasmParseError> {
-        let circuit_gate = CircuitGate::new(name, FrozenCircuit::new(circuit))
-            .map_err(|e| QasmParseError::ConversionError(e.to_string()))?;
+        let circuit_gate = CircuitGate::with_signature(
+            name,
+            FrozenCircuit::new(circuit),
+            params.iter().map(|param| (*param).to_string()),
+        )
+        .map_err(|e| QasmParseError::ConversionError(e.to_string()))?;
         Ok(CustomGateDef {
             name: name.to_string(),
             params: params.iter().map(|param| (*param).to_string()).collect(),
@@ -616,7 +768,103 @@ impl AstToCircuit {
         })
     }
 
+    fn declare_name(&mut self, name: &str, kind: DeclarationKind) -> Result<(), QasmParseError> {
+        if let Some(existing) = self.declarations.get(name) {
+            return Err(QasmParseError::DuplicateDeclaration(format!(
+                "'{name}' declared as {existing:?} and {kind:?}"
+            )));
+        }
+        self.declarations.insert(name.to_string(), kind);
+        Ok(())
+    }
+
+    fn ensure_gate_name_allowed(&self, name: &str) -> Result<(), QasmParseError> {
+        if QELIB1_RESERVED_GATE_NAMES.contains(&name) {
+            return Err(QasmParseError::ReservedGateName(name.to_string()));
+        }
+        Ok(())
+    }
+
+    fn validate_gate_formals(params: &[String], qubits: &[String]) -> Result<(), QasmParseError> {
+        let mut seen_params = HashSet::new();
+        for param in params {
+            if !seen_params.insert(param) {
+                return Err(QasmParseError::InvalidArgument(format!(
+                    "Duplicate gate parameter formal '{param}'"
+                )));
+            }
+        }
+
+        let mut seen_qubits = HashSet::new();
+        for qubit in qubits {
+            if !seen_qubits.insert(qubit) {
+                return Err(QasmParseError::InvalidArgument(format!(
+                    "Duplicate gate qubit formal '{qubit}'"
+                )));
+            }
+            if seen_params.contains(qubit) {
+                return Err(QasmParseError::InvalidArgument(format!(
+                    "Gate formal '{qubit}' is both a parameter and a qubit"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn resolve_include_path(&self, current_dir: Option<&Path>, filename: &str) -> PathBuf {
+        let path = if let Some(base) = current_dir.or(self.base_path.as_deref()) {
+            base.join(filename)
+        } else {
+            PathBuf::from(filename)
+        };
+        normalize_path(path)
+    }
+
+    fn include_cycle_error(stack: &[PathBuf], target: &Path) -> QasmParseError {
+        let mut cycle = stack.to_vec();
+        cycle.push(target.to_path_buf());
+        QasmParseError::IncludeCycle(cycle)
+    }
+
+    fn parse_include(
+        &mut self,
+        target_path: &Path,
+        filename: &str,
+    ) -> Result<OpenQASMProgram, QasmParseError> {
+        if let Some(program) = self.file_cache.get(target_path) {
+            return Ok(program.clone());
+        }
+
+        let content = self.resolver.resolve_source(target_path).map_err(|e| {
+            QasmParseError::IoError(io::Error::new(
+                e.kind(),
+                format!("Include {}: {}", filename, e),
+            ))
+        })?;
+        let parser = parser::ProgramBodyParser::new();
+        let included_program = parser
+            .parse(&content)
+            .map_err(|e| QasmParseError::ParseError(format!("In {}: {:?}", filename, e)))?;
+
+        self.file_cache
+            .insert(target_path.to_path_buf(), included_program.clone());
+        Ok(included_program)
+    }
+
+    #[cfg(test)]
     fn discovery_pass(&mut self, program: &OpenQASMProgram) -> Result<(), QasmParseError> {
+        let current_dir = self.base_path.clone();
+        let mut include_stack = self.initial_include_stack();
+        self.discovery_pass_with_context(program, current_dir.as_deref(), &mut include_stack)
+    }
+
+    fn discovery_pass_with_context(
+        &mut self,
+        program: &OpenQASMProgram,
+        current_dir: Option<&Path>,
+        include_stack: &mut Vec<PathBuf>,
+    ) -> Result<(), QasmParseError> {
         for stmt in &program.statements {
             match stmt {
                 Statement::QReg(name, size) => {
@@ -625,10 +873,9 @@ impl AstToCircuit {
                             "Quantum register '{name}' must have positive width, got {size}"
                         )));
                     }
-                    if !self.qregs.contains_key(name) {
-                        self.qregs.insert(name.clone(), *size);
-                        self.qreg_order.push(name.clone());
-                    }
+                    self.declare_name(name, DeclarationKind::QReg)?;
+                    self.qregs.insert(name.clone(), *size);
+                    self.qreg_order.push(name.clone());
                 }
                 Statement::CReg(name, size) => {
                     if *size <= 0 {
@@ -636,15 +883,14 @@ impl AstToCircuit {
                             "Classical register '{name}' must have positive width, got {size}"
                         )));
                     }
-                    if !self.cregs.contains_key(name) {
-                        self.cregs.insert(name.clone(), *size);
-                        self.creg_order.push(name.clone());
-                    }
+                    self.declare_name(name, DeclarationKind::CReg)?;
+                    self.cregs.insert(name.clone(), *size);
+                    self.creg_order.push(name.clone());
                 }
                 Statement::GateDecl(data) => {
-                    if QELIB1_RESERVED_GATE_NAMES.contains(&data.name.as_str()) {
-                        return Err(QasmParseError::ReservedGateName(data.name.clone()));
-                    }
+                    self.ensure_gate_name_allowed(&data.name)?;
+                    self.declare_name(&data.name, DeclarationKind::Gate)?;
+                    Self::validate_gate_formals(&data.params, &data.qubits)?;
 
                     // Store AST for compilation after discovery
                     let decl = CustomGateDef {
@@ -663,39 +909,28 @@ impl AstToCircuit {
                         continue;
                     }
 
-                    // Resolve path
-                    let target_path = if let Some(base) = &self.base_path {
-                        base.join(filename)
-                    } else {
-                        PathBuf::from(filename)
-                    };
+                    let target_path = self.resolve_include_path(current_dir, filename);
+                    if include_stack.contains(&target_path) {
+                        return Err(Self::include_cycle_error(include_stack, &target_path));
+                    }
 
-                    if !self.file_cache.contains_key(&target_path) {
-                        let content_res = self.resolver.resolve_source(&target_path).map_err(|e| {
-                            QasmParseError::IoError(io::Error::new(
-                                e.kind(),
-                                format!("Include {}: {}", filename, e),
-                            ))
-                        });
-
-                        let content = content_res?;
-                        // Use ProgramBodyParser for included files (no version header required)
-                        let parser = parser::ProgramBodyParser::new();
-                        let included_program = parser.parse(&content).map_err(|e| {
-                            QasmParseError::ParseError(format!("In {}: {:?}", filename, e))
-                        })?;
-
-                        // Cache the parsed AST
-                        self.file_cache
-                            .insert(target_path.clone(), included_program.clone());
-
-                        self.discovery_pass(&included_program)?;
+                    let should_discover = !self.file_cache.contains_key(&target_path);
+                    let included_program = self.parse_include(&target_path, filename)?;
+                    if should_discover {
+                        include_stack.push(target_path.clone());
+                        let next_dir = target_path.parent().map(Path::to_path_buf);
+                        self.discovery_pass_with_context(
+                            &included_program,
+                            next_dir.as_deref(),
+                            include_stack,
+                        )?;
+                        include_stack.pop();
                     }
                 }
                 Statement::Opaque(name, params, qubits) => {
-                    if QELIB1_RESERVED_GATE_NAMES.contains(&name.as_str()) {
-                        return Err(QasmParseError::ReservedGateName(name.clone()));
-                    }
+                    self.ensure_gate_name_allowed(name)?;
+                    self.declare_name(name, DeclarationKind::Opaque)?;
+                    Self::validate_gate_formals(params, qubits)?;
 
                     // Opaque gates have no body - they cannot be expanded
                     let decl = CustomGateDef {
@@ -748,7 +983,8 @@ impl AstToCircuit {
 
         // Convert to CircuitGate
         let frozen = FrozenCircuit::new(gate_circuit);
-        CircuitGate::new(name, frozen).map_err(|e| QasmParseError::ConversionError(e.to_string()))
+        CircuitGate::with_signature(name, frozen, params.iter().cloned())
+            .map_err(|e| QasmParseError::ConversionError(e.to_string()))
     }
 
     /// Build a single statement in a gate body
@@ -878,12 +1114,12 @@ impl AstToCircuit {
                     OpCode::Mul => l * r,
                     OpCode::Div => {
                         // Check for division by zero in constant case
-                        if let Ok(val) = r.evaluate(&None) {
-                            if val == 0.0 {
-                                return Err(QasmParseError::EvaluationError(
-                                    "Division by zero".to_string(),
-                                ));
-                            }
+                        if let Ok(val) = r.evaluate(&None)
+                            && val == 0.0
+                        {
+                            return Err(QasmParseError::EvaluationError(
+                                "Division by zero".to_string(),
+                            ));
                         }
                         l / r
                     }
@@ -1093,6 +1329,8 @@ impl AstToCircuit {
         program: &OpenQASMProgram,
         circuit: &mut Circuit,
         reg_start_map: &HashMap<String, usize>,
+        current_dir: Option<&Path>,
+        include_stack: &mut Vec<PathBuf>,
     ) -> Result<(), QasmParseError> {
         for stmt in &program.statements {
             match stmt {
@@ -1101,17 +1339,25 @@ impl AstToCircuit {
                         continue;
                     }
 
-                    let target_path = if let Some(base) = &self.base_path {
-                        base.join(filename)
-                    } else {
-                        PathBuf::from(filename)
-                    };
+                    let target_path = self.resolve_include_path(current_dir, filename);
+                    if include_stack.contains(&target_path) {
+                        return Err(Self::include_cycle_error(include_stack, &target_path));
+                    }
 
                     // Retrieve from cache instead of re-parsing
                     // Clone the program to avoid borrow issues
                     let included_program = self.file_cache.get(&target_path).cloned();
                     if let Some(included) = included_program {
-                        self.generation_pass(&included, circuit, reg_start_map)?;
+                        include_stack.push(target_path.clone());
+                        let next_dir = target_path.parent().map(Path::to_path_buf);
+                        self.generation_pass(
+                            &included,
+                            circuit,
+                            reg_start_map,
+                            next_dir.as_deref(),
+                            include_stack,
+                        )?;
+                        include_stack.pop();
                     } else {
                         // Should not happen if discovery pass worked correctly
                         return Err(QasmParseError::ConversionError(format!(
@@ -1139,44 +1385,7 @@ impl AstToCircuit {
                     self.append_measurement(circuit, qarg, carg, reg_start_map)?;
                 }
                 Statement::CustomGate(name, params, args) => {
-                    // Convert parameters to ParameterValues (symbolic, not evaluated)
-                    let mut param_values: SmallVec<[ParameterValue; 3]> = smallvec![];
-                    let empty_param_map: HashMap<String, Parameter> = HashMap::new();
-                    for e in params {
-                        let param = Self::expr_to_parameter(e, &empty_param_map)?;
-                        param_values.push(ParameterValue::from(param));
-                    }
-
-                    let qubits = self.resolve_global_args(args, reg_start_map)?;
-
-                    // Try to find the gate definition
-                    if let Some(gate_def) = self.custom_gates.get(name) {
-                        if let Some(ref cg) = gate_def.circuit_gate {
-                            // Add the CircuitGate directly - preserves the gate structure
-                            circuit
-                                .append(
-                                    Instruction::CircuitGate(Box::new(cg.clone())),
-                                    qubits,
-                                    param_values,
-                                    None,
-                                )
-                                .map_err(|e| QasmParseError::ConversionError(e.to_string()))?;
-                        } else {
-                            // Opaque gate - cannot be added
-                            return Err(QasmParseError::UndefinedGate(format!(
-                                "Opaque gate {} cannot be used",
-                                name
-                            )));
-                        }
-                    } else {
-                        // Try standard gate
-                        self.append_standard_gate_to_circuit(
-                            circuit,
-                            name,
-                            &param_values,
-                            &qubits,
-                        )?;
-                    }
+                    self.append_gate_invocation(circuit, name, params, args, reg_start_map)?;
                 }
                 Statement::If(creg, value, stmt) => {
                     let condition = self.build_condition(creg, *value)?;
@@ -1191,6 +1400,84 @@ impl AstToCircuit {
             }
         }
         Ok(())
+    }
+
+    fn append_gate_invocation(
+        &self,
+        circuit: &mut Circuit,
+        name: &str,
+        params: &[Expression],
+        args: &[Argument],
+        reg_start_map: &HashMap<String, usize>,
+    ) -> Result<(), QasmParseError> {
+        let param_values = Self::resolve_invocation_params(params)?;
+        let arg_groups = args
+            .iter()
+            .map(|arg| self.resolve_global_args_single_or_register(arg, reg_start_map))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let width = arg_groups.iter().map(Vec::len).max().ok_or_else(|| {
+            QasmParseError::InvalidArgument(format!("Gate '{name}' has no arguments"))
+        })?;
+
+        for group in &arg_groups {
+            if group.len() != 1 && group.len() != width {
+                return Err(QasmParseError::InvalidArgument(format!(
+                    "Cannot broadcast gate '{name}': argument widths must be 1 or {width}, got {}",
+                    group.len()
+                )));
+            }
+        }
+
+        for index in 0..width {
+            let qubits = arg_groups
+                .iter()
+                .map(|group| group[if group.len() == 1 { 0 } else { index }])
+                .collect::<Vec<_>>();
+            self.append_single_gate_invocation(circuit, name, param_values.clone(), qubits)?;
+        }
+
+        Ok(())
+    }
+
+    fn resolve_invocation_params(
+        params: &[Expression],
+    ) -> Result<SmallVec<[ParameterValue; 3]>, QasmParseError> {
+        let mut param_values: SmallVec<[ParameterValue; 3]> = smallvec![];
+        let empty_param_map: HashMap<String, Parameter> = HashMap::new();
+        for expr in params {
+            let param = Self::expr_to_parameter(expr, &empty_param_map)?;
+            param_values.push(ParameterValue::from(param));
+        }
+        Ok(param_values)
+    }
+
+    fn append_single_gate_invocation(
+        &self,
+        circuit: &mut Circuit,
+        name: &str,
+        params: SmallVec<[ParameterValue; 3]>,
+        qubits: Vec<Qubit>,
+    ) -> Result<(), QasmParseError> {
+        if let Some(gate_def) = self.custom_gates.get(name) {
+            if gate_def.is_opaque {
+                return Err(QasmParseError::UnsupportedOpaqueGate(name.to_string()));
+            }
+            if let Some(ref cg) = gate_def.circuit_gate {
+                circuit
+                    .append(
+                        Instruction::CircuitGate(Box::new(cg.clone())),
+                        qubits,
+                        params,
+                        None,
+                    )
+                    .map_err(|e| QasmParseError::ConversionError(e.to_string()))?;
+                return Ok(());
+            }
+            return Err(QasmParseError::UndefinedGate(name.to_string()));
+        }
+
+        self.append_standard_gate_to_circuit(circuit, name, &params, &qubits)
     }
 
     fn append_measurement(
@@ -1251,33 +1538,7 @@ impl AstToCircuit {
     ) -> Result<(), QasmParseError> {
         match stmt {
             Statement::CustomGate(name, params, args) => {
-                let mut param_values: SmallVec<[ParameterValue; 3]> = smallvec![];
-                let empty_param_map: HashMap<String, Parameter> = HashMap::new();
-                for e in params {
-                    let param = Self::expr_to_parameter(e, &empty_param_map)?;
-                    param_values.push(ParameterValue::from(param));
-                }
-
-                let qubits = self.resolve_global_args(args, reg_start_map)?;
-                if let Some(gate_def) = self.custom_gates.get(name) {
-                    if let Some(ref cg) = gate_def.circuit_gate {
-                        circuit
-                            .append(
-                                Instruction::CircuitGate(Box::new(cg.clone())),
-                                qubits,
-                                param_values,
-                                None,
-                            )
-                            .map_err(|e| QasmParseError::ConversionError(e.to_string()))?;
-                    } else {
-                        return Err(QasmParseError::UndefinedGate(format!(
-                            "Opaque gate {} cannot be used",
-                            name
-                        )));
-                    }
-                } else {
-                    self.append_standard_gate_to_circuit(circuit, name, &param_values, &qubits)?;
-                }
+                self.append_gate_invocation(circuit, name, params, args, reg_start_map)?;
             }
             Statement::Reset(arg) => {
                 let qubits = self.resolve_global_args_single_or_register(arg, reg_start_map)?;
@@ -1469,6 +1730,22 @@ impl AstToCircuit {
             .map_err(|e| QasmParseError::ConversionError(e.to_string()))?;
         Ok(())
     }
+}
+
+fn normalize_path(path: impl AsRef<Path>) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.as_ref().components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+        }
+    }
+    normalized
 }
 
 #[cfg(test)]

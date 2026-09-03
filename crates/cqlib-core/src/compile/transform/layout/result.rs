@@ -29,7 +29,11 @@ use crate::device::Layout;
 pub struct LayoutResult {
     /// Selected logical-to-physical mapping.
     pub layout: Layout,
-    /// Optional score used to rank this layout against other candidates.
+    /// Optional observed score for this layout under the requested objective.
+    ///
+    /// Individual algorithms may use a different selection key. In
+    /// particular, SABRE selects its winner by predicted route quality under
+    /// the prepared routing cost model and reports this score for diagnostics.
     pub score: Option<LayoutScore>,
     /// Diagnostics describing search and scoring behavior.
     pub diagnostics: LayoutDiagnostics,

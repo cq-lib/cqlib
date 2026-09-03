@@ -14,6 +14,7 @@
 
 use super::rule::PyRule;
 use crate::circuit::PyInstruction;
+use crate::utils::hash_value;
 use cqlib_core::compile::knowledge::library::{
     RuleId, RuleKind, RuleLibrary, RuleLibraryError, RuleMetadata,
 };
@@ -25,8 +26,6 @@ use cqlib_core::compile::knowledge::rule_dsl::load::{
 };
 use pyo3::exceptions::{PyIOError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 fn library_error(error: RuleLibraryError) -> PyErr {
@@ -44,7 +43,7 @@ fn load_error(error: LoadError) -> PyErr {
 }
 
 /// Stable library-local identifier for a knowledge rule.
-#[pyclass(name = "RuleId", module = "cqlib.compile.knowledge")]
+#[pyclass(name = "RuleId", module = "cqlib.compile.knowledge", from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PyRuleId {
     pub(crate) inner: RuleId,
@@ -76,9 +75,7 @@ impl PyRuleId {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {
@@ -91,7 +88,7 @@ impl PyRuleId {
 }
 
 /// Coarse compiler use-case assigned to a knowledge rule.
-#[pyclass(name = "RuleKind", module = "cqlib.compile.knowledge")]
+#[pyclass(name = "RuleKind", module = "cqlib.compile.knowledge", from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PyRuleKind {
     pub(crate) inner: RuleKind,
@@ -194,9 +191,7 @@ impl PyRuleKind {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {
@@ -209,7 +204,11 @@ impl PyRuleKind {
 }
 
 /// Precomputed selection metadata for a rule in a library.
-#[pyclass(name = "RuleMetadata", module = "cqlib.compile.knowledge")]
+#[pyclass(
+    name = "RuleMetadata",
+    module = "cqlib.compile.knowledge",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyRuleMetadata {
     inner: RuleMetadata,
@@ -286,10 +285,14 @@ impl PyRuleMetadata {
 }
 
 /// Validated knowledge-rule collection with compiler selection indexes.
-#[pyclass(name = "RuleLibrary", module = "cqlib.compile.knowledge")]
+#[pyclass(
+    name = "RuleLibrary",
+    module = "cqlib.compile.knowledge",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug, Default)]
 pub struct PyRuleLibrary {
-    inner: RuleLibrary,
+    pub(crate) inner: RuleLibrary,
 }
 
 #[pymethods]

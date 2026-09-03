@@ -11,15 +11,15 @@
 // that they have been altered from the originals.
 
 use super::qcis::{decompose_qcis_n_clean, decompose_qcis_no_aux};
+use super::test_utils::{
+    EPSILON, assert_selected_matrix_columns_approx_eq, circuit_from_value_operations,
+    mc_gate_matrix,
+};
 use crate::circuit::value_instruction::ValueInstruction;
 use crate::circuit::{
     Instruction, Parameter, ParameterValue, Qubit, StandardGate, circuit_to_matrix,
 };
 use crate::compile::error::CompilerError;
-use crate::util::test_utils::{
-    EPSILON, assert_selected_matrix_columns_approx_eq, circuit_from_value_operations,
-    mc_gate_matrix,
-};
 #[test]
 fn zero_controls_emit_original_qcis_gate() {
     let target = Qubit::new(0);

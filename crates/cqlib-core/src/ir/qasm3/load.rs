@@ -15,10 +15,13 @@ use crate::circuit::{
     Circuit, ClassicalExpr, ClassicalType, ClassicalVar, Instruction, Parameter, ParameterValue,
     Qubit, StandardGate, UnitaryGate,
 };
+use crate::ir::io_errors_equivalent;
 use oq3_semantics::asg::{
     self, ArithOp, BinaryOp, CmpOp, Expr, ForIterable, GateModifier, GateOperand, IndexOperator,
     LValue, Literal, Stmt, TExpr, UnaryOp,
 };
+use oq3_semantics::context::Context;
+use oq3_semantics::semantic_error::{SemanticErrorKind, SemanticErrorList};
 use oq3_semantics::symbols::{SymbolId, SymbolIdResult, SymbolTable, SymbolType};
 use oq3_semantics::syntax_to_semantics;
 use oq3_semantics::types::{ArrayDims, Type};
@@ -27,6 +30,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -55,17 +59,15 @@ const DEFAULT_MAX_RECURSION_DEPTH: usize = 100;
 pub fn load<P: AsRef<Path>>(path: P) -> Result<Circuit, Qasm3ParseError> {
     let path = path.as_ref();
     let source = fs::read_to_string(path).map_err(Qasm3ParseError::IoError)?;
-    let source = normalize_openqasm3_header(&source);
-    let source = rewrite_scalar_bit_measurement_assignments(&source);
+    let source = prepare_source(&source)?;
+    let source = inject_extension_gate_definitions(&source);
     let search_paths = path.parent().map(|parent| vec![parent.to_path_buf()]);
-    let result =
-        syntax_to_semantics::parse_source_string(source, path.to_str(), search_paths.as_deref());
-    convert_parse_result(
-        result.program(),
-        result.symbol_table(),
-        result.any_syntax_errors(),
-        result.any_semantic_errors(),
-    )
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        syntax_to_semantics::parse_source_string(&source, path.to_str(), search_paths.as_deref())
+    }))
+    .map_err(frontend_panic_error)?;
+    let has_syntax_errors = result.any_syntax_errors();
+    convert_parse_result(result.take_context(), has_syntax_errors, &source)
 }
 
 /// Parse an OpenQASM 3 file and lower it into a Cqlib [`Circuit`].
@@ -97,16 +99,14 @@ pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Circuit, Qasm3ParseError> {
 /// assert_eq!(circuit.operations().len(), 1);
 /// ```
 pub fn loads(source: &str) -> Result<Circuit, Qasm3ParseError> {
-    let source = normalize_openqasm3_header(source);
-    let source = rewrite_scalar_bit_measurement_assignments(&source);
-    let result =
-        syntax_to_semantics::parse_source_string(source, Some("qasm3_source"), None::<&[PathBuf]>);
-    convert_parse_result(
-        result.program(),
-        result.symbol_table(),
-        result.any_syntax_errors(),
-        result.any_semantic_errors(),
-    )
+    let source = prepare_source(source)?;
+    let source = inject_extension_gate_definitions(&source);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        syntax_to_semantics::parse_source_string(&source, Some("qasm3_source"), None::<&[PathBuf]>)
+    }))
+    .map_err(frontend_panic_error)?;
+    let has_syntax_errors = result.any_syntax_errors();
+    convert_parse_result(result.take_context(), has_syntax_errors, &source)
 }
 
 /// Parse an OpenQASM 3 source string and lower it into a Cqlib [`Circuit`].
@@ -117,53 +117,328 @@ pub fn from_str(source: &str) -> Result<Circuit, Qasm3ParseError> {
 }
 
 fn convert_parse_result(
-    program: &asg::Program,
-    symbols: &SymbolTable,
+    context: Context,
     has_syntax_errors: bool,
-    has_semantic_errors: bool,
+    source: &str,
 ) -> Result<Circuit, Qasm3ParseError> {
     if has_syntax_errors {
         return Err(Qasm3ParseError::ParseError(
             "OpenQASM 3 parser reported syntax errors".to_string(),
         ));
     }
-    if has_semantic_errors {
+    let (program, semantic_errors, symbols) = context.as_tuple();
+    if semantic_errors.any_semantic_errors()
+        && !only_scalar_measurement_frontend_errors(&semantic_errors, source)
+    {
         return Err(Qasm3ParseError::SemanticError(
             "OpenQASM 3 parser reported semantic errors".to_string(),
         ));
     }
-    let mut lowering = LoweringContext::new(symbols);
-    lowering.lower_program(program)
+    let mut lowering = LoweringContext::new(&symbols);
+    lowering.lower_program(&program)
 }
 
-fn normalize_openqasm3_header(source: &str) -> String {
-    source.replacen("OPENQASM 3;", "OPENQASM 3.0;", 1)
+fn frontend_panic_error(payload: Box<dyn std::any::Any + Send>) -> Qasm3ParseError {
+    let message = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown OpenQASM front-end failure");
+    Qasm3ParseError::ParseError(format!("OpenQASM 3 front-end failed: {message}"))
 }
 
-fn rewrite_scalar_bit_measurement_assignments(source: &str) -> String {
-    // `oq3_semantics` 0.7.0 rejects `bit b; b = measure q[0];` even though
-    // indexed assignment to a one-bit array is accepted. Keep this compatibility
-    // rewrite deliberately narrow so variables that are read later are not
-    // silently changed from scalar `bit` to `bit[1]`.
-    if source.contains("/*") || source.contains("*/") {
-        return source.to_string();
+fn prepare_source(source: &str) -> Result<String, Qasm3ParseError> {
+    let layout = inspect_source(source)?;
+    reject_empty_pragmas(&layout.code_mask)?;
+
+    let source = normalize_single_quoted_includes(source, &layout)?;
+    let source = normalize_openqasm3_header(&source, &layout.code_mask);
+    let source = normalize_top_level_anonymous_scopes(&source)?;
+    normalize_bit_boolean_initializers(&source)
+}
+
+#[derive(Debug)]
+struct SourceLayout {
+    code_mask: String,
+    strings: Vec<StringSpan>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StringSpan {
+    start: usize,
+    end: usize,
+    quote: u8,
+}
+
+#[derive(Clone, Copy)]
+enum ScanState {
+    Code,
+    LineComment,
+    BlockComment,
+    String { start: usize, quote: u8 },
+}
+
+fn inspect_source(source: &str) -> Result<SourceLayout, Qasm3ParseError> {
+    let bytes = source.as_bytes();
+    let mut mask = bytes.to_vec();
+    let mut strings = Vec::new();
+    let mut state = ScanState::Code;
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        match state {
+            ScanState::Code if bytes[index..].starts_with(b"//") => {
+                mask[index] = b' ';
+                mask[index + 1] = b' ';
+                state = ScanState::LineComment;
+                index += 2;
+            }
+            ScanState::Code if bytes[index..].starts_with(b"/*") => {
+                mask[index] = b' ';
+                mask[index + 1] = b' ';
+                state = ScanState::BlockComment;
+                index += 2;
+            }
+            ScanState::Code if matches!(bytes[index], b'\'' | b'"') => {
+                let quote = bytes[index];
+                mask[index] = b' ';
+                state = ScanState::String {
+                    start: index,
+                    quote,
+                };
+                index += 1;
+            }
+            ScanState::Code => index += 1,
+            ScanState::LineComment if matches!(bytes[index], b'\n' | b'\r') => {
+                state = ScanState::Code;
+                index += 1;
+            }
+            ScanState::LineComment => {
+                mask[index] = b' ';
+                index += 1;
+            }
+            ScanState::BlockComment if bytes[index..].starts_with(b"/*") => {
+                return Err(Qasm3ParseError::ParseError(
+                    "nested block comments are not valid OpenQASM 3".to_string(),
+                ));
+            }
+            ScanState::BlockComment if bytes[index..].starts_with(b"*/") => {
+                mask[index] = b' ';
+                mask[index + 1] = b' ';
+                state = ScanState::Code;
+                index += 2;
+            }
+            ScanState::BlockComment => {
+                if !matches!(bytes[index], b'\n' | b'\r') {
+                    mask[index] = b' ';
+                }
+                index += 1;
+            }
+            ScanState::String { start, quote } if bytes[index] == quote => {
+                mask[index] = b' ';
+                strings.push(StringSpan {
+                    start,
+                    end: index,
+                    quote,
+                });
+                state = ScanState::Code;
+                index += 1;
+            }
+            ScanState::String { .. } if matches!(bytes[index], b'\n' | b'\r') => {
+                return Err(Qasm3ParseError::ParseError(
+                    "unterminated string literal".to_string(),
+                ));
+            }
+            ScanState::String { .. } => {
+                mask[index] = b' ';
+                index += 1;
+            }
+        }
     }
 
-    let Some(rewrites) = scalar_bit_measurement_rewrites(source) else {
+    match state {
+        ScanState::BlockComment => {
+            return Err(Qasm3ParseError::ParseError(
+                "unterminated block comment".to_string(),
+            ));
+        }
+        ScanState::String { .. } => {
+            return Err(Qasm3ParseError::ParseError(
+                "unterminated string literal".to_string(),
+            ));
+        }
+        ScanState::Code | ScanState::LineComment => {}
+    }
+
+    let code_mask = String::from_utf8(mask).expect("source mask preserves UTF-8");
+    Ok(SourceLayout { code_mask, strings })
+}
+
+fn reject_empty_pragmas(code_mask: &str) -> Result<(), Qasm3ParseError> {
+    if code_mask
+        .lines()
+        .any(|line| matches!(line.trim(), "pragma" | "#pragma"))
+    {
+        return Err(Qasm3ParseError::ParseError(
+            "pragma requires content on the same line".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_single_quoted_includes(
+    source: &str,
+    layout: &SourceLayout,
+) -> Result<String, Qasm3ParseError> {
+    let mut bytes = source.as_bytes().to_vec();
+    for span in layout.strings.iter().filter(|span| span.quote == b'\'') {
+        let line_start = layout.code_mask[..span.start]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        let prefix = layout.code_mask[line_start..span.start].trim_end();
+        if prefix.split_whitespace().last() != Some("include") {
+            continue;
+        }
+        let line_end = layout.code_mask[span.end + 1..]
+            .find('\n')
+            .map_or(layout.code_mask.len(), |offset| span.end + 1 + offset);
+        if !layout.code_mask[span.end + 1..line_end]
+            .trim_start()
+            .starts_with(';')
+        {
+            continue;
+        }
+        if source.as_bytes()[span.start + 1..span.end].contains(&b'"') {
+            return Err(Qasm3ParseError::UnsupportedFeature(
+                "single-quoted include path containing a double quote".to_string(),
+            ));
+        }
+        bytes[span.start] = b'"';
+        bytes[span.end] = b'"';
+    }
+    Ok(String::from_utf8(bytes).expect("quote normalization preserves UTF-8"))
+}
+
+fn normalize_openqasm3_header(source: &str, code_mask: &str) -> String {
+    let Some(captures) = short_header_regex().captures(code_mask) else {
         return source.to_string();
     };
-    if rewrites.is_empty() {
+    let Some(major) = captures.name("major") else {
+        return source.to_string();
+    };
+    let mut normalized = source.to_string();
+    normalized.insert_str(major.end(), ".0");
+    normalized
+}
+
+fn normalize_top_level_anonymous_scopes(source: &str) -> Result<String, Qasm3ParseError> {
+    let layout = inspect_source(source)?;
+    let bytes = layout.code_mask.as_bytes();
+    let mut depth = 0usize;
+    let mut statement_start = 0usize;
+    let mut insertions = Vec::new();
+
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match byte {
+            b';' if depth == 0 => statement_start = index + 1,
+            b'{' if depth == 0 => {
+                if layout.code_mask[statement_start..index].trim().is_empty() {
+                    insertions.push(index);
+                }
+                depth = 1;
+            }
+            b'{' => depth += 1,
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    statement_start = index + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut normalized = source.to_string();
+    for index in insertions.into_iter().rev() {
+        // oq3_semantics 0.7.0 panics on anonymous BlockExpr. A constant-true
+        // branch gives its parser the same lexical scope and execution semantics.
+        normalized.insert_str(index, "if (true) ");
+    }
+    Ok(normalized)
+}
+
+fn normalize_bit_boolean_initializers(source: &str) -> Result<String, Qasm3ParseError> {
+    let layout = inspect_source(source)?;
+    let mut insertions = bit_boolean_initializer_regex()
+        .captures_iter(&layout.code_mask)
+        .filter_map(|captures| captures.name("value"))
+        .flat_map(|value| [(value.start(), "bit("), (value.end(), ")")])
+        .collect::<Vec<_>>();
+    insertions.sort_unstable_by_key(|(index, _)| *index);
+
+    let mut normalized = source.to_string();
+    for (index, value) in insertions.into_iter().rev() {
+        normalized.insert_str(index, value);
+    }
+    Ok(normalized)
+}
+
+fn inject_extension_gate_definitions(source: &str) -> String {
+    let definitions = [
+        (
+            "rxx",
+            "gate rxx(theta) a,b { h a; h b; cx a,b; rz(theta) b; cx a,b; h a; h b; }",
+        ),
+        (
+            "ryy",
+            "gate ryy(theta) a,b { rx(pi/2) a; rx(pi/2) b; cx a,b; rz(theta) b; cx a,b; rx(-pi/2) a; rx(-pi/2) b; }",
+        ),
+        (
+            "rzz",
+            "gate rzz(theta) a,b { cx a,b; rz(theta) b; cx a,b; }",
+        ),
+        (
+            "rzx",
+            "gate rzx(theta) a,b { h b; cx a,b; rz(theta) b; cx a,b; h b; }",
+        ),
+        (
+            "fsim",
+            "gate fsim(theta,phi) a,b { rxx(theta) a,b; ryy(theta) a,b; gphase(-phi/4); rz(-phi/2) a; rz(-phi/2) b; rzz(phi/2) a,b; }",
+        ),
+    ];
+    let injected = definitions
+        .iter()
+        .filter_map(|(name, definition)| {
+            if has_gate_definition(source, name) || !has_gate_call(source, name) {
+                None
+            } else {
+                Some(*definition)
+            }
+        })
+        .collect::<Vec<_>>();
+    if injected.is_empty() {
         return source.to_string();
     }
 
+    let insertion = format!("\n{}\n", injected.join("\n\n"));
     let mut lines = source
         .lines()
         .map(ToString::to_string)
         .collect::<Vec<String>>();
-    for rewrite in rewrites {
-        lines[rewrite.declaration_line] = rewrite.declaration_replacement;
-        lines[rewrite.assignment_line] = rewrite.assignment_replacement;
+    let insert_after = lines
+        .iter()
+        .rposition(|line| line.trim() == "include \"stdgates.inc\";")
+        .or_else(|| {
+            lines
+                .iter()
+                .position(|line| line.trim_start().starts_with("OPENQASM "))
+        });
+    if let Some(index) = insert_after {
+        lines.insert(index + 1, insertion);
+    } else {
+        lines.insert(0, insertion);
     }
+
     let mut rewritten = lines.join("\n");
     if source.ends_with('\n') {
         rewritten.push('\n');
@@ -171,118 +446,94 @@ fn rewrite_scalar_bit_measurement_assignments(source: &str) -> String {
     rewritten
 }
 
-#[derive(Debug)]
-struct ScalarBitMeasurementRewrite {
-    declaration_line: usize,
-    declaration_replacement: String,
-    assignment_line: usize,
-    assignment_replacement: String,
+fn has_gate_definition(source: &str, name: &str) -> bool {
+    gate_definition_regex(name).is_match(source)
 }
 
-fn scalar_bit_measurement_rewrites(source: &str) -> Option<Vec<ScalarBitMeasurementRewrite>> {
-    let mut declarations = HashMap::<String, (usize, String)>::new();
-    let mut duplicate_declarations = HashSet::<String>::new();
-    let mut assignments = Vec::<(String, usize, String)>::new();
+fn has_gate_call(source: &str, name: &str) -> bool {
+    gate_call_regex(name).is_match(source)
+}
 
-    for (line_index, line) in source.lines().enumerate() {
-        let (code, comment) = split_line_comment(line);
-        if let Some(captures) = scalar_bit_declaration_regex().captures(code) {
-            let name = captures.name("name")?.as_str().to_string();
-            let replacement = format!(
-                "{}bit[1] {};{}{}",
-                captures.name("indent")?.as_str(),
-                name,
-                captures.name("tail").map_or("", |tail| tail.as_str()),
-                comment
-            );
-            if declarations
-                .insert(name.clone(), (line_index, replacement))
-                .is_some()
-            {
-                duplicate_declarations.insert(name);
-            }
-            continue;
-        }
+fn only_scalar_measurement_frontend_errors(errors: &SemanticErrorList, source: &str) -> bool {
+    errors.include_errors().is_empty()
+        && !errors.is_empty()
+        && errors
+            .iter()
+            .all(|error| scalar_measurement_frontend_error(error, source))
+}
 
-        if let Some(captures) = scalar_bit_measurement_assignment_regex().captures(code) {
-            let name = captures.name("name")?.as_str().to_string();
-            let replacement = format!(
-                "{}{}[0] = measure {}[{}];{}{}",
-                captures.name("indent")?.as_str(),
-                name,
-                captures.name("qubit")?.as_str(),
-                captures.name("index")?.as_str(),
-                captures.name("tail").map_or("", |tail| tail.as_str()),
-                comment
-            );
-            assignments.push((name, line_index, replacement));
-        }
+fn scalar_measurement_frontend_error(
+    error: &oq3_semantics::semantic_error::SemanticError,
+    source: &str,
+) -> bool {
+    if !matches!(error.kind(), SemanticErrorKind::IncompatibleTypesError) {
+        return false;
     }
-
-    let mut rewrites = Vec::new();
-    for (name, assignment_line, assignment_replacement) in assignments {
-        if duplicate_declarations.contains(&name) || identifier_occurrences(source, &name) != 2 {
-            continue;
-        }
-        let Some((declaration_line, declaration_replacement)) = declarations.get(&name) else {
-            continue;
-        };
-        rewrites.push(ScalarBitMeasurementRewrite {
-            declaration_line: *declaration_line,
-            declaration_replacement: declaration_replacement.clone(),
-            assignment_line,
-            assignment_replacement,
-        });
-    }
-
-    Some(rewrites)
+    let range = error.range();
+    let start = u32::from(range.start()) as usize;
+    let end = u32::from(range.end()) as usize;
+    let Some(snippet) = source.get(start..end) else {
+        return false;
+    };
+    let Some(captures) = scalar_measurement_error_regex().captures(snippet) else {
+        return false;
+    };
+    let Some(target) = captures.name("target") else {
+        return false;
+    };
+    scalar_bit_declaration_count(source, target.as_str()) == 1
 }
 
-fn strip_line_comment(line: &str) -> &str {
-    split_line_comment(line).0
+fn scalar_bit_declaration_count(source: &str, identifier: &str) -> usize {
+    let Ok(layout) = inspect_source(source) else {
+        return 0;
+    };
+    let regex = Regex::new(&format!(
+        r"(?m)^[\t ]*bit[\t ]+{}[\t ]*;",
+        regex::escape(identifier)
+    ))
+    .expect("escaped identifier produces a valid regex");
+    regex.find_iter(&layout.code_mask).count()
 }
 
-fn split_line_comment(line: &str) -> (&str, &str) {
-    line.split_once("//")
-        .map_or((line, ""), |(before_comment, _comment)| {
-            (before_comment, &line[before_comment.len()..])
-        })
-}
-
-fn identifier_occurrences(source: &str, identifier: &str) -> usize {
-    identifier_regex()
-        .find_iter(
-            &source
-                .lines()
-                .map(strip_line_comment)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
-        .filter(|token| token.as_str() == identifier)
-        .count()
-}
-
-fn scalar_bit_declaration_regex() -> &'static Regex {
+fn short_header_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
-        Regex::new(r"^(?P<indent>\s*)bit\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;(?P<tail>\s*)$")
-            .expect("valid scalar bit declaration regex")
+        Regex::new(r"\A\s*OPENQASM\s+(?P<major>3)[\t \r\n]*;").expect("valid short header regex")
     })
 }
 
-fn scalar_bit_measurement_assignment_regex() -> &'static Regex {
+fn bit_boolean_initializer_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
         Regex::new(
-            r"^(?P<indent>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*measure\s+(?P<qubit>[A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(?P<index>\d+)\s*\]\s*;(?P<tail>\s*)$",
+            r"(?m)^[\t ]*bit[\t ]+[\p{L}\p{Nl}_][\p{L}\p{Nl}\p{Nd}_]*[\t ]*=[\t ]*(?P<value>true|false)[\t ]*;",
         )
-        .expect("valid scalar bit measurement assignment regex")
+        .expect("valid bit boolean initializer regex")
     })
 }
 
-fn identifier_regex() -> &'static Regex {
+fn scalar_measurement_error_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"[A-Za-z_][A-Za-z0-9_]*").expect("valid identifier regex"))
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?s)^\s*(?P<target>[\p{L}\p{Nl}_][\p{L}\p{Nl}\p{Nd}_]*)\s*=\s*measure\s+[\p{L}\p{Nl}_][\p{L}\p{Nl}\p{Nd}_]*\s*\[\s*\d+\s*\]\s*;?\s*$",
+        )
+        .expect("valid scalar measurement compatibility regex")
+    })
+}
+
+fn gate_definition_regex(name: &str) -> Regex {
+    Regex::new(&format!(r"(?m)^\s*gate\s+{}\b", regex::escape(name)))
+        .expect("valid gate definition regex")
+}
+
+fn gate_call_regex(name: &str) -> Regex {
+    Regex::new(&format!(
+        r"(?m)^\s*{}\s*(?:\(|[A-Za-z_])",
+        regex::escape(name)
+    ))
+    .expect("valid gate call regex")
 }
 
 /// Error returned while parsing or lowering OpenQASM 3 into Cqlib.
@@ -324,9 +575,7 @@ pub enum Qasm3ParseError {
 impl PartialEq for Qasm3ParseError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::IoError(lhs), Self::IoError(rhs)) => {
-                lhs.kind() == rhs.kind() && lhs.to_string() == rhs.to_string()
-            }
+            (Self::IoError(lhs), Self::IoError(rhs)) => io_errors_equivalent(lhs, rhs),
             (Self::ParseError(lhs), Self::ParseError(rhs)) => lhs == rhs,
             (Self::SemanticError(lhs), Self::SemanticError(rhs)) => lhs == rhs,
             (Self::ConversionError(lhs), Self::ConversionError(rhs)) => lhs == rhs,
@@ -471,20 +720,19 @@ impl<'a> LoweringContext<'a> {
     }
 
     fn lower_program(&mut self, program: &asg::Program) -> Result<Circuit, Qasm3ParseError> {
-        if let Some(version) = program.version() {
-            if version.major() != 3 {
-                return Err(Qasm3ParseError::UnsupportedFeature(format!(
-                    "OPENQASM major version {}",
-                    version.major()
-                )));
-            }
+        if let Some(version) = program.version()
+            && version.major() != 3
+        {
+            return Err(Qasm3ParseError::UnsupportedFeature(format!(
+                "OPENQASM major version {}",
+                version.major()
+            )));
         }
 
         let total_qubits = self.discover_quantum(program.stmts())?;
         self.discover_gates(program.stmts())?;
 
         let mut circuit = Circuit::new(total_qubits);
-        self.allocate_classical(program.stmts(), &mut circuit)?;
 
         for stmt in program.stmts() {
             self.lower_stmt(stmt, &mut circuit)?;
@@ -547,29 +795,26 @@ impl<'a> LoweringContext<'a> {
         Ok(())
     }
 
-    fn allocate_classical(
+    fn lower_classical_declaration(
         &mut self,
-        stmts: &[Stmt],
+        decl: &asg::DeclareClassical,
         circuit: &mut Circuit,
     ) -> Result<(), Qasm3ParseError> {
-        for stmt in stmts {
-            if let Stmt::DeclareClassical(decl) = stmt {
-                let id = self.symbol_id(decl.name())?;
-                let ty = self.classical_type(self.symbol_type(&id))?;
-                let var = circuit.var(ty);
-                self.classical.insert(id, var);
-                if let Some(initializer) = decl.initializer() {
-                    let value = self.lower_classical_expr(initializer)?;
-                    circuit.store(var, value)?;
-                }
-            }
+        let id = self.symbol_id(decl.name())?;
+        let ty = self.classical_type(self.symbol_type(&id))?;
+        let var = circuit.var(ty);
+        self.classical.insert(id, var);
+        if let Some(initializer) = decl.initializer() {
+            let value = self.lower_classical_expr(initializer)?;
+            circuit.store(var, value)?;
         }
         Ok(())
     }
 
     fn lower_stmt(&mut self, stmt: &Stmt, circuit: &mut Circuit) -> Result<(), Qasm3ParseError> {
         match stmt {
-            Stmt::DeclareQuantum(_) | Stmt::DeclareClassical(_) | Stmt::Include(_) => Ok(()),
+            Stmt::DeclareQuantum(_) | Stmt::Include(_) => Ok(()),
+            Stmt::DeclareClassical(decl) => self.lower_classical_declaration(decl, circuit),
             Stmt::GateDefinition(_) => Ok(()),
             Stmt::GateCall(call) => self.lower_gate_call(call, circuit),
             Stmt::GPhaseCall(call) => {
@@ -610,6 +855,14 @@ impl<'a> LoweringContext<'a> {
             }
             Stmt::If(op) => {
                 let condition = self.lower_condition(op.condition())?;
+                if condition.is_bool_true() {
+                    return self.lower_stmt_slice(op.then_branch().statements(), circuit);
+                }
+                if condition.is_bool_false() {
+                    return op.else_branch().map_or(Ok(()), |else_branch| {
+                        self.lower_stmt_slice(else_branch.statements(), circuit)
+                    });
+                }
                 if let Some(else_branch) = op.else_branch() {
                     let ctx = RefCell::new(self);
                     circuit.if_else(
@@ -961,7 +1214,17 @@ impl<'a> LoweringContext<'a> {
         }
 
         self.quantum = saved_quantum;
-        let gate = CircuitGate::new(self.symbol_name(id), FrozenCircuit::new(gate_circuit))?;
+        let signature_params = def
+            .params()
+            .unwrap_or(&[])
+            .iter()
+            .map(|param| self.symbol_id(param).map(|id| self.symbol_name(&id)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let gate = CircuitGate::with_signature(
+            self.symbol_name(id),
+            FrozenCircuit::new(gate_circuit),
+            signature_params,
+        )?;
         Ok(GateDef::Circuit(gate))
     }
 
@@ -1299,10 +1562,15 @@ impl<'a> LoweringContext<'a> {
                 Ok(var.expr())
             }
             Expr::Cast(cast) => {
-                if let Type::UInt(Some(width), _) = cast.get_type() {
-                    if let Ok(value) = self.const_u128(cast.operand()) {
-                        return Ok(ClassicalExpr::uint_literal(*width, value)?);
-                    }
+                if matches!(cast.get_type(), Type::Bit(_))
+                    && let Expr::Literal(Literal::Bool(value)) = cast.operand().expression()
+                {
+                    return Ok(ClassicalExpr::bit_literal(*value.value()));
+                }
+                if let Type::UInt(Some(width), _) = cast.get_type()
+                    && let Ok(value) = self.const_u128(cast.operand())
+                {
+                    return Ok(ClassicalExpr::uint_literal(*width, value)?);
                 }
                 let operand = self.lower_classical_expr(cast.operand())?;
                 match (operand.ty(), cast.get_type()) {
@@ -1468,15 +1736,9 @@ impl<'a> LoweringContext<'a> {
                     BinaryOp::ArithOp(ArithOp::Mul) => left.checked_mul(right).ok_or_else(|| {
                         Qasm3ParseError::InvalidArgument("constant mul overflow".to_string())
                     }),
-                    BinaryOp::ArithOp(ArithOp::Div) => {
-                        if right == 0 {
-                            Err(Qasm3ParseError::InvalidArgument(
-                                "division by zero".to_string(),
-                            ))
-                        } else {
-                            Ok(left / right)
-                        }
-                    }
+                    BinaryOp::ArithOp(ArithOp::Div) => left.checked_div(right).ok_or_else(|| {
+                        Qasm3ParseError::InvalidArgument("division by zero".to_string())
+                    }),
                     _ => Err(Qasm3ParseError::UnsupportedFeature(format!(
                         "constant operator {:?}",
                         binary.op()

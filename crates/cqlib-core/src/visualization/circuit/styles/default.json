@@ -265,6 +265,48 @@
     "line_color": "black",
     "line_width": 1.2
   },
+  "BREAK": {
+    "border_color": "black",
+    "background_color": "#F16359",
+    "text_color": "white",
+    "line_color": "black",
+    "line_width": 1.2
+  },
+  "SWITCH": {
+    "border_color": "black",
+    "background_color": "#F16359",
+    "text_color": "white",
+    "line_color": "black",
+    "line_width": 1.2
+  },
+  "CASE": {
+    "border_color": "black",
+    "background_color": "#F16359",
+    "text_color": "white",
+    "line_color": "black",
+    "line_width": 1.2
+  },
+  "DEFAULT": {
+    "border_color": "black",
+    "background_color": "#F16359",
+    "text_color": "white",
+    "line_color": "black",
+    "line_width": 1.2
+  },
+  "CONTINUE": {
+    "border_color": "black",
+    "background_color": "#F16359",
+    "text_color": "white",
+    "line_color": "black",
+    "line_width": 1.2
+  },
+  "FOR": {
+    "border_color": "black",
+    "background_color": "#F16359",
+    "text_color": "white",
+    "line_color": "black",
+    "line_width": 1.2
+  },
   "FSIM": {
   "border_color": "#53B4AA",
   "background_color": "#53B4AA",

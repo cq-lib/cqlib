@@ -171,13 +171,13 @@ impl Ansatz for QAOAAnsatz {
         }
 
         // Validate initial state has same number of qubits if provided
-        if let Some(initial_circuit) = &self.initial_state {
-            if initial_circuit.num_qubits() != self.cost_operator.num_qubits {
-                return Err(CircuitError::QubitCountMismatch {
-                    expected: self.cost_operator.num_qubits,
-                    actual: initial_circuit.num_qubits(),
-                });
-            }
+        if let Some(initial_circuit) = &self.initial_state
+            && initial_circuit.num_qubits() != self.cost_operator.num_qubits
+        {
+            return Err(CircuitError::QubitCountMismatch {
+                expected: self.cost_operator.num_qubits,
+                actual: initial_circuit.num_qubits(),
+            });
         }
 
         Ok(())

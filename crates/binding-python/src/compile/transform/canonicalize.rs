@@ -18,7 +18,11 @@ use cqlib_core::compile::transform::{
 use pyo3::prelude::*;
 
 /// Configuration for circuit canonicalization.
-#[pyclass(name = "CanonicalizeConfig", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "CanonicalizeConfig",
+    module = "cqlib.compile.transform",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyCanonicalizeConfig {
     pub(crate) inner: CanonicalizeConfig,
@@ -127,7 +131,11 @@ impl PyCanonicalizeConfig {
 }
 
 /// Result of a canonicalization run.
-#[pyclass(name = "CanonicalizeResult", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "CanonicalizeResult",
+    module = "cqlib.compile.transform",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyCanonicalizeResult {
     inner: CanonicalizeResult,
@@ -178,7 +186,11 @@ impl PyCanonicalizeResult {
 }
 
 /// Configurable circuit canonicalizer.
-#[pyclass(name = "Canonicalizer", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "Canonicalizer",
+    module = "cqlib.compile.transform",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyCanonicalizer {
     inner: Canonicalizer,

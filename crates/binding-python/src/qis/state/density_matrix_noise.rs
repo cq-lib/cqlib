@@ -47,7 +47,11 @@ use pyo3::prelude::*;
 /// # Get probabilities (P(|1>) ~ 0.99 due to 1% bit-flip noise)
 /// probs = sim.probabilities()
 /// ```
-#[pyclass(name = "DensityMatrixNoise", module = "cqlib.qis.state")]
+#[pyclass(
+    name = "DensityMatrixNoise",
+    module = "cqlib.qis.state",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyDensityMatrixNoise {
     pub(crate) inner: DensityMatrixNoise,
@@ -108,17 +112,21 @@ impl PyDensityMatrixNoise {
     ///     ValueError: If the circuit contains unsupported operations
     #[staticmethod]
     #[pyo3(signature = (circuit, noise_model=None))]
-    fn from_circuit(circuit: &PyCircuit, noise_model: Option<PyNoiseModel>) -> PyResult<Self> {
+    fn from_circuit(
+        py: Python<'_>,
+        circuit: &PyCircuit,
+        noise_model: Option<PyNoiseModel>,
+    ) -> PyResult<Self> {
         let model = noise_model.map(|m| m.inner);
-        let inner =
-            DensityMatrixNoise::from_circuit(&circuit.inner, model).map_err(qis_error_to_py_err)?;
+        let inner = py
+            .detach(|| DensityMatrixNoise::from_circuit(&circuit.inner, model))
+            .map_err(qis_error_to_py_err)?;
         Ok(Self { inner })
     }
 
     /// Applies a circuit to this simulator in place.
-    fn apply_circuit(&mut self, circuit: &PyCircuit) -> PyResult<()> {
-        self.inner
-            .apply_circuit(&circuit.inner)
+    fn apply_circuit(&mut self, py: Python<'_>, circuit: &PyCircuit) -> PyResult<()> {
+        py.detach(|| self.inner.apply_circuit(&circuit.inner))
             .map_err(qis_error_to_py_err)
     }
 
@@ -151,8 +159,8 @@ impl PyDensityMatrixNoise {
     }
 
     /// Returns the ideal measurement probabilities without readout noise.
-    fn probabilities(&self) -> Vec<f64> {
-        self.inner.probabilities()
+    fn probabilities(&self, py: Python<'_>) -> Vec<f64> {
+        py.detach(|| self.inner.probabilities())
     }
 
     /// Computes measurement probabilities with readout error modeling.
@@ -162,9 +170,8 @@ impl PyDensityMatrixNoise {
     ///
     /// Returns:
     ///     A vector of probabilities for all 2^n computational basis states.
-    fn probabilities_with_readout(&self, qubits: Vec<usize>) -> PyResult<Vec<f64>> {
-        self.inner
-            .probabilities_with_readout(&qubits)
+    fn probabilities_with_readout(&self, py: Python<'_>, qubits: Vec<usize>) -> PyResult<Vec<f64>> {
+        py.detach(|| self.inner.probabilities_with_readout(&qubits))
             .map_err(qis_error_to_py_err)
     }
 
@@ -177,14 +184,17 @@ impl PyDensityMatrixNoise {
     #[pyo3(signature = (gate, qubits, params=None))]
     fn apply_standard_gate_noise(
         &mut self,
+        py: Python<'_>,
         gate: &PyStandardGate,
         qubits: Vec<usize>,
         params: Option<Vec<f64>>,
     ) -> PyResult<()> {
         let p = params.unwrap_or_default();
-        self.inner
-            .apply_standard_gate_noise(gate.inner, &qubits, &p)
-            .map_err(qis_error_to_py_err)
+        py.detach(|| {
+            self.inner
+                .apply_standard_gate_noise(gate.inner, &qubits, &p)
+        })
+        .map_err(qis_error_to_py_err)
     }
 
     /// Applies the Pauli-X gate with optional noise.
@@ -250,8 +260,8 @@ impl PyDensityMatrixNoise {
     }
 
     /// Applies the global phase gate with optional noise.
-    fn apply_gphase(&mut self, theta: f64) -> PyResult<()> {
-        self.inner.apply_gphase(theta).map_err(qis_error_to_py_err)
+    fn apply_gphase(&mut self, phi: f64) -> PyResult<()> {
+        self.inner.apply_gphase(phi).map_err(qis_error_to_py_err)
     }
 
     /// Applies the X2P gate with optional noise.
@@ -393,6 +403,7 @@ impl PyDensityMatrixNoise {
     /// Note: No noise is applied for generic unitary gates.
     fn apply_unitary_gate<'py>(
         &mut self,
+        py: Python<'_>,
         qubits: Vec<usize>,
         matrix: &Bound<'py, PyAny>,
     ) -> PyResult<()> {
@@ -417,20 +428,17 @@ impl PyDensityMatrixNoise {
         }
 
         let flat: numpy::ndarray::Array2<num_complex::Complex64> = readonly.as_array().to_owned();
-        self.inner
-            .apply_unitary_gate(&qubits, &flat)
+        py.detach(|| self.inner.apply_unitary_gate(&qubits, &flat))
             .map_err(qis_error_to_py_err)
     }
 
     /// Computes the expectation value of an observable.
-    fn expectation(&self, observable: &Bound<'_, PyAny>) -> PyResult<f64> {
+    fn expectation(&self, py: Python<'_>, observable: &Bound<'_, PyAny>) -> PyResult<f64> {
         if let Ok(h) = observable.extract::<crate::qis::hamiltonian::PyHamiltonian>() {
-            self.inner
-                .expectation(&h.inner)
+            py.detach(|| self.inner.expectation(&h.inner))
                 .map_err(qis_error_to_py_err)
         } else if let Ok(ps) = observable.extract::<crate::qis::pauli::PyPauliString>() {
-            self.inner
-                .expectation(&ps.inner)
+            py.detach(|| self.inner.expectation(&ps.inner))
                 .map_err(qis_error_to_py_err)
         } else {
             Err(PyValueError::new_err(
@@ -456,28 +464,32 @@ impl PyDensityMatrixNoise {
     }
 
     /// Measures one qubit and collapses the state.
-    fn measure(&mut self, qubit: usize) -> PyResult<bool> {
-        self.inner.measure(qubit).map_err(qis_error_to_py_err)
+    fn measure(&mut self, py: Python<'_>, qubit: usize) -> PyResult<bool> {
+        py.detach(|| self.inner.measure(qubit))
+            .map_err(qis_error_to_py_err)
     }
 
     /// Measures all qubits and collapses the state.
-    fn measure_all(&mut self) -> PyOutcome {
-        PyOutcome::from(self.inner.measure_all())
+    fn measure_all(&mut self, py: Python<'_>) -> PyOutcome {
+        PyOutcome::from(py.detach(|| self.inner.measure_all()))
     }
 
     /// Samples measurement outcomes with readout noise, without mutating this state.
-    fn sample_shots(&self, shots: usize) -> Vec<PyOutcome> {
-        self.inner
-            .sample_shots(shots)
+    fn sample_shots(&self, py: Python<'_>, shots: usize) -> Vec<PyOutcome> {
+        py.detach(|| self.inner.sample_shots(shots))
             .into_iter()
             .map(PyOutcome::from)
             .collect()
     }
 
     /// Samples measurement outcomes according to a circuit measurement receipt.
-    fn sample(&self, measurement: &PyMeasurement, shots: usize) -> PyResult<PyExecutionResult> {
-        self.inner
-            .sample(&measurement.inner, shots)
+    fn sample(
+        &self,
+        py: Python<'_>,
+        measurement: &PyMeasurement,
+        shots: usize,
+    ) -> PyResult<PyExecutionResult> {
+        py.detach(|| self.inner.sample(&measurement.inner, shots))
             .map(PyExecutionResult::from)
             .map_err(qis_error_to_py_err)
     }
@@ -485,10 +497,10 @@ impl PyDensityMatrixNoise {
     /// Returns ideal marginal probabilities according to a circuit measurement receipt.
     fn probs(
         &self,
+        py: Python<'_>,
         measurement: &PyMeasurement,
     ) -> PyResult<std::collections::HashMap<PyOutcome, f64>> {
-        self.inner
-            .probs(&measurement.inner)
+        py.detach(|| self.inner.probs(&measurement.inner))
             .map(outcome_probabilities_to_py)
             .map_err(qis_error_to_py_err)
     }
@@ -496,10 +508,10 @@ impl PyDensityMatrixNoise {
     /// Returns marginal probabilities with readout noise applied.
     fn probs_with_readout(
         &self,
+        py: Python<'_>,
         measurement: &PyMeasurement,
     ) -> PyResult<std::collections::HashMap<PyOutcome, f64>> {
-        self.inner
-            .probs_with_readout(&measurement.inner)
+        py.detach(|| self.inner.probs_with_readout(&measurement.inner))
             .map(outcome_probabilities_to_py)
             .map_err(qis_error_to_py_err)
     }

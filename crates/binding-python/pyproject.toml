@@ -1,11 +1,14 @@
 [project]
 name = "cqlib"
+description = "A high-performance quantum computing SDK with a Rust core and Python bindings."
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 readme = "README.md"
+authors = [
+    { name = "Cqlib Development Team", email = "tianyan@chinatelecom.cn" },
+]
 classifiers = [
-    "Environment :: Console",
-    "License :: OSI Approved :: Apache Software License",
+    "Development Status :: 4 - Beta",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
@@ -17,7 +20,8 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
-    "Topic :: Software Development :: Libraries"
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
 ]
 keywords = [
     "cqlib",
@@ -34,6 +38,11 @@ dynamic = ["version"]
 [dependency-groups]
 test = ["pytest>=8.0"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = ["--strict-markers"]
+
 [project.urls]
 Homepage = "https://qc.zdxlz.com/"
 Documentation = "https://qc.zdxlz.com/learn/#/resource/informationSpace?lang=zh&cId=/mkdocs/zh/cqlib/01-overview.html"
@@ -49,4 +58,12 @@ build-backend = "maturin"
 features = ["pyo3/extension-module"]
 module-name = "cqlib._native"
 include-python-files = ["cqlib/**", ]
+include = [{ path = "cqlib/py.typed", format = ["sdist", "wheel"] }]
+exclude = [
+    "cqlib/**/*.so",
+    "cqlib/**/*.dylib",
+    "cqlib/**/*.dll",
+    "cqlib/**/__pycache__",
+    "cqlib/**/*.pyc",
+]
 sdist-include = ["Cargo.toml", "Cargo.lock", "src/**/*", "cqlib/**/*"]

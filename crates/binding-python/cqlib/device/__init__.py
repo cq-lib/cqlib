@@ -51,24 +51,23 @@ Key Usage — noise model::
     >>> model.add_single_qubit_error(StandardGate.H, 0, SingleQubitNoise.depolarizing(0.001))
 """
 
-from .._native import device as _device_module
-
-Topology = _device_module.Topology
-InstructionProp = _device_module.InstructionProp
-QubitProp = _device_module.QubitProp
-EdgeProp = _device_module.EdgeProp
-Device = _device_module.Device
-Layout = _device_module.Layout
-LogicalQubit = _device_module.LogicalQubit
-PhysicalQubit = _device_module.PhysicalQubit
-SingleQubitNoise = _device_module.SingleQubitNoise
-TwoQubitNoise = _device_module.TwoQubitNoise
-ReadoutError = _device_module.ReadoutError
-OperationKey = _device_module.OperationKey
-NoiseModel = _device_module.NoiseModel
-Outcome = _device_module.Outcome
-Status = _device_module.Status
-ExecutionResult = _device_module.ExecutionResult
+from .device_impl import (
+    Device,
+    EdgeProp,
+    InstructionProp,
+    QubitProp,
+)
+from .topology import Topology
+from .layout import Layout
+from .qubit import LogicalQubit, PhysicalQubit
+from .noise import (
+    SingleQubitNoise,
+    TwoQubitNoise,
+    ReadoutError,
+    OperationKey,
+    NoiseModel,
+)
+from .result import Outcome, Status, ExecutionResult
 
 __all__ = [
     "Topology",

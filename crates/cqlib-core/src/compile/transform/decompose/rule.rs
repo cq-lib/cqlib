@@ -22,7 +22,8 @@ use crate::circuit::{
     Instruction, Parameter, ParameterValue, Qubit, StandardGate, ValueInstruction, ValueOperation,
 };
 use crate::compile::CompilerError;
-use crate::compile::transform::decompose::unitary::unitary_2q::TwoQubitUnitaryDecomposeBasis;
+use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
+use crate::compile::transform::target_basis::TargetBasisSignature;
 use ndarray::Array2;
 use num_complex::Complex64;
 use smallvec::SmallVec;
@@ -141,11 +142,38 @@ pub struct McGateRuleRequest<'a> {
 }
 
 /// Runtime cache request for one numeric unitary synthesis.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct NumericUnitaryRuleRequest<'a> {
     pub num_qubits: u16,
     pub matrix: &'a Array2<Complex64>,
-    pub two_qubit_basis: TwoQubitUnitaryDecomposeBasis,
+    pub synthesis_key: NumericUnitarySynthesisKey,
+}
+
+/// Semantic context that determines numeric-unitary synthesis output.
+///
+/// This key intentionally includes the canonical target-basis identity and
+/// exactness mode, so a cached template is never reused under a different
+/// lowering policy.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum NumericUnitarySynthesisKey {
+    OneQubit,
+    TwoQubit {
+        target_basis: Option<TargetBasisSignature>,
+        fallback_pauli: bool,
+    },
+}
+
+impl NumericUnitarySynthesisKey {
+    pub const fn one_qubit() -> Self {
+        Self::OneQubit
+    }
+
+    pub(crate) fn two_qubit(target: &TwoQubitSynthesisTarget) -> Self {
+        Self::TwoQubit {
+            target_basis: target.cache_signature(),
+            fallback_pauli: target.fallback_pauli(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -160,7 +188,7 @@ struct NumericUnitaryRuleKey {
     rows: usize,
     cols: usize,
     matrix: Vec<(u64, u64)>,
-    two_qubit_basis: TwoQubitUnitaryDecomposeBasis,
+    synthesis_key: NumericUnitarySynthesisKey,
 }
 
 impl NumericUnitaryRuleKey {
@@ -174,7 +202,7 @@ impl NumericUnitaryRuleKey {
                 .iter()
                 .map(|value| (value.re.to_bits(), value.im.to_bits()))
                 .collect(),
-            two_qubit_basis: request.two_qubit_basis,
+            synthesis_key: request.synthesis_key,
         }
     }
 }
@@ -410,7 +438,10 @@ fn template_qubit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::circuit::{Instruction, Parameter, StandardGate};
+    use crate::circuit::{Instruction, Parameter, Qubit, StandardGate, ValueOperation};
+    use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
+    use ndarray::Array2;
+    use num_complex::Complex64;
     use smallvec::smallvec;
 
     fn request<'a>(
@@ -531,6 +562,66 @@ mod tests {
                 )
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn numeric_two_qubit_cache_separates_target_signatures() {
+        let matrix = Array2::<Complex64>::eye(4);
+        let cx_target = TwoQubitSynthesisTarget::from_standard_gates(
+            vec![StandardGate::U, StandardGate::H],
+            vec![StandardGate::CX],
+            true,
+        )
+        .unwrap();
+        let cz_target = TwoQubitSynthesisTarget::from_standard_gates(
+            vec![StandardGate::U, StandardGate::H],
+            vec![StandardGate::CZ],
+            true,
+        )
+        .unwrap();
+        let request = NumericUnitaryRuleRequest {
+            num_qubits: 2,
+            matrix: &matrix,
+            synthesis_key: NumericUnitarySynthesisKey::two_qubit(&cx_target),
+        };
+        let distinct_target_request = NumericUnitaryRuleRequest {
+            num_qubits: 2,
+            matrix: &matrix,
+            synthesis_key: NumericUnitarySynthesisKey::two_qubit(&cz_target),
+        };
+        let qubits = [Qubit::new(0), Qubit::new(1)];
+        let operations = vec![ValueOperation::from_standard(StandardGate::CX, qubits, [])];
+        let mut cache = DecompositionRuleCache::default();
+
+        assert!(
+            cache
+                .instantiate_numeric_unitary(request.clone(), &qubits)
+                .unwrap()
+                .is_none()
+        );
+        cache
+            .insert_numeric_unitary(request.clone(), &qubits, &operations, 0.0)
+            .unwrap();
+        assert!(
+            cache
+                .instantiate_numeric_unitary(request, &[Qubit::new(2), Qubit::new(3)])
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            cache
+                .instantiate_numeric_unitary(distinct_target_request, &qubits)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            cache.stats(),
+            DecompositionRuleStats {
+                hits: 1,
+                misses: 2,
+                inserts: 1,
+            }
         );
     }
 }

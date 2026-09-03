@@ -18,7 +18,6 @@ or classical control).  :class:`ValueOperation` pairs an instruction with
 qubits and parameters to form a complete circuit operation.
 """
 
-from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 from .bit import Qubit
@@ -32,6 +31,17 @@ class Instruction:
     Instructions define the operation type but do not own parameters.
     For parameterised operations, use :class:`ValueOperation` factories.
     """
+    @staticmethod
+    def from_name(name: str) -> Instruction:
+        """Create from a case-insensitive standard-gate name (e.g. ``'H'``).
+
+        Only standard gates are addressable by name; multi-controlled and
+        custom gates must be built from their own types.
+
+        Raises:
+            ValueError: If ``name`` does not match any standard gate.
+        """
+        ...
     @staticmethod
     def from_standard_gate(gate: StandardGate) -> Instruction:
         """Create from a :class:`StandardGate` (no bound parameters)."""
@@ -58,7 +68,7 @@ class Instruction:
         ...
     @property
     def name(self) -> str:
-        """Human-readable name (e.g. ``"h"``, ``"cx"``, ``"measure"``)."""
+        """Human-readable name (e.g. ``"H"``, ``"CX"``, ``"Measure"``)."""
         ...
     @property
     def instruction_type(self) -> str:
@@ -112,6 +122,37 @@ class ValueInstruction:
     @property
     def is_instruction(self) -> bool: ...
     @property
+    def name(self) -> str:
+        """Human-readable name (e.g. ``"H"``, ``"CX"``, ``"Measure"``)."""
+        ...
+    @property
+    def instruction_type(self) -> str:
+        """One of ``"standard"``, ``"mcgate"``, ``"unitary"``, ``"circuit"``,
+        ``"directive"``, ``"classical_data"``, ``"classical_control"``, ``"delay"``."""
+        ...
+    @property
+    def is_standard(self) -> bool: ...
+    @property
+    def is_mcgate(self) -> bool: ...
+    @property
+    def is_unitary(self) -> bool: ...
+    @property
+    def is_circuit_gate(self) -> bool: ...
+    @property
+    def is_directive(self) -> bool: ...
+    @property
+    def is_classical_data(self) -> bool: ...
+    @property
+    def is_delay(self) -> bool: ...
+    @property
+    def standard_gate(self) -> StandardGate | None:
+        """The :class:`StandardGate` if this is a standard-gate instruction."""
+        ...
+    @property
+    def directive(self) -> Directive | None:
+        """The :class:`Directive` if this is a directive instruction."""
+        ...
+    @property
     def instruction(self) -> Instruction | None:
         """The inner :class:`Instruction` when this is a plain instruction."""
         ...
@@ -130,17 +171,32 @@ class ValueOperation:
     This is the public construction boundary.  Use the static factories to
     create operations from gates with their bound parameters preserved.
     """
-    def __init__(self, instruction: ValueInstruction, qubits: list[Qubit], params: list[float | Parameter] | None = ..., label: str | None = ...) -> None: ...
+    def __init__(
+        self,
+        instruction: ValueInstruction,
+        qubits: list[Qubit],
+        params: list[float | Parameter] | None = ...,
+        label: str | None = ...,
+    ) -> None: ...
     @staticmethod
-    def from_instruction(instruction: Instruction, qubits: list[Qubit], params: list[float | Parameter] | None = ..., label: str | None = ...) -> ValueOperation:
+    def from_instruction(
+        instruction: Instruction,
+        qubits: list[Qubit],
+        params: list[float | Parameter] | None = ...,
+        label: str | None = ...,
+    ) -> ValueOperation:
         """Create from a storage :class:`Instruction` with explicit parameters."""
         ...
     @staticmethod
-    def from_standard_gate(gate: StandardGate, qubits: list[Qubit], label: str | None = ...) -> ValueOperation:
+    def from_standard_gate(
+        gate: StandardGate, qubits: list[Qubit], label: str | None = ...
+    ) -> ValueOperation:
         """Create while preserving parameters bound to a :class:`StandardGate`."""
         ...
     @staticmethod
-    def from_mc_gate(gate: MCGate, qubits: list[Qubit], label: str | None = ...) -> ValueOperation:
+    def from_mc_gate(
+        gate: MCGate, qubits: list[Qubit], label: str | None = ...
+    ) -> ValueOperation:
         """Create while preserving parameters bound to an :class:`MCGate`."""
         ...
     @staticmethod
@@ -153,6 +209,39 @@ class ValueOperation:
     def qubits(self) -> list[Qubit]: ...
     @property
     def params(self) -> list[float | Parameter]: ...
+    @property
+    def name(self) -> str:
+        """Human-readable instruction name for this operation."""
+        ...
+    @property
+    def num_qubits(self) -> int:
+        """Number of qubits used by this operation instance."""
+        ...
+    @property
+    def num_params(self) -> int:
+        """Number of parameters carried by this operation instance."""
+        ...
+    @property
+    def instruction_type(self) -> str:
+        """One of ``"standard"``, ``"mcgate"``, ``"unitary"``, ``"circuit"``,
+        ``"directive"``, ``"classical_data"``, ``"classical_control"``, ``"delay"``."""
+        ...
+    @property
+    def is_standard(self) -> bool: ...
+    @property
+    def is_mcgate(self) -> bool: ...
+    @property
+    def is_unitary(self) -> bool: ...
+    @property
+    def is_circuit_gate(self) -> bool: ...
+    @property
+    def is_directive(self) -> bool: ...
+    @property
+    def is_classical_data(self) -> bool: ...
+    @property
+    def is_classical_control(self) -> bool: ...
+    @property
+    def is_delay(self) -> bool: ...
     @property
     def label(self) -> str | None: ...
     def matrix(self) -> NDArray[np.complex128]:

@@ -149,11 +149,13 @@ mod control_op;
 mod for_op;
 mod if_op;
 mod switch_op;
+mod validation;
 mod while_op;
 
 pub use body::ControlBody;
-pub use control_op::ClassicalControlOp;
+pub use control_op::{ClassicalControlKind, ClassicalControlOp};
 pub use for_op::ForOp;
 pub use if_op::IfOp;
 pub use switch_op::{SwitchCase, SwitchOp};
+pub(crate) use validation::{validate_for_types, validate_switch};
 pub use while_op::WhileOp;

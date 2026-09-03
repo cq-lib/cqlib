@@ -231,20 +231,20 @@ impl Ansatz for StronglyEntanglingLayers {
             ));
         }
         validate_entanglement_gate("StronglyEntanglingLayers", self.entanglement_gate)?;
-        if self.num_qubits > 1 {
-            if let Some(ranges) = &self.ranges {
-                if ranges.is_empty() {
-                    return Err(CircuitError::InvalidOperation(
-                        "StronglyEntanglingLayers ranges must not be empty".to_string(),
-                    ));
-                }
-                for &range in ranges {
-                    if range == 0 || range >= self.num_qubits {
-                        return Err(CircuitError::InvalidOperation(format!(
-                            "StronglyEntanglingLayers range must be in 1..{}, got {}",
-                            self.num_qubits, range
-                        )));
-                    }
+        if self.num_qubits > 1
+            && let Some(ranges) = &self.ranges
+        {
+            if ranges.is_empty() {
+                return Err(CircuitError::InvalidOperation(
+                    "StronglyEntanglingLayers ranges must not be empty".to_string(),
+                ));
+            }
+            for &range in ranges {
+                if range == 0 || range >= self.num_qubits {
+                    return Err(CircuitError::InvalidOperation(format!(
+                        "StronglyEntanglingLayers range must be in 1..{}, got {}",
+                        self.num_qubits, range
+                    )));
                 }
             }
         }

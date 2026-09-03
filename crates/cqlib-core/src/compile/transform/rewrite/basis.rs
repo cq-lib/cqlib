@@ -147,13 +147,21 @@ pub(super) fn validate_final_target(
         return Ok(());
     }
 
+    let target_basis = config
+        .target_instruction_basis()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|instruction| instruction.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut reason = format!(
-        "target instruction basis not satisfied: {} gate-like operations remain outside the physical target basis",
-        scan.unsupported_gate_like_ops
+        "lowering incomplete: {} gate-like operations remain outside target basis {{{}}}",
+        scan.unsupported_gate_like_ops, target_basis
     );
     if !scan.examples.is_empty() {
         reason.push_str(&format!(" (examples: {})", scan.examples.join(", ")));
     }
+    reason.push_str("; this may indicate missing decomposition rules or insufficient max_rounds");
     Err(CompilerError::InvalidInput(reason))
 }
 

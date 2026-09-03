@@ -21,6 +21,7 @@ use crate::qis::state::statevector::PyStatevector;
 use cqlib_core::qis::Observable;
 use cqlib_core::qis::hamiltonian::Hamiltonian;
 use num_complex::Complex64;
+use numpy::{PyArray2, ToPyArray};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyComplex, PyDict, PyList, PyTuple};
@@ -44,7 +45,7 @@ use std::fmt;
 ///     >>> h.add_term(PauliString.from_str("XX"), 0.3)
 ///     >>> # Simplify to merge duplicate terms
 ///     >>> h.simplify()
-#[pyclass(name = "Hamiltonian", module = "cqlib.qis")]
+#[pyclass(name = "Hamiltonian", module = "cqlib.qis", from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PyHamiltonian {
     pub(crate) inner: Hamiltonian,
@@ -85,12 +86,12 @@ fn extract_complex(value: &Bound<'_, PyAny>) -> PyResult<Complex64> {
     }
 
     // Try to extract as tuple (real, imag)
-    if let Ok(tuple) = value.cast::<PyTuple>() {
-        if tuple.len() == 2 {
-            let real: f64 = tuple.get_item(0)?.extract()?;
-            let imag: f64 = tuple.get_item(1)?.extract()?;
-            return Ok(Complex64::new(real, imag));
-        }
+    if let Ok(tuple) = value.cast::<PyTuple>()
+        && tuple.len() == 2
+    {
+        let real: f64 = tuple.get_item(0)?.extract()?;
+        let imag: f64 = tuple.get_item(1)?.extract()?;
+        return Ok(Complex64::new(real, imag));
     }
 
     Err(PyValueError::new_err(
@@ -289,6 +290,35 @@ impl PyHamiltonian {
     /// Returns true if all Pauli terms mutually commute.
     fn all_terms_commute(&self) -> bool {
         self.inner.all_terms_commute()
+    }
+
+    /// Computes the dense matrix representation as a NumPy array.
+    ///
+    /// Evaluates H = Σ_k c_k P_k by summing each term's Pauli string matrix
+    /// (in little-endian qubit order, including Pauli phases) multiplied by
+    /// its coefficient. An empty Hamiltonian yields the zero matrix.
+    ///
+    /// Memory usage is O(4^N); intended for small-system analysis and verification.
+    ///
+    /// Returns:
+    ///     A NumPy array of shape (2^num_qubits, 2^num_qubits) with complex128 dtype.
+    ///
+    /// Raises:
+    ///     ValueError: If a term's qubit count does not match the Hamiltonian's
+    ///         (defensive; the public constructors already reject such terms).
+    ///
+    /// Examples:
+    ///     >>> from cqlib.qis import Hamiltonian, PauliString
+    ///     >>> h = Hamiltonian.from_pauli(PauliString.from_str("Z"))
+    ///     >>> h.to_matrix()
+    ///     array([[ 1.+0.j,  0.+0.j],
+    ///            [ 0.+0.j, -1.+0.j]])
+    #[allow(clippy::wrong_self_convention)]
+    fn to_matrix<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<Complex64>>> {
+        let matrix = py
+            .detach(|| self.inner.to_matrix())
+            .map_err(qis_error_to_py_err)?;
+        Ok(matrix.to_pyarray(py))
     }
 
     /// Adds two Hamiltonians together.

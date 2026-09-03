@@ -123,13 +123,21 @@ class FrozenCircuit:
 
     @property
     def symbols(self) -> list[str]:
-        """Symbolic parameter names in insertion order."""
+        """Interned symbol names in stable circuit insertion order.
+
+        This registry may contain symbols no longer referenced by executable
+        IR. Use :attr:`used_symbols` for live dependencies.
+        """
+        ...
+
+    @property
+    def used_symbols(self) -> list[str]:
+        """Symbols actually referenced by the frozen executable IR."""
         ...
 
     def __copy__(self) -> FrozenCircuit: ...
     def __deepcopy__(self, memo: dict) -> FrozenCircuit: ...
     def __repr__(self) -> str: ...
-
 
 class CircuitGate:
     """Composite gate defined by an immutable :class:`FrozenCircuit`.
@@ -140,13 +148,33 @@ class CircuitGate:
         circuit: The frozen circuit definition backing this gate.
     """
 
-    def __init__(self, name: str, circuit: FrozenCircuit) -> None:
+    def __init__(
+        self,
+        name: str,
+        circuit: FrozenCircuit,
+        signature_params: list[str] | None = ...,
+    ) -> None:
         """Create a named gate from a frozen circuit.
 
+        If ``signature_params`` is omitted, the positional signature is
+        inferred from the backing circuit's live symbols. An explicit
+        signature may contain declared but unused parameters.
+
+        The backing circuit may contain directives (e.g. measure or
+        reset); they are accepted here and only rejected later, when a
+        unitary matrix or the inverse is requested.
+
         Raises:
-            CircuitError: If *circuit* contains non-gate operations
-                (e.g. directives) that cannot be used inside a gate.
+            CircuitError: If a live symbol is undeclared, or if the
+                explicit signature contains duplicate names.
         """
+        ...
+
+    @staticmethod
+    def with_signature(
+        name: str, circuit: FrozenCircuit, signature_params: list[str]
+    ) -> CircuitGate:
+        """Create a gate with an explicit positional parameter signature."""
         ...
 
     @property
@@ -165,8 +193,22 @@ class CircuitGate:
         ...
 
     @property
+    def signature_params(self) -> list[str]:
+        """Positional parameter names accepted when invoking this gate."""
+        ...
+
+    @property
+    def used_symbols(self) -> list[str]:
+        """Symbols actually referenced by the backing circuit."""
+        ...
+
+    @property
     def symbols(self) -> list[str]:
-        """Symbolic parameter names in positional (application) order."""
+        """Backward-compatible alias for :attr:`used_symbols`.
+
+        This is not the positional call signature; use
+        :attr:`signature_params` for that purpose.
+        """
         ...
 
     @property
@@ -195,7 +237,6 @@ class CircuitGate:
         """
         ...
 
-    def __hash__(self) -> int: ...
     def __copy__(self) -> CircuitGate: ...
     def __deepcopy__(self, memo: dict) -> CircuitGate: ...
     def __repr__(self) -> str: ...

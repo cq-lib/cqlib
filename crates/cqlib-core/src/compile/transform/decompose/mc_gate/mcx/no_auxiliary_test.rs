@@ -21,7 +21,7 @@ use super::{
 use crate::circuit::value_instruction::ValueInstruction;
 use crate::circuit::{Instruction, ParameterValue, Qubit, StandardGate, operation::ValueOperation};
 use crate::compile::error::CompilerError;
-use crate::util::test_utils::assert_value_operations_equal;
+use crate::compile::transform::decompose::mc_gate::test_utils::assert_value_operations_equal;
 use num_complex::Complex64;
 use std::collections::{BTreeMap, HashSet};
 use std::f64::consts::{FRAC_1_SQRT_2, PI};

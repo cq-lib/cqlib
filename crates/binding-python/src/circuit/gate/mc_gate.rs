@@ -18,6 +18,7 @@
 use crate::circuit::PyStandardGate;
 use crate::circuit::error::{CircuitError as PyCircuitError, ParameterError as PyParameterError};
 use crate::circuit::parameter::PyParameter;
+use crate::utils::hash_value;
 use cqlib_core::circuit::Parameter;
 use cqlib_core::circuit::error::ParameterError;
 use cqlib_core::circuit::gate::MCGate;
@@ -28,7 +29,7 @@ use pyo3::{PyResult, pyclass, pymethods};
 use std::fmt;
 
 /// Multi-controlled standard gate with optional bound parameters.
-#[pyclass(name = "MCGate", module = "cqlib.circuit.gates")]
+#[pyclass(name = "MCGate", module = "cqlib.circuit.gates", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyMcGate {
     pub(crate) inner: MCGate,
@@ -48,10 +49,10 @@ impl PyMcGate {
     ///
     /// ```python
     /// # Create a Toffoli-like gate (CCX) with 2 controls
-    /// ccx = McGate(2, StandardGate.X)
+    /// ccx = MCGate(2, StandardGate.X)
     ///
     /// # Create a multi-controlled Hadamard
-    /// much = McGate(3, StandardGate.H)
+    /// much = MCGate(3, StandardGate.H)
     /// ```
     #[new]
     pub fn new(num_controls: u8, gate: PyStandardGate) -> Self {
@@ -121,13 +122,9 @@ impl PyMcGate {
     ///
     /// The inverse of a controlled gate C(U) is C(U†).
     ///
-    /// # Arguments
-    ///
-    /// * `params` - Optional parameters for the base gate.
-    ///
     /// # Returns
     ///
-    /// A tuple of (inverse gate, inverse parameters), or None if not invertible.
+    /// A new multi-controlled gate with inverse parameters already bound.
     pub fn inverse(&self) -> PyResult<Self> {
         if self.params.len() != self.inner.num_params() {
             return Err(PyCircuitError::new_err(format!(
@@ -179,8 +176,13 @@ impl PyMcGate {
     }
 
     fn __repr__(&self) -> String {
+        let base_name = self.inner.base_gate().name();
         if self.params.is_empty() {
-            self.inner.to_string()
+            format!(
+                "MCGate({}, StandardGate.{})",
+                self.inner.num_ctrl_qubits(),
+                base_name
+            )
         } else {
             let params = self
                 .params
@@ -188,7 +190,12 @@ impl PyMcGate {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{}({params})", self.inner)
+            format!(
+                "MCGate({}, StandardGate.{}({}))",
+                self.inner.num_ctrl_qubits(),
+                base_name,
+                params
+            )
         }
     }
 
@@ -205,13 +212,7 @@ impl PyMcGate {
     }
 
     fn __hash__(&self) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        self.params.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&(&self.inner, &self.params))
     }
 }
 

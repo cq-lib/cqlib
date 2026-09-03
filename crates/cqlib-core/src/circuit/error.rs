@@ -197,6 +197,16 @@ pub enum CircuitError {
         len: usize,
     },
 
+    /// Thrown when deleting an operation would remove a classical value that
+    /// is still read by another operation.
+    #[error("classical value {index} is still used at {context}")]
+    ClassicalValueStillInUse {
+        /// Circuit-local value index.
+        index: u32,
+        /// Description of the remaining use site.
+        context: String,
+    },
+
     /// Thrown when a gate parameter has an invalid value (NaN or Infinity).
     ///
     /// This occurs when appending or evaluating a gate with a non-finite fixed
@@ -219,6 +229,10 @@ pub enum CircuitError {
     /// if the DAG structure was manually modified and left in an inconsistent state.
     #[error("Invalid control flow graph structure: {0}")]
     InvalidControlFlow(String),
+
+    /// Thrown when the circuit dependency DAG has an invalid or inconsistent structure.
+    #[error("Invalid circuit DAG structure: {0}")]
+    InvalidDag(String),
 
     /// Thrown when a classical handle was created by a different circuit.
     #[error("{kind} {index} belongs to another circuit")]

@@ -439,6 +439,36 @@ pub struct PauliString {
     pub x: BitVec,
 }
 
+/// Iterator over a Pauli string in ascending qubit-index order.
+pub struct PauliIter<'a> {
+    pauli: &'a PauliString,
+    indices: std::ops::Range<usize>,
+}
+
+impl Iterator for PauliIter<'_> {
+    type Item = Pauli;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.indices.next().map(|index| self.pauli.get_pauli(index))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.indices.size_hint()
+    }
+}
+
+impl ExactSizeIterator for PauliIter<'_> {}
+impl std::iter::FusedIterator for PauliIter<'_> {}
+
+impl<'a> IntoIterator for &'a PauliString {
+    type Item = Pauli;
+    type IntoIter = PauliIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 impl fmt::Display for PauliString {
     /// Formats the Pauli string as “+XYZ” or “-iZIX”.
     ///
@@ -469,6 +499,14 @@ impl fmt::Display for PauliString {
 }
 
 impl PauliString {
+    /// Iterates over operators from qubit index 0 upward.
+    pub fn iter(&self) -> PauliIter<'_> {
+        PauliIter {
+            pauli: self,
+            indices: 0..self.num_qubits,
+        }
+    }
+
     /// Creates a new identity Pauli string.
     ///
     /// # Examples
@@ -555,6 +593,38 @@ impl PauliString {
         }
     }
 
+    /// Returns the dense complex matrix representation of this Pauli string.
+    ///
+    /// Qubit zero is the least-significant tensor factor, so an $N$-qubit
+    /// string is expanded as $P_{N-1} \otimes \cdots \otimes P_0$. The
+    /// string's global [`Phase`] is included in the returned matrix.
+    ///
+    /// This method is intended for small-system analysis and verification.
+    /// The returned matrix has dimensions $2^N \times 2^N$ and requires
+    /// $O(4^N)$ memory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cqlib_core::qis::PauliString;
+    /// use num_complex::Complex64;
+    ///
+    /// let pauli: PauliString = "X".parse().unwrap();
+    /// let matrix = pauli.to_matrix();
+    /// assert_eq!(matrix[[0, 1]], Complex64::new(1.0, 0.0));
+    /// assert_eq!(matrix[[1, 0]], Complex64::new(1.0, 0.0));
+    /// ```
+    pub fn to_matrix(&self) -> Array2<Complex64> {
+        let mut matrix = Array2::from_elem((1, 1), Complex64::new(1.0, 0.0));
+        for qubit in (0..self.num_qubits).rev() {
+            matrix = kronecker_product(&matrix, &self.get_pauli(qubit).to_matrix());
+        }
+
+        let phase = self.phase.to_complex();
+        matrix.mapv_inplace(|value| value * phase);
+        matrix
+    }
+
     /// Returns the Pauli operator at the specified qubit index, or an error if out of bounds.
     ///
     /// # Arguments
@@ -626,7 +696,7 @@ impl PauliString {
         let term2 = self.z.clone() & &other.x;
         let anti_commutations = (term1 ^ term2).count_ones();
 
-        anti_commutations % 2 == 0
+        anti_commutations & 1 == 0
     }
 
     /// Converts the X bit vector to a usize mask.
@@ -834,7 +904,7 @@ impl PauliString {
             // For each qubit i with Z operator (z[i]=1) and state s[i]=1, contribute factor -1
             let overlap = state_idx & z_mask;
             let parity = overlap.count_ones();
-            let eigenvalue = if parity % 2 == 0 { 1.0 } else { -1.0 };
+            let eigenvalue = if parity & 1 == 0 { 1.0 } else { -1.0 };
 
             exp_value += prob * eigenvalue;
         }
@@ -884,6 +954,30 @@ impl PauliString {
             _ => 0,
         }
     }
+}
+
+fn kronecker_product(left: &Array2<Complex64>, right: &Array2<Complex64>) -> Array2<Complex64> {
+    let (left_rows, left_cols) = left.dim();
+    let (right_rows, right_cols) = right.dim();
+    let mut result = Array2::from_elem(
+        (left_rows * right_rows, left_cols * right_cols),
+        Complex64::new(0.0, 0.0),
+    );
+
+    for left_row in 0..left_rows {
+        for left_col in 0..left_cols {
+            for right_row in 0..right_rows {
+                for right_col in 0..right_cols {
+                    result[[
+                        left_row * right_rows + right_row,
+                        left_col * right_cols + right_col,
+                    ]] = left[[left_row, left_col]] * right[[right_row, right_col]];
+                }
+            }
+        }
+    }
+
+    result
 }
 
 /// Multiplies two Pauli strings, returning a new instance.

@@ -8,9 +8,9 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-beta.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "Apache-2.0"
 license-file = "LICENSE.txt"
 
@@ -23,14 +23,15 @@ strip = true
 approx = { version = "0.5", features = ["num-complex"] }
 bitvec = "1.0.1"
 cbindgen = "0.29.2"
-faer = "0.24.0"
+criterion = "0.5"
+faer = "0.24"
 lalrpop = "0.22"
 lalrpop-util = "0.22"
 lazy_static = "1.5.0"
 indexmap = "2.12"
 ndarray = { version = "0.17", features = ["approx", "rayon"] }
 num = "0.4"
-numpy = "0.27"
+numpy = "0.29"
 num-complex = "0.4"
 oq3_semantics = "0.7.0"
 rayon = "1.11.0"

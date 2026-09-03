@@ -19,6 +19,11 @@ rule decompose_phase_to_rz {
     rewrite { RZ(theta) 0, GPhase(theta/2) }
 }
 
+rule decompose_phase_to_rx_ry {
+    match { Phase(theta) 0 }
+    rewrite { RX(-π/2) 0, RY(theta) 0, RX(π/2) 0, GPhase(theta/2) }
+}
+
 rule decompose_rz_to_phase {
     match { RZ(theta) 0 }
     rewrite { Phase(theta) 0, GPhase(-theta/2) }

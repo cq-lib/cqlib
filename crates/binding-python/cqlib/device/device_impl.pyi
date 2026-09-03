@@ -11,8 +11,11 @@
 # that they have been altered from the originals.
 
 from datetime import datetime
-from cqlib.circuit import Instruction, Qubit
+from cqlib.circuit import Circuit, Instruction, Qubit, StandardGate, ValueOperation
+from .qubit import PhysicalQubit
 from .topology import Topology
+
+_PhysicalQubitLike = int | Qubit | PhysicalQubit
 
 class InstructionProp:
     """Calibration data for a quantum gate executed on specific qubits.
@@ -24,15 +27,16 @@ class InstructionProp:
     Key Usage::
 
         >>> from cqlib.device import InstructionProp
-        >>> from cqlib.circuit import StandardGate
+        >>> from cqlib.circuit import Instruction, StandardGate
         >>>
         >>> # H gate with 0.1% error rate
-        >>> prop = InstructionProp(StandardGate.H, error_rate=0.001)
+        >>> h = Instruction.from_standard_gate(StandardGate.H)
+        >>> prop = InstructionProp(h, error_rate=0.001)
         >>>
         >>> # Optionally set gate duration
         >>> prop.length = 35.0  # 35 ns
         >>>
-        >>> prop.instruction    # StandardGate.H
+        >>> prop.instruction    # Instruction(StandardGate.H)
         >>> prop.error_rate     # 0.001
         >>> prop.length         # 35.0
     """
@@ -41,8 +45,12 @@ class InstructionProp:
         """Creates calibration data for a given instruction.
 
         Args:
-            instruction: The quantum instruction (e.g., ``StandardGate.H``).
+            instruction: The quantum instruction, for example one created by
+                ``Instruction.from_standard_gate(StandardGate.H)``.
             error_rate: The error rate (infidelity) in range [0.0, 1.0].
+
+        Raises:
+            ValueError: If ``error_rate`` is not finite or outside [0, 1].
         """
 
     @property
@@ -67,6 +75,9 @@ class InstructionProp:
 
         Args:
             error_rate: Error rate in [0.0, 1.0].
+
+        Raises:
+            ValueError: If ``error_rate`` is not finite or outside [0, 1].
         """
 
     @property
@@ -79,6 +90,9 @@ class InstructionProp:
 
         Args:
             length: Gate length in nanoseconds.
+
+        Raises:
+            ValueError: If ``length`` is not finite or is negative.
         """
 
     def __copy__(self) -> "InstructionProp": ...
@@ -116,6 +130,9 @@ class QubitProp:
 
         Args:
             readout_error: Base readout error rate in [0.0, 1.0].
+
+        Raises:
+            ValueError: If ``readout_error`` is not finite or outside [0, 1].
         """
 
     @property
@@ -132,6 +149,9 @@ class QubitProp:
 
         Args:
             prob: Probability in [0.0, 1.0].
+
+        Raises:
+            ValueError: If ``prob`` is not finite or outside [0, 1].
         """
 
     @property
@@ -144,6 +164,9 @@ class QubitProp:
 
         Args:
             prob: Probability in [0.0, 1.0].
+
+        Raises:
+            ValueError: If ``prob`` is not finite or outside [0, 1].
         """
 
     @property
@@ -156,6 +179,9 @@ class QubitProp:
 
         Args:
             t1: T1 time in microseconds.
+
+        Raises:
+            ValueError: If ``t1`` is not finite or is not positive.
         """
 
     @property
@@ -168,6 +194,9 @@ class QubitProp:
 
         Args:
             t2: T2 time in microseconds.
+
+        Raises:
+            ValueError: If ``t2`` is not finite or is not positive.
         """
 
     @property
@@ -180,6 +209,9 @@ class QubitProp:
 
         Args:
             frequency: Transition frequency in GHz.
+
+        Raises:
+            ValueError: If ``frequency`` is not finite or is not positive.
         """
 
     @property
@@ -193,6 +225,10 @@ class QubitProp:
 
         Args:
             prop: The instruction calibration data to add.
+
+        Raises:
+            ValueError: If the instruction is not a single-qubit standard gate
+                or its calibration values are invalid.
         """
 
     def __copy__(self) -> "QubitProp": ...
@@ -212,9 +248,10 @@ class EdgeProp:
         >>> from cqlib.circuit import StandardGate
         >>>
         >>> edge = EdgeProp()
-        >>> cx_prop = InstructionProp(StandardGate.CX, error_rate=0.005)
+        >>> cx = Instruction.from_standard_gate(StandardGate.CX)
+        >>> cx_prop = InstructionProp(cx, error_rate=0.005)
         >>> cx_prop.length = 200.0  # 200 ns
-        >>> edge.native_instructions = cx_prop
+        >>> edge.add_native_instruction(cx_prop)
     """
 
     def __init__(self) -> None:
@@ -229,6 +266,10 @@ class EdgeProp:
 
         Args:
             prop: The instruction calibration data (appended to existing list).
+
+        Raises:
+            ValueError: If the instruction is not a two-qubit standard gate
+                or its calibration values are invalid.
         """
 
     def __copy__(self) -> "EdgeProp": ...
@@ -291,11 +332,9 @@ class Device:
     # ---- Constructor ----
 
     def __init__(
-        self, name: str, qubits: list[int] | list[Qubit], topology: Topology
+        self, name: str, qubits: list[_PhysicalQubitLike], topology: Topology
     ) -> None:
         """Creates a device with given qubits and topology.
-
-        Note: The ``qubits`` list must be all ``int`` or all ``Qubit``.
 
         Args:
             name: Human-readable device name (e.g., ``"ibm_sherbrooke"``).
@@ -330,7 +369,7 @@ class Device:
 
     @staticmethod
     def line_from_qubits(
-        name: str, physical_qubits: list[int] | list[Qubit]
+        name: str, physical_qubits: list[_PhysicalQubitLike]
     ) -> "Device":
         """Create a device with given qubits connected as a directed line.
 
@@ -343,7 +382,7 @@ class Device:
         Example::
 
             >>> dev = Device.line_from_qubits("custom", [100, 101, 102, 103])
-            >>> dev.qubits  # [Qubit(100), Qubit(101), Qubit(102), Qubit(103)]
+            >>> dev.qubits  # [PhysicalQubit(100), PhysicalQubit(101), PhysicalQubit(102), PhysicalQubit(103)]
         """
 
     @staticmethod
@@ -419,18 +458,16 @@ class Device:
         """Device name."""
 
     @property
-    def qubits(self) -> list[Qubit]:
+    def qubits(self) -> list[PhysicalQubit]:
         """All registered physical qubits."""
 
     @property
-    def invalid_qubits(self) -> list[Qubit]:
+    def invalid_qubits(self) -> list[PhysicalQubit]:
         """Invalid (offline / faulty) qubits."""
 
     @invalid_qubits.setter
-    def invalid_qubits(self, qubits: list[int] | list[Qubit]) -> None:
+    def invalid_qubits(self, qubits: list[_PhysicalQubitLike]) -> None:
         """Set the list of invalid qubits.
-
-        Note: The list must be all ``int`` or all ``Qubit``.
 
         Raises:
             ValueError: If any qubit is not registered with the device.
@@ -446,7 +483,11 @@ class Device:
 
     @native_gates.setter
     def native_gates(self, gates: list[Instruction]) -> None:
-        """Set the device-wide native gates."""
+        """Set the device-wide native gates.
+
+        Raises:
+            ValueError: If any entry is non-standard or acts on more than two qubits.
+        """
 
     @property
     def calibration_time(self) -> datetime | None:
@@ -470,7 +511,11 @@ class Device:
 
     @default_t1.setter
     def default_t1(self, t1: float) -> None:
-        """Set default T1 time (μs)."""
+        """Set default T1 time (μs).
+
+        Raises:
+            ValueError: If ``t1`` is not finite or is not positive.
+        """
 
     @property
     def default_t2(self) -> float | None:
@@ -478,7 +523,11 @@ class Device:
 
     @default_t2.setter
     def default_t2(self, t2: float) -> None:
-        """Set default T2 time (μs)."""
+        """Set default T2 time (μs).
+
+        Raises:
+            ValueError: If ``t2`` is not finite or is not positive.
+        """
 
     @property
     def default_readout_error(self) -> float | None:
@@ -486,7 +535,11 @@ class Device:
 
     @default_readout_error.setter
     def default_readout_error(self, error: float) -> None:
-        """Set default readout error."""
+        """Set default readout error.
+
+        Raises:
+            ValueError: If ``error`` is not finite or outside [0, 1].
+        """
 
     @property
     def default_single_qubit_error(self) -> float | None:
@@ -494,7 +547,11 @@ class Device:
 
     @default_single_qubit_error.setter
     def default_single_qubit_error(self, error: float) -> None:
-        """Set default single-qubit error."""
+        """Set default single-qubit error.
+
+        Raises:
+            ValueError: If ``error`` is not finite or outside [0, 1].
+        """
 
     @property
     def default_two_qubit_error(self) -> float | None:
@@ -502,12 +559,16 @@ class Device:
 
     @default_two_qubit_error.setter
     def default_two_qubit_error(self, error: float) -> None:
-        """Set default two-qubit error."""
+        """Set default two-qubit error.
+
+        Raises:
+            ValueError: If ``error`` is not finite or outside [0, 1].
+        """
 
     # ---- Per-qubit / per-edge property management ----
 
     def add_qubit_properties(
-        self, qubit: int | Qubit, props: QubitProp
+        self, qubit: _PhysicalQubitLike, props: QubitProp
     ) -> None:
         """Add or update properties for a specific qubit.
 
@@ -516,11 +577,14 @@ class Device:
             props: The :class:`QubitProp` data to assign.
 
         Raises:
-            ValueError: If the qubit is not usable (not registered or invalid).
+            ValueError: If the qubit is not registered or is absent from the topology.
+
+        Calibration can be retained for a registered qubit even while it is
+        marked invalid/offline.
         """
 
     def add_edge_properties(
-        self, control: int | Qubit, target: int | Qubit, props: EdgeProp
+        self, control: _PhysicalQubitLike, target: _PhysicalQubitLike, props: EdgeProp
     ) -> None:
         """Add or update properties for a specific directed coupling.
 
@@ -533,7 +597,7 @@ class Device:
             ValueError: If the edge is not in the topology.
         """
 
-    def qubit_properties(self, qubit: int | Qubit) -> QubitProp | None:
+    def qubit_properties(self, qubit: _PhysicalQubitLike) -> QubitProp | None:
         """Get the properties of a specific qubit.
 
         Returns ``None`` if no properties have been assigned for this qubit.
@@ -543,7 +607,7 @@ class Device:
         """
 
     def edge_properties(
-        self, control: int | Qubit, target: int | Qubit
+        self, control: _PhysicalQubitLike, target: _PhysicalQubitLike
     ) -> EdgeProp | None:
         """Get the properties of a specific directed coupling.
 
@@ -556,7 +620,7 @@ class Device:
 
     # ---- Effective qubit parameter queries (fallback to defaults) ----
 
-    def get_t1(self, qubit: int | Qubit) -> float | None:
+    def get_t1(self, qubit: _PhysicalQubitLike) -> float | None:
         """Get T1 relaxation time for a qubit.
 
         Falls back to :attr:`default_t1` if the qubit has no specific value.
@@ -565,7 +629,7 @@ class Device:
             qubit: The qubit to query.
         """
 
-    def get_t2(self, qubit: int | Qubit) -> float | None:
+    def get_t2(self, qubit: _PhysicalQubitLike) -> float | None:
         """Get T2 dephasing time for a qubit.
 
         Falls back to :attr:`default_t2` if the qubit has no specific value.
@@ -574,7 +638,7 @@ class Device:
             qubit: The qubit to query.
         """
 
-    def get_readout_error(self, qubit: int | Qubit) -> float | None:
+    def get_readout_error(self, qubit: _PhysicalQubitLike) -> float | None:
         """Get readout error rate for a qubit.
 
         Falls back to :attr:`default_readout_error` if the qubit has no specific value.
@@ -586,7 +650,7 @@ class Device:
     # ---- Error rate queries for routing / noise-aware compilation ----
 
     def single_qubit_error(
-        self, qubit: int | Qubit, instruction: Instruction
+        self, qubit: _PhysicalQubitLike, instruction: Instruction
     ) -> float | None:
         """Get the error rate for a given instruction on a single qubit.
 
@@ -604,8 +668,8 @@ class Device:
 
     def two_qubit_error(
         self,
-        control: int | Qubit,
-        target: int | Qubit,
+        control: _PhysicalQubitLike,
+        target: _PhysicalQubitLike,
         instruction: Instruction,
     ) -> float | None:
         """Get the error rate for a given instruction on a directed coupling.
@@ -624,7 +688,7 @@ class Device:
         """
 
     def edge_error(
-        self, control: int | Qubit, target: int | Qubit
+        self, control: _PhysicalQubitLike, target: _PhysicalQubitLike
     ) -> float | None:
         """Get the best available two-qubit error on a directed coupling.
 
@@ -645,14 +709,14 @@ class Device:
     # ---- Qubit usability queries ----
 
     @property
-    def usable_qubits(self) -> list[Qubit]:
+    def usable_qubits(self) -> list[PhysicalQubit]:
         """All registered physical qubits that are not marked invalid."""
 
     @property
     def num_usable_qubits(self) -> int:
         """Number of usable (registered and not invalid) physical qubits."""
 
-    def is_usable_qubit(self, qubit: int | Qubit) -> bool:
+    def is_usable_qubit(self, qubit: _PhysicalQubitLike) -> bool:
         """Check whether a physical qubit is registered and not invalid.
 
         Args:
@@ -660,6 +724,28 @@ class Device:
 
         Returns:
             ``True`` if the qubit is online and usable.
+        """
+
+    def supports_native_instruction(
+        self, instruction: Instruction, qargs: list[_PhysicalQubitLike]
+    ) -> bool:
+        """Return whether an instruction is native on the exact ordered qargs."""
+
+    def validate_operation(self, operation: ValueOperation) -> None:
+        """Validate one value-level operation in the physical-qubit ID space.
+
+        Classical control-flow bodies are checked recursively without requiring
+        the operation's owning circuit or its classical resource tables.
+
+        Raises:
+            ValueError: If the operation cannot execute on this device.
+        """
+
+    def validate_circuit(self, circuit: Circuit) -> None:
+        """Validate a circuit in the physical-qubit ID space.
+
+        Raises:
+            ValueError: If any operation cannot execute on this device.
         """
 
     def __copy__(self) -> "Device": ...

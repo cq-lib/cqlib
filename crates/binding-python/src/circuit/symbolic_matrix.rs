@@ -30,7 +30,7 @@ use pyo3::prelude::*;
 use std::collections::{BTreeSet, HashMap};
 
 /// Complex scalar whose real and imaginary parts are Parameter expressions.
-#[pyclass(name = "SymbolicComplex", module = "cqlib.circuit")]
+#[pyclass(name = "SymbolicComplex", module = "cqlib.circuit", from_py_object)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PySymbolicComplex {
     pub(crate) inner: SymbolicComplex,
@@ -176,7 +176,7 @@ impl PySymbolicComplex {
 }
 
 /// Dense row-major matrix of symbolic complex values.
-#[pyclass(name = "SymbolicMatrix", module = "cqlib.circuit")]
+#[pyclass(name = "SymbolicMatrix", module = "cqlib.circuit", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PySymbolicMatrix {
     pub(crate) inner: SymbolicMatrix,

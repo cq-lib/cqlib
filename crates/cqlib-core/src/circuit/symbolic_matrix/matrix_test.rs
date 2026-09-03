@@ -53,11 +53,11 @@ fn test_symbolic_complex_exp_i() {
 
 #[test]
 fn test_symbolic_complex_from_real() {
-    let z = SymbolicComplex::from_real(3.14);
+    let z = SymbolicComplex::from_real(2.5);
     assert!(!z.is_zero_exact());
     assert!(z.im.is_zero());
     let evaluated = z.evaluate(&None).unwrap();
-    assert!((evaluated.re - 3.14).abs() < 1e-12);
+    assert!((evaluated.re - 2.5).abs() < 1e-12);
     assert!(evaluated.im.abs() < 1e-12);
 }
 
@@ -132,7 +132,7 @@ fn test_symbolic_complex_complex64_mul() {
 
 #[test]
 fn test_symbolic_complex_display() {
-    let real = SymbolicComplex::from_real(3.14);
+    let real = SymbolicComplex::from_real(2.5);
     assert!(!real.to_string().contains('i'));
 
     let imag = SymbolicComplex::new(0.0, 2.0);

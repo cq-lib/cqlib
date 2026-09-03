@@ -12,6 +12,7 @@
 
 //! Multi-controlled FSIM synthesis primitives.
 
+use super::validation::find_duplicate_qubit;
 use super::{
     pauli_rotation::{decompose_pauli_rotation_n_clean, decompose_pauli_rotation_no_aux},
     phase::{decompose_phase_n_clean, decompose_phase_no_aux},
@@ -19,7 +20,6 @@ use super::{
 };
 use crate::circuit::{Parameter, ParameterValue, Qubit, StandardGate, operation::ValueOperation};
 use crate::compile::error::CompilerError;
-use crate::util::qubit::find_duplicate_qubit;
 
 const DECOMPOSE_FSIM_NAME: &str = "decompose.fsim";
 

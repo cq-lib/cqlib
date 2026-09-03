@@ -32,98 +32,10 @@ use crate::qis::hamiltonian::Hamiltonian;
 
 use super::{EvolutionStrategy, PauliEvolutionAnsatz};
 
-/// Single-qubit Pauli matrices in the computational basis.
-mod pauli_matrices {
-    use super::*;
-
-    pub fn i() -> Array2<Complex64> {
-        Array2::from_diag(&ndarray::arr1(&[
-            Complex64::new(1.0, 0.0),
-            Complex64::new(1.0, 0.0),
-        ]))
-    }
-
-    pub fn x() -> Array2<Complex64> {
-        let z = Complex64::new(0.0, 0.0);
-        let o = Complex64::new(1.0, 0.0);
-        Array2::from_shape_vec((2, 2), vec![z, o, o, z]).unwrap()
-    }
-
-    pub fn y() -> Array2<Complex64> {
-        let z = Complex64::new(0.0, 0.0);
-        let pi = Complex64::new(0.0, 1.0);
-        let mi = Complex64::new(0.0, -1.0);
-        Array2::from_shape_vec((2, 2), vec![z, mi, pi, z]).unwrap()
-    }
-
-    pub fn z() -> Array2<Complex64> {
-        let o = Complex64::new(1.0, 0.0);
-        let m = Complex64::new(-1.0, 0.0);
-        Array2::from_diag(&ndarray::arr1(&[o, m]))
-    }
-}
-
-/// Computes the Kronecker (tensor) product of two matrices.
-fn kron(a: &Array2<Complex64>, b: &Array2<Complex64>) -> Array2<Complex64> {
-    let (m, n) = a.dim();
-    let (p, q) = b.dim();
-    let mut result = Array2::zeros((m * p, n * q));
-    for i in 0..m {
-        for j in 0..n {
-            let aij = a[[i, j]];
-            for k in 0..p {
-                for l in 0..q {
-                    result[[i * p + k, j * q + l]] = aij * b[[k, l]];
-                }
-            }
-        }
-    }
-    result
-}
-
-/// Builds the full matrix of a [`PauliString`] in the **little-endian** convention
-/// used by `circuit_to_matrix` (qubit 0 is the LSB / "innermost" Kronecker factor).
-///
-/// For an $n$-qubit string $P_0 \otimes P_1 \otimes \ldots \otimes P_{n-1}$,
-/// the little-endian matrix is $P_{n-1} \otimes \ldots \otimes P_1 \otimes P_0$.
-fn pauli_string_matrix(pauli_str: &str) -> Array2<Complex64> {
-    use crate::qis::pauli::Pauli;
-    use pauli_matrices::*;
-
-    let ps: crate::qis::pauli::PauliString = pauli_str.parse().unwrap();
-    let n = ps.num_qubits;
-
-    // Collect single-qubit matrices for qubit 0..n-1
-    let single: Vec<Array2<Complex64>> = (0..n)
-        .map(|idx| match ps.get_pauli(idx) {
-            Pauli::I => i(),
-            Pauli::X => x(),
-            Pauli::Y => y(),
-            Pauli::Z => z(),
-        })
-        .collect();
-
-    // Little-endian: qubit 0 is innermost → build P_{n-1} ⊗ ... ⊗ P_0
-    // Start from qubit n-1 (outermost) and Kronecker down.
-    let mut mat = single[n - 1].clone();
-    for idx in (0..n - 1).rev() {
-        mat = kron(&mat, &single[idx]);
-    }
-
-    // Absorb phase
-    let phase = ps.phase.to_complex();
-    mat.mapv(|v| v * phase)
-}
-
 /// Builds the full Hamiltonian matrix $H = \sum_k c_k P_k$.
 fn hamiltonian_matrix(h: &Hamiltonian) -> Array2<Complex64> {
-    let dim = 1usize << h.num_qubits;
-    let mut mat = Array2::<Complex64>::zeros((dim, dim));
-    for (pauli, coeff) in &h.terms {
-        let pm = pauli_string_matrix(&format!("{}", pauli));
-        mat = mat + pm.mapv(|v| v * *coeff);
-    }
-    mat
+    h.to_matrix()
+        .expect("Hamiltonian evolution tests use dimensionally valid terms")
 }
 
 /// Computes $e^{-iHt}$ via Taylor series: $\sum_{k=0}^{K} \frac{(-iHt)^k}{k!}$.
@@ -141,7 +53,7 @@ fn matrix_exp_iht(h_mat: &Array2<Complex64>, t: f64) -> Array2<Complex64> {
 
     for k in 1..=60usize {
         term = term.dot(&a) / Complex64::from(k as f64);
-        result = result + &term;
+        result += &term;
 
         // Early termination if converged
         if term.iter().all(|v| v.norm() < 1e-16) {

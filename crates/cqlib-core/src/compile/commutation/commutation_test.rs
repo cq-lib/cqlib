@@ -11,10 +11,55 @@
 // that they have been altered from the originals.
 
 use super::checker::{Commutation, CommutationChecker, CommutationConfig, CommutationResult};
-use crate::circuit::{Instruction, Parameter, Qubit, StandardGate, UnitaryGate};
+use crate::circuit::gate::FrozenCircuit;
+use crate::circuit::{
+    Circuit, CircuitGate, CircuitId, ClassicalControlOp, ClassicalDataOp, ClassicalType,
+    ClassicalValue, Directive, Instruction, Parameter, Qubit, StandardGate, UnitaryGate,
+};
 use ndarray::Array2;
 use num_complex::Complex64;
 use std::f64::consts::{FRAC_PI_2, PI};
+
+fn numeric_params(gate: StandardGate) -> Vec<Parameter> {
+    match gate.num_params() {
+        0 => vec![],
+        1 => vec![Parameter::from(0.731)],
+        2 => vec![Parameter::from(0.731), Parameter::from(-1.127)],
+        3 => vec![
+            Parameter::from(0.731),
+            Parameter::from(-1.127),
+            Parameter::from(0.419),
+        ],
+        count => panic!("unexpected standard-gate parameter count {count}"),
+    }
+}
+
+fn ordered_qargs(width: usize) -> Vec<Vec<Qubit>> {
+    let qubits = [Qubit::new(0), Qubit::new(1), Qubit::new(2)];
+    match width {
+        0 => vec![vec![]],
+        1 => qubits.iter().map(|&qubit| vec![qubit]).collect(),
+        2 => qubits
+            .iter()
+            .flat_map(|&first| {
+                qubits
+                    .iter()
+                    .copied()
+                    .filter(move |&second| second != first)
+                    .map(move |second| vec![first, second])
+            })
+            .collect(),
+        3 => vec![
+            vec![qubits[0], qubits[1], qubits[2]],
+            vec![qubits[0], qubits[2], qubits[1]],
+            vec![qubits[1], qubits[0], qubits[2]],
+            vec![qubits[1], qubits[2], qubits[0]],
+            vec![qubits[2], qubits[0], qubits[1]],
+            vec![qubits[2], qubits[1], qubits[0]],
+        ],
+        _ => vec![],
+    }
+}
 
 fn algebra_only_checker() -> CommutationChecker {
     CommutationChecker::with_config(CommutationConfig {
@@ -63,6 +108,80 @@ fn disjoint_operations_commute_exactly() {
     );
 
     assert_exact(result);
+}
+
+#[test]
+fn circuit_gate_same_application_respects_signature_order() {
+    let mut definition = Circuit::new(1);
+    definition
+        .rx(Qubit::new(0), Parameter::symbol("theta"))
+        .unwrap();
+    definition
+        .ry(Qubit::new(0), Parameter::symbol("phi"))
+        .unwrap();
+
+    let ordered = Instruction::CircuitGate(Box::new(
+        CircuitGate::with_signature(
+            "G",
+            FrozenCircuit::new(definition.clone()),
+            ["theta".to_string(), "phi".to_string()],
+        )
+        .unwrap(),
+    ));
+    let reversed = Instruction::CircuitGate(Box::new(
+        CircuitGate::with_signature(
+            "G",
+            FrozenCircuit::new(definition),
+            ["phi".to_string(), "theta".to_string()],
+        )
+        .unwrap(),
+    ));
+    let checker = algebra_only_checker();
+    let qubits = [Qubit::new(0)];
+    let params = [Parameter::from(0.37), Parameter::from(-0.81)];
+
+    assert_exact(checker.check(&ordered, &qubits, &params, &ordered, &qubits, &params));
+    assert!(
+        checker
+            .check(&ordered, &qubits, &params, &reversed, &qubits, &params)
+            .is_none()
+    );
+}
+
+#[test]
+fn same_application_shortcut_excludes_side_effecting_operations() {
+    let checker = algebra_only_checker();
+    let qubits = [Qubit::new(0)];
+    let result = ClassicalValue::new(CircuitId::new(), 0, ClassicalType::Bit);
+    let cases = [
+        (Instruction::Directive(Directive::Measure), vec![]),
+        (Instruction::Directive(Directive::Reset), vec![]),
+        (Instruction::Delay, vec![Parameter::from(1.0)]),
+        (
+            Instruction::ClassicalData(ClassicalDataOp::MeasureBit { result }),
+            vec![],
+        ),
+        (
+            Instruction::ClassicalControl(ClassicalControlOp::Break),
+            vec![],
+        ),
+    ];
+
+    for (instruction, params) in cases {
+        assert!(
+            checker
+                .check(
+                    &instruction,
+                    &qubits,
+                    &params,
+                    &instruction,
+                    &qubits,
+                    &params,
+                )
+                .is_none(),
+            "side-effecting instruction {instruction:?} used the same-application shortcut"
+        );
+    }
 }
 
 #[test]
@@ -414,4 +533,57 @@ fn matrix_fallback_respects_max_qubits() {
     );
 
     assert!(result.is_none());
+}
+
+#[test]
+fn every_numeric_standard_gate_commutation_claim_matches_direct_matrix_check() {
+    use super::matrix::matrix_commutation;
+
+    let checker = algebra_only_checker();
+    for &lhs_gate in StandardGate::all() {
+        let lhs_inst = Instruction::Standard(lhs_gate);
+        let lhs_params = numeric_params(lhs_gate);
+        for lhs_qargs in ordered_qargs(lhs_gate.num_qubits()) {
+            for &rhs_gate in StandardGate::all() {
+                // The direct matrix fallback intentionally does not represent
+                // zero-qubit GPhase operations; their scalar commutation is
+                // covered separately by the cheap checker path.
+                if lhs_gate == StandardGate::GPhase || rhs_gate == StandardGate::GPhase {
+                    continue;
+                }
+                let rhs_inst = Instruction::Standard(rhs_gate);
+                let rhs_params = numeric_params(rhs_gate);
+                for rhs_qargs in ordered_qargs(rhs_gate.num_qubits()) {
+                    let Some(claim) = checker.check(
+                        &lhs_inst,
+                        &lhs_qargs,
+                        &lhs_params,
+                        &rhs_inst,
+                        &rhs_qargs,
+                        &rhs_params,
+                    ) else {
+                        continue;
+                    };
+                    let matrix = matrix_commutation(
+                        &lhs_inst,
+                        &lhs_qargs,
+                        &lhs_params,
+                        &rhs_inst,
+                        &rhs_qargs,
+                        &rhs_params,
+                        3,
+                    );
+                    assert!(
+                        matrix.is_some(),
+                        "false commutation claim {claim:?}: {lhs_gate:?}{lhs_qargs:?} vs {rhs_gate:?}{rhs_qargs:?}"
+                    );
+                    assert_eq!(
+                        claim.is_exact(),
+                        matrix.as_ref().is_some_and(Commutation::is_exact),
+                        "wrong commutation phase class: {lhs_gate:?}{lhs_qargs:?} vs {rhs_gate:?}{rhs_qargs:?}"
+                    );
+                }
+            }
+        }
+    }
 }

@@ -21,7 +21,7 @@
 //! static compiler analysis: a gate in a branch or loop body contributes once
 //! to the layout model, regardless of whether that path is taken at runtime.
 
-use crate::circuit::{Circuit, ClassicalControlOp, Instruction, Operation, Qubit};
+use crate::circuit::{Circuit, ClassicalControlOp, Instruction, Operation, Qubit, StandardGate};
 use crate::compile::CompilerError;
 use crate::device::LogicalQubit;
 use std::collections::BTreeMap;
@@ -69,6 +69,19 @@ pub struct Interaction {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct InteractionGraph {
     interactions: Vec<Interaction>,
+    gate_contributions: Vec<Vec<GateInteraction>>,
+    temporal_weights: Vec<[f64; 3]>,
+}
+
+/// Gate-specific weights for one unordered logical-qubit interaction.
+///
+/// This remains compiler-internal so the public [`Interaction`] summary keeps
+/// its existing shape and direction-weight contract.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct GateInteraction {
+    pub(super) gate: StandardGate,
+    pub(super) left_to_right_weight: f64,
+    pub(super) right_to_left_weight: f64,
 }
 
 impl InteractionGraph {
@@ -80,6 +93,28 @@ impl InteractionGraph {
     /// Returns all interactions in deterministic endpoint order.
     pub fn interactions(&self) -> &[Interaction] {
         &self.interactions
+    }
+
+    /// Returns gate-specific contributions for the interaction at `index`.
+    pub(super) fn gate_contributions(&self, index: usize) -> &[GateInteraction] {
+        debug_assert_eq!(self.interactions.len(), self.gate_contributions.len());
+        self.gate_contributions
+            .get(index)
+            .expect("interaction and gate-contribution slots must remain aligned")
+            .as_slice()
+    }
+
+    pub(super) fn temporal_weights(&self, index: usize) -> [f64; 3] {
+        debug_assert_eq!(self.interactions.len(), self.temporal_weights.len());
+        self.temporal_weights
+            .get(index)
+            .copied()
+            .unwrap_or([0.0; 3])
+    }
+
+    #[cfg(test)]
+    pub(super) fn contribution_slot_count(&self) -> usize {
+        self.gate_contributions.len()
     }
 
     /// Returns whether no two-qubit interactions were observed.
@@ -113,8 +148,10 @@ impl InteractionGraph {
         &mut self,
         first: LogicalQubit,
         second: LogicalQubit,
+        gate: Option<StandardGate>,
         weight: f64,
         order: usize,
+        temporal_bucket: usize,
     ) {
         let (left, right, left_to_right) = if first <= second {
             (first, second, true)
@@ -135,6 +172,15 @@ impl InteractionGraph {
                     interaction.directed_weight_right_to_left += weight;
                 }
                 interaction.first_seen_order = interaction.first_seen_order.min(order);
+                if let Some(gate) = gate {
+                    add_gate_contribution(
+                        &mut self.gate_contributions[index],
+                        gate,
+                        left_to_right,
+                        weight,
+                    );
+                }
+                self.temporal_weights[index][temporal_bucket] += weight;
             }
             Err(index) => {
                 self.interactions.insert(
@@ -148,9 +194,41 @@ impl InteractionGraph {
                         first_seen_order: order,
                     },
                 );
+                let mut contributions = Vec::new();
+                if let Some(gate) = gate {
+                    add_gate_contribution(&mut contributions, gate, left_to_right, weight);
+                }
+                self.gate_contributions.insert(index, contributions);
+                let mut temporal = [0.0; 3];
+                temporal[temporal_bucket] = weight;
+                self.temporal_weights.insert(index, temporal);
             }
         }
+        debug_assert_eq!(self.interactions.len(), self.gate_contributions.len());
+        debug_assert_eq!(self.interactions.len(), self.temporal_weights.len());
     }
+}
+
+fn add_gate_contribution(
+    contributions: &mut Vec<GateInteraction>,
+    gate: StandardGate,
+    left_to_right: bool,
+    weight: f64,
+) {
+    if let Some(contribution) = contributions.iter_mut().find(|item| item.gate == gate) {
+        if left_to_right {
+            contribution.left_to_right_weight += weight;
+        } else {
+            contribution.right_to_left_weight += weight;
+        }
+        return;
+    }
+
+    contributions.push(GateInteraction {
+        gate,
+        left_to_right_weight: if left_to_right { weight } else { 0.0 },
+        right_to_left_weight: if left_to_right { 0.0 } else { weight },
+    });
 }
 
 /// Extracts layout-relevant interaction data from a circuit.
@@ -167,9 +245,42 @@ impl InteractionGraph {
 pub fn analyze_circuit_for_layout(
     circuit: &Circuit,
 ) -> Result<CircuitLayoutAnalysis, CompilerError> {
-    let mut analyzer = InteractionAnalyzer::new(circuit.qubits());
+    let operation_count = count_layout_order_operations(circuit.operations());
+    let mut analyzer = InteractionAnalyzer::new(circuit.qubits(), operation_count);
     analyzer.scan_operations(circuit.operations())?;
     Ok(analyzer.finish())
+}
+
+fn count_layout_order_operations(operations: &[Operation]) -> usize {
+    operations
+        .iter()
+        .map(|operation| match &operation.instruction {
+            Instruction::ClassicalControl(control) => match control {
+                ClassicalControlOp::If(op) => {
+                    count_layout_order_operations(op.then_body().operations())
+                        + op.else_body()
+                            .map_or(0, |body| count_layout_order_operations(body.operations()))
+                }
+                ClassicalControlOp::While(op) => {
+                    count_layout_order_operations(op.body().operations())
+                }
+                ClassicalControlOp::For(op) => {
+                    count_layout_order_operations(op.body().operations())
+                }
+                ClassicalControlOp::Switch(op) => {
+                    op.cases()
+                        .iter()
+                        .map(|case| count_layout_order_operations(case.body().operations()))
+                        .sum::<usize>()
+                        + op.default()
+                            .map_or(0, |body| count_layout_order_operations(body.operations()))
+                }
+                ClassicalControlOp::Break | ClassicalControlOp::Continue => 0,
+            },
+            Instruction::ClassicalData(_) | Instruction::Directive(_) | Instruction::Delay => 0,
+            _ => 1,
+        })
+        .sum()
 }
 
 struct InteractionAnalyzer {
@@ -177,15 +288,17 @@ struct InteractionAnalyzer {
     interactions: InteractionGraph,
     /// Monotonic order for quantum operations that affect layout tie-breaks.
     operation_order: usize,
+    total_operation_count: usize,
 }
 
 impl InteractionAnalyzer {
     /// Creates an analyzer seeded with the circuit's logical qubit order.
-    fn new(qubits: Vec<Qubit>) -> Self {
+    fn new(qubits: Vec<Qubit>, total_operation_count: usize) -> Self {
         Self {
             logical_qubits: qubits.into_iter().map(LogicalQubit::from_qubit).collect(),
             interactions: InteractionGraph::new(),
             operation_order: 0,
+            total_operation_count,
         }
     }
 
@@ -213,8 +326,17 @@ impl InteractionAnalyzer {
                         self.interactions.add_operation_interaction(
                             first,
                             second,
+                            match &operation.instruction {
+                                Instruction::Standard(gate) if gate.num_qubits() == 2 => {
+                                    Some(*gate)
+                                }
+                                _ => None,
+                            },
                             1.0,
                             self.operation_order,
+                            (self.operation_order.saturating_mul(3)
+                                / self.total_operation_count.max(1))
+                            .min(2),
                         );
                     }
                     arity => {

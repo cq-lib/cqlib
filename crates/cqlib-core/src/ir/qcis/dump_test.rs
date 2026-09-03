@@ -301,7 +301,7 @@ fn test_format_float() {
     assert_eq!(format_float(-std::f64::consts::PI / 2.0), "-pi/2");
     assert_eq!(format_float(std::f64::consts::PI / 4.0), "pi/4");
     assert_eq!(format_float(42.0), "42");
-    assert_eq!(format_float(3.14159), "3.14159");
+    assert_eq!(format_float(2.5), "2.5");
 }
 
 #[test]

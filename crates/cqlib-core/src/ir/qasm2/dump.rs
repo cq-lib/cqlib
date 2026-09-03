@@ -62,7 +62,7 @@
 //!
 //! - General classical expressions and assignments are not supported by OpenQASM 2.0
 //! - Else branches, loops, switches, and nested control flow return an error
-//! - Measurements inside gate definitions return an error
+//! - Measurements and resets inside gate definitions return an error
 //! - Classical register names are normalized to `c{id}` and `v{id}` because
 //!   [`Circuit`] does not retain source-format register names.
 //! - Non-zero global phase and `GPhase` instructions are emitted only as comments;
@@ -70,7 +70,7 @@
 
 use crate::circuit::circuit_param::CircuitParam;
 use crate::circuit::gate::{
-    CircuitGate, ClassicalDataOp, Directive, FrozenCircuit, Instruction, StandardGate,
+    CircuitGate, ClassicalDataOp, Directive, Instruction, StandardGate, UnitaryGate,
 };
 use crate::circuit::operation::Operation;
 use crate::circuit::parameter::Parameter;
@@ -86,6 +86,8 @@ use std::io::{self, Write as IoWrite};
 use std::path::Path;
 use std::sync::Arc;
 
+const QELIB1_CUSTOM_GATES: &[&str] = &["ch", "cu1", "cu3"];
+
 /// Errors that can occur during OpenQASM serialization.
 ///
 /// These errors indicate problems that prevent successful conversion
@@ -98,6 +100,8 @@ pub enum QasmDumpError {
     FormatError(String),
     /// Measure directives inside gate definitions are invalid in OpenQASM 2.0
     MeasureInGateNotAllowed,
+    /// Reset directives inside gate definitions are invalid in OpenQASM 2.0
+    ResetInGateNotAllowed,
     /// Invalid qubit index in quantum register
     InvalidQubitIndex(String),
     /// A classical type cannot be represented by an OpenQASM 2.0 `creg`.
@@ -123,6 +127,9 @@ impl std::fmt::Display for QasmDumpError {
             QasmDumpError::FormatError(s) => write!(f, "Format error: {}", s),
             QasmDumpError::MeasureInGateNotAllowed => {
                 write!(f, "Measure inside gate definition is not allowed")
+            }
+            QasmDumpError::ResetInGateNotAllowed => {
+                write!(f, "Reset inside gate definition is not allowed")
             }
             QasmDumpError::InvalidQubitIndex(s) => write!(f, "Invalid qubit index: {}", s),
             QasmDumpError::UnsupportedClassicalType(s) => {
@@ -293,19 +300,19 @@ pub fn dumps(circuit: &Circuit) -> Result<String, QasmDumpError> {
     ];
 
     for gate in extended_gates {
-        if used_standard_gates.contains(&gate) {
-            if let Some(def) = get_extended_gate_definition(gate) {
-                writeln!(&mut output, "{}", def)?;
-            }
+        if used_standard_gates.contains(&gate)
+            && let Some(def) = get_extended_gate_definition(gate)
+        {
+            writeln!(&mut output, "{}", def)?;
         }
     }
     writeln!(&mut output)?;
 
     // Pass 1: Collect gate definitions (Dependencies first)
     let mut defined_gates: IndexMap<String, CircuitGate> = IndexMap::new();
-    let mut unitary_gate_defs: IndexMap<String, Arc<FrozenCircuit>> = IndexMap::new();
+    let mut unitary_gate_defs: IndexMap<String, UnitaryGate> = IndexMap::new();
     // UnitaryGate with only matrix (no circuit) - will be declared as opaque
-    let mut opaque_unitary_gates: IndexMap<String, u16> = IndexMap::new();
+    let mut opaque_unitary_gates: IndexMap<String, UnitaryGate> = IndexMap::new();
     // Track if Delay is used
     let mut has_delay = false;
     collect_gates(
@@ -323,14 +330,14 @@ pub fn dumps(circuit: &Circuit) -> Result<String, QasmDumpError> {
     }
 
     // Output UnitaryGate definitions (with circuit)
-    for (label, fc) in unitary_gate_defs.iter() {
-        dump_unitary_gate_definition(label, fc, &mut output)?;
+    for gate in unitary_gate_defs.values() {
+        dump_unitary_gate_definition(gate, &mut output)?;
         writeln!(&mut output)?;
     }
 
     // Output opaque declarations for UnitaryGate without circuit
-    for (label, num_qubits) in opaque_unitary_gates.iter() {
-        dump_opaque_declaration(label, *num_qubits, &mut output)?;
+    for gate in opaque_unitary_gates.values() {
+        dump_opaque_declaration(gate, &mut output)?;
         writeln!(&mut output)?;
     }
 
@@ -379,8 +386,8 @@ pub fn to_string(circuit: &Circuit) -> Result<String, QasmDumpError> {
 fn collect_gates(
     circuit: &Circuit,
     defined_gates: &mut IndexMap<String, CircuitGate>,
-    unitary_gate_defs: &mut IndexMap<String, Arc<FrozenCircuit>>,
-    opaque_unitary_gates: &mut IndexMap<String, u16>,
+    unitary_gate_defs: &mut IndexMap<String, UnitaryGate>,
+    opaque_unitary_gates: &mut IndexMap<String, UnitaryGate>,
     has_delay: &mut bool,
 ) -> Result<(), QasmDumpError> {
     collect_gates_from_operations(
@@ -395,13 +402,16 @@ fn collect_gates(
 fn collect_gates_from_operations(
     operations: &[Operation],
     defined_gates: &mut IndexMap<String, CircuitGate>,
-    unitary_gate_defs: &mut IndexMap<String, Arc<FrozenCircuit>>,
-    opaque_unitary_gates: &mut IndexMap<String, u16>,
+    unitary_gate_defs: &mut IndexMap<String, UnitaryGate>,
+    opaque_unitary_gates: &mut IndexMap<String, UnitaryGate>,
     has_delay: &mut bool,
 ) -> Result<(), QasmDumpError> {
     for op in operations {
         match &op.instruction {
             Instruction::CircuitGate(cg) => {
+                if QELIB1_CUSTOM_GATES.contains(&cg.name.as_str()) {
+                    continue;
+                }
                 // Recurse first (Post-order traversal ensures dependencies are collected first)
                 collect_gates(
                     &cg.circuit.circuit,
@@ -439,13 +449,13 @@ fn collect_gates_from_operations(
                     // Register this UnitaryGate as a gate definition
                     let label = ug.label().to_string();
                     if !unitary_gate_defs.contains_key(&label) {
-                        unitary_gate_defs.insert(label, fc.clone());
+                        unitary_gate_defs.insert(label, ug.as_ref().clone());
                     }
                 } else {
                     // UnitaryGate without circuit (only matrix) - will be declared as opaque
                     let label = ug.label().to_string();
                     if !opaque_unitary_gates.contains_key(&label) {
-                        opaque_unitary_gates.insert(label, ug.num_qubits());
+                        opaque_unitary_gates.insert(label, ug.as_ref().clone());
                     }
                 }
             }
@@ -518,11 +528,9 @@ fn collect_gates_from_operations(
 }
 
 fn dump_gate_definition(cg: &CircuitGate, output: &mut String) -> Result<(), QasmDumpError> {
-    if operations_contain_measurement(cg.circuit.circuit.operations()) {
-        return Err(QasmDumpError::MeasureInGateNotAllowed);
-    }
+    validate_gate_body_operations(cg.circuit.circuit.operations())?;
 
-    let params: Vec<String> = cg.symbols().iter().cloned().collect();
+    let params: Vec<String> = cg.signature_params().iter().cloned().collect();
     let params_str = if params.is_empty() {
         String::new()
     } else {
@@ -562,19 +570,29 @@ fn dump_gate_definition(cg: &CircuitGate, output: &mut String) -> Result<(), Qas
 }
 
 fn dump_unitary_gate_definition(
-    label: &str,
-    frozen_circuit: &FrozenCircuit,
+    gate: &UnitaryGate,
     output: &mut String,
 ) -> Result<(), QasmDumpError> {
-    if operations_contain_measurement(frozen_circuit.circuit.operations()) {
-        return Err(QasmDumpError::MeasureInGateNotAllowed);
-    }
+    let frozen_circuit = gate.circuit().as_ref().ok_or_else(|| {
+        QasmDumpError::FormatError(format!(
+            "Unitary gate '{}' has no circuit definition",
+            gate.label()
+        ))
+    })?;
+    validate_gate_body_operations(frozen_circuit.circuit.operations())?;
 
     let num_qubits = frozen_circuit.circuit.qubits().len();
     let qubits: Vec<String> = (0..num_qubits).map(|i| format!("q{}", i)).collect();
     let qubits_str = qubits.join(",");
+    let params_str = format_parameter_signature(&unitary_gate_parameter_names(gate));
 
-    writeln!(output, "gate {} {} {{", label, qubits_str)?;
+    writeln!(
+        output,
+        "gate {}{} {} {{",
+        gate.label(),
+        params_str,
+        qubits_str
+    )?;
 
     // Body context
     let mut body_qubit_map = HashMap::new();
@@ -597,27 +615,56 @@ fn dump_unitary_gate_definition(
     Ok(())
 }
 
-fn operations_contain_measurement(operations: &[Operation]) -> bool {
-    operations
+fn validate_gate_body_operations(operations: &[Operation]) -> Result<(), QasmDumpError> {
+    if operations
         .iter()
-        .any(|operation| match &operation.instruction {
-            Instruction::Directive(Directive::Measure)
-            | Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
-            | Instruction::ClassicalData(ClassicalDataOp::MeasureBits { .. }) => true,
-            Instruction::ClassicalControl(control) => control.has_measurement(),
-            _ => false,
-        })
+        .any(|operation| operation.instruction.has_measurement())
+    {
+        return Err(QasmDumpError::MeasureInGateNotAllowed);
+    }
+    if operations.iter().any(|operation| {
+        matches!(
+            &operation.instruction,
+            Instruction::Directive(Directive::Reset)
+        )
+    }) {
+        return Err(QasmDumpError::ResetInGateNotAllowed);
+    }
+    Ok(())
 }
 
-fn dump_opaque_declaration(
-    label: &str,
-    num_qubits: u16,
-    output: &mut String,
-) -> Result<(), QasmDumpError> {
-    let qubits: Vec<String> = (0..num_qubits).map(|i| format!("q{}", i)).collect();
-    let qubits_str = qubits.join(",");
+fn unitary_gate_parameter_names(gate: &UnitaryGate) -> Vec<String> {
+    if let Some(circuit) = gate.circuit() {
+        return circuit.circuit().symbols().iter().cloned().collect();
+    }
+    if let Some(params) = gate.matrix_params() {
+        return params.to_vec();
+    }
+    (0..gate.num_params())
+        .map(|index| format!("p{index}"))
+        .collect()
+}
 
-    writeln!(output, "opaque {} {};", label, qubits_str)?;
+fn format_parameter_signature(params: &[String]) -> String {
+    if params.is_empty() {
+        String::new()
+    } else {
+        format!("({})", params.join(","))
+    }
+}
+
+fn dump_opaque_declaration(gate: &UnitaryGate, output: &mut String) -> Result<(), QasmDumpError> {
+    let qubits: Vec<String> = (0..gate.num_qubits()).map(|i| format!("q{}", i)).collect();
+    let qubits_str = qubits.join(",");
+    let params_str = format_parameter_signature(&unitary_gate_parameter_names(gate));
+
+    writeln!(
+        output,
+        "opaque {}{} {};",
+        gate.label(),
+        params_str,
+        qubits_str
+    )?;
     Ok(())
 }
 
@@ -635,11 +682,11 @@ fn process_circuit_operations(
         let op = &operations[index];
         if let Instruction::ClassicalData(ClassicalDataOp::Store { target, value }) =
             &op.instruction
+            && accepting_initializers
+            && is_zero_initializer(*target, value)
         {
-            if accepting_initializers && is_zero_initializer(*target, value) {
-                index += 1;
-                continue;
-            }
+            index += 1;
+            continue;
         }
         accepting_initializers = false;
         match &op.instruction {
@@ -664,10 +711,17 @@ fn process_circuit_operations(
                 writeln!(output, "{}{} {};", cg.name, params_str, mapped_qs.join(","))?;
             }
             Instruction::UnitaryGate(unitary_gate) => {
-                // Output gate call: label qubits;
+                // Output gate call: label(params) qubits;
                 // (The gate definition or opaque declaration was already output in Pass 1)
+                let params_str = format_params(op, circuit, param_map);
                 let mapped_qs = map_qubits(op, qubit_map);
-                writeln!(output, "{} {};", unitary_gate.label(), mapped_qs.join(","))?;
+                writeln!(
+                    output,
+                    "{}{} {};",
+                    unitary_gate.label(),
+                    params_str,
+                    mapped_qs.join(",")
+                )?;
             }
             Instruction::ClassicalData(ClassicalDataOp::MeasureBit { result })
             | Instruction::ClassicalData(ClassicalDataOp::MeasureBits { result }) => {
@@ -677,7 +731,7 @@ fn process_circuit_operations(
                 if consumes_store
                     && operations[index + 2..]
                         .iter()
-                        .any(|operation| operation_reads_value(operation, *result))
+                        .any(|operation| operation.instruction.reads_value(*result))
                 {
                     return Err(QasmDumpError::UnsupportedClassicalData(format!(
                         "measurement value {} is read after being stored into a mutable register",
@@ -741,17 +795,6 @@ fn is_zero_initializer(target: ClassicalVar, value: &ClassicalExpr) -> bool {
     }
 }
 
-fn operation_reads_value(operation: &Operation, value: ClassicalValue) -> bool {
-    match &operation.instruction {
-        Instruction::ClassicalData(ClassicalDataOp::Store {
-            value: expression, ..
-        }) => expression.values().contains(&value),
-        Instruction::ClassicalData(_) => false,
-        Instruction::ClassicalControl(control) => control.reads_value(value),
-        _ => false,
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 enum MeasurementDestination {
     Value(ClassicalValue),
@@ -782,7 +825,7 @@ fn collect_skipped_classical_values(
                 if consumes_store {
                     let read_later = operations[index + 2..]
                         .iter()
-                        .any(|operation| operation_reads_value(operation, *result));
+                        .any(|operation| operation.instruction.reads_value(*result));
                     if !read_later {
                         skipped.insert(*result);
                     }
@@ -863,49 +906,14 @@ fn measurement_destination(
     if matches!(
         instruction,
         Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
-    ) {
-        if let Some(bit) = stored_measurement_bit(*target, result, value) {
-            return Ok((MeasurementDestination::VarBit(*target, bit), true));
-        }
+    ) && let Some(bit) = value.measurement_store_bit(*target, result)
+    {
+        return Ok((MeasurementDestination::VarBit(*target, bit), true));
     }
 
     Err(QasmDumpError::UnsupportedClassicalData(
         "measurement is followed by a store that cannot be represented by OpenQASM 2.0".to_string(),
     ))
-}
-
-fn stored_measurement_bit(
-    target: ClassicalVar,
-    result: ClassicalValue,
-    expression: &ClassicalExpr,
-) -> Option<u32> {
-    let ClassicalType::BitVec(width) = target.ty() else {
-        return None;
-    };
-    let ClassicalExprKind::PackBits { bits } = expression.kind() else {
-        return None;
-    };
-    if bits.len() != width.get() as usize {
-        return None;
-    }
-
-    let mut measured_index = None;
-    for (index, bit) in bits.iter().enumerate() {
-        match bit.kind() {
-            ClassicalExprKind::Value(value) if *value == result => {
-                if measured_index.replace(index as u32).is_some() {
-                    return None;
-                }
-            }
-            ClassicalExprKind::ExtractBit {
-                value,
-                index: source_index,
-            } if *source_index == index as u32
-                && matches!(value.kind(), ClassicalExprKind::Var(var) if *var == target) => {}
-            _ => return None,
-        }
-    }
-    measured_index
 }
 
 fn dump_classical_measurement(
@@ -1340,7 +1348,7 @@ fn conditional_operation_qasms(
             if consumes_store
                 && operations[index + 2..]
                     .iter()
-                    .any(|operation| operation_reads_value(operation, *result))
+                    .any(|operation| operation.instruction.reads_value(*result))
             {
                 return Err(QasmDumpError::UnsupportedClassicalData(format!(
                     "measurement value {} is read after being stored into a mutable register",
@@ -1536,8 +1544,14 @@ fn operation_to_qasm(
             Ok(format!("{}{} {}", cg.name, params_str, mapped_qs.join(",")))
         }
         Instruction::UnitaryGate(unitary_gate) => {
+            let params_str = format_params(op, circuit, param_map);
             let mapped_qs = map_qubits(op, qubit_map);
-            Ok(format!("{} {}", unitary_gate.label(), mapped_qs.join(",")))
+            Ok(format!(
+                "{}{} {}",
+                unitary_gate.label(),
+                params_str,
+                mapped_qs.join(",")
+            ))
         }
         Instruction::ClassicalData(_) => Err(QasmDumpError::UnsupportedClassicalData(
             "classical data operation inside conditional body".to_string(),

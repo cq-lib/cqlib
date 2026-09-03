@@ -167,7 +167,7 @@ fn test_parametric_standard_gates_with_symbolic_params_match_numeric() {
         StandardGate::XY2P,
         StandardGate::XY2M,
     ] {
-        let symbolic = standard_gate_symbolic_matrix(gate, &[theta.clone()]).unwrap();
+        let symbolic = standard_gate_symbolic_matrix(gate, std::slice::from_ref(&theta)).unwrap();
         let mut bindings = HashMap::new();
         bindings.insert("theta", 0.63);
         let evaluated = evaluate_symbolic_matrix(&symbolic, &Some(bindings.clone())).unwrap();
@@ -971,6 +971,42 @@ fn test_symbolic_parameterized_unitary_circuit_definition_preserves_symbol() {
 }
 
 #[test]
+fn test_symbolic_circuit_backed_unitary_ignores_unreferenced_interned_symbols() {
+    let mut inner = Circuit::new(1);
+    inner.add_parameter(Parameter::symbol("stale"));
+    inner.rx(Qubit::new(0), Parameter::symbol("theta")).unwrap();
+    let frozen = FrozenCircuit::new(inner);
+    assert_eq!(
+        frozen
+            .used_symbols()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["theta"]
+    );
+
+    let gate = UnitaryGate::new("InnerRX", 1, 1)
+        .with_circuit(Arc::new(frozen))
+        .unwrap();
+    let mut circuit = Circuit::new(1);
+    circuit
+        .unitary_with_params(
+            gate,
+            vec![Qubit::new(0)],
+            vec![ParameterValue::from(Parameter::symbol("phi"))],
+        )
+        .unwrap();
+
+    let symbolic = circuit_to_symbolic_matrix(&circuit, None).unwrap();
+    let mut bindings = HashMap::new();
+    bindings.insert("phi", PI / 4.0);
+    let evaluated = evaluate_symbolic_matrix(&symbolic, &Some(bindings)).unwrap();
+    let expected = crate::circuit::gate::gate_matrix::rx_gate(PI / 4.0);
+
+    assert_matrix_approx_eq(&evaluated, &expected, 1e-12);
+}
+
+#[test]
 fn test_symbolic_unitary_explicit_symbolic_matrix_precedes_circuit() {
     let mut inner = Circuit::new(1);
     inner.rx(Qubit::new(0), Parameter::symbol("theta")).unwrap();
@@ -1211,7 +1247,13 @@ fn test_apply_standard_gate_to_matrix_directly() {
     // Symbolic path: RX(theta) on qubit 1.
     let theta = Parameter::symbol("theta");
     let mut matrix = symbolic_eye(4);
-    apply_standard_gate_to_matrix(&mut matrix, StandardGate::RX, &[1], &[theta.clone()]).unwrap();
+    apply_standard_gate_to_matrix(
+        &mut matrix,
+        StandardGate::RX,
+        &[1],
+        std::slice::from_ref(&theta),
+    )
+    .unwrap();
     let mut bindings = HashMap::new();
     bindings.insert("theta", PI / 4.0);
     let evaluated = evaluate_symbolic_matrix(&matrix, &Some(bindings.clone())).unwrap();

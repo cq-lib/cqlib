@@ -13,6 +13,9 @@
 import numpy as np
 from cqlib.circuit import StandardGate, Qubit
 from cqlib.qis import Pauli
+from .qubit import PhysicalQubit
+
+_PhysicalQubitLike = int | Qubit | PhysicalQubit
 
 class SingleQubitNoise:
     """
@@ -47,6 +50,9 @@ class SingleQubitNoise:
 
         Args:
             p: Bit-flip probability in range [0.0, 1.0]
+
+        Raises:
+            ValueError: If ``p`` is not finite or outside [0, 1].
         """
         ...
 
@@ -58,6 +64,9 @@ class SingleQubitNoise:
 
         Args:
             p: Phase-flip probability in range [0.0, 1.0]
+
+        Raises:
+            ValueError: If ``p`` is not finite or outside [0, 1].
         """
         ...
 
@@ -71,6 +80,10 @@ class SingleQubitNoise:
             px: Probability of X error
             py: Probability of Y error
             pz: Probability of Z error
+
+        Raises:
+            ValueError: If a probability is not finite or outside [0, 1], or
+                if ``px + py + pz`` exceeds 1.
         """
         ...
 
@@ -82,6 +95,9 @@ class SingleQubitNoise:
 
         Args:
             p: Total depolarization probability in range [0.0, 1.0]
+
+        Raises:
+            ValueError: If ``p`` is not finite or outside [0, 1].
         """
         ...
 
@@ -93,6 +109,9 @@ class SingleQubitNoise:
 
         Args:
             gamma: Damping parameter in range [0.0, 1.0]
+
+        Raises:
+            ValueError: If ``gamma`` is not finite or outside [0, 1].
         """
         ...
 
@@ -104,6 +123,9 @@ class SingleQubitNoise:
 
         Args:
             lambda_: Phase damping parameter in range [0.0, 1.0]
+
+        Raises:
+            ValueError: If ``lambda_`` is not finite or outside [0, 1].
         """
         ...
 
@@ -157,6 +179,9 @@ class TwoQubitNoise:
 
         Args:
             p: Total depolarization probability in range [0.0, 1.0]
+
+        Raises:
+            ValueError: If ``p`` is not finite or outside [0, 1].
         """
         ...
 
@@ -182,6 +207,9 @@ class TwoQubitNoise:
             op_q0: Pauli operator for the first qubit.
             op_q1: Pauli operator for the second qubit.
             p: Correlation probability in range [0.0, 1.0].
+
+        Raises:
+            ValueError: If ``p`` is not finite or outside [0, 1].
         """
         ...
 
@@ -226,6 +254,9 @@ class ReadoutError:
         Args:
             p_0_given_1: Probability of measuring 0 given state was prepared in 1
             p_1_given_0: Probability of measuring 1 given state was prepared in 0
+
+        Raises:
+            ValueError: If either probability is not finite or outside [0, 1].
         """
         ...
 
@@ -254,19 +285,20 @@ class OperationKey:
     """
 
     @staticmethod
-    def new_single(gate: StandardGate, q0: int | Qubit) -> "OperationKey":
+    def new_single(gate: StandardGate, q0: _PhysicalQubitLike) -> "OperationKey":
         """
         Creates a key for a single-qubit operation.
 
         Args:
             gate: The quantum gate
             q0: The target qubit
+
         """
         ...
 
     @staticmethod
     def new_double(
-        gate: StandardGate, q0: int | Qubit, q1: int | Qubit
+        gate: StandardGate, q0: _PhysicalQubitLike, q1: _PhysicalQubitLike
     ) -> "OperationKey":
         """
         Creates a key for a two-qubit operation.
@@ -275,12 +307,18 @@ class OperationKey:
             gate: The quantum gate
             q0: First qubit (typically control)
             q1: Second qubit (typically target)
+
+        Raises:
+            ValueError: If the qubits are duplicated.
         """
         ...
 
     @staticmethod
     def new_triple(
-        gate: StandardGate, q0: int | Qubit, q1: int | Qubit, q2: int | Qubit
+        gate: StandardGate,
+        q0: _PhysicalQubitLike,
+        q1: _PhysicalQubitLike,
+        q2: _PhysicalQubitLike,
     ) -> "OperationKey":
         """
         Creates a key for a three-qubit operation.
@@ -290,6 +328,9 @@ class OperationKey:
             q0: First qubit
             q1: Second qubit
             q2: Third qubit
+
+        Raises:
+            ValueError: If any qubits are duplicated.
         """
         ...
 
@@ -348,7 +389,7 @@ class NoiseModel:
         """Creates an empty noise model."""
         ...
 
-    def add_readout_error(self, qubit: int | Qubit, error: ReadoutError) -> None:
+    def add_readout_error(self, qubit: _PhysicalQubitLike, error: ReadoutError) -> None:
         """
         Adds a readout error for a specific qubit.
 
@@ -359,7 +400,7 @@ class NoiseModel:
         ...
 
     def add_single_qubit_error(
-        self, gate: StandardGate, qubit: int | Qubit, noise: SingleQubitNoise
+        self, gate: StandardGate, qubit: _PhysicalQubitLike, noise: SingleQubitNoise
     ) -> None:
         """
         Adds single-qubit noise to a gate on a specific qubit.
@@ -372,7 +413,11 @@ class NoiseModel:
         ...
 
     def add_two_qubit_error(
-        self, gate: StandardGate, q0: int | Qubit, q1: int | Qubit, noise: TwoQubitNoise
+        self,
+        gate: StandardGate,
+        q0: _PhysicalQubitLike,
+        q1: _PhysicalQubitLike,
+        noise: TwoQubitNoise,
     ) -> None:
         """
         Adds two-qubit noise to a gate on specific qubits.
@@ -385,7 +430,7 @@ class NoiseModel:
         """
         ...
 
-    def get_readout_error(self, qubit: int | Qubit) -> ReadoutError | None:
+    def get_readout_error(self, qubit: _PhysicalQubitLike) -> ReadoutError | None:
         """Returns the readout error for a qubit, if any."""
         ...
 

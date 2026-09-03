@@ -16,9 +16,65 @@ use super::{
 };
 use crate::circuit::Qubit;
 use crate::circuit::circuit_impl::Circuit;
-use crate::circuit::gate::{Instruction, StandardGate};
+use crate::circuit::gate::{FrozenCircuit, Instruction, StandardGate, UnitaryGate};
 use crate::qis::{Hamiltonian, Pauli, PauliString};
 use num_complex::Complex64;
+use std::sync::Arc;
+
+#[test]
+fn run_args_preserves_eq_and_stable_gate_set_comparison() {
+    fn assert_eq_trait<T: Eq>() {}
+
+    let left = Instruction::UnitaryGate(Box::new(UnitaryGate::new("custom", 1, 0)));
+    let right = Instruction::UnitaryGate(Box::new(UnitaryGate::new("custom", 1, 0)));
+
+    assert_eq_trait::<RunArgs>();
+    assert_eq!(
+        RunArgs::Zne {
+            gate_set: Some(vec![left]),
+            shots: Some(100),
+        },
+        RunArgs::Zne {
+            gate_set: Some(vec![right]),
+            shots: Some(100),
+        }
+    );
+
+    assert_ne!(
+        RunArgs::Zne {
+            gate_set: Some(vec![Instruction::UnitaryGate(Box::new(UnitaryGate::new(
+                "custom", 1, 0,
+            )))]),
+            shots: Some(100),
+        },
+        RunArgs::Zne {
+            gate_set: Some(vec![Instruction::UnitaryGate(Box::new(UnitaryGate::new(
+                "other", 1, 0,
+            )))]),
+            shots: Some(100),
+        }
+    );
+}
+
+#[test]
+fn zne_selective_folding_uses_stable_custom_gate_names() {
+    let mut definition = Circuit::new(1);
+    definition.h(Qubit::new(0)).unwrap();
+    let applied = UnitaryGate::new("selected", 1, 0)
+        .with_circuit(Arc::new(FrozenCircuit::new(definition)))
+        .unwrap();
+    let mut circuit = Circuit::new(1);
+    circuit.unitary(applied, vec![Qubit::new(0)]).unwrap();
+    let mitigation = super::ZNEMitigation::new(circuit, vec![1]);
+
+    let same_name = Instruction::UnitaryGate(Box::new(UnitaryGate::new("selected", 1, 0)));
+    let different_name = Instruction::UnitaryGate(Box::new(UnitaryGate::new("other", 1, 0)));
+
+    let selected = mitigation.fold_circuits(Some(&[same_name])).unwrap();
+    let skipped = mitigation.fold_circuits(Some(&[different_name])).unwrap();
+    assert_eq!(selected[0].operations().len(), 3);
+    assert_eq!(skipped[0].operations().len(), 1);
+}
 
 fn single_qubit_z_hamiltonian() -> Hamiltonian {
     let mut pauli_string = PauliString::new(1);

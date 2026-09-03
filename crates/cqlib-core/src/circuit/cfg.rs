@@ -1047,13 +1047,13 @@ impl CircuitCFG {
     }
 
     fn validate_param(&self, parameter: &CircuitParam, context: &str) -> Result<(), CircuitError> {
-        if let CircuitParam::Index(index) = parameter {
-            if self.parameters.get_index(*index as usize).is_none() {
-                return Err(CircuitError::InvalidControlFlow(format!(
-                    "{} references missing parameter index {}",
-                    context, index
-                )));
-            }
+        if let CircuitParam::Index(index) = parameter
+            && self.parameters.get_index(*index as usize).is_none()
+        {
+            return Err(CircuitError::InvalidControlFlow(format!(
+                "{} references missing parameter index {}",
+                context, index
+            )));
         }
         Ok(())
     }
@@ -1341,6 +1341,22 @@ fn control_operation(op: ClassicalControlOp) -> Operation {
         qubits: SmallVec::new(),
         params: SmallVec::new(),
         label: None,
+    }
+}
+
+impl TryFrom<&Circuit> for CircuitCFG {
+    type Error = CircuitError;
+
+    fn try_from(circuit: &Circuit) -> Result<Self, Self::Error> {
+        Self::from_circuit(circuit)
+    }
+}
+
+impl TryFrom<&CircuitCFG> for Circuit {
+    type Error = CircuitError;
+
+    fn try_from(cfg: &CircuitCFG) -> Result<Self, Self::Error> {
+        cfg.to_circuit()
     }
 }
 

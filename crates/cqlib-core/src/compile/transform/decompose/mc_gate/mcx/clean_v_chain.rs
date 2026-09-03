@@ -14,7 +14,7 @@
 
 use crate::circuit::{Qubit, StandardGate, operation::ValueOperation};
 use crate::compile::error::CompilerError;
-use crate::util::qubit::find_duplicate_qubit;
+use crate::compile::transform::decompose::mc_gate::validation::find_duplicate_qubit;
 
 use super::{
     DECOMPOSE_MCX_NAME, relative_phase::emit_relative_phase_toffoli, trivial::decompose_mcx_small,

@@ -30,4 +30,14 @@ class ResourceUnavailableError(ResourceError):
     """
     ...
 
-__all__: list[str]
+__all__ = [
+    "AncillaRequirement",
+    "ResourcePolicy",
+    "ResourceLimits",
+    "ResourceRequest",
+    "ResourcePlan",
+    "ResourceLease",
+    "ResourceManager",
+    "ResourceError",
+    "ResourceUnavailableError",
+]

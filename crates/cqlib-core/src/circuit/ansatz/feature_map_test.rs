@@ -16,21 +16,12 @@ use super::*;
 use crate::circuit::Operation;
 use crate::circuit::ansatz::{Ansatz, EntanglementTopology, PauliFeatureMap};
 use crate::circuit::circuit_param::CircuitParam;
-use crate::circuit::gate::instruction::Instruction;
 use crate::circuit::gate::standard_gate::StandardGate;
 use crate::qis::pauli::PauliString;
 
-/// Helper function to extract the StandardGate from an Operation's instruction
-fn get_standard_gate(op: &Operation) -> Option<StandardGate> {
-    match &op.instruction {
-        Instruction::Standard(gate) => Some(*gate),
-        _ => None,
-    }
-}
-
 /// Helper function to check if an operation is an H gate on a specific qubit
 fn is_h_gate_on_qubit(op: &Operation, expected_qubit: usize) -> bool {
-    match get_standard_gate(op) {
+    match op.standard_gate() {
         Some(StandardGate::H) => op.qubits.len() == 1 && op.qubits[0].index() == expected_qubit,
         _ => false,
     }
@@ -38,7 +29,7 @@ fn is_h_gate_on_qubit(op: &Operation, expected_qubit: usize) -> bool {
 
 /// Helper function to check if an operation is an RZ gate with a specific parameter pattern
 fn is_rz_gate_with_param(op: &Operation, expected_qubit: usize) -> bool {
-    match get_standard_gate(op) {
+    match op.standard_gate() {
         Some(StandardGate::RZ) => {
             op.qubits.len() == 1 && op.qubits[0].index() == expected_qubit && op.params.len() == 1
         }
@@ -48,7 +39,7 @@ fn is_rz_gate_with_param(op: &Operation, expected_qubit: usize) -> bool {
 
 /// Helper function to check if an operation is a CNOT gate between specific qubits
 fn is_cnot_gate(op: &Operation, control: usize, target: usize) -> bool {
-    match get_standard_gate(op) {
+    match op.standard_gate() {
         Some(StandardGate::CX) => {
             op.qubits.len() == 2
                 && op.qubits[0].index() == control
@@ -59,7 +50,7 @@ fn is_cnot_gate(op: &Operation, control: usize, target: usize) -> bool {
 }
 
 fn is_x_gate_on_qubit(op: &Operation, expected_qubit: usize) -> bool {
-    match get_standard_gate(op) {
+    match op.standard_gate() {
         Some(StandardGate::X) => op.qubits.len() == 1 && op.qubits[0].index() == expected_qubit,
         _ => false,
     }
@@ -684,8 +675,8 @@ fn test_pauli_feature_map_full_entanglement_3qubits() {
     assert_eq!(ops.len(), 12);
 
     // Check H gates
-    for i in 0..3 {
-        assert!(is_h_gate_on_qubit(&ops[i], i));
+    for (i, op) in ops.iter().enumerate().take(3) {
+        assert!(is_h_gate_on_qubit(op, i));
     }
 }
 

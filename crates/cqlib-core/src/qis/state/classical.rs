@@ -31,10 +31,9 @@ use crate::circuit::{
 };
 use crate::device::Outcome;
 use crate::qis::QisError;
-use smallvec::SmallVec;
 
 /// A typed runtime classical value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RuntimeValue {
     Bit(bool),
     Bool(bool),
@@ -57,7 +56,7 @@ impl RuntimeValue {
     pub fn to_bitstring(&self) -> Option<String> {
         match self {
             Self::Bit(value) => Some(if *value { "1" } else { "0" }.to_string()),
-            Self::BitVec { width, bits } => Some(bits.to_string(*width as usize)),
+            Self::BitVec { width, bits } => Some(bits.to_bitstring(*width as usize)),
             Self::Bool(_) | Self::UInt { .. } => None,
         }
     }
@@ -69,7 +68,7 @@ impl RuntimeValue {
     pub(crate) fn bit_vec_from_lsb(bits: &[bool]) -> Self {
         Self::BitVec {
             width: bits.len() as u32,
-            bits: outcome_from_lsb(bits),
+            bits: Outcome::from_lsb_bits(bits),
         }
     }
 
@@ -254,7 +253,7 @@ impl ClassicalState {
             }),
             ClassicalExprKind::BitVecLiteral { width, value } => Ok(RuntimeValue::BitVec {
                 width: width.get(),
-                bits: outcome_from_lsb(
+                bits: Outcome::from_lsb_bits(
                     &(0..width.get())
                         .map(|index| (value >> index) & 1 == 1)
                         .collect::<Vec<_>>(),
@@ -398,16 +397,6 @@ fn evaluate_compare(
     Ok(RuntimeValue::Bool(result))
 }
 
-fn outcome_from_lsb(bits: &[bool]) -> Outcome {
-    let mut chunks = vec![0u64; bits.len().div_ceil(64)];
-    for (index, value) in bits.iter().copied().enumerate() {
-        if value {
-            chunks[index / 64] |= 1u64 << (index % 64);
-        }
-    }
-    Outcome::new(SmallVec::from_vec(chunks))
-}
-
 fn qis_unsupported(message: impl Into<String>) -> QisError {
     QisError::UnsupportedOperation(message.into())
 }
@@ -481,5 +470,60 @@ mod tests {
                 }
             ))
         ));
+    }
+
+    #[test]
+    fn runtime_value_compares_by_value_and_hashes_consistently() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let hash_of = |value: &RuntimeValue| {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        assert_eq!(
+            RuntimeValue::UInt {
+                width: 8,
+                value: 42
+            },
+            RuntimeValue::UInt {
+                width: 8,
+                value: 42
+            }
+        );
+        assert_ne!(
+            RuntimeValue::UInt {
+                width: 8,
+                value: 42
+            },
+            RuntimeValue::UInt {
+                width: 8,
+                value: 43
+            }
+        );
+        assert_ne!(RuntimeValue::Bit(true), RuntimeValue::Bool(true),);
+
+        let bit_vec = RuntimeValue::BitVec {
+            width: 3,
+            bits: crate::device::Outcome::from_bitstring("101").unwrap(),
+        };
+        let bit_vec_again = RuntimeValue::BitVec {
+            width: 3,
+            bits: crate::device::Outcome::from_bitstring("101").unwrap(),
+        };
+        assert_eq!(bit_vec, bit_vec_again);
+        assert_eq!(hash_of(&bit_vec), hash_of(&bit_vec_again));
+        assert_eq!(
+            hash_of(&RuntimeValue::UInt {
+                width: 8,
+                value: 42
+            }),
+            hash_of(&RuntimeValue::UInt {
+                width: 8,
+                value: 42
+            })
+        );
     }
 }

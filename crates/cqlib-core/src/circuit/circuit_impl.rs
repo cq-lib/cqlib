@@ -51,6 +51,7 @@ use crate::circuit::bit::Qubit;
 use crate::circuit::circuit_classical::ControlScopeKind;
 use crate::circuit::circuit_param::{CircuitParam, ParameterValue};
 use crate::circuit::classical::CircuitId;
+use crate::circuit::classical_expr::{ClassicalExpr, ClassicalExprKind};
 use crate::circuit::error::CircuitError;
 use crate::circuit::gate::circuit_gate::{CircuitGate, FrozenCircuit};
 use crate::circuit::gate::instruction::Instruction;
@@ -70,6 +71,7 @@ use ndarray::Array2;
 use num_complex::Complex64;
 use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// A quantum circuit representation serving as the core IR for quantum programs.
 ///
@@ -107,7 +109,7 @@ pub struct Circuit {
     /// The ordered sequence of operations (quantum gates, measurements, etc.) in the circuit.
     ///
     /// This vector represents the circuit schedule.
-    pub(super) data: Vec<Operation>,
+    pub(super) data: Arc<Vec<Operation>>,
     /// Static types of circuit-local runtime classical variables.
     ///
     /// A [`ClassicalVar`] ID is an index into this table. Keeping ownership in
@@ -134,6 +136,19 @@ pub struct Circuit {
 impl Clone for Circuit {
     fn clone(&self) -> Self {
         let circuit_id = CircuitId::new();
+        if self.classical_vars.is_empty() && self.classical_values.is_empty() {
+            return Self {
+                circuit_id,
+                qubits: self.qubits.clone(),
+                symbols: self.symbols.clone(),
+                parameters: self.parameters.clone(),
+                data: self.data.clone(),
+                classical_vars: Vec::new(),
+                classical_values: Vec::new(),
+                control_scope_stack: self.control_scope_stack.clone(),
+                global_phase: self.global_phase.clone(),
+            };
+        }
         let var_map = self
             .classical_vars
             .iter()
@@ -156,23 +171,14 @@ impl Clone for Circuit {
                 )
             })
             .collect::<HashMap<_, _>>();
-        let qubit_mapping = self
-            .qubits
-            .iter()
-            .copied()
-            .map(|qubit| (qubit, qubit))
-            .collect::<HashMap<_, _>>();
-        let param_index_map = (0..self.parameters.len())
-            .map(|index| CircuitParam::Index(index as u32))
-            .collect::<Vec<_>>();
         let data = self
             .data
             .iter()
             .map(|operation| {
-                Self::remap_compose_operation(
+                Self::remap_operation(
                     operation,
-                    &qubit_mapping,
-                    &param_index_map,
+                    &|qubit| Ok(qubit),
+                    &|param| Ok(param.clone()),
                     &var_map,
                     &value_map,
                 )
@@ -185,7 +191,7 @@ impl Clone for Circuit {
             qubits: self.qubits.clone(),
             symbols: self.symbols.clone(),
             parameters: self.parameters.clone(),
-            data,
+            data: Arc::new(data),
             classical_vars: self.classical_vars.clone(),
             classical_values: self.classical_values.clone(),
             control_scope_stack: self.control_scope_stack.clone(),
@@ -199,149 +205,301 @@ impl PartialEq for Circuit {
     fn eq(&self, other: &Self) -> bool {
         if self.qubits != other.qubits
             || self.symbols != other.symbols
-            || self.parameters != other.parameters
+            || self.parameters.len() != other.parameters.len()
+            || !self
+                .parameters
+                .iter()
+                .all(|parameter| other.parameters.contains(parameter))
             || self.classical_vars != other.classical_vars
             || self.classical_values != other.classical_values
             || self.control_scope_stack != other.control_scope_stack
-            || !circuit_params_equal(
-                std::slice::from_ref(&self.global_phase),
-                std::slice::from_ref(&other.global_phase),
-            )
             || self.data.len() != other.data.len()
         {
             return false;
         }
-
-        let qubit_mapping = other
-            .qubits
-            .iter()
-            .copied()
-            .map(|qubit| (qubit, qubit))
-            .collect::<HashMap<_, _>>();
-        let param_index_map = (0..other.parameters.len())
-            .map(|index| CircuitParam::Index(index as u32))
-            .collect::<Vec<_>>();
-        let var_map = other
-            .classical_vars
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, ty)| {
-                (
-                    ClassicalVar::new(other.circuit_id, index as u32, ty),
-                    ClassicalVar::new(self.circuit_id, index as u32, ty),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let value_map = other
-            .classical_values
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(index, ty)| {
-                (
-                    ClassicalValue::new(other.circuit_id, index as u32, ty),
-                    ClassicalValue::new(self.circuit_id, index as u32, ty),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-
-        other.data.iter().zip(&self.data).all(|(rhs, lhs)| {
-            Self::remap_compose_operation(
-                rhs,
-                &qubit_mapping,
-                &param_index_map,
-                &var_map,
-                &value_map,
-            )
-            .is_ok_and(|rhs| operations_equal(lhs, &rhs))
-        })
+        circuit_params_equal(
+            &self.global_phase,
+            &other.global_phase,
+            &self.parameters,
+            &other.parameters,
+        ) && operations_structurally_equal(
+            self.data.as_slice(),
+            other.data.as_slice(),
+            &self.parameters,
+            &other.parameters,
+        )
     }
 }
 
-fn operations_equal(lhs: &Operation, rhs: &Operation) -> bool {
-    instructions_equal(&lhs.instruction, &rhs.instruction)
-        && lhs.qubits == rhs.qubits
-        && circuit_params_equal(&lhs.params, &rhs.params)
-        && lhs.label == rhs.label
-}
-
-fn instructions_equal(lhs: &Instruction, rhs: &Instruction) -> bool {
-    match (lhs, rhs) {
-        (Instruction::Standard(lhs), Instruction::Standard(rhs)) => lhs == rhs,
-        (Instruction::McGate(lhs), Instruction::McGate(rhs)) => lhs == rhs,
-        (Instruction::Directive(lhs), Instruction::Directive(rhs)) => lhs == rhs,
-        (Instruction::Delay, Instruction::Delay) => true,
-        (Instruction::CircuitGate(lhs), Instruction::CircuitGate(rhs)) => {
-            lhs.name() == rhs.name()
-                && lhs.num_qubits() == rhs.num_qubits()
-                && lhs.num_params() == rhs.num_params()
-                && lhs.circuit().circuit() == rhs.circuit().circuit()
-        }
-        (Instruction::UnitaryGate(lhs), Instruction::UnitaryGate(rhs)) => lhs == rhs,
-        (Instruction::ClassicalData(lhs), Instruction::ClassicalData(rhs)) => {
-            classical_data_equal(lhs, rhs)
-        }
-        (Instruction::ClassicalControl(lhs), Instruction::ClassicalControl(rhs)) => {
-            classical_control_equal(lhs, rhs)
-        }
-        _ => false,
+impl Circuit {
+    /// Compares operation semantics without allocating remapped operation trees.
+    pub(crate) fn operations_structurally_equal(&self, other: &Self) -> bool {
+        operations_structurally_equal(
+            self.data.as_slice(),
+            other.data.as_slice(),
+            &self.parameters,
+            &other.parameters,
+        )
     }
 }
 
-fn classical_data_equal(lhs: &ClassicalDataOp, rhs: &ClassicalDataOp) -> bool {
-    match (lhs, rhs) {
+fn circuit_params_equal(
+    left: &CircuitParam,
+    right: &CircuitParam,
+    left_parameters: &IndexSet<Parameter>,
+    right_parameters: &IndexSet<Parameter>,
+) -> bool {
+    match (left, right) {
+        (CircuitParam::Fixed(left), CircuitParam::Fixed(right)) => left == right,
+        (CircuitParam::Index(left), CircuitParam::Index(right)) => left_parameters
+            .get_index(*left as usize)
+            .zip(right_parameters.get_index(*right as usize))
+            .is_some_and(|(left, right)| left == right),
+        (CircuitParam::Fixed(value), CircuitParam::Index(index)) => right_parameters
+            .get_index(*index as usize)
+            .is_some_and(|right| Parameter::from(*value) == *right),
+        (CircuitParam::Index(index), CircuitParam::Fixed(value)) => left_parameters
+            .get_index(*index as usize)
+            .is_some_and(|left| *left == Parameter::from(*value)),
+    }
+}
+
+fn classical_var_equal(left: ClassicalVar, right: ClassicalVar) -> bool {
+    left.index() == right.index() && left.ty() == right.ty()
+}
+
+fn classical_value_equal(left: ClassicalValue, right: ClassicalValue) -> bool {
+    left.index() == right.index() && left.ty() == right.ty()
+}
+
+fn classical_expr_equal(left: &ClassicalExpr, right: &ClassicalExpr) -> bool {
+    if left.ty() != right.ty() {
+        return false;
+    }
+    match (left.kind(), right.kind()) {
+        (ClassicalExprKind::Var(left), ClassicalExprKind::Var(right)) => {
+            classical_var_equal(*left, *right)
+        }
+        (ClassicalExprKind::Value(left), ClassicalExprKind::Value(right)) => {
+            classical_value_equal(*left, *right)
+        }
+        (
+            ClassicalExprKind::Unary {
+                op: left_op,
+                expr: left,
+            },
+            ClassicalExprKind::Unary {
+                op: right_op,
+                expr: right,
+            },
+        ) => left_op == right_op && classical_expr_equal(left, right),
+        (
+            ClassicalExprKind::Binary {
+                op: left_op,
+                lhs: left_lhs,
+                rhs: left_rhs,
+            },
+            ClassicalExprKind::Binary {
+                op: right_op,
+                lhs: right_lhs,
+                rhs: right_rhs,
+            },
+        ) => {
+            left_op == right_op
+                && classical_expr_equal(left_lhs, right_lhs)
+                && classical_expr_equal(left_rhs, right_rhs)
+        }
+        (
+            ClassicalExprKind::Compare {
+                op: left_op,
+                lhs: left_lhs,
+                rhs: left_rhs,
+            },
+            ClassicalExprKind::Compare {
+                op: right_op,
+                lhs: right_lhs,
+                rhs: right_rhs,
+            },
+        ) => {
+            left_op == right_op
+                && classical_expr_equal(left_lhs, right_lhs)
+                && classical_expr_equal(left_rhs, right_rhs)
+        }
+        (
+            ClassicalExprKind::Cast {
+                cast: left_cast,
+                expr: left,
+            },
+            ClassicalExprKind::Cast {
+                cast: right_cast,
+                expr: right,
+            },
+        ) => left_cast == right_cast && classical_expr_equal(left, right),
+        (
+            ClassicalExprKind::Select {
+                condition: left_condition,
+                then_expr: left_then,
+                else_expr: left_else,
+            },
+            ClassicalExprKind::Select {
+                condition: right_condition,
+                then_expr: right_then,
+                else_expr: right_else,
+            },
+        ) => {
+            classical_expr_equal(left_condition, right_condition)
+                && classical_expr_equal(left_then, right_then)
+                && classical_expr_equal(left_else, right_else)
+        }
+        (
+            ClassicalExprKind::ExtractBit {
+                value: left,
+                index: left_index,
+            },
+            ClassicalExprKind::ExtractBit {
+                value: right,
+                index: right_index,
+            },
+        ) => left_index == right_index && classical_expr_equal(left, right),
+        (
+            ClassicalExprKind::ExtractBits {
+                value: left,
+                offset: left_offset,
+                width: left_width,
+            },
+            ClassicalExprKind::ExtractBits {
+                value: right,
+                offset: right_offset,
+                width: right_width,
+            },
+        ) => {
+            left_offset == right_offset
+                && left_width == right_width
+                && classical_expr_equal(left, right)
+        }
+        (ClassicalExprKind::Concat { parts: left }, ClassicalExprKind::Concat { parts: right })
+        | (
+            ClassicalExprKind::PackBits { bits: left },
+            ClassicalExprKind::PackBits { bits: right },
+        ) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|(left, right)| classical_expr_equal(left, right))
+        }
+        (left, right) => left == right,
+    }
+}
+
+fn classical_data_equal(left: &ClassicalDataOp, right: &ClassicalDataOp) -> bool {
+    match (left, right) {
         (
             ClassicalDataOp::Store {
-                target: lhs_target,
-                value: lhs_value,
+                target: left_target,
+                value: left_value,
             },
             ClassicalDataOp::Store {
-                target: rhs_target,
-                value: rhs_value,
+                target: right_target,
+                value: right_value,
             },
-        ) => lhs_target == rhs_target && lhs_value == rhs_value,
+        ) => {
+            classical_var_equal(*left_target, *right_target)
+                && classical_expr_equal(left_value, right_value)
+        }
         (
-            ClassicalDataOp::MeasureBit { result: lhs },
-            ClassicalDataOp::MeasureBit { result: rhs },
+            ClassicalDataOp::MeasureBit { result: left },
+            ClassicalDataOp::MeasureBit { result: right },
         )
         | (
-            ClassicalDataOp::MeasureBits { result: lhs },
-            ClassicalDataOp::MeasureBits { result: rhs },
-        ) => lhs == rhs,
+            ClassicalDataOp::MeasureBits { result: left },
+            ClassicalDataOp::MeasureBits { result: right },
+        ) => classical_value_equal(*left, *right),
         _ => false,
     }
 }
 
-fn classical_control_equal(lhs: &ClassicalControlOp, rhs: &ClassicalControlOp) -> bool {
-    match (lhs, rhs) {
-        (ClassicalControlOp::If(lhs), ClassicalControlOp::If(rhs)) => {
-            lhs.condition() == rhs.condition()
-                && bodies_equal(lhs.then_body(), rhs.then_body())
-                && match (lhs.else_body(), rhs.else_body()) {
-                    (Some(lhs), Some(rhs)) => bodies_equal(lhs, rhs),
+fn operation_instruction_equal(
+    left: &Instruction,
+    right: &Instruction,
+    left_parameters: &IndexSet<Parameter>,
+    right_parameters: &IndexSet<Parameter>,
+) -> bool {
+    match (left, right) {
+        (Instruction::ClassicalData(left), Instruction::ClassicalData(right)) => {
+            classical_data_equal(left, right)
+        }
+        (Instruction::ClassicalControl(left), Instruction::ClassicalControl(right)) => {
+            classical_control_equal(left, right, left_parameters, right_parameters)
+        }
+        _ => left == right,
+    }
+}
+
+fn control_body_equal(
+    left: &ControlBody,
+    right: &ControlBody,
+    left_parameters: &IndexSet<Parameter>,
+    right_parameters: &IndexSet<Parameter>,
+) -> bool {
+    operations_structurally_equal(
+        left.operations(),
+        right.operations(),
+        left_parameters,
+        right_parameters,
+    )
+}
+
+fn classical_control_equal(
+    left: &ClassicalControlOp,
+    right: &ClassicalControlOp,
+    left_parameters: &IndexSet<Parameter>,
+    right_parameters: &IndexSet<Parameter>,
+) -> bool {
+    match (left, right) {
+        (ClassicalControlOp::If(left), ClassicalControlOp::If(right)) => {
+            classical_expr_equal(left.condition(), right.condition())
+                && control_body_equal(
+                    left.then_body(),
+                    right.then_body(),
+                    left_parameters,
+                    right_parameters,
+                )
+                && match (left.else_body(), right.else_body()) {
+                    (Some(left), Some(right)) => {
+                        control_body_equal(left, right, left_parameters, right_parameters)
+                    }
                     (None, None) => true,
                     _ => false,
                 }
         }
-        (ClassicalControlOp::While(lhs), ClassicalControlOp::While(rhs)) => {
-            lhs.condition() == rhs.condition() && bodies_equal(lhs.body(), rhs.body())
+        (ClassicalControlOp::While(left), ClassicalControlOp::While(right)) => {
+            classical_expr_equal(left.condition(), right.condition())
+                && control_body_equal(left.body(), right.body(), left_parameters, right_parameters)
         }
-        (ClassicalControlOp::For(lhs), ClassicalControlOp::For(rhs)) => {
-            lhs.var() == rhs.var()
-                && lhs.start() == rhs.start()
-                && lhs.stop() == rhs.stop()
-                && lhs.step() == rhs.step()
-                && bodies_equal(lhs.body(), rhs.body())
+        (ClassicalControlOp::For(left), ClassicalControlOp::For(right)) => {
+            classical_var_equal(left.var(), right.var())
+                && classical_expr_equal(left.start(), right.start())
+                && classical_expr_equal(left.stop(), right.stop())
+                && classical_expr_equal(left.step(), right.step())
+                && control_body_equal(left.body(), right.body(), left_parameters, right_parameters)
         }
-        (ClassicalControlOp::Switch(lhs), ClassicalControlOp::Switch(rhs)) => {
-            lhs.target() == rhs.target()
-                && lhs.cases().len() == rhs.cases().len()
-                && lhs.cases().iter().zip(rhs.cases()).all(|(lhs, rhs)| {
-                    lhs.value() == rhs.value() && bodies_equal(lhs.body(), rhs.body())
+        (ClassicalControlOp::Switch(left), ClassicalControlOp::Switch(right)) => {
+            classical_expr_equal(left.target(), right.target())
+                && left.cases().len() == right.cases().len()
+                && left.cases().iter().zip(right.cases()).all(|(left, right)| {
+                    left.value() == right.value()
+                        && control_body_equal(
+                            left.body(),
+                            right.body(),
+                            left_parameters,
+                            right_parameters,
+                        )
                 })
-                && match (lhs.default(), rhs.default()) {
-                    (Some(lhs), Some(rhs)) => bodies_equal(lhs, rhs),
+                && match (left.default(), right.default()) {
+                    (Some(left), Some(right)) => {
+                        control_body_equal(left, right, left_parameters, right_parameters)
+                    }
                     (None, None) => true,
                     _ => false,
                 }
@@ -352,21 +510,26 @@ fn classical_control_equal(lhs: &ClassicalControlOp, rhs: &ClassicalControlOp) -
     }
 }
 
-fn bodies_equal(lhs: &ControlBody, rhs: &ControlBody) -> bool {
-    lhs.operations().len() == rhs.operations().len()
-        && lhs
-            .operations()
-            .iter()
-            .zip(rhs.operations())
-            .all(|(lhs, rhs)| operations_equal(lhs, rhs))
-}
-
-fn circuit_params_equal(lhs: &[CircuitParam], rhs: &[CircuitParam]) -> bool {
-    lhs.len() == rhs.len()
-        && lhs.iter().zip(rhs).all(|(lhs, rhs)| match (lhs, rhs) {
-            (CircuitParam::Fixed(lhs), CircuitParam::Fixed(rhs)) => lhs == rhs,
-            (CircuitParam::Index(lhs), CircuitParam::Index(rhs)) => lhs == rhs,
-            _ => false,
+fn operations_structurally_equal(
+    left: &[Operation],
+    right: &[Operation],
+    left_parameters: &IndexSet<Parameter>,
+    right_parameters: &IndexSet<Parameter>,
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.qubits == right.qubits
+                && left.label == right.label
+                && left.params.len() == right.params.len()
+                && left.params.iter().zip(&right.params).all(|(left, right)| {
+                    circuit_params_equal(left, right, left_parameters, right_parameters)
+                })
+                && operation_instruction_equal(
+                    &left.instruction,
+                    &right.instruction,
+                    left_parameters,
+                    right_parameters,
+                )
         })
 }
 
@@ -399,7 +562,7 @@ impl Circuit {
         Self {
             circuit_id: CircuitId::new(),
             qubits,
-            data: vec![],
+            data: Arc::new(Vec::new()),
             classical_vars: vec![],
             classical_values: vec![],
             control_scope_stack: vec![],
@@ -429,7 +592,7 @@ impl Circuit {
             circuit_id: CircuitId::new(),
             symbols: IndexSet::new(),
             qubits: qubits.into_iter().collect(),
-            data: vec![],
+            data: Arc::new(Vec::new()),
             classical_vars: vec![],
             classical_values: vec![],
             control_scope_stack: vec![],
@@ -461,15 +624,16 @@ impl Circuit {
     ) -> Result<Self, CircuitError> {
         let operations = operations.into_iter().collect::<Vec<_>>();
         let mut circuit = Self::from_qubits(qubits)?;
+        Arc::make_mut(&mut circuit.data).reserve(operations.len());
         if let Some(circuit_id) = infer_classical_circuit_id(&operations)? {
             circuit.circuit_id = circuit_id;
         }
         circuit.classical_vars = classical_vars.unwrap_or_default();
         circuit.classical_values = classical_values.unwrap_or_default();
         for operation in operations {
-            circuit.append_value_operation(operation)?;
+            circuit.append_value_operation_deferred_validation(operation)?;
         }
-        validate_operation_parameters(circuit.operations(), &circuit.parameters)?;
+        circuit.validate_operation_parameters(circuit.operations())?;
         circuit.validate()?;
         Ok(circuit)
     }
@@ -483,12 +647,34 @@ impl Circuit {
         &mut self,
         operation: ValueOperation,
     ) -> Result<(), CircuitError> {
-        let instruction = lower_instruction(self, operation.instruction)?;
-        self.append(
+        self.append_value_operation_with_validation(operation, true)
+    }
+
+    fn append_value_operation_deferred_validation(
+        &mut self,
+        operation: ValueOperation,
+    ) -> Result<(), CircuitError> {
+        self.append_value_operation_with_validation(operation, false)
+    }
+
+    fn append_value_operation_with_validation(
+        &mut self,
+        operation: ValueOperation,
+        validate_builder_state: bool,
+    ) -> Result<(), CircuitError> {
+        let ValueOperation {
             instruction,
-            operation.qubits,
-            operation.params,
-            operation.label.as_deref(),
+            qubits,
+            params,
+            label,
+        } = operation;
+        let instruction = self.lower_instruction(instruction)?;
+        self.append_owned_with_validation(
+            instruction,
+            qubits,
+            params,
+            label,
+            validate_builder_state,
         )
     }
 
@@ -629,13 +815,119 @@ impl Circuit {
         &self.parameters
     }
 
-    /// Returns all symbolic variable names referenced by interned parameters.
+    /// Returns all symbolic variable names present in the parameter registry.
+    ///
+    /// The registry is stable and is not compacted when operations stop using a
+    /// parameter, so this set may include symbols that are no longer referenced
+    /// by the executable IR. Use [`Circuit::used_symbols`] when only live
+    /// dependencies are needed.
     pub fn symbols(&self) -> &IndexSet<String> {
         &self.symbols
     }
+
+    /// Returns symbolic variable names referenced by the executable IR.
+    ///
+    /// This includes the global phase and operation parameters in top-level and
+    /// nested structured control-flow bodies. The result preserves the stable
+    /// insertion order of [`Circuit::symbols`] while filtering out interned but
+    /// unreferenced symbols.
+    pub fn used_symbols(&self) -> IndexSet<String> {
+        let referenced_indices = self.referenced_parameter_indices();
+        let mut referenced_symbols = HashSet::new();
+        for index in referenced_indices {
+            if let Some(parameter) = self.parameters.get_index(index as usize) {
+                referenced_symbols.extend(parameter.get_symbols());
+            }
+        }
+
+        self.symbols
+            .iter()
+            .filter(|symbol| referenced_symbols.contains(symbol.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    /// Returns whether `symbol` is referenced by the circuit's executable IR.
+    ///
+    /// This inspects the global phase and operation parameters, including
+    /// parameters in nested structured control-flow bodies. It intentionally
+    /// does not use the circuit's symbol registry because that registry may
+    /// retain symbols that are interned but no longer referenced.
+    pub fn uses_symbol(&self, symbol: &str) -> bool {
+        self.referenced_parameter_indices()
+            .into_iter()
+            .any(|index| {
+                self.parameters
+                    .get_index(index as usize)
+                    .is_some_and(|parameter| parameter.get_symbols().contains(symbol))
+            })
+    }
+
+    fn referenced_parameter_indices(&self) -> HashSet<u32> {
+        let mut indices = HashSet::new();
+        if let CircuitParam::Index(index) = self.global_phase {
+            indices.insert(index);
+        }
+        Self::collect_operation_parameter_indices(self.data.as_slice(), &mut indices);
+        indices
+    }
+
+    fn collect_operation_parameter_indices(operations: &[Operation], indices: &mut HashSet<u32>) {
+        for operation in operations {
+            indices.extend(operation.params.iter().filter_map(|param| match param {
+                CircuitParam::Index(index) => Some(*index),
+                CircuitParam::Fixed(_) => None,
+            }));
+
+            if let Instruction::ClassicalControl(control) = &operation.instruction {
+                match control {
+                    ClassicalControlOp::If(op) => {
+                        Self::collect_operation_parameter_indices(
+                            op.then_body().operations(),
+                            indices,
+                        );
+                        if let Some(body) = op.else_body() {
+                            Self::collect_operation_parameter_indices(body.operations(), indices);
+                        }
+                    }
+                    ClassicalControlOp::While(op) => {
+                        Self::collect_operation_parameter_indices(op.body().operations(), indices);
+                    }
+                    ClassicalControlOp::For(op) => {
+                        Self::collect_operation_parameter_indices(op.body().operations(), indices);
+                    }
+                    ClassicalControlOp::Switch(op) => {
+                        for case in op.cases() {
+                            Self::collect_operation_parameter_indices(
+                                case.body().operations(),
+                                indices,
+                            );
+                        }
+                        if let Some(body) = op.default() {
+                            Self::collect_operation_parameter_indices(body.operations(), indices);
+                        }
+                    }
+                    ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+                }
+            }
+        }
+    }
+
     /// Returns a vector of all qubits in the circuit, preserving their insertion order.
     pub fn qubits(&self) -> Vec<Qubit> {
         self.qubits.iter().cloned().collect()
+    }
+
+    /// Returns whether `qubit` belongs to this circuit without materializing
+    /// the ordered qubit list.
+    pub(crate) fn contains_qubit(&self, qubit: &Qubit) -> bool {
+        self.qubits.contains(qubit)
+    }
+
+    /// Returns whether two circuits have the same ordered qubit domain without
+    /// allocating either public qubit vector.
+    pub(crate) fn has_same_qubits(&self, other: &Self) -> bool {
+        self.qubits == other.qubits
     }
 
     /// Returns the global phase of the circuit as a `Parameter`.
@@ -669,7 +961,234 @@ impl Circuit {
 
     /// Returns storage-IR operations in execution order.
     pub fn operations(&self) -> &[Operation] {
-        &self.data
+        self.data.as_slice()
+    }
+
+    /// Removes a top-level operation from the circuit schedule.
+    ///
+    /// This deletes exactly one operation from the circuit's top-level
+    /// operation list. Structured control-flow operations and circuit-backed
+    /// gates are removed as whole operations; this API does not delete
+    /// individual operations inside a [`ControlBody`] or nested circuit.
+    ///
+    /// If the removed operation defines measurement-backed classical values,
+    /// those values are removed from the circuit's immutable classical value
+    /// table and remaining value references are compacted. Deletion fails
+    /// atomically when any remaining operation still reads a removed value.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::remove_operations`] for a single index.
+    pub fn remove_operation(&mut self, index: usize) -> Result<Operation, CircuitError> {
+        let mut removed = self.remove_operations([index])?;
+        Ok(removed.remove(0))
+    }
+
+    /// Removes multiple top-level operations from the circuit schedule.
+    ///
+    /// `indices` are interpreted against the original top-level operation
+    /// list before deletion. Duplicate indices are ignored, and removed
+    /// operations are returned in ascending original-index order. Structured
+    /// control-flow operations and circuit-backed gates are removed as whole
+    /// operations; this API does not delete individual operations inside a
+    /// [`ControlBody`] or nested circuit.
+    ///
+    /// If the removed operations define measurement-backed classical values,
+    /// those values are removed from the circuit's immutable classical value
+    /// table and remaining value references are compacted. Deletion fails
+    /// atomically when any remaining operation still reads a removed value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircuitError::OperationIndexOutOfBounds`] when any index is
+    /// not a valid operation index. Returns
+    /// [`CircuitError::ClassicalValueStillInUse`] when a measurement result
+    /// defined by the removed operations is still read by an operation that is
+    /// not also being removed. Also returns any validation or remapping error
+    /// raised by the candidate circuit after deletion.
+    pub fn remove_operations<I>(&mut self, indices: I) -> Result<Vec<Operation>, CircuitError>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        let mut indices = indices.into_iter().collect::<Vec<_>>();
+        indices.sort_unstable();
+        indices.dedup();
+
+        if indices.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if let Some(index) = indices
+            .iter()
+            .copied()
+            .find(|&index| index >= self.data.len())
+        {
+            return Err(CircuitError::OperationIndexOutOfBounds {
+                index,
+                len: self.data.len(),
+            });
+        }
+
+        let mut removed = Vec::with_capacity(indices.len());
+        let mut removed_values = Vec::new();
+        for &index in &indices {
+            let operation = self.data[index].clone();
+            Self::collect_defined_classical_values(&operation, &mut removed_values);
+            removed.push(operation);
+        }
+        removed_values.sort_unstable();
+        removed_values.dedup();
+
+        let remove_set = indices.iter().copied().collect::<HashSet<_>>();
+
+        for (operation_index, operation) in self.data.iter().enumerate() {
+            if remove_set.contains(&operation_index) {
+                continue;
+            }
+            for value in &removed_values {
+                if operation.instruction.reads_value(*value) {
+                    return Err(CircuitError::ClassicalValueStillInUse {
+                        index: value.index(),
+                        context: format!("operation {operation_index}"),
+                    });
+                }
+            }
+        }
+
+        let mut candidate_classical_values = self.classical_values.clone();
+        let candidate_data = if removed_values.is_empty() {
+            let mut candidate_data = Vec::with_capacity(self.data.len() - indices.len());
+            for (operation_index, operation) in self.data.iter().cloned().enumerate() {
+                if !remove_set.contains(&operation_index) {
+                    candidate_data.push(operation);
+                }
+            }
+            candidate_data
+        } else {
+            let (compacted_values, value_map) = Self::build_value_compaction_map(
+                self.circuit_id,
+                &candidate_classical_values,
+                &removed_values,
+            );
+            candidate_classical_values = compacted_values;
+
+            let qubit_mapping = self
+                .qubits
+                .iter()
+                .copied()
+                .map(|qubit| (qubit, qubit))
+                .collect::<HashMap<_, _>>();
+            let param_index_map = (0..self.parameters.len())
+                .map(|index| CircuitParam::Index(index as u32))
+                .collect::<Vec<_>>();
+            let var_map = self
+                .classical_vars
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(var_index, ty)| {
+                    let var = ClassicalVar::new(self.circuit_id, var_index as u32, ty);
+                    (var, var)
+                })
+                .collect::<HashMap<_, _>>();
+
+            self.data
+                .iter()
+                .enumerate()
+                .filter(|(operation_index, _)| !remove_set.contains(operation_index))
+                .map(|(_, operation)| {
+                    Self::remap_compose_operation(
+                        operation,
+                        &qubit_mapping,
+                        &param_index_map,
+                        &var_map,
+                        &value_map,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        let candidate = Self {
+            circuit_id: self.circuit_id,
+            qubits: self.qubits.clone(),
+            symbols: self.symbols.clone(),
+            parameters: self.parameters.clone(),
+            data: Arc::new(candidate_data),
+            classical_vars: self.classical_vars.clone(),
+            classical_values: candidate_classical_values,
+            control_scope_stack: self.control_scope_stack.clone(),
+            global_phase: self.global_phase.clone(),
+        };
+        candidate.validate()?;
+
+        self.data = candidate.data;
+        self.classical_values = candidate.classical_values;
+
+        Ok(removed)
+    }
+
+    fn collect_defined_classical_values(operation: &Operation, out: &mut Vec<ClassicalValue>) {
+        let collect_from_body = |body: &ControlBody, out: &mut Vec<ClassicalValue>| {
+            for operation in body.operations() {
+                Circuit::collect_defined_classical_values(operation, out);
+            }
+        };
+
+        match &operation.instruction {
+            Instruction::ClassicalData(op) => {
+                if let Some(result) = op.result() {
+                    out.push(result);
+                }
+            }
+            Instruction::ClassicalControl(op) => match op {
+                ClassicalControlOp::If(op) => {
+                    collect_from_body(op.then_body(), out);
+                    if let Some(body) = op.else_body() {
+                        collect_from_body(body, out);
+                    }
+                }
+                ClassicalControlOp::While(op) => collect_from_body(op.body(), out),
+                ClassicalControlOp::For(op) => collect_from_body(op.body(), out),
+                ClassicalControlOp::Switch(op) => {
+                    for case in op.cases() {
+                        collect_from_body(case.body(), out);
+                    }
+                    if let Some(body) = op.default() {
+                        collect_from_body(body, out);
+                    }
+                }
+                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn build_value_compaction_map(
+        circuit_id: CircuitId,
+        values: &[ClassicalType],
+        removed: &[ClassicalValue],
+    ) -> (Vec<ClassicalType>, HashMap<ClassicalValue, ClassicalValue>) {
+        let removed_indices = removed
+            .iter()
+            .map(|value| value.index())
+            .collect::<HashSet<_>>();
+        let mut compacted = Vec::with_capacity(values.len().saturating_sub(removed_indices.len()));
+        let mut value_map =
+            HashMap::with_capacity(values.len().saturating_sub(removed_indices.len()));
+
+        for (old_index, ty) in values.iter().copied().enumerate() {
+            if removed_indices.contains(&(old_index as u32)) {
+                continue;
+            }
+            let new_index = compacted.len() as u32;
+            compacted.push(ty);
+            value_map.insert(
+                ClassicalValue::new(circuit_id, old_index as u32, ty),
+                ClassicalValue::new(circuit_id, new_index, ty),
+            );
+        }
+
+        (compacted, value_map)
     }
 
     /// Returns the circuit depth (longest ASAP schedule path over qubit wires).
@@ -692,7 +1211,11 @@ impl Circuit {
     /// Returns [`CircuitError::ControlFlowPresent`] when `recurse = false` and
     /// the circuit contains control flow.
     pub fn depth(&self, recurse: bool) -> Result<usize, CircuitError> {
-        crate::circuit::depth::circuit_depth(self.qubits.iter().copied(), &self.data, recurse)
+        crate::circuit::depth::circuit_depth(
+            self.qubits.iter().copied(),
+            self.data.as_slice(),
+            recurse,
+        )
     }
 
     /// Returns the static types of runtime classical variables owned by this circuit.
@@ -745,11 +1268,50 @@ impl Circuit {
         Q::Item: Into<Qubit>,
         P: IntoIterator<Item = ParameterValue>,
     {
-        let validate_classical = matches!(
+        self.append_with_validation(instruction, qubits, params, label, true)
+    }
+
+    fn append_with_validation<Q, P>(
+        &mut self,
+        instruction: Instruction,
+        qubits: Q,
+        params: P,
+        label: Option<&str>,
+        validate_builder_state: bool,
+    ) -> Result<(), CircuitError>
+    where
+        Q: IntoIterator,
+        Q::Item: Into<Qubit>,
+        P: IntoIterator<Item = ParameterValue>,
+    {
+        self.append_owned_with_validation(
             instruction,
-            Instruction::ClassicalData(_) | Instruction::ClassicalControl(_)
-        );
-        let checkpoint = validate_classical.then(|| self.checkpoint());
+            qubits,
+            params,
+            label.map(Into::into),
+            validate_builder_state,
+        )
+    }
+
+    fn append_owned_with_validation<Q, P>(
+        &mut self,
+        instruction: Instruction,
+        qubits: Q,
+        params: P,
+        label: Option<Box<str>>,
+        validate_builder_state: bool,
+    ) -> Result<(), CircuitError>
+    where
+        Q: IntoIterator,
+        Q::Item: Into<Qubit>,
+        P: IntoIterator<Item = ParameterValue>,
+    {
+        let validate_classical_now = validate_builder_state
+            && matches!(
+                instruction,
+                Instruction::ClassicalData(_) | Instruction::ClassicalControl(_)
+            );
+        let checkpoint = validate_classical_now.then(|| self.checkpoint());
 
         if let Instruction::ClassicalControl(op) = &instruction {
             self.validate_control_op(op)?;
@@ -773,10 +1335,21 @@ impl Circuit {
             }
         }
 
-        let mut seen = HashSet::with_capacity(qubits_sv.len());
-        for &qubit in &qubits_sv {
-            if !seen.insert(qubit) {
+        const INLINE_DUPLICATE_CHECK_LIMIT: usize = 8;
+        if qubits_sv.len() <= INLINE_DUPLICATE_CHECK_LIMIT {
+            if qubits_sv
+                .iter()
+                .enumerate()
+                .any(|(index, qubit)| qubits_sv[..index].contains(qubit))
+            {
                 return Err(CircuitError::DuplicateQubits);
+            }
+        } else {
+            let mut seen = HashSet::with_capacity(qubits_sv.len());
+            for &qubit in &qubits_sv {
+                if !seen.insert(qubit) {
+                    return Err(CircuitError::DuplicateQubits);
+                }
             }
         }
 
@@ -810,18 +1383,16 @@ impl Circuit {
             }
         }
 
-        self.data.push(Operation {
+        Arc::make_mut(&mut self.data).push(Operation {
             instruction,
             qubits: qubits_sv,
             params: circuit_params,
-            label: label.map(Into::into),
+            label,
         });
 
-        if validate_classical {
-            if let Err(error) = self.validate_builder_state() {
-                self.rollback_to(checkpoint.expect("classical append must define a checkpoint"));
-                return Err(error);
-            }
+        if validate_classical_now && let Err(error) = self.validate_builder_state() {
+            self.rollback_to(checkpoint.expect("classical append must define a checkpoint"));
+            return Err(error);
         }
 
         Ok(())
@@ -935,7 +1506,7 @@ impl Circuit {
 
     /// Appends an XY gate.
     ///
-    /// Rotation between the $|01\rangle$ and $|10\rangle$ subspace.
+    /// Applies a pi rotation about the axis at angle `theta` in the single-qubit XY plane.
     pub fn xy(
         &mut self,
         qubit: Qubit,
@@ -950,7 +1521,7 @@ impl Circuit {
         )
     }
 
-    /// Appends a $\sqrt{XY}$ gate (positive phase).
+    /// Appends a positive half-pi rotation in the single-qubit XY plane.
     pub fn xy2p(
         &mut self,
         qubit: Qubit,
@@ -965,7 +1536,7 @@ impl Circuit {
         )
     }
 
-    /// Appends a $\sqrt{XY}^\dagger$ gate (negative phase).
+    /// Appends a negative half-pi rotation in the single-qubit XY plane.
     pub fn xy2m(
         &mut self,
         qubit: Qubit,
@@ -1371,8 +1942,12 @@ impl Circuit {
 
     /// Inserts a Barrier.
     ///
-    /// A barrier forbids the compiler from optimizing across this line. It has no physical effect
-    /// on the qubits but is crucial for debugging and manual optimization control.
+    /// A barrier forbids the compiler from optimizing or reordering across this line. It has no
+    /// physical effect on the quantum state, but is crucial for debugging and manual optimization
+    /// control.
+    ///
+    /// A non-empty `qubits` list creates a barrier over exactly those qubits. An empty list
+    /// creates a global barrier over every qubit in this circuit.
     pub fn barrier(&mut self, qubits: Vec<Qubit>) -> Result<(), CircuitError> {
         self.append(
             Instruction::Directive(Directive::Barrier),
@@ -1571,7 +2146,7 @@ impl Circuit {
         let mut new_circuit = Circuit::from_qubits(self.qubits())?;
         new_circuit.classical_vars = self.classical_vars.clone();
         new_circuit.classical_values = self.classical_values.clone();
-        new_circuit.data.reserve(self.data.len());
+        Arc::make_mut(&mut new_circuit.data).reserve(self.data.len());
         // 1. Invert Global Phase
         let current_phase_param = self.global_phase();
         // New phase = -1.0 * old_phase
@@ -1646,8 +2221,9 @@ impl Circuit {
     /// Converts the circuit into a `CircuitGate` instruction.
     ///
     /// This method "freezes" the current circuit and wraps it into an instruction that can be
-    /// appended to another circuit. The provided `params` are bound to the circuit's free symbols
-    /// in the order they were defined.
+    /// appended to another circuit. Its positional parameter signature is
+    /// inferred from symbols currently referenced by the executable IR, in
+    /// stable registry order.
     ///
     /// # Arguments
     ///
@@ -1737,7 +2313,7 @@ impl Circuit {
             })
             .collect();
 
-        for op in &self.data {
+        for op in self.data.iter() {
             Self::decompose_recursive(
                 op,
                 self,
@@ -1776,13 +2352,16 @@ impl Circuit {
                     // Apply substitution from the *parent* scope (if we are deep in recursion)
                     // We need simultaneous substitution here too
                     param = Self::apply_param_map(param, param_map);
+                    if param.get_symbols().is_empty() {
+                        param.evaluate(&None)?;
+                    }
                     resolved_params.push(param);
                 }
 
                 // 2. Build maps for the next level
                 // Param Map: Inner Symbol -> Resolved Value
                 let mut next_param_map = HashMap::new();
-                for (i, sym) in cg.symbols().iter().enumerate() {
+                for (i, sym) in cg.signature_params().iter().enumerate() {
                     if i < resolved_params.len() {
                         next_param_map.insert(sym.clone(), resolved_params[i].clone());
                     }
@@ -1801,7 +2380,7 @@ impl Circuit {
                 }
 
                 // 3. Recurse
-                for sub_op in &cg.circuit.circuit.data {
+                for sub_op in cg.circuit.circuit.data.iter() {
                     Self::decompose_recursive(
                         sub_op,
                         &cg.circuit.circuit,
@@ -1837,6 +2416,9 @@ impl Circuit {
                     };
 
                     param = Self::apply_param_map(param, param_map);
+                    if param.get_symbols().is_empty() {
+                        param.evaluate(&None)?;
+                    }
 
                     mapped_params.push(ParameterValue::from(param));
                 }
@@ -1848,41 +2430,19 @@ impl Circuit {
                     _ => op.instruction.clone(),
                 };
 
-                target_circuit
-                    .append(
-                        instruction,
-                        mapped_qubits,
-                        mapped_params,
-                        op.label.as_deref(),
-                    )
-                    .unwrap();
+                target_circuit.append(
+                    instruction,
+                    mapped_qubits,
+                    mapped_params,
+                    op.label.as_deref(),
+                )?;
                 Ok(())
             }
         }
     }
 
-    fn apply_param_map(mut param: Parameter, map: &HashMap<String, Parameter>) -> Parameter {
-        if map.is_empty() {
-            return param;
-        }
-
-        // Simultaneous substitution strategy using temporary placeholders
-        // 1. Replace all target symbols with unique temp symbols
-        let mut temp_map = HashMap::new();
-        for (key, val) in map {
-            // Use a specific internal prefix to avoid collisions during the two-step replacement.
-            // This acts as a simultaneous substitution.
-            let temp_key = format!("__INTERNAL_SUB_{}", key);
-            param = param.replace(key, Parameter::try_from(temp_key.as_str()).unwrap());
-            temp_map.insert(temp_key, val);
-        }
-
-        // 2. Replace temp symbols with actual values
-        for (temp_key, val) in temp_map {
-            param = param.replace(&temp_key, val.clone());
-        }
-
-        param
+    fn apply_param_map(param: Parameter, map: &HashMap<String, Parameter>) -> Parameter {
+        param.substitute_many_simultaneous(map)
     }
 
     /// Computes the dense unitary matrix represented by this circuit.
@@ -1941,16 +2501,21 @@ impl Circuit {
         for param in self.parameters.iter() {
             if let Ok(val) = param.evaluate(bindings) {
                 index_map.push(CircuitParam::Fixed(val));
-            } else {
-                let mut tp = param.clone();
-                if let Some(bindings) = bindings {
-                    for (k, v) in bindings.iter() {
-                        tp = tp.replace(k, Parameter::from(*v));
-                    }
-                    let s = tp.simplify();
-                    tp = s.map_err(|e| CircuitError::UnresolvedParameter(format!("{:?}", e)))?;
-                }
+                continue;
+            }
 
+            let mut tp = param.clone();
+            if let Some(bindings) = bindings {
+                for (k, v) in bindings.iter() {
+                    tp = tp.replace(k, Parameter::from(*v));
+                }
+                let s = tp.simplify();
+                tp = s.map_err(|e| CircuitError::UnresolvedParameter(format!("{:?}", e)))?;
+            }
+
+            if tp.get_symbols().is_empty() {
+                index_map.push(CircuitParam::Fixed(tp.evaluate(&None)?));
+            } else {
                 // Intern the new parameter (deduplicates automatically)
                 let (idx, is_new) = new_circuit.parameters.insert_full(tp.clone());
 
@@ -1965,8 +2530,9 @@ impl Circuit {
         }
 
         // Remap operations to use new parameter indices or fixed values
-        new_circuit.data.reserve(self.data.len());
-        for op in &self.data {
+        let new_data = Arc::make_mut(&mut new_circuit.data);
+        new_data.reserve(self.data.len());
+        for op in self.data.iter() {
             let mut new_op = op.clone();
             for p in &mut new_op.params {
                 if let CircuitParam::Index(old_idx) = p {
@@ -1976,7 +2542,7 @@ impl Circuit {
                         .ok_or(CircuitError::InvalidParameterIndex(*old_idx))?;
                 }
             }
-            new_circuit.data.push(new_op);
+            new_data.push(new_op);
         }
 
         // Remap global phase
@@ -2002,41 +2568,60 @@ impl Circuit {
         var_map: &HashMap<ClassicalVar, ClassicalVar>,
         value_map: &HashMap<ClassicalValue, ClassicalValue>,
     ) -> Result<Operation, CircuitError> {
-        let mut new_op = op.clone();
-
-        for q in &mut new_op.qubits {
-            *q = qubit_mapping
-                .get(q)
-                .copied()
-                .ok_or(CircuitError::QubitNotFound(q.id()))?;
-        }
-
-        for p in &mut new_op.params {
-            if let CircuitParam::Index(old_idx) = p {
-                *p = param_index_map
+        Self::remap_operation(
+            op,
+            &|qubit| {
+                qubit_mapping
+                    .get(&qubit)
+                    .copied()
+                    .ok_or(CircuitError::QubitNotFound(qubit.id()))
+            },
+            &|param| match param {
+                CircuitParam::Index(old_idx) => param_index_map
                     .get(*old_idx as usize)
                     .cloned()
-                    .ok_or(CircuitError::InvalidParameterIndex(*old_idx))?;
-            }
-        }
+                    .ok_or(CircuitError::InvalidParameterIndex(*old_idx)),
+                CircuitParam::Fixed(value) => Ok(CircuitParam::Fixed(*value)),
+            },
+            var_map,
+            value_map,
+        )
+    }
 
-        new_op.instruction = match &op.instruction {
+    fn remap_operation<QubitMapper, ParamMapper>(
+        op: &Operation,
+        map_qubit: &QubitMapper,
+        map_param: &ParamMapper,
+        var_map: &HashMap<ClassicalVar, ClassicalVar>,
+        value_map: &HashMap<ClassicalValue, ClassicalValue>,
+    ) -> Result<Operation, CircuitError>
+    where
+        QubitMapper: Fn(Qubit) -> Result<Qubit, CircuitError>,
+        ParamMapper: Fn(&CircuitParam) -> Result<CircuitParam, CircuitError>,
+    {
+        let qubits = op
+            .qubits
+            .iter()
+            .copied()
+            .map(map_qubit)
+            .collect::<Result<_, _>>()?;
+        let params = op.params.iter().map(map_param).collect::<Result<_, _>>()?;
+        let instruction = match &op.instruction {
             Instruction::ClassicalData(classical_op) => Instruction::ClassicalData(
                 Self::remap_classical_data_op(classical_op, var_map, value_map)?,
             ),
-            Instruction::ClassicalControl(op) => {
-                Instruction::ClassicalControl(Self::remap_compose_control_op(
-                    op,
-                    qubit_mapping,
-                    param_index_map,
-                    var_map,
-                    value_map,
-                )?)
-            }
+            Instruction::ClassicalControl(op) => Instruction::ClassicalControl(
+                Self::remap_control_op(op, map_qubit, map_param, var_map, value_map)?,
+            ),
             _ => op.instruction.clone(),
         };
 
-        Ok(new_op)
+        Ok(Operation {
+            instruction,
+            qubits,
+            params,
+            label: op.label.clone(),
+        })
     }
 
     fn remap_classical_data_op(
@@ -2073,68 +2658,57 @@ impl Circuit {
         }
     }
 
-    fn remap_compose_control_body(
+    fn remap_control_body<QubitMapper, ParamMapper>(
         body: &ControlBody,
-        qubit_mapping: &HashMap<Qubit, Qubit>,
-        param_index_map: &[CircuitParam],
+        map_qubit: &QubitMapper,
+        map_param: &ParamMapper,
         var_map: &HashMap<ClassicalVar, ClassicalVar>,
         value_map: &HashMap<ClassicalValue, ClassicalValue>,
-    ) -> Result<ControlBody, CircuitError> {
+    ) -> Result<ControlBody, CircuitError>
+    where
+        QubitMapper: Fn(Qubit) -> Result<Qubit, CircuitError>,
+        ParamMapper: Fn(&CircuitParam) -> Result<CircuitParam, CircuitError>,
+    {
         body.operations()
             .iter()
-            .map(|op| {
-                Self::remap_compose_operation(
-                    op,
-                    qubit_mapping,
-                    param_index_map,
-                    var_map,
-                    value_map,
-                )
-            })
+            .map(|op| Self::remap_operation(op, map_qubit, map_param, var_map, value_map))
             .collect::<Result<Vec<_>, _>>()
             .map(ControlBody::new)
     }
 
-    fn remap_compose_control_op(
+    fn remap_control_op<QubitMapper, ParamMapper>(
         op: &ClassicalControlOp,
-        qubit_mapping: &HashMap<Qubit, Qubit>,
-        param_index_map: &[CircuitParam],
+        map_qubit: &QubitMapper,
+        map_param: &ParamMapper,
         var_map: &HashMap<ClassicalVar, ClassicalVar>,
         value_map: &HashMap<ClassicalValue, ClassicalValue>,
-    ) -> Result<ClassicalControlOp, CircuitError> {
+    ) -> Result<ClassicalControlOp, CircuitError>
+    where
+        QubitMapper: Fn(Qubit) -> Result<Qubit, CircuitError>,
+        ParamMapper: Fn(&CircuitParam) -> Result<CircuitParam, CircuitError>,
+    {
         match op {
             ClassicalControlOp::If(op) => {
                 let condition = op.condition().remap_classical_ids(var_map, value_map)?;
-                let then_body = Self::remap_compose_control_body(
+                let then_body = Self::remap_control_body(
                     op.then_body(),
-                    qubit_mapping,
-                    param_index_map,
+                    map_qubit,
+                    map_param,
                     var_map,
                     value_map,
                 )?;
                 let else_body = op
                     .else_body()
                     .map(|body| {
-                        Self::remap_compose_control_body(
-                            body,
-                            qubit_mapping,
-                            param_index_map,
-                            var_map,
-                            value_map,
-                        )
+                        Self::remap_control_body(body, map_qubit, map_param, var_map, value_map)
                     })
                     .transpose()?;
                 IfOp::new(condition, then_body, else_body).map(ClassicalControlOp::If)
             }
             ClassicalControlOp::While(op) => {
                 let condition = op.condition().remap_classical_ids(var_map, value_map)?;
-                let body = Self::remap_compose_control_body(
-                    op.body(),
-                    qubit_mapping,
-                    param_index_map,
-                    var_map,
-                    value_map,
-                )?;
+                let body =
+                    Self::remap_control_body(op.body(), map_qubit, map_param, var_map, value_map)?;
                 WhileOp::new(condition, body).map(ClassicalControlOp::While)
             }
             ClassicalControlOp::For(op) => {
@@ -2147,13 +2721,8 @@ impl Circuit {
                 let start = op.start().remap_classical_ids(var_map, value_map)?;
                 let stop = op.stop().remap_classical_ids(var_map, value_map)?;
                 let step = op.step().remap_classical_ids(var_map, value_map)?;
-                let body = Self::remap_compose_control_body(
-                    op.body(),
-                    qubit_mapping,
-                    param_index_map,
-                    var_map,
-                    value_map,
-                )?;
+                let body =
+                    Self::remap_control_body(op.body(), map_qubit, map_param, var_map, value_map)?;
                 ForOp::new(var, start, stop, step, body).map(ClassicalControlOp::For)
             }
             ClassicalControlOp::Switch(op) => {
@@ -2164,10 +2733,10 @@ impl Circuit {
                     .map(|case| {
                         Ok(SwitchCase::new(
                             case.value(),
-                            Self::remap_compose_control_body(
+                            Self::remap_control_body(
                                 case.body(),
-                                qubit_mapping,
-                                param_index_map,
+                                map_qubit,
+                                map_param,
                                 var_map,
                                 value_map,
                             )?,
@@ -2177,13 +2746,7 @@ impl Circuit {
                 let default = op
                     .default()
                     .map(|body| {
-                        Self::remap_compose_control_body(
-                            body,
-                            qubit_mapping,
-                            param_index_map,
-                            var_map,
-                            value_map,
-                        )
+                        Self::remap_control_body(body, map_qubit, map_param, var_map, value_map)
                     })
                     .transpose()?;
                 SwitchOp::new(target, cases, default).map(ClassicalControlOp::Switch)
@@ -2369,8 +2932,9 @@ impl Circuit {
             .extend(other.classical_vars.iter().copied());
         self.classical_values
             .extend(other.classical_values.iter().copied());
-        self.data.reserve(remapped_ops.len());
-        self.data.extend(remapped_ops);
+        let data = Arc::make_mut(&mut self.data);
+        data.reserve(remapped_ops.len());
+        data.extend(remapped_ops);
 
         Ok(())
     }
@@ -2411,15 +2975,66 @@ impl Circuit {
     }
 }
 
-fn lower_instruction(
-    circuit: &mut Circuit,
-    instruction: ValueInstruction,
-) -> Result<Instruction, CircuitError> {
-    fn lower_operation(
-        circuit: &mut Circuit,
-        operation: ValueOperation,
-    ) -> Result<Operation, CircuitError> {
-        let instruction = lower_instruction(circuit, operation.instruction)?;
+impl Circuit {
+    fn lower_instruction(
+        &mut self,
+        instruction: ValueInstruction,
+    ) -> Result<Instruction, CircuitError> {
+        let op = match instruction {
+            ValueInstruction::Instruction(Instruction::ClassicalControl(_)) => {
+                return Err(CircuitError::InvalidOperation(
+                    "ValueInstruction::Instruction cannot wrap Instruction::ClassicalControl"
+                        .to_string(),
+                ));
+            }
+            ValueInstruction::Instruction(instruction) => return Ok(instruction),
+            ValueInstruction::ClassicalControl(op) => op,
+        };
+
+        let op = match op {
+            ValueClassicalControlOp::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                let then_body = self.lower_body(then_body)?;
+                let else_body = else_body.map(|body| self.lower_body(body)).transpose()?;
+                IfOp::new(condition, then_body, else_body).map(ClassicalControlOp::If)?
+            }
+            ValueClassicalControlOp::While { condition, body } => {
+                let body = self.lower_body(body)?;
+                WhileOp::new(condition, body).map(ClassicalControlOp::While)?
+            }
+            ValueClassicalControlOp::For {
+                var,
+                start,
+                stop,
+                step,
+                body,
+            } => {
+                let body = self.lower_body(body)?;
+                ForOp::new(var, start, stop, step, body).map(ClassicalControlOp::For)?
+            }
+            ValueClassicalControlOp::Switch {
+                target,
+                cases,
+                default,
+            } => {
+                let cases = cases
+                    .into_iter()
+                    .map(|case| Ok(SwitchCase::new(case.value, self.lower_body(case.body)?)))
+                    .collect::<Result<Vec<_>, CircuitError>>()?;
+                let default = default.map(|body| self.lower_body(body)).transpose()?;
+                SwitchOp::new(target, cases, default).map(ClassicalControlOp::Switch)?
+            }
+            ValueClassicalControlOp::Break => ClassicalControlOp::Break,
+            ValueClassicalControlOp::Continue => ClassicalControlOp::Continue,
+        };
+        Ok(Instruction::ClassicalControl(op))
+    }
+
+    fn lower_operation(&mut self, operation: ValueOperation) -> Result<Operation, CircuitError> {
+        let instruction = self.lower_instruction(operation.instruction)?;
         let params = operation
             .params
             .into_iter()
@@ -2428,10 +3043,10 @@ fn lower_instruction(
                 |(param_index, param)| -> Result<CircuitParam, CircuitError> {
                     match param {
                         ParameterValue::Param(param) => {
-                            let (index, is_new) = circuit.parameters.insert_full(param.clone());
+                            let (index, is_new) = self.parameters.insert_full(param.clone());
                             if is_new {
                                 for sym in param.get_symbols() {
-                                    circuit.symbols.insert(sym);
+                                    self.symbols.insert(sym);
                                 }
                             }
                             Ok(CircuitParam::Index(index as u32))
@@ -2457,119 +3072,59 @@ fn lower_instruction(
         })
     }
 
-    fn lower_body(
-        circuit: &mut Circuit,
-        body: ValueControlBody,
-    ) -> Result<ControlBody, CircuitError> {
+    fn lower_body(&mut self, body: ValueControlBody) -> Result<ControlBody, CircuitError> {
         body.operations()
             .iter()
             .cloned()
-            .map(|operation| lower_operation(circuit, operation))
+            .map(|operation| self.lower_operation(operation))
             .collect::<Result<Vec<_>, _>>()
             .map(ControlBody::new)
     }
 
-    let op = match instruction {
-        ValueInstruction::Instruction(Instruction::ClassicalControl(_)) => {
-            return Err(CircuitError::InvalidOperation(
-                "ValueInstruction::Instruction cannot wrap Instruction::ClassicalControl"
-                    .to_string(),
-            ));
-        }
-        ValueInstruction::Instruction(instruction) => return Ok(instruction),
-        ValueInstruction::ClassicalControl(op) => op,
-    };
-
-    let op = match op {
-        ValueClassicalControlOp::If {
-            condition,
-            then_body,
-            else_body,
-        } => {
-            let then_body = lower_body(circuit, then_body)?;
-            let else_body = else_body
-                .map(|body| lower_body(circuit, body))
-                .transpose()?;
-            IfOp::new(condition, then_body, else_body).map(ClassicalControlOp::If)?
-        }
-        ValueClassicalControlOp::While { condition, body } => {
-            let body = lower_body(circuit, body)?;
-            WhileOp::new(condition, body).map(ClassicalControlOp::While)?
-        }
-        ValueClassicalControlOp::For {
-            var,
-            start,
-            stop,
-            step,
-            body,
-        } => {
-            let body = lower_body(circuit, body)?;
-            ForOp::new(var, start, stop, step, body).map(ClassicalControlOp::For)?
-        }
-        ValueClassicalControlOp::Switch {
-            target,
-            cases,
-            default,
-        } => {
-            let cases = cases
-                .into_iter()
-                .map(|case| Ok(SwitchCase::new(case.value, lower_body(circuit, case.body)?)))
-                .collect::<Result<Vec<_>, CircuitError>>()?;
-            let default = default.map(|body| lower_body(circuit, body)).transpose()?;
-            SwitchOp::new(target, cases, default).map(ClassicalControlOp::Switch)?
-        }
-        ValueClassicalControlOp::Break => ClassicalControlOp::Break,
-        ValueClassicalControlOp::Continue => ClassicalControlOp::Continue,
-    };
-    Ok(Instruction::ClassicalControl(op))
-}
-
-fn validate_operation_parameters(
-    operations: &[Operation],
-    parameters: &IndexSet<Parameter>,
-) -> Result<(), CircuitError> {
-    for operation in operations {
-        for param in &operation.params {
-            match param {
-                CircuitParam::Fixed(value) => {
-                    if !value.is_finite() {
-                        return Err(CircuitError::InvalidParameterValue(0, *value));
+    fn validate_operation_parameters(&self, operations: &[Operation]) -> Result<(), CircuitError> {
+        for operation in operations {
+            for param in &operation.params {
+                match param {
+                    CircuitParam::Fixed(value) => {
+                        if !value.is_finite() {
+                            return Err(CircuitError::InvalidParameterValue(0, *value));
+                        }
                     }
-                }
-                CircuitParam::Index(index) => {
-                    if parameters.get_index(*index as usize).is_none() {
-                        return Err(CircuitError::InvalidParameterIndex(*index));
+                    CircuitParam::Index(index) => {
+                        if self.parameters.get_index(*index as usize).is_none() {
+                            return Err(CircuitError::InvalidParameterIndex(*index));
+                        }
                     }
                 }
             }
-        }
-        if let Instruction::ClassicalControl(op) = &operation.instruction {
-            match op {
-                ClassicalControlOp::If(op) => {
-                    validate_operation_parameters(op.then_body().operations(), parameters)?;
-                    if let Some(body) = op.else_body() {
-                        validate_operation_parameters(body.operations(), parameters)?;
+            if let Instruction::ClassicalControl(op) = &operation.instruction {
+                match op {
+                    ClassicalControlOp::If(op) => {
+                        self.validate_operation_parameters(op.then_body().operations())?;
+                        if let Some(body) = op.else_body() {
+                            self.validate_operation_parameters(body.operations())?;
+                        }
                     }
-                }
-                ClassicalControlOp::While(op) => {
-                    validate_operation_parameters(op.body().operations(), parameters)?;
-                }
-                ClassicalControlOp::For(op) => {
-                    validate_operation_parameters(op.body().operations(), parameters)?;
-                }
-                ClassicalControlOp::Switch(op) => {
-                    for case in op.cases() {
-                        validate_operation_parameters(case.body().operations(), parameters)?;
+                    ClassicalControlOp::While(op) => {
+                        self.validate_operation_parameters(op.body().operations())?;
                     }
-                    if let Some(body) = op.default() {
-                        validate_operation_parameters(body.operations(), parameters)?;
+                    ClassicalControlOp::For(op) => {
+                        self.validate_operation_parameters(op.body().operations())?;
                     }
+                    ClassicalControlOp::Switch(op) => {
+                        for case in op.cases() {
+                            self.validate_operation_parameters(case.body().operations())?;
+                        }
+                        if let Some(body) = op.default() {
+                            self.validate_operation_parameters(body.operations())?;
+                        }
+                    }
+                    ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
                 }
-                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
             }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 fn infer_classical_circuit_id(

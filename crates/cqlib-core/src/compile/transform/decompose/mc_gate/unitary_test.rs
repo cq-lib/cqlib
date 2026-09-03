@@ -10,16 +10,16 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+use super::test_utils::{
+    EPSILON, assert_fixed_parameter_operation, assert_selected_matrix_columns_approx_eq,
+    assert_value_operations_only_use_qubits, circuit_from_value_operations, mc_gate_matrix,
+};
 use super::unitary::{decompose_unitary_n_clean, decompose_unitary_no_aux};
 use crate::circuit::value_instruction::ValueInstruction;
 use crate::circuit::{
     Instruction, Parameter, ParameterValue, Qubit, StandardGate, circuit_to_matrix,
 };
 use crate::compile::error::CompilerError;
-use crate::util::test_utils::{
-    EPSILON, assert_fixed_parameter_operation, assert_selected_matrix_columns_approx_eq,
-    assert_value_operations_only_use_qubits, circuit_from_value_operations, mc_gate_matrix,
-};
 #[test]
 fn zero_controls_emit_original_standard_u() {
     let target = Qubit::new(3);

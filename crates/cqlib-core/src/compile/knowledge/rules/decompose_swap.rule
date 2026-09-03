@@ -33,3 +33,107 @@ rule decompose_swap_to_ising {
     match { SWAP 0 1 }
     rewrite { RXX(π/2) 0 1, RYY(π/2) 0 1, RZZ(π/2) 0 1, GPhase(π/4) }
 }
+
+rule decompose_swap_to_rx_ry_rzz {
+    match { SWAP 0 1 }
+    rewrite { RY(-π/2) 0, RY(-π/2) 1, RZZ(π/2) 0 1, RY(π/2) 1, RY(π/2) 0, RX(π/2) 0, RX(π/2) 1, RZZ(π/2) 0 1, RX(-π/2) 1, RX(-π/2) 0, RZZ(π/2) 0 1, GPhase(π/4) }
+}
+
+rule decompose_swap_to_x2p_cz {
+    match { SWAP 0 1 }
+    rewrite {
+        X2P 0, X2P 1, CZ 0 1,
+        X2P 0, X2P 1, CZ 0 1,
+        X2P 0, X2P 1, CZ 0 1,
+        GPhase(π)
+    }
+}
+
+rule decompose_swap_to_x2m_cz {
+    match { SWAP 0 1 }
+    rewrite {
+        X2M 0, X2M 1, CZ 0 1,
+        X2M 0, X2M 1, CZ 0 1,
+        X2M 0, X2M 1, CZ 0 1,
+        GPhase(π)
+    }
+}
+
+rule decompose_swap_to_y2m_cz {
+    match { SWAP 0 1 }
+    rewrite {
+        Y2M 0, Y2M 1, CZ 0 1,
+        Y2M 0, Y2M 1, CZ 0 1,
+        Y2M 0, Y2M 1, CZ 0 1,
+        GPhase(π)
+    }
+}
+
+rule decompose_swap_to_x2p_cx {
+    match { SWAP 0 1 }
+    rewrite {
+        X2P 0, X2P 1, CX 0 1,
+        X2P 0, X2P 1, CX 1 0,
+        X2P 0, X2P 1, CX 0 1,
+        GPhase(-π/2)
+    }
+}
+
+rule decompose_swap_to_y2m_cx {
+    match { SWAP 0 1 }
+    rewrite {
+        Y2M 0, Y2M 0, CX 0 1,
+        Y2M 0, Y2M 1, CX 0 1,
+        Y2M 0, Y2M 1, CX 0 1,
+        GPhase(π)
+    }
+}
+
+rule decompose_swap_to_y2p_cz {
+    match { SWAP 0 1 }
+    rewrite {
+        Y2P 0, Y2P 1, CZ 0 1,
+        Y2P 0, Y2P 1, CZ 0 1,
+        Y2P 0, Y2P 1, CZ 0 1,
+        GPhase(π)
+    }
+}
+
+rule decompose_swap_to_x2p_x2m_cz {
+    match { SWAP 0 1 }
+    rewrite {
+        X2P 0, X2M 1, CZ 0 1,
+        X2M 0, X2P 1, CZ 0 1,
+        X2P 0, X2M 1, CZ 0 1
+    }
+}
+
+rule decompose_swap_to_y2p_y2m_cz {
+    match { SWAP 0 1 }
+    rewrite {
+        Y2P 0, Y2M 1, CZ 0 1,
+        Y2M 0, Y2P 1, CZ 0 1,
+        Y2P 0, Y2M 1, CZ 0 1
+    }
+}
+
+rule decompose_swap_to_x2p_y2p_cz {
+    match { SWAP 0 1 }
+    rewrite {
+        X2P 0, Y2P 1, CZ 0 1,
+        X2P 0, Y2P 1, CZ 0 1,
+        X2P 0, Y2P 1, CZ 0 1,
+        RZ(π/2) 0, RZ(-π/2) 1,
+        GPhase(π)
+    }
+}
+
+rule decompose_swap_to_x2p_y2m_cz {
+    match { SWAP 0 1 }
+    rewrite {
+        X2P 0, Y2M 1, CZ 0 1,
+        X2P 0, Y2M 1, CZ 0 1,
+        X2P 0, Y2M 1, CZ 0 1,
+        RZ(3*π/2) 0, RZ(π/2) 1
+    }
+}

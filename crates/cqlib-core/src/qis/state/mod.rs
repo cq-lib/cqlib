@@ -70,12 +70,13 @@
 //!
 //! let mut counts = HashMap::new();
 //! for outcome in state.sample_shots(1000) {
-//!     *counts.entry(outcome.to_string(2)).or_insert(0usize) += 1;
+//!     *counts.entry(outcome.to_bitstring(2)).or_insert(0usize) += 1;
 //! }
 //!
 //! assert!(counts.keys().all(|bits| bits == "00" || bits == "11"));
 //! ```
 
+mod aligned_buffer;
 pub mod classical;
 pub mod density_matrix;
 pub mod density_matrix_noise;

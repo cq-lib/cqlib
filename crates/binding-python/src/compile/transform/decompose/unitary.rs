@@ -28,7 +28,8 @@ use pyo3::prelude::*;
 /// Numeric decomposition of a one-qubit unitary matrix.
 #[pyclass(
     name = "OneQubitUnitaryDecomposition",
-    module = "cqlib.compile.transform.decompose.unitary"
+    module = "cqlib.compile.transform.decompose.unitary",
+    skip_from_py_object
 )]
 #[derive(Clone, Copy, Debug)]
 pub struct PyOneQubitUnitaryDecomposition {
@@ -80,7 +81,8 @@ impl PyOneQubitUnitaryDecomposition {
 /// Standard-gate synthesis of a two-qubit unitary matrix.
 #[pyclass(
     name = "TwoQubitUnitarySynthesisResult",
-    module = "cqlib.compile.transform.decompose.unitary"
+    module = "cqlib.compile.transform.decompose.unitary",
+    skip_from_py_object
 )]
 #[derive(Clone, Debug)]
 pub struct PyTwoQubitUnitarySynthesisResult {
@@ -124,7 +126,8 @@ impl PyTwoQubitUnitarySynthesisResult {
 /// Canonical two-qubit KAK decomposition.
 #[pyclass(
     name = "KakDecomposition",
-    module = "cqlib.compile.transform.decompose.unitary"
+    module = "cqlib.compile.transform.decompose.unitary",
+    skip_from_py_object
 )]
 #[derive(Clone, Debug)]
 pub struct PyKakDecomposition {

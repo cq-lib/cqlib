@@ -41,14 +41,15 @@
 //! construction IR.
 
 use crate::circuit::ClassicalControlOp;
+use crate::circuit::ClassicalType;
 use crate::circuit::circuit_param::{CircuitParam, ParameterValue};
 use crate::circuit::classical::{ClassicalValue, ClassicalVar};
 use crate::circuit::classical_expr::ClassicalExpr;
-use crate::circuit::control_flow::ControlBody;
+use crate::circuit::control_flow::{ControlBody, validate_for_types, validate_switch};
 use crate::circuit::error::CircuitError;
-use crate::circuit::gate::ClassicalDataOp;
 use crate::circuit::gate::directive::Directive;
 use crate::circuit::gate::instruction::Instruction;
+use crate::circuit::gate::standard_gate::StandardGate;
 use crate::circuit::operation::{Operation, ValueOperation};
 use alloc::collections::BTreeSet;
 use std::fmt;
@@ -81,7 +82,7 @@ use std::fmt;
 /// ]);
 /// assert_eq!(body.operations().len(), 2);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ValueControlBody {
     operations: Vec<ValueOperation>,
 }
@@ -111,21 +112,12 @@ impl ValueControlBody {
 
     /// Returns true if this body directly or recursively contains measurement.
     pub fn has_measurement(&self) -> bool {
-        self.operations.iter().any(|operation| {
-            matches!(
-                &operation.instruction,
-                ValueInstruction::Instruction(Instruction::Directive(Directive::Measure))
-                    | ValueInstruction::Instruction(Instruction::ClassicalData(
-                        ClassicalDataOp::MeasureBit { .. }
-                    ))
-                    | ValueInstruction::Instruction(Instruction::ClassicalData(
-                        ClassicalDataOp::MeasureBits { .. }
-                    ))
-            ) || matches!(
-                &operation.instruction,
-                ValueInstruction::ClassicalControl(control) if control.has_measurement()
-            )
-        })
+        self.operations
+            .iter()
+            .any(|operation| match &operation.instruction {
+                ValueInstruction::Instruction(instruction) => instruction.has_measurement(),
+                ValueInstruction::ClassicalControl(control) => control.has_measurement(),
+            })
     }
 
     /// Returns true if this body directly or recursively reads `value`.
@@ -133,13 +125,8 @@ impl ValueControlBody {
         self.operations
             .iter()
             .any(|operation| match &operation.instruction {
-                ValueInstruction::Instruction(Instruction::ClassicalData(
-                    ClassicalDataOp::Store {
-                        value: expression, ..
-                    },
-                )) => expression.values().contains(&value),
+                ValueInstruction::Instruction(instruction) => instruction.reads_value(value),
                 ValueInstruction::ClassicalControl(control) => control.reads_value(value),
-                _ => false,
             })
     }
 }
@@ -154,7 +141,7 @@ impl From<Vec<ValueOperation>> for ValueControlBody {
 ///
 /// Each case matches an exact unsigned integer value and carries a [`ValueControlBody`]
 /// to execute when the switch target equals that value.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ValueSwitchCase {
     /// The exact unsigned integer value that triggers this case.
     pub value: u128,
@@ -186,7 +173,7 @@ impl ValueSwitchCase {
 /// | `Switch` | [`SwitchOp`](crate::circuit::SwitchOp) |
 /// | `Break` | [`ClassicalControlOp::Break`](crate::circuit::ClassicalControlOp) |
 /// | `Continue` | [`ClassicalControlOp::Continue`](crate::circuit::ClassicalControlOp) |
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ValueClassicalControlOp {
     /// Execute `then_body` when `condition` is true, optionally `else_body` when false.
     ///
@@ -242,6 +229,79 @@ pub enum ValueClassicalControlOp {
 }
 
 impl ValueClassicalControlOp {
+    /// Creates a validated `if` operation.
+    ///
+    /// `condition` must have type [`ClassicalType::Bool`].
+    pub fn new_if(
+        condition: ClassicalExpr,
+        then_body: ValueControlBody,
+        else_body: Option<ValueControlBody>,
+    ) -> Result<Self, CircuitError> {
+        if condition.ty() != ClassicalType::Bool {
+            return Err(CircuitError::InvalidOperation(format!(
+                "if condition must be Bool, got {:?}",
+                condition.ty()
+            )));
+        }
+        Ok(Self::If {
+            condition,
+            then_body,
+            else_body,
+        })
+    }
+
+    /// Creates a validated `while` operation.
+    ///
+    /// `condition` must have type [`ClassicalType::Bool`].
+    pub fn new_while(
+        condition: ClassicalExpr,
+        body: ValueControlBody,
+    ) -> Result<Self, CircuitError> {
+        if condition.ty() != ClassicalType::Bool {
+            return Err(CircuitError::InvalidOperation(format!(
+                "while condition must be Bool, got {:?}",
+                condition.ty()
+            )));
+        }
+        Ok(Self::While { condition, body })
+    }
+
+    /// Creates a validated unsigned range `for` operation.
+    ///
+    /// `var` must be a `UInt` and `start`, `stop`, and `step` must match its width.
+    pub fn new_for(
+        var: ClassicalVar,
+        start: ClassicalExpr,
+        stop: ClassicalExpr,
+        step: ClassicalExpr,
+        body: ValueControlBody,
+    ) -> Result<Self, CircuitError> {
+        validate_for_types(var, &start, &stop, &step)?;
+        Ok(Self::For {
+            var,
+            start,
+            stop,
+            step,
+            body,
+        })
+    }
+
+    /// Creates a validated exact-value `switch` operation.
+    ///
+    /// `target` must be a `UInt`; every case value must fit its width and be unique.
+    pub fn new_switch(
+        target: ClassicalExpr,
+        cases: Vec<ValueSwitchCase>,
+        default: Option<ValueControlBody>,
+    ) -> Result<Self, CircuitError> {
+        validate_switch(&target, cases.iter().map(|case| case.value))?;
+        Ok(Self::Switch {
+            target,
+            cases,
+            default,
+        })
+    }
+
     /// Returns every qubit used by the operation's nested control-flow bodies.
     pub fn used_qubits(&self) -> BTreeSet<crate::circuit::Qubit> {
         let mut qubits = BTreeSet::new();
@@ -404,7 +464,7 @@ impl fmt::Display for ValueClassicalControlOp {
 /// - `ValueInstruction::ClassicalControl(vcc)` → `Instruction::ClassicalControl(cc)`,
 ///   where every nested [`ValueControlBody`] is recursively converted to a
 ///   [`ControlBody`] with interned parameters.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ValueInstruction {
     /// A non-control-flow instruction. The wrapped [`Instruction`] must not be
     /// [`Instruction::ClassicalControl`].
@@ -436,6 +496,73 @@ impl ValueInstruction {
     /// Returns `true` if this is a non-control-flow instruction.
     pub fn is_instruction(&self) -> bool {
         matches!(self, Self::Instruction(_))
+    }
+
+    /// Returns the human-readable instruction name.
+    pub fn name(&self) -> String {
+        match self {
+            Self::Instruction(instruction) => instruction.name(),
+            Self::ClassicalControl(control) => control.to_string(),
+        }
+    }
+
+    /// Returns a stable category name for this instruction.
+    pub fn instruction_type(&self) -> &'static str {
+        match self {
+            Self::Instruction(instruction) => instruction.instruction_type(),
+            Self::ClassicalControl(_) => "classical_control",
+        }
+    }
+
+    /// Returns `true` if this is a standard-gate instruction.
+    pub fn is_standard(&self) -> bool {
+        matches!(self, Self::Instruction(instruction) if instruction.is_standard())
+    }
+
+    /// Returns `true` if this is a multi-controlled-gate instruction.
+    pub fn is_mcgate(&self) -> bool {
+        matches!(self, Self::Instruction(instruction) if instruction.is_mcgate())
+    }
+
+    /// Returns `true` if this is a user-defined unitary instruction.
+    pub fn is_unitary(&self) -> bool {
+        matches!(self, Self::Instruction(instruction) if instruction.is_unitary())
+    }
+
+    /// Returns `true` if this is a circuit-backed gate instruction.
+    pub fn is_circuit_gate(&self) -> bool {
+        matches!(self, Self::Instruction(instruction) if instruction.is_circuit_gate())
+    }
+
+    /// Returns `true` if this is a non-unitary directive.
+    pub fn is_directive(&self) -> bool {
+        matches!(self, Self::Instruction(instruction) if instruction.is_directive())
+    }
+
+    /// Returns `true` if this is a classical-data instruction.
+    pub fn is_classical_data(&self) -> bool {
+        matches!(self, Self::Instruction(instruction) if instruction.is_classical_data())
+    }
+
+    /// Returns `true` if this is a delay instruction.
+    pub fn is_delay(&self) -> bool {
+        matches!(self, Self::Instruction(instruction) if instruction.is_delay())
+    }
+
+    /// Returns the standard gate when this is a standard-gate instruction.
+    pub fn standard_gate(&self) -> Option<StandardGate> {
+        match self {
+            Self::Instruction(Instruction::Standard(gate)) => Some(*gate),
+            _ => None,
+        }
+    }
+
+    /// Returns the directive when this is a directive instruction.
+    pub fn directive(&self) -> Option<Directive> {
+        match self {
+            Self::Instruction(Instruction::Directive(directive)) => Some(*directive),
+            _ => None,
+        }
     }
 
     /// Returns the wrapped storage instruction when this is a non-control-flow value instruction.
@@ -482,7 +609,7 @@ impl fmt::Display for ValueInstruction {
     }
 }
 
-pub(crate) fn storage_operation_to_value<F>(
+pub fn storage_operation_to_value<F>(
     operation: Operation,
     resolve_parameter: &F,
 ) -> Result<ValueOperation, CircuitError>
@@ -586,7 +713,7 @@ mod tests {
     use super::*;
     use crate::circuit::ClassicalType;
     use crate::circuit::bit::Qubit;
-    use crate::circuit::gate::StandardGate;
+    use crate::circuit::gate::{ClassicalDataOp, Directive, StandardGate};
     use std::num::NonZeroU32;
 
     #[test]
@@ -623,6 +750,43 @@ mod tests {
         let vi = ValueInstruction::from(vcc);
         assert!(vi.is_classical_control());
         assert!(!vi.is_instruction());
+    }
+
+    #[test]
+    fn value_instruction_exposes_instruction_queries() {
+        let standard = ValueInstruction::from_instruction(Instruction::Standard(StandardGate::H));
+        assert_eq!(standard.name(), "H");
+        assert_eq!(standard.instruction_type(), "standard");
+        assert!(standard.is_standard());
+        assert_eq!(standard.standard_gate(), Some(StandardGate::H));
+        assert_eq!(standard.directive(), None);
+
+        let directive =
+            ValueInstruction::from_instruction(Instruction::Directive(Directive::Barrier));
+        assert_eq!(directive.name(), "barrier");
+        assert_eq!(directive.to_string(), "barrier");
+        assert_eq!(directive.instruction_type(), "directive");
+        assert!(directive.is_directive());
+        assert_eq!(directive.directive(), Some(Directive::Barrier));
+
+        let value =
+            ClassicalValue::new(crate::circuit::CircuitId::default(), 0, ClassicalType::Bit);
+        let classical_data = ValueInstruction::from_instruction(Instruction::ClassicalData(
+            ClassicalDataOp::MeasureBit { result: value },
+        ));
+        assert_eq!(classical_data.name(), "measure_bit");
+        assert_eq!(classical_data.instruction_type(), "classical_data");
+        assert!(classical_data.is_classical_data());
+
+        let control = ValueInstruction::from(ValueClassicalControlOp::Break);
+        assert_eq!(control.name(), "break");
+        assert_eq!(control.instruction_type(), "classical_control");
+        assert!(control.is_classical_control());
+
+        let delay = ValueInstruction::from_instruction(Instruction::Delay);
+        assert_eq!(delay.name(), "delay");
+        assert_eq!(delay.instruction_type(), "delay");
+        assert!(delay.is_delay());
     }
 
     #[test]
@@ -706,5 +870,53 @@ mod tests {
         let case = ValueSwitchCase::new(1, body);
         assert_eq!(case.value, 1);
         assert_eq!(case.body.operations().len(), 0);
+    }
+
+    #[test]
+    fn value_instructions_compare_nested_control_flow_structurally() {
+        let make_if = || {
+            ValueInstruction::ClassicalControl(ValueClassicalControlOp::If {
+                condition: ClassicalExpr::bool_literal(true),
+                then_body: ValueControlBody::new(vec![ValueOperation::from_standard(
+                    StandardGate::H,
+                    [Qubit::new(0)],
+                    [],
+                )]),
+                else_body: None,
+            })
+        };
+
+        assert_eq!(make_if(), make_if());
+
+        let different_body = ValueInstruction::ClassicalControl(ValueClassicalControlOp::If {
+            condition: ClassicalExpr::bool_literal(true),
+            then_body: ValueControlBody::new(vec![ValueOperation::from_standard(
+                StandardGate::X,
+                [Qubit::new(0)],
+                [],
+            )]),
+            else_body: None,
+        });
+        assert_ne!(make_if(), different_body);
+
+        let with_else = ValueInstruction::ClassicalControl(ValueClassicalControlOp::If {
+            condition: ClassicalExpr::bool_literal(true),
+            then_body: ValueControlBody::new(vec![ValueOperation::from_standard(
+                StandardGate::H,
+                [Qubit::new(0)],
+                [],
+            )]),
+            else_body: Some(ValueControlBody::new(vec![])),
+        });
+        assert_ne!(make_if(), with_else);
+
+        assert_eq!(
+            ValueInstruction::from_instruction(Instruction::Standard(StandardGate::H)),
+            ValueInstruction::from_instruction(Instruction::Standard(StandardGate::H))
+        );
+        assert_ne!(
+            ValueInstruction::from_instruction(Instruction::Standard(StandardGate::H)),
+            ValueInstruction::from_instruction(Instruction::Standard(StandardGate::X))
+        );
     }
 }

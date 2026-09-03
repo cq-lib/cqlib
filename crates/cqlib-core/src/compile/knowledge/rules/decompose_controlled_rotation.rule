@@ -79,6 +79,21 @@ rule decompose_cry_to_rzz {
     rewrite { RX(π/2) 1, RZ(theta/2) 1, RZZ(-theta/2) 0 1, RX(-π/2) 1 }
 }
 
+rule decompose_crz_to_rx_ry_rzz {
+    match { CRZ(theta) 0 1 }
+    rewrite { RX(-π/2) 1, RY(theta/2) 1, RX(π/2) 1, RZZ(-theta/2) 0 1 }
+}
+
+rule decompose_crx_to_rx_ry_rzz {
+    match { CRX(theta) 0 1 }
+    rewrite { RX(theta/2) 1, RY(-π/2) 1, RZZ(-theta/2) 0 1, RY(π/2) 1 }
+}
+
+rule decompose_cry_to_rx_ry_rzz {
+    match { CRY(theta) 0 1 }
+    rewrite { RY(theta/2) 1, RX(π/2) 1, RZZ(-theta/2) 0 1, RX(-π/2) 1 }
+}
+
 rule decompose_crz_to_cz {
     match { CRZ(theta) 0 1 }
     rewrite { H 1, CZ 0 1, H 1, RZ(-theta/2) 1, H 1, CZ 0 1, H 1, RZ(theta/2) 1 }

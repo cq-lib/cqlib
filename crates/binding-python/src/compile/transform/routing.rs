@@ -15,7 +15,7 @@
 use crate::circuit::PyCircuit;
 use crate::compile::error::compiler_error_to_py_err;
 use crate::compile::sabre::{PySabreConfig, PySabreRoutingDiagnostics};
-use crate::compile::transform::layout::{PyLayoutObjective, PyLayoutScore};
+use crate::compile::transform::layout::{PyLayoutDiagnostics, PyLayoutObjective, PyLayoutScore};
 use crate::device::device_impl::PyDevice;
 use crate::device::layout::PyLayout;
 use cqlib_core::compile::sabre::SabreConfig;
@@ -85,7 +85,11 @@ fn py_route_sabre(
 }
 
 /// A physical circuit produced by routing, plus routing metadata.
-#[pyclass(name = "RoutedCircuit", module = "cqlib.compile.transform.routing")]
+#[pyclass(
+    name = "RoutedCircuit",
+    module = "cqlib.compile.transform.routing",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyRoutedCircuit {
     inner: RoutedCircuit,
@@ -151,7 +155,15 @@ impl PyRoutedCircuit {
 }
 
 /// Full SABRE layout-selection and routing result.
-#[pyclass(name = "SabreRouteResult", module = "cqlib.compile.transform.routing")]
+///
+/// Wraps the routed circuit and adds the observed objective score of the
+/// winning layout. SABRE selects the winner by predicted native route
+/// quality; the score is diagnostic and is not the route-selection key.
+#[pyclass(
+    name = "SabreRouteResult",
+    module = "cqlib.compile.transform.routing",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PySabreRouteResult {
     inner: SabreRouteResult,
@@ -170,9 +182,19 @@ impl PySabreRouteResult {
         self.inner.routed().clone().into()
     }
 
+    /// Observed score of the selected initial layout, when available.
+    ///
+    /// SABRE selects the winner by predicted route quality under the prepared
+    /// routing cost model; this score is diagnostic and is not the
+    /// route-selection key.
     #[getter]
     fn layout_score(&self) -> Option<PyLayoutScore> {
         self.inner.layout_score().cloned().map(Into::into)
+    }
+
+    #[getter]
+    fn layout_diagnostics(&self) -> PyLayoutDiagnostics {
+        self.inner.layout_diagnostics().clone().into()
     }
 
     #[getter]

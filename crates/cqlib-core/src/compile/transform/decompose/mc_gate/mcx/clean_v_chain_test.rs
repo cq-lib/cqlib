@@ -18,11 +18,11 @@ use super::{
 };
 use crate::circuit::{Qubit, StandardGate, circuit_to_matrix};
 use crate::compile::error::CompilerError;
-use crate::qis::Statevector;
-use crate::util::test_utils::{
+use crate::compile::transform::decompose::mc_gate::test_utils::{
     assert_standard_operation, assert_value_operations_equal, circuit_from_value_operations,
     single_nonzero_matrix_output, statevector_after_value_operations,
 };
+use crate::qis::Statevector;
 use num_complex::Complex64;
 
 fn assert_duplicate_error(

@@ -39,6 +39,19 @@ use std::collections::{BTreeSet, HashSet};
 
 use super::config::CanonicalizeConfig;
 use super::ops::{BarrierRelation, barrier_relation, is_strict_noop, parameter_is_exact_zero};
+use std::fmt;
+
+#[derive(Clone, Copy)]
+struct OperationScope<'a> {
+    parent: &'a str,
+    index: usize,
+}
+
+impl fmt::Display for OperationScope<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}[{}]", self.parent, self.index)
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum VerifyMode<'a> {
@@ -47,15 +60,36 @@ pub enum VerifyMode<'a> {
 }
 
 pub fn verify_circuit(circuit: &Circuit, mode: VerifyMode<'_>) -> Result<(), CompilerError> {
-    if let CircuitParam::Index(index) = circuit.global_phase_param() {
-        if circuit.parameters().get_index(*index as usize).is_none() {
-            return Err(CompilerError::InvalidInput(format!(
-                "global phase references missing parameter index {}",
-                index
-            )));
+    if let CircuitParam::Index(index) = circuit.global_phase_param()
+        && circuit.parameters().get_index(*index as usize).is_none()
+    {
+        return Err(CompilerError::InvalidInput(format!(
+            "global phase references missing parameter index {}",
+            index
+        )));
+    }
+    let global_phase = circuit.global_phase();
+    verify_parameter_finite(&global_phase, "global phase")?;
+    if matches!(mode, VerifyMode::Output { .. }) {
+        verify_parameter_canonical(&global_phase, circuit.global_phase_param(), "global phase")?;
+        // A canonicalization round accumulates a zero phase contribution for
+        // every retained root operation. The expression engine can normalize
+        // a tiny numeric residue while constructing that sum even when the
+        // residue alone is already a canonical numeric parameter. Reject that
+        // representation here so the verified fast path is a true fixed point.
+        if !circuit.operations().is_empty() && !global_phase.is_canonical_positive_zero() {
+            let accumulated = (global_phase.clone() + Parameter::from(0.0))
+                .canonicalized()
+                .map_err(|error| {
+                    CompilerError::Circuit(crate::circuit::CircuitError::InvalidParameter(error))
+                })?;
+            if accumulated != global_phase {
+                return Err(CompilerError::InvariantViolation(
+                    "global phase is not in accumulator-normal form".to_string(),
+                ));
+            }
         }
     }
-    verify_parameter_finite(&circuit.global_phase(), "global phase")?;
     verify_operations(circuit, circuit.operations(), "root", mode)?;
 
     if matches!(mode, VerifyMode::Output { .. }) {
@@ -71,12 +105,14 @@ fn verify_operations(
     scope: &str,
     mode: VerifyMode<'_>,
 ) -> Result<(), CompilerError> {
-    let circuit_qubits = circuit.qubits();
     for (index, operation) in operations.iter().enumerate() {
-        let op_scope = format!("{scope}[{index}]");
+        let op_scope = OperationScope {
+            parent: scope,
+            index,
+        };
 
         for qubit in &operation.qubits {
-            if !circuit_qubits.contains(qubit) {
+            if !circuit.contains_qubit(qubit) {
                 return Err(CompilerError::InvalidInput(format!(
                     "{op_scope} references unknown qubit {qubit}"
                 )));
@@ -85,12 +121,28 @@ fn verify_operations(
 
         verify_no_duplicate_qubits(operation, &op_scope)?;
         verify_instruction_arity(operation, &op_scope)?;
-        verify_operation_params(circuit, operation, &op_scope)?;
+        verify_operation_params(circuit, operation, mode, &op_scope)?;
+
+        if matches!(mode, VerifyMode::Output { config } if config.canonicalizes_instruction_form())
+            && matches!(operation.instruction, Instruction::McGate(_))
+            && operation.instruction.canonicalize_form() != operation.instruction
+        {
+            return Err(CompilerError::InvariantViolation(format!(
+                "{op_scope} instruction form is not canonical"
+            )));
+        }
 
         match &operation.instruction {
             Instruction::ClassicalControl(control) => {
                 verify_classical_control(circuit, control, mode, &op_scope)?;
                 verify_control_flow_qubits(operation, mode, &op_scope)?;
+            }
+            Instruction::ClassicalData(ClassicalDataOp::Store { value, .. })
+                if matches!(mode, VerifyMode::Output { .. }) && value.simplified() != *value =>
+            {
+                return Err(CompilerError::InvariantViolation(format!(
+                    "{op_scope} classical expression is not simplified"
+                )));
             }
             Instruction::Standard(StandardGate::GPhase) => match mode {
                 VerifyMode::Input => {}
@@ -131,7 +183,7 @@ fn verify_operations(
                 .iter()
                 .map(|param| circuit.resolve_parameter(param))
                 .collect::<Result<Vec<_>, _>>()?;
-            if is_strict_noop(&operation.instruction, &params, &operation.qubits)? {
+            if is_strict_noop(&operation.instruction, &params)? {
                 return Err(CompilerError::InvariantViolation(format!(
                     "{op_scope} contains a removable no-op"
                 )));
@@ -142,7 +194,10 @@ fn verify_operations(
     Ok(())
 }
 
-fn verify_no_duplicate_qubits(operation: &Operation, scope: &str) -> Result<(), CompilerError> {
+fn verify_no_duplicate_qubits(
+    operation: &Operation,
+    scope: &OperationScope<'_>,
+) -> Result<(), CompilerError> {
     if matches!(
         operation.instruction,
         Instruction::Directive(Directive::Barrier)
@@ -150,19 +205,24 @@ fn verify_no_duplicate_qubits(operation: &Operation, scope: &str) -> Result<(), 
         return Ok(());
     }
 
-    let mut seen = BTreeSet::new();
-    for qubit in &operation.qubits {
-        if !seen.insert(*qubit) {
-            return Err(CompilerError::InvalidInput(format!(
-                "{scope} contains duplicate qubit {qubit}"
-            )));
-        }
+    if let Some((_, qubit)) = operation
+        .qubits
+        .iter()
+        .enumerate()
+        .find(|(index, qubit)| operation.qubits[..*index].contains(qubit))
+    {
+        return Err(CompilerError::InvalidInput(format!(
+            "{scope} contains duplicate qubit {qubit}"
+        )));
     }
 
     Ok(())
 }
 
-fn verify_instruction_arity(operation: &Operation, scope: &str) -> Result<(), CompilerError> {
+fn verify_instruction_arity(
+    operation: &Operation,
+    scope: &OperationScope<'_>,
+) -> Result<(), CompilerError> {
     if let Some((expected_qubits, expected_params)) = operation.instruction.gate_arity() {
         return verify_fixed_arity(
             expected_qubits,
@@ -215,7 +275,7 @@ fn verify_fixed_arity(
     actual_qubits: usize,
     expected_params: usize,
     actual_params: usize,
-    scope: &str,
+    scope: &OperationScope<'_>,
 ) -> Result<(), CompilerError> {
     if expected_qubits != actual_qubits {
         return Err(CompilerError::InvalidInput(format!(
@@ -233,7 +293,8 @@ fn verify_fixed_arity(
 fn verify_operation_params(
     circuit: &Circuit,
     operation: &Operation,
-    scope: &str,
+    mode: VerifyMode<'_>,
+    scope: &OperationScope<'_>,
 ) -> Result<(), CompilerError> {
     for (param_index, param) in operation.params.iter().enumerate() {
         match param {
@@ -250,14 +311,43 @@ fn verify_operation_params(
                         "{scope} references missing parameter index {index}"
                     )));
                 };
-                verify_parameter_finite(param, &format!("{scope} parameter {param_index}"))?;
+                verify_parameter_finite(param, format_args!("{scope} parameter {param_index}"))?;
             }
+        }
+        if matches!(mode, VerifyMode::Output { .. }) {
+            let resolved = circuit.resolve_parameter(param)?;
+            verify_parameter_canonical(
+                &resolved,
+                param,
+                format_args!("{scope} parameter {param_index}"),
+            )?;
         }
     }
     Ok(())
 }
 
-fn verify_parameter_finite(param: &Parameter, scope: &str) -> Result<(), CompilerError> {
+fn verify_parameter_canonical(
+    param: &Parameter,
+    stored: &CircuitParam,
+    scope: impl fmt::Display,
+) -> Result<(), CompilerError> {
+    let canonical = param.canonicalized().map_err(|error| {
+        CompilerError::Circuit(crate::circuit::CircuitError::InvalidParameter(error))
+    })?;
+    if canonical != *param
+        || (canonical.get_symbols().is_empty() && !matches!(stored, CircuitParam::Fixed(_)))
+    {
+        return Err(CompilerError::InvariantViolation(format!(
+            "{scope} is not stored in canonical form"
+        )));
+    }
+    Ok(())
+}
+
+fn verify_parameter_finite(
+    param: &Parameter,
+    scope: impl fmt::Display,
+) -> Result<(), CompilerError> {
     if param.get_symbols().is_empty() {
         let value = param.evaluate(&None).map_err(|error| {
             CompilerError::InvalidInput(format!("{scope} cannot be evaluated: {error}"))
@@ -274,7 +364,7 @@ fn verify_parameter_finite(param: &Parameter, scope: &str) -> Result<(), Compile
 fn verify_control_flow_qubits(
     operation: &Operation,
     mode: VerifyMode<'_>,
-    scope: &str,
+    scope: &OperationScope<'_>,
 ) -> Result<(), CompilerError> {
     let expected: SmallVec<[_; 3]> = match &operation.instruction {
         Instruction::ClassicalControl(control) => control.used_qubits().into_iter().collect(),
@@ -306,12 +396,31 @@ fn verify_classical_control(
     circuit: &Circuit,
     control: &ClassicalControlOp,
     mode: VerifyMode<'_>,
-    scope: &str,
+    scope: &OperationScope<'_>,
 ) -> Result<(), CompilerError> {
     let body_mode = match mode {
         VerifyMode::Output { config } if !config.recurses_control_flow() => VerifyMode::Input,
         _ => mode,
     };
+
+    if matches!(mode, VerifyMode::Output { config } if config.recurses_control_flow()) {
+        let expressions_are_canonical = match control {
+            ClassicalControlOp::If(op) => op.condition().simplified() == *op.condition(),
+            ClassicalControlOp::While(op) => op.condition().simplified() == *op.condition(),
+            ClassicalControlOp::For(op) => {
+                op.start().simplified() == *op.start()
+                    && op.stop().simplified() == *op.stop()
+                    && op.step().simplified() == *op.step()
+            }
+            ClassicalControlOp::Switch(op) => op.target().simplified() == *op.target(),
+            ClassicalControlOp::Break | ClassicalControlOp::Continue => true,
+        };
+        if !expressions_are_canonical {
+            return Err(CompilerError::InvariantViolation(format!(
+                "{scope} control-flow expression is not simplified"
+            )));
+        }
+    }
 
     match control {
         ClassicalControlOp::If(op) => {
@@ -372,20 +481,19 @@ fn verify_classical_control(
 fn verify_output_barrier(
     operation: &Operation,
     next: Option<&Operation>,
-    scope: &str,
+    scope: &OperationScope<'_>,
 ) -> Result<(), CompilerError> {
-    if operation.qubits.is_empty() {
-        return Err(CompilerError::InvariantViolation(format!(
-            "{scope} contains empty barrier"
-        )));
-    }
-    let mut sorted = operation.qubits.clone();
-    sorted.sort_unstable_by_key(|qubit| qubit.id());
-    sorted.dedup();
-    if operation.qubits != sorted {
-        return Err(CompilerError::InvariantViolation(format!(
-            "{scope} barrier qubits are not sorted and deduplicated"
-        )));
+    // An empty scope is the canonical representation of a global barrier.
+    // Only local barrier scopes require sorted, deduplicated operands.
+    if !operation.qubits.is_empty() {
+        let mut sorted = operation.qubits.clone();
+        sorted.sort_unstable_by_key(|qubit| qubit.id());
+        sorted.dedup();
+        if operation.qubits != sorted {
+            return Err(CompilerError::InvariantViolation(format!(
+                "{scope} barrier qubits are not sorted and deduplicated"
+            )));
+        }
     }
     if operation.label.is_some() {
         return Err(CompilerError::InvariantViolation(format!(

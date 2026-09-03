@@ -17,8 +17,13 @@ use crate::circuit::symbolic_matrix::{
     SymbolicComplex, standard_gate_symbolic_matrix, symbolic_eye,
 };
 use crate::circuit::{Circuit, Parameter, Qubit};
-use crate::util::matrix::c;
 use ndarray::array;
+use num_complex::Complex64;
+
+const fn c(re: f64, im: f64) -> Complex64 {
+    Complex64::new(re, im)
+}
+
 use std::f64::consts::PI;
 use std::sync::Arc;
 
@@ -226,6 +231,22 @@ fn test_matrix_for_params_circuit_backed_parameterized() {
     assert!(matches!(result, Cow::Owned(_)));
     assert_eq!(result.shape(), &[2, 2]);
     // RX(pi) ~= -i X
+    assert!((result[[0, 1]].im + 1.0).abs() < 1e-10);
+    assert!((result[[1, 0]].im + 1.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_circuit_backed_parameter_binding_ignores_unreferenced_interned_symbols() {
+    let mut inner = Circuit::new(1);
+    inner.add_parameter(Parameter::symbol("stale"));
+    inner.rx(Qubit::new(0), Parameter::symbol("theta")).unwrap();
+    let frozen = Arc::new(FrozenCircuit::new(inner));
+
+    let gate = UnitaryGate::new("RxCircuit", 1, 1)
+        .with_circuit(frozen)
+        .unwrap();
+    let result = gate.matrix_for_params(&[PI]).unwrap();
+
     assert!((result[[0, 1]].im + 1.0).abs() < 1e-10);
     assert!((result[[1, 0]].im + 1.0).abs() < 1e-10);
 }

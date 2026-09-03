@@ -49,9 +49,8 @@
 ```text
 crates/cqlib-core/        Rust 核心库
 crates/cqlib/             Rust 对外 crate
-crates/binding-python/    Python 绑定
+crates/binding-python/    Python 绑定及其测试
 crates/binding-c/         C 绑定
-tests/python/             Python 集成测试
 docs/                     文档相关文件
 ```
 
@@ -63,7 +62,7 @@ docs/                     文档相关文件
 
 本项目当前要求：
 
-- Rust 1.85+
+- Rust 1.89+
 - Python 3.10+
 - C 11+ 工具链，用于 C 绑定相关开发
 
@@ -148,12 +147,6 @@ Python 测试：
 
 ```bash
 maturin develop -m crates/binding-python/Cargo.toml
-pytest tests/python/
-```
-
-如果修改了 `crates/binding-python/tests` 覆盖的能力，也请运行：
-
-```bash
 pytest crates/binding-python/tests/
 ```
 

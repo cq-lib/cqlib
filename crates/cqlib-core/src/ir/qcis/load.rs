@@ -51,6 +51,7 @@
 use crate::circuit::circuit_param::ParameterValue;
 use crate::circuit::gate::Instruction;
 use crate::circuit::{Circuit, Parameter, Qubit, StandardGate};
+use crate::ir::io_errors_equivalent;
 use regex::Regex;
 use std::collections::HashSet;
 use std::path::Path;
@@ -114,9 +115,7 @@ pub enum QcisParseError {
 impl PartialEq for QcisParseError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::IoError(lhs), Self::IoError(rhs)) => {
-                lhs.kind() == rhs.kind() && lhs.to_string() == rhs.to_string()
-            }
+            (Self::IoError(lhs), Self::IoError(rhs)) => io_errors_equivalent(lhs, rhs),
             (Self::InvalidQubitFormat(lhs), Self::InvalidQubitFormat(rhs)) => lhs == rhs,
             (Self::InvalidQubitId(lhs), Self::InvalidQubitId(rhs)) => lhs == rhs,
             (

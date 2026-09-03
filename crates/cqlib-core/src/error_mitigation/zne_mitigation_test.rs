@@ -17,7 +17,6 @@ use crate::circuit::circuit_impl::Circuit;
 use crate::circuit::gate::{Instruction, StandardGate};
 use crate::error_mitigation::ErrorMitigationError;
 use crate::qis::{Hamiltonian, Pauli, PauliString};
-use ndarray::Array2;
 use num_complex::Complex64;
 
 fn single_qubit_z_hamiltonian() -> Hamiltonian {
@@ -35,7 +34,9 @@ fn estimator_hmat(
     assert_eq!(shot_number, None);
     let hamiltonian = hamiltonian_arg.expect("ZNE estimator should receive a Hamiltonian");
     let c_mat = circuit.to_matrix(None).unwrap();
-    let h_mat = hamiltonian_to_matrix(hamiltonian);
+    let h_mat = hamiltonian
+        .to_matrix()
+        .expect("ZNE estimator should receive dimensionally valid Hamiltonian terms");
     let dim = c_mat.nrows();
 
     assert_eq!(
@@ -69,61 +70,6 @@ fn estimator_hmat(
     }
 
     (expectation.re, 0.0)
-}
-
-fn hamiltonian_to_matrix(hamiltonian: &Hamiltonian) -> Array2<Complex64> {
-    let dim = 1usize << hamiltonian.num_qubits;
-    let mut matrix = Array2::from_elem((dim, dim), Complex64::new(0.0, 0.0));
-
-    for (pauli_string, coeff) in &hamiltonian.terms {
-        assert_eq!(
-            pauli_string.num_qubits, hamiltonian.num_qubits,
-            "hamiltonian term qubit mismatch: expected {}, got {}",
-            hamiltonian.num_qubits, pauli_string.num_qubits
-        );
-
-        let mut term_matrix = Array2::from_elem((1, 1), Complex64::new(1.0, 0.0));
-        for qubit in (0..hamiltonian.num_qubits).rev() {
-            let pauli = pauli_at(pauli_string, qubit);
-            term_matrix = kron(&term_matrix, &pauli.to_matrix());
-        }
-
-        let scaled_term =
-            term_matrix.mapv(|value| value * *coeff * pauli_string.phase.to_complex());
-        matrix += &scaled_term;
-    }
-
-    matrix
-}
-
-fn pauli_at(pauli_string: &PauliString, qubit: usize) -> Pauli {
-    match (pauli_string.x[qubit], pauli_string.z[qubit]) {
-        (false, false) => Pauli::I,
-        (true, false) => Pauli::X,
-        (false, true) => Pauli::Z,
-        (true, true) => Pauli::Y,
-    }
-}
-
-fn kron(left: &Array2<Complex64>, right: &Array2<Complex64>) -> Array2<Complex64> {
-    let (left_rows, left_cols) = left.dim();
-    let (right_rows, right_cols) = right.dim();
-    let mut result = Array2::from_elem(
-        (left_rows * right_rows, left_cols * right_cols),
-        Complex64::new(0.0, 0.0),
-    );
-
-    for i in 0..left_rows {
-        for j in 0..left_cols {
-            for k in 0..right_rows {
-                for l in 0..right_cols {
-                    result[(i * right_rows + k, j * right_cols + l)] = left[(i, j)] * right[(k, l)];
-                }
-            }
-        }
-    }
-
-    result
 }
 
 #[test]

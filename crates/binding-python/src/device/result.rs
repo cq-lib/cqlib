@@ -48,12 +48,11 @@
 
 use crate::circuit::PyQubit;
 use crate::circuit::bit::PyIntListOrQubitList;
+use crate::utils::hash_value;
 use cqlib_core::device::{ExecutionResult, Outcome, Status};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// Measurement outcome as a compact bitstring.
 ///
@@ -81,7 +80,7 @@ use std::hash::{Hash, Hasher};
 /// # Convert back to string
 /// bitstring = outcome.to_bitstring(3)  # "101"
 /// ```
-#[pyclass(name = "Outcome", module = "cqlib.device")]
+#[pyclass(name = "Outcome", module = "cqlib.device", from_py_object)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PyOutcome {
     pub(crate) inner: Outcome,
@@ -152,7 +151,7 @@ impl PyOutcome {
     ///
     /// Binary string of length `num_qubits`
     fn to_bitstring(&self, num_qubits: usize) -> String {
-        self.inner.to_string(num_qubits)
+        self.inner.to_bitstring(num_qubits)
     }
 
     /// Returns the raw storage chunks.
@@ -173,9 +172,7 @@ impl PyOutcome {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {
@@ -220,7 +217,7 @@ impl PyOutcome {
 /// if status.is_terminal():
 ///     print(f"Job finished with status: {status}")
 /// ```
-#[pyclass(name = "Status", module = "cqlib.device")]
+#[pyclass(name = "Status", module = "cqlib.device", skip_from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PyStatus {
     pub(crate) inner: Status,
@@ -326,6 +323,20 @@ impl PyStatus {
         self.inner.is_success()
     }
 
+    /// Compares two statuses by value: same state and, for failures, the
+    /// same error message and code.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyStatus>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyRef<'_, PyStatus>>()?;
+        Ok(self.inner == other.inner)
+    }
+
+    fn __hash__(&self) -> u64 {
+        hash_value(&self.inner)
+    }
+
     fn __copy__(&self) -> Self {
         self.clone()
     }
@@ -371,7 +382,7 @@ impl PyStatus {
 /// print(result.counts)  # {"00": 512, "11": 488}
 /// print(result.probabilities)  # {"00": 0.512, "11": 0.488}
 /// ```
-#[pyclass(name = "ExecutionResult", module = "cqlib.device")]
+#[pyclass(name = "ExecutionResult", module = "cqlib.device", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyExecutionResult {
     pub(crate) inner: ExecutionResult,
@@ -398,7 +409,7 @@ impl PyExecutionResult {
     /// * `task_id` - Unique job identifier
     /// * `qubits` - List of measured qubits
     /// * `shots` - Number of measurement shots
-    /// * `num_qubits` - Total number of qubits in the circuit
+    /// * `num_qubits` - Number of measured qubits (width of the measurement bitstrings)
     /// * `backend` - Optional backend name
     #[new]
     #[pyo3(signature = (task_id, qubits, shots, num_qubits, backend=None))]
@@ -427,14 +438,7 @@ impl PyExecutionResult {
         backend: Option<String>,
     ) -> PyResult<Self> {
         let qubits = qubits.into();
-        let counts = counts
-            .into_iter()
-            .map(|(bitstring, count)| {
-                Outcome::from_bitstring(&bitstring)
-                    .map(|outcome| (outcome, count))
-                    .map_err(|e| PyValueError::new_err(e.to_string()))
-            })
-            .collect::<PyResult<HashMap<_, _>>>()?;
+        let counts = parse_counts(num_qubits, counts)?;
         Ok(Self {
             inner: ExecutionResult::from_counts(
                 task_id, qubits, shots, num_qubits, backend, counts,
@@ -457,16 +461,10 @@ impl PyExecutionResult {
     ///
     /// # Errors
     ///
-    /// Raises `ValueError` if any bitstring contains invalid characters.
+    /// Raises `ValueError` if any bitstring contains invalid characters or
+    /// has a length that does not match `num_qubits`.
     fn finish(&mut self, counts: HashMap<String, usize>) -> PyResult<()> {
-        let counts = counts
-            .into_iter()
-            .map(|(bitstring, count)| {
-                Outcome::from_bitstring(&bitstring)
-                    .map(|outcome| (outcome, count))
-                    .map_err(|e| PyValueError::new_err(e.to_string()))
-            })
-            .collect::<PyResult<HashMap<_, _>>>()?;
+        let counts = parse_counts(self.num_qubits(), counts)?;
         self.inner.finish(counts, None);
         Ok(())
     }
@@ -604,6 +602,33 @@ fn status_kind(status: &Status) -> &'static str {
     }
 }
 
+/// Parses string-keyed measurement counts into `Outcome`-keyed counts.
+///
+/// Validates that every key has exactly `num_qubits` bits before parsing. This
+/// is required because [`Outcome::from_bitstring`] does not preserve the input
+/// width: without this check, distinct keys such as `"1"` and `"01"` would
+/// collapse to the same `Outcome` (silently dropping data), and a key wider
+/// than `num_qubits` would be truncated when formatted back to a bitstring.
+fn parse_counts(
+    num_qubits: usize,
+    counts: HashMap<String, usize>,
+) -> PyResult<HashMap<Outcome, usize>> {
+    let mut parsed = HashMap::with_capacity(counts.len());
+    for (bitstring, count) in counts {
+        if bitstring.len() != num_qubits {
+            return Err(PyValueError::new_err(format!(
+                "bitstring '{bitstring}' has length {} but num_qubits={num_qubits}; \
+                 every counts key must have exactly num_qubits bits",
+                bitstring.len()
+            )));
+        }
+        let outcome = Outcome::from_bitstring(&bitstring)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        parsed.insert(outcome, count);
+    }
+    Ok(parsed)
+}
+
 /// Converts internal counts to string-keyed dictionary.
 fn counts_to_bitstring_map(
     counts: &HashMap<Outcome, usize>,
@@ -611,7 +636,7 @@ fn counts_to_bitstring_map(
 ) -> HashMap<String, usize> {
     counts
         .iter()
-        .map(|(outcome, count)| (outcome.to_string(num_qubits), *count))
+        .map(|(outcome, count)| (outcome.to_bitstring(num_qubits), *count))
         .collect()
 }
 
@@ -622,7 +647,7 @@ fn probabilities_to_bitstring_map(
 ) -> HashMap<String, f64> {
     probabilities
         .iter()
-        .map(|(outcome, prob)| (outcome.to_string(num_qubits), *prob))
+        .map(|(outcome, prob)| (outcome.to_bitstring(num_qubits), *prob))
         .collect()
 }
 

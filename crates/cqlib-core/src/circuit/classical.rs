@@ -412,8 +412,8 @@ mod tests {
         let full = Outcome::from_indices(3, [0, 2]);
 
         let projected = measurement.project(&full);
-        assert_eq!(projected.to_string(3), "011");
-        assert_eq!(measurement.project_basis(0b101).to_string(3), "011");
+        assert_eq!(projected.to_bitstring(3), "011");
+        assert_eq!(measurement.project_basis(0b101).to_bitstring(3), "011");
     }
 
     #[test]

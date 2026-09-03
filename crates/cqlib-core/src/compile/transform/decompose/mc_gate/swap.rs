@@ -13,9 +13,9 @@
 //! Multi-controlled SWAP synthesis primitives.
 
 use super::mcx::{decompose_mcx_n_clean, decompose_mcx_no_aux};
+use super::validation::find_duplicate_qubit;
 use crate::circuit::{Qubit, StandardGate, operation::ValueOperation};
 use crate::compile::error::CompilerError;
-use crate::util::qubit::find_duplicate_qubit;
 
 const DECOMPOSE_SWAP_NAME: &str = "decompose.swap";
 

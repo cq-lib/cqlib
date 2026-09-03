@@ -10,84 +10,21 @@
 # copyright notice, and modified files need to carry a notice indicating
 # that they have been altered from the originals.
 
-"""SABRE configuration, routing results, and routing entry point."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence
 
-from cqlib.circuit import Circuit
-from cqlib.device import Device, Layout
+from cqlib.circuit import Circuit, Qubit
+from cqlib.device import Device, Layout, LogicalQubit
 
-class SabreTrialObjective:
-    """Objective used to select the best independent routing trial.
-
-    The objective affects only final trial selection. Candidate SWAPs within a
-    trial are still scored by :class:`SabreHeuristicConfig`.
-    """
-
-    @staticmethod
-    def swap_count() -> SabreTrialObjective:
-        """Minimize inserted SWAP count only."""
-        ...
-    @staticmethod
-    def depth() -> SabreTrialObjective:
-        """Minimize routed two-qubit depth only."""
-        ...
-    @staticmethod
-    def swap_then_depth() -> SabreTrialObjective:
-        """Minimize SWAP count, then use two-qubit depth to break ties.
-
-        This is the default production objective.
-        """
-        ...
-    @staticmethod
-    def depth_then_swap() -> SabreTrialObjective:
-        """Minimize two-qubit depth, then use SWAP count to break ties."""
-        ...
-    def __copy__(self) -> SabreTrialObjective:
-        """Return this immutable objective value."""
-        ...
-    def __deepcopy__(self, memo: dict[int, object]) -> SabreTrialObjective:
-        """Return this immutable objective value."""
-        ...
-    def __eq__(self, other: object) -> bool:
-        """Return whether two objectives select trials identically."""
-        ...
-    def __hash__(self) -> int:
-        """Return a stable hash for this objective during the process."""
-        ...
+_LogicalQubitLike = int | Qubit | LogicalQubit
 
 class SabreHeuristicConfig:
-    """Weights and limits used to choose candidate SWAPs within one trial.
+    """Local SWAP-selection weights and release-valve limits.
 
-    Lower candidate scores are preferred. ``basic_weight`` weights currently
-    executable two-qubit interactions. ``lookahead_weights`` applies one
-    weight per future interaction layer. When ``decay_increment`` is not
-    ``None``, recently swapped physical qubits receive a temporary penalty.
-
-    Validation occurs when :func:`sabre_route` is called. Weights and
-    ``best_epsilon`` must be finite and non-negative. ``decay_reset`` must be
-    positive when decay is enabled.
-
-    Args:
-        basic_weight: Weight of the current front-layer distance.
-        lookahead_weights: Per-layer lookahead weights. ``None`` selects the
-            core default ``[0.5]``; an empty sequence disables lookahead.
-        decay_increment: Penalty added after a heuristic SWAP. ``None``
-            disables decay.
-        decay_reset: Number of heuristic SWAP attempts between decay resets.
-        attempt_limit: SWAP attempts without progress before shortest-path
-            fallback is used.
-        best_epsilon: Absolute tolerance used to treat candidate scores as tied.
-
-    Example::
-
-        heuristic = SabreHeuristicConfig(
-            lookahead_weights=[0.5, 0.25],
-            decay_increment=0.01,
-            attempt_limit=100,
-        )
+    Structural distance uses active-layer-normalized lookahead and
+    multiplicative congestion control. Exact native 2Q cost resolves
+    candidates within a narrow structural window.
     """
 
     def __init__(
@@ -95,242 +32,189 @@ class SabreHeuristicConfig:
         *,
         basic_weight: float = 1.0,
         lookahead_weights: Sequence[float] | None = None,
-        decay_increment: float | None = 0.001,
-        decay_reset: int = 5,
+        decay_increment: float | None = 0.002,
+        decay_reset: int = 10,
         attempt_limit: int = 1000,
         best_epsilon: float = 1e-10,
     ) -> None: ...
     @property
-    def basic_weight(self) -> float:
-        """Weight of current front-layer interaction distances."""
-        ...
+    def basic_weight(self) -> float: ...
     @property
-    def lookahead_weights(self) -> list[float]:
-        """Copy of the per-lookahead-layer distance weights."""
-        ...
+    def lookahead_weights(self) -> list[float]: ...
     @property
-    def decay_increment(self) -> float | None:
-        """Decay penalty increment, or ``None`` when decay is disabled."""
-        ...
+    def decay_increment(self) -> float | None: ...
     @property
-    def decay_reset(self) -> int:
-        """Number of heuristic SWAP attempts between decay resets."""
-        ...
+    def decay_reset(self) -> int: ...
     @property
-    def attempt_limit(self) -> int:
-        """No-progress limit before shortest-path fallback."""
-        ...
+    def attempt_limit(self) -> int: ...
     @property
-    def best_epsilon(self) -> float:
-        """Tolerance for candidate-score ties."""
-        ...
-    def __copy__(self) -> SabreHeuristicConfig:
-        """Return an independent shallow copy."""
-        ...
-    def __deepcopy__(self, memo: dict[int, object]) -> SabreHeuristicConfig:
-        """Return an independent deep copy."""
-        ...
-    def __eq__(self, other: object) -> bool:
-        """Return whether every heuristic option is equal."""
-        ...
+    def best_epsilon(self) -> float: ...
+    def __copy__(self) -> SabreHeuristicConfig: ...
+    def __deepcopy__(self, memo: dict[int, object]) -> SabreHeuristicConfig: ...
+    def __eq__(self, other: object) -> bool: ...
+
+class SabreVf2PrepassConfig:
+    """Bounded VF2 prepass used to seed topology-perfect candidates."""
+
+    def __init__(
+        self, *, candidate_limit: int = 10, call_limit: int = 1_000_000
+    ) -> None: ...
+    @property
+    def candidate_limit(self) -> int: ...
+    @property
+    def call_limit(self) -> int: ...
+    def __copy__(self) -> SabreVf2PrepassConfig: ...
+    def __deepcopy__(self, memo: dict[int, object]) -> SabreVf2PrepassConfig: ...
+    def __eq__(self, other: object) -> bool: ...
 
 class SabreConfig:
-    """Configuration shared by SABRE layout refinement and routing.
-
-    Direct :func:`sabre_route` calls start from a concrete layout, so
-    ``layout_trials``, ``refinement_iterations``, and
-    ``layout_scoring_trials`` do not affect that function. They are retained
-    because the same configuration type is used by compiler layout passes.
-
-    Args:
-        layout_trials: Starting-layout trials used during layout refinement.
-        refinement_iterations: Forward/backward iterations per layout trial.
-        layout_scoring_trials: Routing trials used to score refined layouts.
-        routing_trials: Independent trials used by :func:`sabre_route`; must
-            be greater than zero.
-        trial_objective: Trial-selection objective. ``None`` selects
-            :meth:`SabreTrialObjective.swap_then_depth`.
-        seed: Optional unsigned 64-bit seed. Equal seeds and inputs produce
-            equal cqlib routing results.
-        heuristic: Swap-selection settings. ``None`` uses core defaults.
-
-    Example::
-
-        config = SabreConfig(
-            routing_trials=4,
-            seed=23,
-            trial_objective=SabreTrialObjective.depth_then_swap(),
-            heuristic=SabreHeuristicConfig(attempt_limit=200),
-        )
-    """
+    """Configuration shared by SABRE layout refinement and routing."""
 
     def __init__(
         self,
         *,
         layout_trials: int = 10,
+        layout_assignment_budget: int = 1_000_000,
+        vf2_prepass: SabreVf2PrepassConfig | None = ...,
         refinement_iterations: int = 1,
-        layout_scoring_trials: int = 1,
-        routing_trials: int = 5,
-        trial_objective: SabreTrialObjective | None = None,
+        routing_trials: int = 1,
         seed: int | None = None,
         heuristic: SabreHeuristicConfig | None = None,
     ) -> None: ...
     @staticmethod
-    def deterministic_seeded(seed: int) -> SabreConfig:
-        """Return a compact deterministic configuration for tests/examples."""
-        ...
+    def deterministic_seeded(seed: int) -> SabreConfig: ...
     @property
-    def layout_trials(self) -> int:
-        """Number of starting-layout trials used during refinement."""
-        ...
+    def layout_trials(self) -> int: ...
     @property
-    def refinement_iterations(self) -> int:
-        """Forward/backward refinement iterations per layout trial."""
-        ...
+    def layout_assignment_budget(self) -> int: ...
     @property
-    def layout_scoring_trials(self) -> int:
-        """Routing trials used to score a refined layout."""
-        ...
+    def vf2_prepass(self) -> SabreVf2PrepassConfig | None: ...
+    @property
+    def refinement_iterations(self) -> int: ...
     @property
     def routing_trials(self) -> int:
-        """Independent trials evaluated by direct routing."""
+        """Complete routing trials run for each fully refined layout.
+
+        The search directly returns the best route and does not route
+        intermediate refinement states or run a separate layout-scoring
+        phase.
+        """
         ...
     @property
-    def trial_objective(self) -> SabreTrialObjective:
-        """Objective used to select the winning routing trial."""
-        ...
+    def seed(self) -> int | None: ...
     @property
-    def seed(self) -> int | None:
-        """Deterministic seed, or ``None`` for entropy-based seeding."""
+    def heuristic(self) -> SabreHeuristicConfig: ...
+    def validate(self) -> None:
+        """Validate fields used by routing.
+
+        Raises:
+            CompilerConfigError: If a routing field is invalid.
+        """
         ...
-    @property
-    def heuristic(self) -> SabreHeuristicConfig:
-        """Independent copy of the active swap-selection configuration."""
-        ...
-    def __copy__(self) -> SabreConfig:
-        """Return an independent shallow copy."""
-        ...
-    def __deepcopy__(self, memo: dict[int, object]) -> SabreConfig:
-        """Return an independent deep copy."""
-        ...
-    def __eq__(self, other: object) -> bool:
-        """Return whether every SABRE option is equal."""
-        ...
+    def __copy__(self) -> SabreConfig: ...
+    def __deepcopy__(self, memo: dict[int, object]) -> SabreConfig: ...
+    def __eq__(self, other: object) -> bool: ...
 
 class SabreRoutingDiagnostics:
-    """Read-only search diagnostics for the selected routed circuit."""
+    """Read-only topology, native-cost, and cache diagnostics."""
 
     @property
-    def trials_evaluated(self) -> int:
-        """Number of independent routing trials evaluated."""
-        ...
+    def trials_evaluated(self) -> int: ...
     @property
-    def selected_trial_index(self) -> int:
-        """Zero-based index of the selected trial."""
-        ...
+    def selected_trial_index(self) -> int: ...
     @property
-    def fallback_count(self) -> int:
-        """Number of shortest-path fallback invocations."""
-        ...
+    def fallback_count(self) -> int: ...
     @property
-    def control_flow_blocks_routed(self) -> int:
-        """Number of recursively routed control-flow bodies."""
-        ...
+    def control_flow_blocks_routed(self) -> int: ...
     @property
-    def two_qubit_depth(self) -> int:
-        """ASAP two-qubit depth of the selected routed operation stream."""
-        ...
+    def two_qubit_depth(self) -> int: ...
     @property
-    def operation_count(self) -> int:
-        """Total operation count of the selected routed stream."""
-        ...
-    def __copy__(self) -> SabreRoutingDiagnostics:
-        """Return an independent shallow copy."""
-        ...
-    def __deepcopy__(self, memo: dict[int, object]) -> SabreRoutingDiagnostics:
-        """Return an independent deep copy."""
-        ...
-    def __eq__(self, other: object) -> bool:
-        """Return whether every diagnostic counter is equal."""
-        ...
+    def operation_count(self) -> int: ...
+    @property
+    def native_two_qubit_count(self) -> int: ...
+    @property
+    def native_two_qubit_depth(self) -> int: ...
+    @property
+    def native_total_depth(self) -> int: ...
+    @property
+    def native_operation_count(self) -> int: ...
+    @property
+    def unknown_loop_count(self) -> int: ...
+    @property
+    def requirement_signature_count(self) -> int: ...
+    @property
+    def eager_pair_state_count(self) -> int: ...
+    @property
+    def lazy_pair_l1_lookup_count(self) -> int: ...
+    @property
+    def lazy_pair_l1_hit_count(self) -> int: ...
+    @property
+    def lazy_pair_l1_cached_count(self) -> int: ...
+    def __copy__(self) -> SabreRoutingDiagnostics: ...
+    def __deepcopy__(self, memo: dict[int, object]) -> SabreRoutingDiagnostics: ...
+    def __eq__(self, other: object) -> bool: ...
 
 class SabreRoutingResult:
-    """Circuit and layout metadata produced by :func:`sabre_route`.
-
-    All object-valued properties return independent wrappers. The routed
-    circuit uses physical qubit identifiers and includes inserted SWAP gates.
-    """
-
     @property
-    def circuit(self) -> Circuit:
-        """Independent copy of the physical routed circuit."""
-        ...
+    def circuit(self) -> Circuit: ...
     @property
-    def initial_layout(self) -> Layout:
-        """Normalized initial layout used by the selected trial."""
-        ...
+    def initial_layout(self) -> Layout: ...
     @property
-    def final_layout(self) -> Layout:
-        """Logical-to-physical layout after all routed operations."""
-        ...
+    def final_layout(self) -> Layout: ...
     @property
-    def swap_count(self) -> int:
-        """Number of inserted SWAPs, including control-flow epilogues."""
-        ...
+    def swap_count(self) -> int: ...
     @property
-    def diagnostics(self) -> SabreRoutingDiagnostics:
-        """Independent copy of routing search diagnostics."""
-        ...
-    def __copy__(self) -> SabreRoutingResult:
-        """Return an independent shallow copy of the complete result."""
-        ...
-    def __deepcopy__(self, memo: dict[int, object]) -> SabreRoutingResult:
-        """Return an independent deep copy of the complete result."""
-        ...
+    def diagnostics(self) -> SabreRoutingDiagnostics: ...
+    def __copy__(self) -> SabreRoutingResult: ...
+    def __deepcopy__(self, memo: dict[int, object]) -> SabreRoutingResult: ...
 
 def sabre_route(
     circuit: Circuit,
     device: Device,
     initial_layout: Layout,
+    *,
     config: SabreConfig | None = None,
 ) -> SabreRoutingResult:
-    """Route ``circuit`` from ``initial_layout`` onto ``device``.
-
-    The router inserts SWAPs until every two-qubit operation acts on adjacent
-    usable physical qubits. Control-flow bodies are routed recursively and
-    restored to their entry layout before leaving the body. The original
-    circuit, device, layout, and configuration are not modified.
-
-    Args:
-        circuit: Logical input circuit.
-        device: Target device whose usable topology constrains interactions.
-        initial_layout: Mapping for every logical qubit in ``circuit``.
-        config: Routing configuration. ``None`` uses :class:`SabreConfig`
-            defaults.
-
-    Returns:
-        Routed physical circuit, selected layouts, SWAP count, and diagnostics.
+    """Route from a supplied layout using topology-aware SABRE.
 
     Raises:
-        ValueError: If configuration values are invalid, the layout does not
-            map every circuit qubit to a usable physical qubit, an interaction
-            crosses disconnected topology components, or the circuit contains
-            an operation unsupported by the routing DAG.
-
-    Example::
-
-        circuit = Circuit(2)
-        circuit.cx(0, 1)
-        device = Device.line("line3", 3)
-        layout = Layout.from_pairs([(0, 0), (1, 2)], physical_count=3)
-        result = sabre_route(
-            circuit,
-            device,
-            layout,
-            SabreConfig(routing_trials=1, seed=7),
-        )
-        assert result.swap_count == 1
+        CompilerConfigError: If the configuration or inputs are invalid.
+        CompilerTransformError: If no feasible route exists.
     """
     ...
 
-__all__: list[str]
+def normalize_initial_layout(
+    logical_qubits: Sequence[_LogicalQubitLike],
+    device: Device,
+    initial_layout: Layout,
+) -> Layout:
+    """Normalize a complete mapping against all usable physical qubits.
+
+    Raises:
+        CompilerConfigError: If the layout is incomplete or incompatible.
+    """
+    ...
+
+def validate_reachable_interactions(
+    circuit: Circuit,
+    device: Device,
+    initial_layout: Layout,
+) -> None:
+    """Validate topology movement and terminal reachability without routing.
+
+    Raises:
+        CompilerConfigError: If the inputs are invalid.
+        CompilerTransformError: If an interaction cannot be reached.
+    """
+    ...
+
+__all__ = [
+    "SabreHeuristicConfig",
+    "SabreVf2PrepassConfig",
+    "SabreConfig",
+    "SabreRoutingDiagnostics",
+    "SabreRoutingResult",
+    "sabre_route",
+    "normalize_initial_layout",
+    "validate_reachable_interactions",
+]

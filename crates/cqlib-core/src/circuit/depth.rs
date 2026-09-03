@@ -16,14 +16,13 @@
 //! barriers synchronize their listed qubits (an empty list is a global barrier
 //! over all circuit qubits). With `recurse = true`, structured control flow is
 //! unfolded into an estimated depth: `if`/`switch` take the max branch, `while`
-//! counts the body once, `for` with a statically-known unsigned-literal range
+//! counts the body once, `for` with a statically-known unsigned constant range
 //! is fully unrolled (else counted once). `CircuitGate` is opaque (depth 1).
 //!
 //! The algorithm runs in O(n) without constructing a graph: it keeps a
 //! per-qubit frontier depth and, for each operation in program order, advances
 //! every synchronized wire to `base + local_depth`.
 
-use crate::circuit::classical_expr::{ClassicalExpr, ClassicalExprKind};
 use crate::circuit::control_flow::{ClassicalControlOp, ControlBody, ForOp, IfOp};
 use crate::circuit::error::CircuitError;
 use crate::circuit::gate::Instruction;
@@ -214,49 +213,11 @@ fn if_union_qubits(op: &IfOp) -> Vec<Qubit> {
     qubits.into_iter().collect()
 }
 
-/// Returns `Some(iterations)` when `start`/`stop`/`step` are all `UIntLiteral`
-/// constants and the half-open range `[start, stop)` is well-formed (step != 0).
-/// Returns `None` when the iteration count is not statically known (e.g. a
-/// `Var` or composite expression) or when `step == 0`, so the caller falls
-/// back to counting the body once.
+/// Returns `Some(iterations)` when the range reduces to unsigned constants and
+/// the half-open range `[start, stop)` is well-formed. Runtime-dependent ranges
+/// and zero steps return `None`, so the caller counts the body once.
 fn for_loop_iterations(op: &ForOp) -> Option<usize> {
-    let start = eval_uint_literal(op.start())?;
-    let stop = eval_uint_literal(op.stop())?;
-    let step = eval_uint_literal(op.step())?;
-    if step == 0 {
-        return None;
-    }
-    // Half-open [start, stop). Empty ranges produce 0 iterations.
-    if step > 0 {
-        if stop <= start {
-            return Some(0);
-        }
-        let span = stop.checked_sub(start)?;
-        // ceil(span / step) = (span + step - 1) / step, guarded against overflow.
-        let numer = span.checked_add(step.checked_sub(1)?)?;
-        let iterations = numer.checked_div(step)?;
-        Some(iterations as usize)
-    } else {
-        // Descending range: step < 0. Iterate while start > stop.
-        if stop >= start {
-            return Some(0);
-        }
-        let span = start.checked_sub(stop)?;
-        let abs_step = (0u128).checked_sub(step)?; // |step|, step < 0 so this is positive
-        let numer = span.checked_add(abs_step.checked_sub(1)?)?;
-        let iterations = numer.checked_div(abs_step)?;
-        Some(iterations as usize)
-    }
-}
-
-/// Evaluates a [`ClassicalExpr`] to a `u128` constant when it is a
-/// `UIntLiteral`. Returns `None` for any other kind (variables, values,
-/// composite expressions) — there is no constant evaluator for those.
-fn eval_uint_literal(expr: &ClassicalExpr) -> Option<u128> {
-    match expr.kind() {
-        ClassicalExprKind::UIntLiteral { value, .. } => Some(*value),
-        _ => None,
-    }
+    usize::try_from(op.static_iteration_count()?).ok()
 }
 
 /// Returns the recursive union of qubits touched by `operations`, descending
@@ -323,6 +284,7 @@ mod tests {
         Qubit,
     };
     use smallvec::smallvec;
+    use std::slice::from_ref;
 
     fn q(n: u32) -> Qubit {
         Qubit::new(n)
@@ -710,7 +672,7 @@ mod tests {
             params: smallvec![],
             label: None,
         };
-        assert!(!contains_control_flow(&[plain.clone()]));
+        assert!(!contains_control_flow(from_ref(&plain)));
 
         let if_op = IfOp::new(
             ClassicalExpr::bool_literal(true),

@@ -18,16 +18,15 @@
 //! Python `ParameterError` type.
 
 use crate::circuit::error::ParameterError as PyParameterError;
+use crate::utils::hash_value;
 use cqlib_core::circuit::Parameter;
 use cqlib_core::circuit::error::ParameterError;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// Immutable symbolic or numeric expression used as a circuit parameter.
-#[pyclass(name = "Parameter", module = "cqlib.circuit")]
+#[pyclass(name = "Parameter", module = "cqlib.circuit", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyParameter {
     pub(crate) inner: Parameter,
@@ -624,9 +623,7 @@ impl PyParameter {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     /// Replaces all occurrences of a symbol with another parameter expression.

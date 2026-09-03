@@ -45,6 +45,7 @@ from .state import Statevector as Statevector
 # Entropy and metrics modules
 from . import entropy as entropy
 from . import metrics as metrics
+from . import state as state
 
 class Observable(Protocol):
     """Protocol for quantum observables."""
@@ -63,6 +64,7 @@ __all__ = [
     "PauliString",
     "Hamiltonian",
     "TrotterMode",
+    "state",
     "Statevector",
     "DensityMatrix",
     "DensityMatrixNoise",

@@ -78,7 +78,7 @@ pub enum TrotterMode {
     /// Error scales as $O(t^2/n)$.
     FirstOrder,
 
-    /// Second-order Strange splitting (symmetric decomposition).
+    /// Second-order Strang splitting (symmetric decomposition).
     ///
     /// $$U(t) \approx \left[ e^{-i c_1 t/2n \cdot P_1} \cdots e^{-i c_m t/2n \cdot P_m}
     /// \cdot e^{-i c_m t/2n \cdot P_m} \cdots e^{-i c_1 t/2n \cdot P_1} \right]^n$$
@@ -237,7 +237,7 @@ impl PauliEvolution for Circuit {
 
             // Add to circuit's global phase
             let current_phase = self.global_phase();
-            let global_phase_param = parameter_value_to_parameter(global_phase_param)?;
+            let global_phase_param = Parameter::from(global_phase_param);
             let new_phase = current_phase + global_phase_param;
             self.set_global_phase(new_phase);
 
@@ -328,14 +328,6 @@ pub(crate) fn multiply_angle_by_factor(angle: ParameterValue, factor: f64) -> Pa
     }
 }
 
-/// Helper function to convert ParameterValue to Parameter
-fn parameter_value_to_parameter(pv: ParameterValue) -> Result<Parameter, CircuitError> {
-    match pv {
-        ParameterValue::Fixed(val) => Ok(Parameter::from(val)),
-        ParameterValue::Param(param) => Ok(param),
-    }
-}
-
 // These `pub(crate)` functions implement the product-formula math for both the
 // numeric API (`to_trotter_circuit` / `to_evolution_circuit`) and the parametric
 // ansatz (`PauliEvolutionAnsatz` in `circuit/ansatz/hamiltonian_evolution.rs`).
@@ -396,7 +388,7 @@ pub(crate) fn trotter_first_order_core(
     Ok(())
 }
 
-/// Applies second-order Suzuki (Strange) splitting decomposition.
+/// Applies second-order Suzuki (Strang) splitting decomposition.
 ///
 /// Realizes:
 /// $$U(t) \approx \left[\prod_k e^{-i c_k t/(2n) P_k}

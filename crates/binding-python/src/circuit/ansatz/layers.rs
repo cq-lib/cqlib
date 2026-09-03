@@ -21,7 +21,11 @@ use crate::circuit::circuit_impl::PyCircuit;
 use crate::circuit::gate::PyStandardGate;
 
 /// Basic entangler layers with one rotation per qubit followed by ring entanglement.
-#[pyclass(name = "BasicEntanglerLayers", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "BasicEntanglerLayers",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyBasicEntanglerLayers {
     pub(crate) inner: BasicEntanglerLayers,
@@ -121,7 +125,11 @@ impl PyBasicEntanglerLayers {
 /// Uses CX by default because the range pattern is directed and has explicit
 /// control-target semantics. Users can still choose CX, CY, or CZ manually to
 /// match backend-native gates or experiment-specific circuit conventions.
-#[pyclass(name = "StronglyEntanglingLayers", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "StronglyEntanglingLayers",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyStronglyEntanglingLayers {
     pub(crate) inner: StronglyEntanglingLayers,

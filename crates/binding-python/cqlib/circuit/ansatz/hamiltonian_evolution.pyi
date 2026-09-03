@@ -121,7 +121,7 @@ class EvolutionStrategy:
               \\quad \\text{error } O\\!\\left(\\frac{t^2}{n}\\right)
 
         - :meth:`~cqlib.qis.TrotterMode.second_order` — second-order Suzuki
-          (symmetric / Strange splitting):
+          (symmetric / Strang splitting):
 
           .. math::
 
@@ -311,7 +311,7 @@ class PauliEvolutionAnsatz:
         >>> info.is_exact, info.all_terms_commute
         (True, True)
         >>> circuit = ansatz.build_circuit("evo")
-        >>> circuit.symbols   # ('evo_t',)
+        >>> circuit.symbols   # ['evo_t']
 
         **Non-commuting Hamiltonian (Trotter approximation):**
 
@@ -323,7 +323,7 @@ class PauliEvolutionAnsatz:
         ...     .with_strategy(EvolutionStrategy.trotter(TrotterMode.second_order(), steps=10))
         ...     .with_time_param_name("tau"))
         >>> circuit2 = ansatz2.build_circuit("ignored")
-        >>> circuit2.symbols   # ('tau',)
+        >>> circuit2.symbols   # ['tau']
         >>> ansatz2.num_parameters()
         1
     """
@@ -381,7 +381,7 @@ class PauliEvolutionAnsatz:
         Examples:
             >>> ansatz = ansatz.with_time_param_name("tau")
             >>> circuit = ansatz.build_circuit("ignored")
-            >>> circuit.symbols   # ('tau',)
+            >>> circuit.symbols   # ['tau']
         """
         ...
 

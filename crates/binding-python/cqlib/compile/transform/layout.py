@@ -22,6 +22,21 @@ LayoutDiagnostics = _layout_module.LayoutDiagnostics
 LayoutResult = _layout_module.LayoutResult
 Vf2EdgeRequirement = _layout_module.Vf2EdgeRequirement
 Vf2LayoutConfig = _layout_module.Vf2LayoutConfig
+Interaction = _layout_module.Interaction
+InteractionGraph = _layout_module.InteractionGraph
+CircuitLayoutAnalysis = _layout_module.CircuitLayoutAnalysis
+DistanceTable = _layout_module.DistanceTable
+PhysicalLayoutGraph = _layout_module.PhysicalLayoutGraph
+PreparedSabreCircuit = _layout_module.PreparedSabreCircuit
+PreparedSabreTarget = _layout_module.PreparedSabreTarget
+analyze_circuit_for_layout = _layout_module.analyze_circuit_for_layout
+prepare_sabre_circuit = _layout_module.prepare_sabre_circuit
+prepare_sabre_topology_target = _layout_module.prepare_sabre_topology_target
+prepare_sabre_device_target = _layout_module.prepare_sabre_device_target
+sabre_layout_prepared = _layout_module.sabre_layout_prepared
+trivial_layout_prepared = _layout_module.trivial_layout_prepared
+greedy_layout_prepared = _layout_module.greedy_layout_prepared
+vf2_perfect_layout_prepared = _layout_module.vf2_perfect_layout_prepared
 trivial_layout = _layout_module.trivial_layout
 greedy_layout = _layout_module.greedy_layout
 vf2_perfect_layout = _layout_module.vf2_perfect_layout
@@ -34,6 +49,21 @@ __all__ = [
     "LayoutResult",
     "Vf2EdgeRequirement",
     "Vf2LayoutConfig",
+    "Interaction",
+    "InteractionGraph",
+    "CircuitLayoutAnalysis",
+    "DistanceTable",
+    "PhysicalLayoutGraph",
+    "PreparedSabreCircuit",
+    "PreparedSabreTarget",
+    "analyze_circuit_for_layout",
+    "prepare_sabre_circuit",
+    "prepare_sabre_topology_target",
+    "prepare_sabre_device_target",
+    "sabre_layout_prepared",
+    "trivial_layout_prepared",
+    "greedy_layout_prepared",
+    "vf2_perfect_layout_prepared",
     "trivial_layout",
     "greedy_layout",
     "vf2_perfect_layout",

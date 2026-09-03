@@ -11,7 +11,7 @@
 // that they have been altered from the originals.
 
 use super::Parameter;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::{E, PI};
 
 #[test]
@@ -21,8 +21,8 @@ fn test_p_construction() {
     assert_eq!(p1.to_string(), "theta");
 
     // From f64
-    let p2 = Parameter::from(3.14);
-    assert_eq!(p2.to_string(), "3.14");
+    let p2 = Parameter::from(2.5);
+    assert_eq!(p2.to_string(), "2.5");
 
     // From integer
     let p3 = Parameter::from(42);
@@ -555,8 +555,8 @@ fn test_p_derivative_constant() {
     let d_c1 = c1.derivative(x).unwrap();
     assert_eq!(d_c1, Parameter::from(0));
 
-    // d(3.14)/dx = 0
-    let c2 = Parameter::from(3.14);
+    // d(2.5)/dx = 0
+    let c2 = Parameter::from(2.5);
     let d_c2 = c2.derivative(x).unwrap();
     assert_eq!(d_c2, Parameter::from(0));
 
@@ -833,8 +833,8 @@ fn test_p_parse_number() {
     let p = Parameter::try_from("1.0").unwrap();
     assert!((p.evaluate(&None).unwrap() - 1.0).abs() < 1e-10);
 
-    let p = Parameter::try_from("3.14").unwrap();
-    assert!((p.evaluate(&None).unwrap() - 3.14).abs() < 1e-10);
+    let p = Parameter::try_from("2.5").unwrap();
+    assert!((p.evaluate(&None).unwrap() - 2.5).abs() < 1e-10);
 
     let p = Parameter::try_from("42").unwrap();
     assert!((p.evaluate(&None).unwrap() - 42.0).abs() < 1e-10);
@@ -979,15 +979,15 @@ fn test_p_display_format() {
 
 #[test]
 fn test_p_complex_real_world() {
-    // RXY gate parameters: theta = pi/2 + 1, phi = 3.14
+    // RXY gate parameters: theta = pi/2 + 1, phi = 2.5
     let theta = Parameter::try_from("pi/2+1").unwrap();
-    let phi = Parameter::try_from("3.14").unwrap();
+    let phi = Parameter::try_from("2.5").unwrap();
 
     let mut bindings = HashMap::new();
     bindings.insert("pi", PI);
 
     assert!((theta.evaluate(&Some(bindings.clone())).unwrap() - (PI / 2.0 + 1.0)).abs() < 1e-10);
-    assert!((phi.evaluate(&None).unwrap() - 3.14).abs() < 1e-10);
+    assert!((phi.evaluate(&None).unwrap() - 2.5).abs() < 1e-10);
 
     // RZ(pi/4 + 0.5)
     let rz_param = Parameter::try_from("pi/4+0.5").unwrap();
@@ -1105,7 +1105,7 @@ fn test_from_str() {
 
 #[test]
 fn test_is_constant() {
-    let constant = Parameter::from(3.14);
+    let constant = Parameter::from(2.5);
     assert!(constant.is_constant());
 
     let symbolic = Parameter::symbol("x");
@@ -1179,4 +1179,36 @@ fn test_as_expr_and_into_expr() {
     let expr = p2.into_expr();
     // Just verify we can consume the parameter and get the expression
     let _ = expr;
+}
+
+#[test]
+fn simultaneous_substitution_does_not_cascade_overlapping_bindings() {
+    let parameter = Parameter::symbol("a") + Parameter::symbol("b");
+    let bindings = HashMap::from([
+        ("a".to_string(), Parameter::symbol("b")),
+        ("b".to_string(), Parameter::symbol("c")),
+    ]);
+
+    let substituted = parameter.substitute_many_simultaneous(&bindings);
+
+    assert_eq!(
+        substituted.get_symbols(),
+        HashSet::from(["b".to_string(), "c".to_string()])
+    );
+}
+
+#[test]
+fn simultaneous_substitution_does_not_revisit_replacement_expressions() {
+    let parameter = Parameter::symbol("a");
+    let bindings = HashMap::from([
+        (
+            "a".to_string(),
+            Parameter::symbol("b") + Parameter::from(1.0),
+        ),
+        ("b".to_string(), Parameter::from(2.0)),
+    ]);
+
+    let substituted = parameter.substitute_many_simultaneous(&bindings);
+
+    assert_eq!(substituted.get_symbols(), HashSet::from(["b".to_string()]));
 }

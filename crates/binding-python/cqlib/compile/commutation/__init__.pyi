@@ -34,4 +34,10 @@ from .checker import CommutationConfig as CommutationConfig
 from .checker import algebraic_commutation as algebraic_commutation
 from .checker import check_commutation as check_commutation
 
-__all__: list[str]
+__all__ = [
+    "Commutation",
+    "CommutationConfig",
+    "CommutationChecker",
+    "check_commutation",
+    "algebraic_commutation",
+]

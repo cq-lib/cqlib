@@ -294,3 +294,20 @@ rule merge_xy2m {
         XY(π + a) 0
     }
 }
+
+rule merge_fsim {
+    match { FSIM(a, b) 0 1, FSIM(c, d) 0 1 }
+    rewrite { FSIM(a + c, b + d) 0 1 }
+}
+
+rule merge_xy2p_xy2m_to_xy {
+    match { XY2P(a) 0, XY2M(b) 0 }
+    require { b - a == π mod 2*π }
+    rewrite { XY(a) 0 }
+}
+
+rule merge_xy2m_xy2p_to_xy {
+    match { XY2M(a) 0, XY2P(b) 0 }
+    require { b - a == π mod 2*π }
+    rewrite { XY(π + a) 0 }
+}

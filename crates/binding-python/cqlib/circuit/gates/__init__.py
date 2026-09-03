@@ -15,8 +15,8 @@
 The ``cqlib.circuit.gates`` submodule provides gate type classes
 (:class:`StandardGate`, :class:`UnitaryGate`, :class:`MCGate`,
 :class:`CircuitGate`, :class:`Directive`, :class:`FrozenCircuit`) and
-33 pre-built standard-gate singleton constants (``H``, ``X``, ``CX``,
-``RX``, ``RX``, etc.) for use with
+36 pre-built standard-gate singleton constants (``H``, ``X``, ``CX``,
+``RX``, ``RZ``, etc.) for use with
 :meth:`Circuit.append_gate <cqlib.circuit.Circuit.append_gate>`
 and :meth:`Circuit.append_unitary_gate
 <cqlib.circuit.Circuit.append_unitary_gate>`.

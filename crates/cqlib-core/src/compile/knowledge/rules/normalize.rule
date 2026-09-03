@@ -93,3 +93,93 @@ rule normalize_fsim_zero {
     require { a == 0 mod 2*π, b == 0 mod 2*π }
     rewrite {}
 }
+
+rule normalize_crx_zero {
+    match { CRX(a) 0 1 }
+    require { a == 0 mod 4*π }
+    rewrite {}
+}
+
+rule normalize_cry_zero {
+    match { CRY(a) 0 1 }
+    require { a == 0 mod 4*π }
+    rewrite {}
+}
+
+rule normalize_crz_zero {
+    match { CRZ(a) 0 1 }
+    require { a == 0 mod 4*π }
+    rewrite {}
+}
+
+rule normalize_mcphase1_zero {
+    match { MCPhase[1](a) 0 1 }
+    require { a == 0 mod 2*π }
+    rewrite {}
+}
+
+rule normalize_mcphase2_zero {
+    match { MCPhase[2](a) 0 1 2 }
+    require { a == 0 mod 2*π }
+    rewrite {}
+}
+
+rule normalize_rx_2pi {
+    match { RX(a) 0 }
+    require { a == 2*π mod 4*π }
+    rewrite { GPhase(π) }
+}
+
+rule normalize_ry_2pi {
+    match { RY(a) 0 }
+    require { a == 2*π mod 4*π }
+    rewrite { GPhase(π) }
+}
+
+rule normalize_rz_2pi {
+    match { RZ(a) 0 }
+    require { a == 2*π mod 4*π }
+    rewrite { GPhase(π) }
+}
+
+rule normalize_rxx_2pi {
+    match { RXX(a) 0 1 }
+    require { a == 2*π mod 4*π }
+    rewrite { GPhase(π) }
+}
+
+rule normalize_ryy_2pi {
+    match { RYY(a) 0 1 }
+    require { a == 2*π mod 4*π }
+    rewrite { GPhase(π) }
+}
+
+rule normalize_rzz_2pi {
+    match { RZZ(a) 0 1 }
+    require { a == 2*π mod 4*π }
+    rewrite { GPhase(π) }
+}
+
+rule normalize_rzx_2pi {
+    match { RZX(a) 0 1 }
+    require { a == 2*π mod 4*π }
+    rewrite { GPhase(π) }
+}
+
+rule normalize_crx_2pi {
+    match { CRX(a) 0 1 }
+    require { a == 2*π mod 4*π }
+    rewrite { Phase(π) 0 }
+}
+
+rule normalize_cry_2pi {
+    match { CRY(a) 0 1 }
+    require { a == 2*π mod 4*π }
+    rewrite { Phase(π) 0 }
+}
+
+rule normalize_crz_2pi {
+    match { CRZ(a) 0 1 }
+    require { a == 2*π mod 4*π }
+    rewrite { Phase(π) 0 }
+}

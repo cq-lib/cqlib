@@ -26,7 +26,7 @@ use smallvec::SmallVec;
 use std::collections::HashMap;
 
 /// Instruction subset supported by knowledge-rule structural matching.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum KnowledgeInstructionKey {
     Standard(StandardGate),
     McGate(MCGate),
@@ -40,6 +40,24 @@ impl KnowledgeInstructionKey {
             Instruction::McGate(gate) => Some(Self::McGate(gate.as_ref().clone())),
             _ => None,
         }
+    }
+
+    pub(crate) fn is_implicit(&self) -> bool {
+        matches!(self, Self::Standard(StandardGate::GPhase))
+    }
+
+    pub(crate) fn num_qubits(&self) -> Option<usize> {
+        Some(match self {
+            Self::Standard(gate) => gate.num_qubits(),
+            Self::McGate(gate) => gate.num_qubits(),
+        })
+    }
+
+    pub(crate) fn num_params(&self) -> Option<usize> {
+        Some(match self {
+            Self::Standard(gate) => gate.num_params(),
+            Self::McGate(gate) => gate.num_params(),
+        })
     }
 }
 
@@ -70,16 +88,41 @@ impl<'a> ConcreteOperationView<'a> {
 }
 
 /// Mutable bindings produced while matching a rule instance.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct MatchBindings {
     qubits: HashMap<u32, Qubit>,
     reverse_qubits: HashMap<Qubit, u32>,
     params: HashMap<String, Parameter>,
+    insertion_log: Vec<BindingInsertion>,
 }
+
+#[derive(Debug, Clone)]
+enum BindingInsertion {
+    Qubit { rule: u32, actual: Qubit },
+    Parameter(String),
+}
+
+impl PartialEq for MatchBindings {
+    fn eq(&self, other: &Self) -> bool {
+        self.qubits == other.qubits
+            && self.reverse_qubits == other.reverse_qubits
+            && self.params == other.params
+    }
+}
+
+impl Eq for MatchBindings {}
 
 impl MatchBindings {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Removes all bindings while retaining the allocated matching workspace.
+    pub(crate) fn clear(&mut self) {
+        self.qubits.clear();
+        self.reverse_qubits.clear();
+        self.params.clear();
+        self.insertion_log.clear();
     }
 
     /// Returns all rule-local qubit bindings.
@@ -100,6 +143,84 @@ impl MatchBindings {
     /// Returns the concrete parameter bound to a rule symbol.
     pub fn param(&self, symbol: &str) -> Option<&Parameter> {
         self.params.get(symbol)
+    }
+
+    pub(crate) fn checkpoint(&self) -> usize {
+        self.insertion_log.len()
+    }
+
+    pub(crate) fn rollback(&mut self, checkpoint: usize) {
+        while self.insertion_log.len() > checkpoint {
+            match self
+                .insertion_log
+                .pop()
+                .expect("binding insertion log length was checked")
+            {
+                BindingInsertion::Qubit { rule, actual } => {
+                    self.qubits.remove(&rule);
+                    self.reverse_qubits.remove(&actual);
+                }
+                BindingInsertion::Parameter(symbol) => {
+                    self.params.remove(&symbol);
+                }
+            }
+        }
+    }
+
+    fn bind_qubits(&mut self, item: &RuleItem, concrete: ConcreteOperationView<'_>) -> bool {
+        for (&rule_qubit, &actual_qubit) in item.qubits.iter().zip(concrete.qubits) {
+            if let Some(bound) = self.qubits.get(&rule_qubit) {
+                if *bound != actual_qubit {
+                    return false;
+                }
+            } else if let Some(other_rule_qubit) = self.reverse_qubits.get(&actual_qubit) {
+                if *other_rule_qubit != rule_qubit {
+                    return false;
+                }
+            } else {
+                self.qubits.insert(rule_qubit, actual_qubit);
+                self.reverse_qubits.insert(actual_qubit, rule_qubit);
+                self.insertion_log.push(BindingInsertion::Qubit {
+                    rule: rule_qubit,
+                    actual: actual_qubit,
+                });
+            }
+        }
+        true
+    }
+
+    fn bind_parameters(&mut self, item: &RuleItem, concrete: ConcreteOperationView<'_>) -> bool {
+        let rule_params = item.params.as_deref().unwrap_or(&[]);
+        if rule_params.len() != concrete.params.len() {
+            return false;
+        }
+
+        rule_params
+            .iter()
+            .zip(concrete.params)
+            .all(|(rule_param, actual)| self.match_parameter(rule_param, actual))
+    }
+
+    fn match_parameter(&mut self, rule_param: &ParameterValue, actual: &Parameter) -> bool {
+        match rule_param {
+            ParameterValue::Fixed(value) => {
+                Parameter::from(*value).provably_equal(actual, PARAMETER_EQ_TOLERANCE)
+            }
+            ParameterValue::Param(pattern) => {
+                if let Some(symbol) = pattern.as_symbol() {
+                    if let Some(bound) = self.params.get(&symbol) {
+                        return bound.provably_equal(actual, PARAMETER_EQ_TOLERANCE);
+                    }
+                    self.params.insert(symbol.clone(), actual.clone());
+                    self.insertion_log.push(BindingInsertion::Parameter(symbol));
+                    return true;
+                }
+
+                let substituted = pattern.substitute_many(&self.params);
+                substituted.get_symbols().is_empty()
+                    && substituted.provably_equal(actual, PARAMETER_EQ_TOLERANCE)
+            }
+        }
     }
 }
 
@@ -134,25 +255,37 @@ pub fn match_rule_item(
 ) -> Result<bool, MatchError> {
     let Some(item_key) = KnowledgeInstructionKey::from_instruction(&item.instruction) else {
         return Err(MatchError::UnsupportedRuleInstruction {
-            instruction: format!("{:?}", item.instruction),
+            instruction: item.instruction.to_string(),
         });
     };
     let Some(concrete_key) = concrete.key() else {
         return Ok(false);
     };
+    match_rule_item_with_keys(item, &item_key, &concrete_key, concrete, bindings)
+}
+
+/// Internal matcher entry point for callers that already cache instruction keys.
+pub(crate) fn match_rule_item_with_keys(
+    item: &RuleItem,
+    item_key: &KnowledgeInstructionKey,
+    concrete_key: &KnowledgeInstructionKey,
+    concrete: ConcreteOperationView<'_>,
+    bindings: &mut MatchBindings,
+) -> Result<bool, MatchError> {
     if item_key != concrete_key || item.qubits.len() != concrete.qubits.len() {
         return Ok(false);
     }
 
-    let mut next = bindings.clone();
-    if !bind_qubits(item, concrete, &mut next) {
+    let checkpoint = bindings.checkpoint();
+    if !bindings.bind_qubits(item, concrete) {
+        bindings.rollback(checkpoint);
         return Ok(false);
     }
-    if !bind_parameters(item, concrete, &mut next) {
+    if !bindings.bind_parameters(item, concrete) {
+        bindings.rollback(checkpoint);
         return Ok(false);
     }
 
-    *bindings = next;
     Ok(true)
 }
 
@@ -186,7 +319,7 @@ pub fn instantiate_target(
     for item in target {
         let Some(key) = KnowledgeInstructionKey::from_instruction(&item.instruction) else {
             return Err(MatchError::UnsupportedRuleInstruction {
-                instruction: format!("{:?}", item.instruction),
+                instruction: item.instruction.to_string(),
             });
         };
         let qubits = item
@@ -242,69 +375,6 @@ pub fn rule_matches_operations(
     }
 
     Ok(Some(bindings))
-}
-
-fn bind_qubits(
-    item: &RuleItem,
-    concrete: ConcreteOperationView<'_>,
-    bindings: &mut MatchBindings,
-) -> bool {
-    for (&rule_qubit, &actual_qubit) in item.qubits.iter().zip(concrete.qubits) {
-        if let Some(bound) = bindings.qubits.get(&rule_qubit) {
-            if *bound != actual_qubit {
-                return false;
-            }
-        } else if let Some(other_rule_qubit) = bindings.reverse_qubits.get(&actual_qubit) {
-            if *other_rule_qubit != rule_qubit {
-                return false;
-            }
-        } else {
-            bindings.qubits.insert(rule_qubit, actual_qubit);
-            bindings.reverse_qubits.insert(actual_qubit, rule_qubit);
-        }
-    }
-    true
-}
-
-fn bind_parameters(
-    item: &RuleItem,
-    concrete: ConcreteOperationView<'_>,
-    bindings: &mut MatchBindings,
-) -> bool {
-    let rule_params = item.params.as_deref().unwrap_or(&[]);
-    if rule_params.len() != concrete.params.len() {
-        return false;
-    }
-
-    rule_params
-        .iter()
-        .zip(concrete.params)
-        .all(|(rule_param, actual)| match_parameter(rule_param, actual, bindings))
-}
-
-fn match_parameter(
-    rule_param: &ParameterValue,
-    actual: &Parameter,
-    bindings: &mut MatchBindings,
-) -> bool {
-    match rule_param {
-        ParameterValue::Fixed(value) => {
-            Parameter::from(*value).provably_equal(actual, PARAMETER_EQ_TOLERANCE)
-        }
-        ParameterValue::Param(pattern) => {
-            if let Some(symbol) = pattern.as_symbol() {
-                if let Some(bound) = bindings.params.get(&symbol) {
-                    return bound.provably_equal(actual, PARAMETER_EQ_TOLERANCE);
-                }
-                bindings.params.insert(symbol, actual.clone());
-                return true;
-            }
-
-            let substituted = pattern.substitute_many(&bindings.params);
-            substituted.get_symbols().is_empty()
-                && substituted.provably_equal(actual, PARAMETER_EQ_TOLERANCE)
-        }
-    }
 }
 
 fn condition_symbols_bound(condition: &Condition, bindings: &MatchBindings) -> bool {

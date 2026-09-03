@@ -19,7 +19,11 @@ use cqlib_core::compile::resource::{ResourceLimits, ResourceManager, ResourcePol
 use pyo3::prelude::*;
 
 /// Python wrapper around compiler-visible ancillary-resource bookkeeping.
-#[pyclass(name = "ResourceManager", module = "cqlib.compile.resource")]
+#[pyclass(
+    name = "ResourceManager",
+    module = "cqlib.compile.resource",
+    skip_from_py_object
+)]
 #[derive(Debug)]
 pub struct PyResourceManager {
     pub(crate) inner: ResourceManager,

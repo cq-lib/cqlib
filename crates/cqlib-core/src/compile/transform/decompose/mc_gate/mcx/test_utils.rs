@@ -15,8 +15,8 @@
 use crate::circuit::Qubit;
 use crate::circuit::operation::ValueOperation;
 use crate::compile::transform::decompose::mc_gate::mcx::relative_phase::emit_relative_phase_toffoli;
+use crate::compile::transform::decompose::mc_gate::test_utils::assert_value_operations_equal;
 use crate::qis::Statevector;
-use crate::util::test_utils::assert_value_operations_equal;
 use num_complex::Complex64;
 
 pub const EPSILON: f64 = 1e-10;

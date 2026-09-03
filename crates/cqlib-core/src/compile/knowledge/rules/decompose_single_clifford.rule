@@ -24,6 +24,31 @@ rule decompose_h_to_rz_ry {
     rewrite { RZ(π) 0, RY(π/2) 0, GPhase(π/2) }
 }
 
+rule decompose_h_to_rx_ry {
+    match { H 0 }
+    rewrite { RY(π/2) 0, RX(π) 0, GPhase(π/2) }
+}
+
+rule decompose_s_to_rx_ry {
+    match { S 0 }
+    rewrite { RX(-π/2) 0, RY(π/2) 0, RX(π/2) 0, GPhase(π/4) }
+}
+
+rule decompose_sdg_to_rx_ry {
+    match { SDG 0 }
+    rewrite { RX(-π/2) 0, RY(-π/2) 0, RX(π/2) 0, GPhase(-π/4) }
+}
+
+rule decompose_t_to_rx_ry {
+    match { T 0 }
+    rewrite { RX(-π/2) 0, RY(π/4) 0, RX(π/2) 0, GPhase(π/8) }
+}
+
+rule decompose_tdg_to_rx_ry {
+    match { TDG 0 }
+    rewrite { RX(-π/2) 0, RY(-π/4) 0, RX(π/2) 0, GPhase(-π/8) }
+}
+
 rule decompose_x_to_rx {
     match { X 0 }
     rewrite { RX(π) 0, GPhase(π/2) }
@@ -77,6 +102,11 @@ rule decompose_z_to_s {
 rule decompose_z_to_sdg {
     match { Z 0 }
     rewrite { SDG 0, SDG 0 }
+}
+
+rule decompose_z_to_rx_ry {
+    match { Z 0 }
+    rewrite { RX(-π/2) 0, RY(π) 0, RX(π/2) 0, GPhase(π/2) }
 }
 
 rule decompose_x2p_to_rx {

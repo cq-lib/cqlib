@@ -42,7 +42,9 @@ use crate::circuit::{Instruction, Parameter, ParameterValue, Qubit};
 use crate::compile::PARAMETER_EQ_TOLERANCE;
 use crate::compile::commutation::checker::{Commutation, CommutationResult};
 use crate::compile::knowledge::library::{RuleKind, RuleLibrary};
+use crate::compile::knowledge::matcher::KnowledgeInstructionKey;
 use crate::compile::knowledge::rule::{Condition, Rule, RuleItem};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 
 /// Compiled commutation rules loaded from the compiler knowledge library.
@@ -50,6 +52,25 @@ use std::collections::HashMap;
 pub struct RuleCommutationOracle {
     /// Validated two-operation swap rules.
     rules: Vec<Rule>,
+    /// Candidate rules indexed by the concrete ordered instruction pair.
+    rule_index:
+        HashMap<(KnowledgeInstructionKey, KnowledgeInstructionKey), SmallVec<[IndexedRule; 4]>>,
+}
+
+/// One rule candidate and the operand order used to match it.
+#[derive(Debug, Clone, Copy)]
+struct IndexedRule {
+    /// Position of the rule in [`RuleCommutationOracle::rules`].
+    rule_index: usize,
+    /// Whether the concrete operands match the rule's source order or its reverse.
+    direction: MatchDirection,
+}
+
+/// Operand direction recorded while building the instruction-pair index.
+#[derive(Debug, Clone, Copy)]
+enum MatchDirection {
+    Forward,
+    Reverse,
 }
 
 /// Bindings accumulated while matching one commutation rule instance.
@@ -89,8 +110,9 @@ impl RuleCommutationOracle {
 
     /// Checks whether the oracle has an exact swap proof for the operation pair.
     ///
-    /// Rules are tried in both operand orders so callers do not need to
-    /// canonicalize `lhs` and `rhs` before querying.
+    /// Candidate rules are selected by ordered instruction pair and retain both
+    /// operand directions, so callers do not need to canonicalize `lhs` and
+    /// `rhs` before querying.
     pub fn check(
         &self,
         lhs_inst: &Instruction,
@@ -100,12 +122,21 @@ impl RuleCommutationOracle {
         rhs_qubits: &[Qubit],
         rhs_params: &[Parameter],
     ) -> CommutationResult {
-        for rule in &self.rules {
-            if rule_matches(
-                rule, lhs_inst, lhs_qubits, lhs_params, rhs_inst, rhs_qubits, rhs_params,
-            ) || rule_matches(
-                rule, rhs_inst, rhs_qubits, rhs_params, lhs_inst, lhs_qubits, lhs_params,
-            ) {
+        let lhs_key = KnowledgeInstructionKey::from_instruction(lhs_inst)?;
+        let rhs_key = KnowledgeInstructionKey::from_instruction(rhs_inst)?;
+        let candidates = self.rule_index.get(&(lhs_key, rhs_key))?;
+
+        for candidate in candidates {
+            let rule = &self.rules[candidate.rule_index];
+            let matched = match candidate.direction {
+                MatchDirection::Forward => rule_matches(
+                    rule, lhs_inst, lhs_qubits, lhs_params, rhs_inst, rhs_qubits, rhs_params,
+                ),
+                MatchDirection::Reverse => rule_matches(
+                    rule, rhs_inst, rhs_qubits, rhs_params, lhs_inst, lhs_qubits, lhs_params,
+                ),
+            };
+            if matched {
                 return Some(Commutation::Exact);
             }
         }
@@ -125,8 +156,41 @@ impl RuleCommutationOracle {
                     && rule.operations[1].equivalent_to(&rule.target[0])
             })
             .cloned()
-            .collect();
-        Self { rules }
+            .collect::<Vec<_>>();
+        let mut rule_index: HashMap<
+            (KnowledgeInstructionKey, KnowledgeInstructionKey),
+            SmallVec<[IndexedRule; 4]>,
+        > = HashMap::new();
+
+        for (index, rule) in rules.iter().enumerate() {
+            let Some(lhs_key) =
+                KnowledgeInstructionKey::from_instruction(&rule.operations[0].instruction)
+            else {
+                continue;
+            };
+            let Some(rhs_key) =
+                KnowledgeInstructionKey::from_instruction(&rule.operations[1].instruction)
+            else {
+                continue;
+            };
+
+            rule_index
+                .entry((lhs_key.clone(), rhs_key.clone()))
+                .or_default()
+                .push(IndexedRule {
+                    rule_index: index,
+                    direction: MatchDirection::Forward,
+                });
+            rule_index
+                .entry((rhs_key, lhs_key))
+                .or_default()
+                .push(IndexedRule {
+                    rule_index: index,
+                    direction: MatchDirection::Reverse,
+                });
+        }
+
+        Self { rules, rule_index }
     }
 }
 
@@ -252,3 +316,7 @@ fn conditions_hold(conditions: &[Condition], bindings: &HashMap<String, Paramete
         }
     })
 }
+
+#[cfg(test)]
+#[path = "./rules_test.rs"]
+mod rules_test;

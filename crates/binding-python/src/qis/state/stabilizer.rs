@@ -22,7 +22,11 @@ use cqlib_core::qis::state::stabilizer::{CircuitExecutionResult, StabilizerState
 use pyo3::prelude::*;
 
 /// Result of executing a Clifford circuit with a stabilizer simulator.
-#[pyclass(name = "StabilizerCircuitResult", module = "cqlib.qis.state")]
+#[pyclass(
+    name = "StabilizerCircuitResult",
+    module = "cqlib.qis.state",
+    skip_from_py_object
+)]
 #[derive(Debug)]
 pub struct PyStabilizerCircuitResult {
     inner: CircuitExecutionResult,
@@ -52,7 +56,11 @@ impl PyStabilizerCircuitResult {
 }
 
 /// Stabilizer state simulator for Clifford circuits.
-#[pyclass(name = "StabilizerState", module = "cqlib.qis.state")]
+#[pyclass(
+    name = "StabilizerState",
+    module = "cqlib.qis.state",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyStabilizerState {
     pub(crate) inner: StabilizerState,
@@ -82,24 +90,23 @@ impl PyStabilizerState {
 
     /// Creates a stabilizer state by simulating a Clifford circuit.
     #[staticmethod]
-    fn from_circuit(circuit: &PyCircuit) -> PyResult<Self> {
-        StabilizerState::from_circuit(&circuit.inner)
+    fn from_circuit(py: Python<'_>, circuit: &PyCircuit) -> PyResult<Self> {
+        py.detach(|| StabilizerState::from_circuit(&circuit.inner))
             .map(Self::from)
             .map_err(qis_error_to_py_err)
     }
 
     /// Executes a Clifford circuit and returns final state plus runtime classical data.
     #[staticmethod]
-    fn run_circuit(circuit: &PyCircuit) -> PyResult<PyStabilizerCircuitResult> {
-        StabilizerState::run_circuit(&circuit.inner)
+    fn run_circuit(py: Python<'_>, circuit: &PyCircuit) -> PyResult<PyStabilizerCircuitResult> {
+        py.detach(|| StabilizerState::run_circuit(&circuit.inner))
             .map(|inner| PyStabilizerCircuitResult { inner })
             .map_err(qis_error_to_py_err)
     }
 
     /// Applies a Clifford circuit to this state in place.
-    fn apply_circuit(&mut self, circuit: &PyCircuit) -> PyResult<()> {
-        self.inner
-            .apply_circuit(&circuit.inner)
+    fn apply_circuit(&mut self, py: Python<'_>, circuit: &PyCircuit) -> PyResult<()> {
+        py.detach(|| self.inner.apply_circuit(&circuit.inner))
             .map_err(qis_error_to_py_err)
     }
 
@@ -184,45 +191,50 @@ impl PyStabilizerState {
     }
 
     /// Measures one qubit and collapses the state.
-    fn measure(&mut self, qubit: usize) -> PyResult<bool> {
-        self.inner.measure(qubit).map_err(qis_error_to_py_err)
+    fn measure(&mut self, py: Python<'_>, qubit: usize) -> PyResult<bool> {
+        py.detach(|| self.inner.measure(qubit))
+            .map_err(qis_error_to_py_err)
     }
 
     /// Measures all qubits and collapses the state.
-    fn measure_all(&mut self) -> PyOutcome {
-        PyOutcome::from(self.inner.measure_all())
+    fn measure_all(&mut self, py: Python<'_>) -> PyOutcome {
+        PyOutcome::from(py.detach(|| self.inner.measure_all()))
     }
 
     /// Resets one qubit to |0>.
-    fn reset(&mut self, qubit: usize) -> PyResult<()> {
-        self.inner.reset(qubit).map_err(qis_error_to_py_err)
+    fn reset(&mut self, py: Python<'_>, qubit: usize) -> PyResult<()> {
+        py.detach(|| self.inner.reset(qubit))
+            .map_err(qis_error_to_py_err)
     }
 
     /// Returns the probability of a computational basis bitstring.
-    fn probability_of(&self, bits: Vec<bool>) -> PyResult<f64> {
-        self.inner
-            .probability_of(&bits)
+    fn probability_of(&self, py: Python<'_>, bits: Vec<bool>) -> PyResult<f64> {
+        py.detach(|| self.inner.probability_of(&bits))
             .map_err(qis_error_to_py_err)
     }
 
     /// Returns the full computational-basis probability distribution.
-    fn probabilities(&self) -> PyResult<Vec<f64>> {
-        self.inner.probabilities().map_err(qis_error_to_py_err)
+    fn probabilities(&self, py: Python<'_>) -> PyResult<Vec<f64>> {
+        py.detach(|| self.inner.probabilities())
+            .map_err(qis_error_to_py_err)
     }
 
     /// Samples measurement outcomes without mutating this state.
-    fn sample_shots(&self, shots: usize) -> Vec<PyOutcome> {
-        self.inner
-            .sample_shots(shots)
+    fn sample_shots(&self, py: Python<'_>, shots: usize) -> Vec<PyOutcome> {
+        py.detach(|| self.inner.sample_shots(shots))
             .into_iter()
             .map(PyOutcome::from)
             .collect()
     }
 
     /// Samples measurement outcomes according to a circuit measurement receipt.
-    fn sample(&self, measurement: &PyMeasurement, shots: usize) -> PyResult<PyExecutionResult> {
-        self.inner
-            .sample(&measurement.inner, shots)
+    fn sample(
+        &self,
+        py: Python<'_>,
+        measurement: &PyMeasurement,
+        shots: usize,
+    ) -> PyResult<PyExecutionResult> {
+        py.detach(|| self.inner.sample(&measurement.inner, shots))
             .map(PyExecutionResult::from)
             .map_err(qis_error_to_py_err)
     }
@@ -230,10 +242,10 @@ impl PyStabilizerState {
     /// Returns marginal probabilities according to a circuit measurement receipt.
     fn probs(
         &self,
+        py: Python<'_>,
         measurement: &PyMeasurement,
     ) -> PyResult<std::collections::HashMap<PyOutcome, f64>> {
-        self.inner
-            .probs(&measurement.inner)
+        py.detach(|| self.inner.probs(&measurement.inner))
             .map(outcome_probabilities_to_py)
             .map_err(qis_error_to_py_err)
     }

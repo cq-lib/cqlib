@@ -43,6 +43,7 @@
 //! device.add_qubit_properties(0, prop)
 //! ```
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 pub mod device_impl;
@@ -51,6 +52,36 @@ pub mod noise;
 pub mod qubit;
 pub mod result;
 pub mod topology;
+
+pub(crate) fn validate_probability(value: f64, name: &str) -> PyResult<f64> {
+    if value.is_finite() && (0.0..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err(PyValueError::new_err(format!(
+            "{name} must be finite and in [0, 1], got {value}"
+        )))
+    }
+}
+
+pub(crate) fn validate_positive(value: f64, name: &str) -> PyResult<f64> {
+    if value.is_finite() && value > 0.0 {
+        Ok(value)
+    } else {
+        Err(PyValueError::new_err(format!(
+            "{name} must be finite and greater than 0, got {value}"
+        )))
+    }
+}
+
+pub(crate) fn validate_nonnegative(value: f64, name: &str) -> PyResult<f64> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err(PyValueError::new_err(format!(
+            "{name} must be finite and non-negative, got {value}"
+        )))
+    }
+}
 
 /// Registers all device-related classes with the Python module.
 ///
@@ -83,7 +114,7 @@ pub mod topology;
 /// use pyo3::prelude::*;
 /// use _native::device::register_device_module;
 ///
-/// Python::with_gil(|py| {
+/// Python::try_attach(|py| {
 ///     let module = PyModule::new(py, "cqlib").unwrap();
 ///     register_device_module(&module).unwrap();
 /// });

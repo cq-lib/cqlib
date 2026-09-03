@@ -32,9 +32,10 @@
 //! ```
 
 use crate::circuit::PyQubit;
+use crate::utils::hash_value;
 use cqlib_core::circuit::Qubit;
 use cqlib_core::device::{LogicalQubit, PhysicalQubit};
-use pyo3::{Bound, PyAny, pyclass, pymethods};
+use pyo3::{Borrowed, Bound, FromPyObject, PyAny, PyErr, pyclass, pymethods};
 
 /// Python wrapper for [`LogicalQubit`].
 ///
@@ -57,7 +58,7 @@ use pyo3::{Bound, PyAny, pyclass, pymethods};
 /// print(lq.id)     # 0
 /// print(lq.qubit)  # Qubit(0)
 /// ```
-#[pyclass(name = "LogicalQubit", module = "cqlib.device")]
+#[pyclass(name = "LogicalQubit", module = "cqlib.device", skip_from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PyLogicalQubit {
     pub(crate) inner: LogicalQubit,
@@ -78,6 +79,59 @@ impl From<PyLogicalQubit> for LogicalQubit {
 impl From<PyLogicalQubit> for Qubit {
     fn from(value: PyLogicalQubit) -> Self {
         value.inner.qubit()
+    }
+}
+
+/// Python input accepted where a logical device qubit is required.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PyLogicalQubitLike {
+    inner: LogicalQubit,
+}
+
+impl<'py> FromPyObject<'_, 'py> for PyLogicalQubitLike {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'_, 'py, PyAny>) -> Result<Self, Self::Error> {
+        if let Ok(value) = obj.cast::<PyLogicalQubit>() {
+            return Ok(Self {
+                inner: value.borrow().inner,
+            });
+        }
+        if let Ok(value) = obj.cast::<PyQubit>() {
+            return Ok(Self {
+                inner: LogicalQubit::from_qubit(value.borrow().inner),
+            });
+        }
+        obj.extract::<u32>().map(|id| Self {
+            inner: LogicalQubit::new(id),
+        })
+    }
+}
+
+impl From<PyLogicalQubitLike> for LogicalQubit {
+    fn from(value: PyLogicalQubitLike) -> Self {
+        value.inner
+    }
+}
+
+/// Python sequence accepted for logical device qubits.
+pub struct PyLogicalQubitList {
+    inner: Vec<LogicalQubit>,
+}
+
+impl<'py> FromPyObject<'_, 'py> for PyLogicalQubitList {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'_, 'py, PyAny>) -> Result<Self, Self::Error> {
+        obj.extract::<Vec<PyLogicalQubitLike>>().map(|values| Self {
+            inner: values.into_iter().map(Into::into).collect(),
+        })
+    }
+}
+
+impl From<PyLogicalQubitList> for Vec<LogicalQubit> {
+    fn from(value: PyLogicalQubitList) -> Self {
+        value.inner
     }
 }
 
@@ -116,12 +170,53 @@ impl PyLogicalQubit {
         self.inner.id()
     }
 
+    /// Returns the qubit identifier as an index (for parity with
+    /// `Qubit.index`).
+    #[getter]
+    fn index(&self) -> usize {
+        self.inner.id() as usize
+    }
+
     fn __copy__(&self) -> Self {
         *self
     }
 
     fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
         *self
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyLogicalQubit>()
+            .is_ok_and(|other| self.inner == other.borrow().inner)
+    }
+
+    fn __lt__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyLogicalQubit>()
+            .is_ok_and(|other| self.inner < other.borrow().inner)
+    }
+
+    fn __le__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyLogicalQubit>()
+            .is_ok_and(|other| self.inner <= other.borrow().inner)
+    }
+
+    fn __gt__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyLogicalQubit>()
+            .is_ok_and(|other| self.inner > other.borrow().inner)
+    }
+
+    fn __ge__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyLogicalQubit>()
+            .is_ok_and(|other| self.inner >= other.borrow().inner)
+    }
+
+    fn __hash__(&self) -> u64 {
+        hash_value(&self.inner)
     }
 
     /// Returns a string representation for debugging.
@@ -160,7 +255,7 @@ impl PyLogicalQubit {
 /// print(pq.id)     # 100
 /// print(pq.qubit)  # Qubit(100)
 /// ```
-#[pyclass(name = "PhysicalQubit", module = "cqlib.device")]
+#[pyclass(name = "PhysicalQubit", module = "cqlib.device", skip_from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PyPhysicalQubit {
     pub(crate) inner: PhysicalQubit,
@@ -181,6 +276,75 @@ impl From<PyPhysicalQubit> for PhysicalQubit {
 impl From<PyPhysicalQubit> for Qubit {
     fn from(value: PyPhysicalQubit) -> Self {
         value.inner.qubit()
+    }
+}
+
+/// Python input accepted where a physical device qubit is required.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PyPhysicalQubitLike {
+    inner: PhysicalQubit,
+}
+
+impl<'py> FromPyObject<'_, 'py> for PyPhysicalQubitLike {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'_, 'py, PyAny>) -> Result<Self, Self::Error> {
+        if let Ok(value) = obj.cast::<PyPhysicalQubit>() {
+            return Ok(Self {
+                inner: value.borrow().inner,
+            });
+        }
+        if let Ok(value) = obj.cast::<PyQubit>() {
+            return Ok(Self {
+                inner: PhysicalQubit::from_qubit(value.borrow().inner),
+            });
+        }
+        obj.extract::<u32>().map(|id| Self {
+            inner: PhysicalQubit::new(id),
+        })
+    }
+}
+
+impl From<PyPhysicalQubitLike> for PhysicalQubit {
+    fn from(value: PyPhysicalQubitLike) -> Self {
+        value.inner
+    }
+}
+
+impl From<PyPhysicalQubitLike> for Qubit {
+    fn from(value: PyPhysicalQubitLike) -> Self {
+        PhysicalQubit::from(value).qubit()
+    }
+}
+
+/// Python sequence accepted for physical device qubits.
+pub struct PyPhysicalQubitList {
+    inner: Vec<PhysicalQubit>,
+}
+
+impl<'py> FromPyObject<'_, 'py> for PyPhysicalQubitList {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'_, 'py, PyAny>) -> Result<Self, Self::Error> {
+        obj.extract::<Vec<PyPhysicalQubitLike>>()
+            .map(|values| Self {
+                inner: values.into_iter().map(Into::into).collect(),
+            })
+    }
+}
+
+impl From<PyPhysicalQubitList> for Vec<PhysicalQubit> {
+    fn from(value: PyPhysicalQubitList) -> Self {
+        value.inner
+    }
+}
+
+impl From<PyPhysicalQubitList> for Vec<Qubit> {
+    fn from(value: PyPhysicalQubitList) -> Self {
+        Vec::<PhysicalQubit>::from(value)
+            .into_iter()
+            .map(PhysicalQubit::qubit)
+            .collect()
     }
 }
 
@@ -219,12 +383,53 @@ impl PyPhysicalQubit {
         self.inner.id()
     }
 
+    /// Returns the hardware-qubit identifier as an index (for parity
+    /// with `Qubit.index`).
+    #[getter]
+    fn index(&self) -> usize {
+        self.inner.id() as usize
+    }
+
     fn __copy__(&self) -> Self {
         *self
     }
 
     fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
         *self
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyPhysicalQubit>()
+            .is_ok_and(|other| self.inner == other.borrow().inner)
+    }
+
+    fn __lt__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyPhysicalQubit>()
+            .is_ok_and(|other| self.inner < other.borrow().inner)
+    }
+
+    fn __le__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyPhysicalQubit>()
+            .is_ok_and(|other| self.inner <= other.borrow().inner)
+    }
+
+    fn __gt__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyPhysicalQubit>()
+            .is_ok_and(|other| self.inner > other.borrow().inner)
+    }
+
+    fn __ge__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .cast::<PyPhysicalQubit>()
+            .is_ok_and(|other| self.inner >= other.borrow().inner)
+    }
+
+    fn __hash__(&self) -> u64 {
+        hash_value(&self.inner)
     }
 
     /// Returns a string representation for debugging.

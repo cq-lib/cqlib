@@ -25,7 +25,7 @@ use cqlib_core::circuit::gate::{CircuitGate, FrozenCircuit};
 use pyo3::prelude::*;
 
 /// Immutable circuit definition suitable for use inside a gate.
-#[pyclass(name = "FrozenCircuit", module = "cqlib.circuit.gates")]
+#[pyclass(name = "FrozenCircuit", module = "cqlib.circuit.gates", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyFrozenCircuit {
     pub(crate) inner: FrozenCircuit,
@@ -85,10 +85,19 @@ impl PyFrozenCircuit {
             .collect()
     }
 
-    /// Returns symbolic parameter names in circuit insertion order.
+    /// Returns interned symbol names in circuit insertion order.
+    ///
+    /// This stable registry may include symbols no longer referenced by the
+    /// frozen executable IR.
     #[getter]
     fn symbols(&self) -> Vec<String> {
         self.inner.circuit().symbols().iter().cloned().collect()
+    }
+
+    /// Returns symbols actually referenced by the frozen executable IR.
+    #[getter]
+    fn used_symbols(&self) -> Vec<String> {
+        self.inner.used_symbols().iter().cloned().collect()
     }
 
     fn __repr__(&self) -> String {
@@ -97,6 +106,18 @@ impl PyFrozenCircuit {
             self.inner.circuit().num_qubits(),
             self.inner.circuit().operations().len()
         )
+    }
+
+    /// Compares two frozen circuits by structural equality.
+    ///
+    /// The defining circuits compare structurally (circuit identity is
+    /// ignored) and the derived symbolic-matrix cache never participates.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyFrozenCircuit>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyFrozenCircuit>()?;
+        Ok(self.inner == other.inner)
     }
 
     fn __copy__(&self) -> Self {
@@ -109,7 +130,7 @@ impl PyFrozenCircuit {
 }
 
 /// Composite gate defined by an immutable circuit.
-#[pyclass(name = "CircuitGate", module = "cqlib.circuit.gates")]
+#[pyclass(name = "CircuitGate", module = "cqlib.circuit.gates", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyCircuitGate {
     pub(crate) inner: CircuitGate,
@@ -119,8 +140,29 @@ pub struct PyCircuitGate {
 impl PyCircuitGate {
     /// Creates a reusable gate from a frozen circuit definition.
     #[new]
-    fn new(name: String, circuit: PyFrozenCircuit) -> PyResult<Self> {
-        CircuitGate::new(name, circuit.inner)
+    #[pyo3(signature = (name, circuit, signature_params=None))]
+    fn new(
+        name: String,
+        circuit: PyFrozenCircuit,
+        signature_params: Option<Vec<String>>,
+    ) -> PyResult<Self> {
+        let result = match signature_params {
+            Some(params) => CircuitGate::with_signature(name, circuit.inner, params),
+            None => CircuitGate::new(name, circuit.inner),
+        };
+        result
+            .map(|inner| Self { inner })
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    /// Creates a reusable gate with an explicit positional parameter signature.
+    #[staticmethod]
+    fn with_signature(
+        name: String,
+        circuit: PyFrozenCircuit,
+        signature_params: Vec<String>,
+    ) -> PyResult<Self> {
+        CircuitGate::with_signature(name, circuit.inner, signature_params)
             .map(|inner| Self { inner })
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
@@ -143,10 +185,22 @@ impl PyCircuitGate {
         self.inner.num_params()
     }
 
-    /// Returns symbolic parameter names in positional order.
+    /// Returns the positional parameter signature used to invoke this gate.
+    #[getter]
+    fn signature_params(&self) -> Vec<String> {
+        self.inner.signature_params().iter().cloned().collect()
+    }
+
+    /// Returns symbols actually referenced by the backing circuit.
+    #[getter]
+    fn used_symbols(&self) -> Vec<String> {
+        self.inner.used_symbols().iter().cloned().collect()
+    }
+
+    /// Backward-compatible alias for `used_symbols`.
     #[getter]
     fn symbols(&self) -> Vec<String> {
-        self.inner.symbols().into_iter().collect()
+        self.used_symbols()
     }
 
     /// Returns the immutable circuit definition.
@@ -163,6 +217,11 @@ impl PyCircuitGate {
             .inverse()
             .map(|inner| Self { inner })
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    /// Structural equality: name, ordered signature, and defining circuit.
+    fn __eq__(&self, other: &PyCircuitGate) -> bool {
+        self.inner == other.inner
     }
 
     fn __repr__(&self) -> String {

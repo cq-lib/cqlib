@@ -372,3 +372,73 @@ rule cancel_u_inverse_global_phase {
     }
     rewrite { GPhase(π) }
 }
+
+rule cancel_mcx1 {
+    match { MCX[1] 0 1, MCX[1] 0 1 }
+    rewrite {}
+}
+
+rule cancel_mcx2 {
+    match { MCX[2] 0 1 2, MCX[2] 0 1 2 }
+    rewrite {}
+}
+
+rule cancel_mcx2_controls_swapped {
+    match { MCX[2] 0 1 2, MCX[2] 1 0 2 }
+    rewrite {}
+}
+
+rule cancel_mcx3 {
+    match { MCX[3] 0 1 2 3, MCX[3] 0 1 2 3 }
+    rewrite {}
+}
+
+rule cancel_mcy1 {
+    match { MCY[1] 0 1, MCY[1] 0 1 }
+    rewrite {}
+}
+
+rule cancel_mcy2 {
+    match { MCY[2] 0 1 2, MCY[2] 0 1 2 }
+    rewrite {}
+}
+
+rule cancel_mcy2_controls_swapped {
+    match { MCY[2] 0 1 2, MCY[2] 1 0 2 }
+    rewrite {}
+}
+
+rule cancel_mcz1 {
+    match { MCZ[1] 0 1, MCZ[1] 0 1 }
+    rewrite {}
+}
+
+rule cancel_mcz1_swapped {
+    match { MCZ[1] 0 1, MCZ[1] 1 0 }
+    rewrite {}
+}
+
+rule cancel_mcz2 {
+    match { MCZ[2] 0 1 2, MCZ[2] 0 1 2 }
+    rewrite {}
+}
+
+rule cancel_mcz2_controls_swapped {
+    match { MCZ[2] 0 1 2, MCZ[2] 1 0 2 }
+    rewrite {}
+}
+
+rule cancel_mch1 {
+    match { MCH[1] 0 1, MCH[1] 0 1 }
+    rewrite {}
+}
+
+rule cancel_mcswap1 {
+    match { MCSWAP[1] 0 1 2, MCSWAP[1] 0 1 2 }
+    rewrite {}
+}
+
+rule cancel_mcswap1_targets_swapped {
+    match { MCSWAP[1] 0 1 2, MCSWAP[1] 0 2 1 }
+    rewrite {}
+}

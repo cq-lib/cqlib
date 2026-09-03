@@ -55,7 +55,8 @@ pub use mc_gate::{
 };
 pub use rule::{
     DecompositionAlgorithm, DecompositionRule, DecompositionRuleCache, DecompositionRuleStats,
-    McGateRuleRequest, NumericUnitaryRuleRequest, ResourceSignature, RuntimeAncillaKind,
+    McGateRuleRequest, NumericUnitaryRuleRequest, NumericUnitarySynthesisKey, ResourceSignature,
+    RuntimeAncillaKind,
 };
 pub use unitary::decompose::{
     DecomposeUnitaries, UnitaryDecomposeConfig, decompose_unitaries,

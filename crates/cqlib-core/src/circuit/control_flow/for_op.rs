@@ -11,12 +11,12 @@
 // that they have been altered from the originals.
 
 use super::ControlBody;
-use crate::circuit::classical_expr::ClassicalExpr;
-use crate::circuit::{CircuitError, ClassicalType, ClassicalValue, ClassicalVar, Qubit};
+use crate::circuit::classical_expr::{ClassicalExpr, ClassicalExprKind, simplify};
+use crate::circuit::{CircuitError, ClassicalValue, ClassicalVar, Qubit};
 use std::collections::BTreeSet;
 
 /// Unsigned runtime range loop with half-open `[start, stop)` semantics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ForOp {
     var: ClassicalVar,
     start: ClassicalExpr,
@@ -34,33 +34,7 @@ impl ForOp {
         step: ClassicalExpr,
         body: ControlBody,
     ) -> Result<Self, CircuitError> {
-        if !matches!(var.ty(), ClassicalType::UInt(_)) {
-            return Err(CircuitError::InvalidOperation(format!(
-                "for loop variable must be UInt, got {:?}",
-                var.ty()
-            )));
-        }
-        if start.ty() != var.ty() {
-            return Err(CircuitError::InvalidOperation(format!(
-                "for start type must match loop variable {:?}, got {:?}",
-                var.ty(),
-                start.ty()
-            )));
-        }
-        if stop.ty() != var.ty() {
-            return Err(CircuitError::InvalidOperation(format!(
-                "for stop type must match loop variable {:?}, got {:?}",
-                var.ty(),
-                stop.ty()
-            )));
-        }
-        if step.ty() != var.ty() {
-            return Err(CircuitError::InvalidOperation(format!(
-                "for step type must match loop variable {:?}, got {:?}",
-                var.ty(),
-                step.ty()
-            )));
-        }
+        super::validate_for_types(var, &start, &stop, &step)?;
 
         Ok(Self {
             var,
@@ -94,6 +68,27 @@ impl ForOp {
     /// Returns the loop body.
     pub fn body(&self) -> &ControlBody {
         &self.body
+    }
+
+    /// Returns the exact iteration count when every range expression reduces
+    /// to an unsigned literal. Runtime-dependent ranges and zero steps are
+    /// intentionally reported as unknown.
+    pub(crate) fn static_iteration_count(&self) -> Option<u128> {
+        let literal = |expr: &ClassicalExpr| match simplify(expr).kind() {
+            ClassicalExprKind::UIntLiteral { value, .. } => Some(*value),
+            _ => None,
+        };
+        let start = literal(&self.start)?;
+        let stop = literal(&self.stop)?;
+        let step = literal(&self.step)?;
+        if step == 0 {
+            return None;
+        }
+        Some(if start >= stop {
+            0
+        } else {
+            (stop - start).div_ceil(step)
+        })
     }
 
     /// Returns mutable variables read by the range expressions.
@@ -173,6 +168,27 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn static_iteration_count_accepts_simplifiable_uint_constants() {
+        let var = ClassicalVar::new(test_circuit_id(), 0, ClassicalType::uint(8).unwrap());
+        let bitvec_uint = |value| {
+            ClassicalExpr::bit_vec_literal(8, value)
+                .unwrap()
+                .to_uint()
+                .unwrap()
+        };
+        let op = ForOp::new(
+            var,
+            bitvec_uint(1),
+            bitvec_uint(8),
+            bitvec_uint(2),
+            ControlBody::new(vec![]),
+        )
+        .unwrap();
+
+        assert_eq!(op.static_iteration_count(), Some(4));
     }
 
     #[test]

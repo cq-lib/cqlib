@@ -51,7 +51,9 @@ class TwoQubitUnitarySynthesisResult:
         """Scalar phase multiplying the emitted operation sequence."""
         ...
     def __copy__(self) -> TwoQubitUnitarySynthesisResult: ...
-    def __deepcopy__(self, memo: dict[int, object]) -> TwoQubitUnitarySynthesisResult: ...
+    def __deepcopy__(
+        self, memo: dict[int, object]
+    ) -> TwoQubitUnitarySynthesisResult: ...
 
 class KakDecomposition:
     """Canonical two-qubit KAK decomposition."""
@@ -98,7 +100,8 @@ def synthesize_numeric_1q_unitary(
 
     Raises:
         TypeError: If ``matrix`` cannot be converted to a two-dimensional array.
-        ValueError: If the converted matrix is not a finite 2x2 unitary.
+        CompilerConfigError: If the converted matrix is not a finite 2x2
+            unitary.
     """
     ...
 
@@ -112,7 +115,7 @@ def synthesize_numeric_2q_unitary(
 
     Raises:
         TypeError: If ``matrix`` cannot be converted to a two-dimensional array.
-        ValueError: If the matrix is invalid or the qubits are equal.
+        CompilerConfigError: If the matrix is invalid or the qubits are equal.
     """
     ...
 
@@ -121,8 +124,16 @@ def kak_decompose(matrix: ArrayLike) -> KakDecomposition:
 
     Raises:
         TypeError: If ``matrix`` cannot be converted to a two-dimensional array.
-        ValueError: If the converted matrix is not a finite 4x4 unitary.
+        CompilerConfigError: If the converted matrix is not a finite 4x4
+            unitary.
     """
     ...
 
-__all__: list[str]
+__all__ = [
+    "OneQubitUnitaryDecomposition",
+    "TwoQubitUnitarySynthesisResult",
+    "KakDecomposition",
+    "synthesize_numeric_1q_unitary",
+    "synthesize_numeric_2q_unitary",
+    "kak_decompose",
+]

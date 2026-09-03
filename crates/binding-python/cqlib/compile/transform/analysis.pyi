@@ -1,0 +1,53 @@
+# This code is part of Cqlib.
+#
+# (C) Copyright China Telecom Quantum Group 2026
+#
+# This code is licensed under the Apache License, Version 2.0. You may
+# obtain a copy of this license in the LICENSE.txt file in the root directory
+# of this source tree or at http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Any modifications or derivative works of this code must retain this
+# copyright notice, and modified files need to carry a notice indicating
+# that they have been altered from the originals.
+
+from __future__ import annotations
+
+from cqlib.circuit import Circuit
+
+class CircuitAnalysis:
+    """Immutable structural facts used by compiler transforms."""
+
+    @staticmethod
+    def analyze(circuit: Circuit) -> CircuitAnalysis:
+        """Analyze ``circuit`` recursively without modifying it."""
+        ...
+    @property
+    def has_classical_data(self) -> bool: ...
+    @property
+    def has_classical_control(self) -> bool: ...
+    @property
+    def has_measurement(self) -> bool: ...
+    @property
+    def has_classical_values(self) -> bool: ...
+    @property
+    def has_classical_vars(self) -> bool: ...
+    @property
+    def has_runtime_classical(self) -> bool: ...
+    @property
+    def needs_classical_handle_preservation(self) -> bool: ...
+    @property
+    def has_circuit_gate_definitions(self) -> bool: ...
+    @property
+    def has_unitary_circuit_definitions(self) -> bool: ...
+    @property
+    def has_unitary_gates(self) -> bool: ...
+    @property
+    def has_mc_gates(self) -> bool: ...
+    def __repr__(self) -> str: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __copy__(self) -> CircuitAnalysis: ...
+    def __deepcopy__(self, memo: dict[int, object]) -> CircuitAnalysis: ...
+
+__all__ = [
+    "CircuitAnalysis",
+]

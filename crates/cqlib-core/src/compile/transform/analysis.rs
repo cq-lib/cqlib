@@ -16,7 +16,9 @@
 //! transforms can skip inapplicable work without rescanning the full operation
 //! tree repeatedly.
 
-use crate::circuit::{Circuit, ClassicalControlOp, Instruction, Operation};
+use crate::circuit::{
+    Circuit, ClassicalControlOp, Directive, Instruction, Operation, StandardGate,
+};
 
 /// Structural facts about a circuit relevant to compiler transforms.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,18 +39,83 @@ pub struct CircuitAnalysis {
 impl CircuitAnalysis {
     /// Computes structural facts for `circuit`.
     pub fn analyze(circuit: &Circuit) -> Self {
+        WorkflowCircuitAnalysis::analyze(circuit).public
+    }
+}
+
+/// Allocation-free workflow facts that are intentionally not part of the
+/// public compiler API.
+///
+/// Circuit-backed definitions remain opaque until the definition pass expands
+/// them. A changed circuit invalidates this summary, so operations revealed by
+/// expansion are discovered by the next analysis of the current IR revision.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct WorkflowCircuitAnalysis {
+    public: CircuitAnalysis,
+    standard_gates: StandardGateSet,
+    instruction_kinds: InstructionKindSet,
+    has_gate_like_operation_over_two_qubits: bool,
+    /// Exact correction remains target-dependent; this fact only identifies
+    /// circuits for which physical operand direction can be relevant.
+    has_direction_sensitive_two_qubit_operation: bool,
+    has_reset: bool,
+    has_control_flow: bool,
+}
+
+impl WorkflowCircuitAnalysis {
+    pub(crate) fn analyze(circuit: &Circuit) -> Self {
         let mut analysis = Self {
-            has_classical_values: !circuit.classical_values().is_empty(),
-            has_classical_vars: !circuit.classical_vars().is_empty(),
+            public: CircuitAnalysis {
+                has_classical_values: !circuit.classical_values().is_empty(),
+                has_classical_vars: !circuit.classical_vars().is_empty(),
+                ..CircuitAnalysis::default()
+            },
             ..Self::default()
         };
         analysis.scan_operations(circuit.operations());
-        analysis.has_runtime_classical = analysis.has_classical_data
-            || analysis.has_classical_control
-            || analysis.has_classical_values
-            || analysis.has_classical_vars;
-        analysis.needs_classical_handle_preservation = analysis.has_runtime_classical;
+        analysis.public.has_runtime_classical = analysis.public.has_classical_data
+            || analysis.public.has_classical_control
+            || analysis.public.has_classical_values
+            || analysis.public.has_classical_vars;
+        analysis.public.needs_classical_handle_preservation = analysis.public.has_runtime_classical;
         analysis
+    }
+
+    pub(crate) const fn public(&self) -> &CircuitAnalysis {
+        &self.public
+    }
+
+    pub(crate) const fn has_unexpanded_definitions(&self) -> bool {
+        self.public.has_circuit_gate_definitions || self.public.has_unitary_circuit_definitions
+    }
+
+    pub(crate) const fn has_unitary_gates(&self) -> bool {
+        self.public.has_unitary_gates
+    }
+
+    pub(crate) const fn has_mc_gates(&self) -> bool {
+        self.public.has_mc_gates
+    }
+
+    pub(crate) const fn has_gate_like_operation_over_two_qubits(&self) -> bool {
+        self.has_gate_like_operation_over_two_qubits
+    }
+
+    pub(crate) fn standard_gates(&self) -> impl Iterator<Item = StandardGate> + '_ {
+        StandardGate::all()
+            .iter()
+            .copied()
+            .filter(|gate| self.standard_gates.contains(*gate))
+    }
+
+    pub(crate) const fn has_extended_gate_like_operations(&self) -> bool {
+        self.instruction_kinds.contains(InstructionKind::McGate)
+            || self
+                .instruction_kinds
+                .contains(InstructionKind::UnitaryGate)
+            || self
+                .instruction_kinds
+                .contains(InstructionKind::CircuitGate)
     }
 
     fn scan_operations(&mut self, operations: &[Operation]) {
@@ -59,29 +126,55 @@ impl CircuitAnalysis {
 
     fn scan_operation(&mut self, operation: &Operation) {
         match &operation.instruction {
+            Instruction::Standard(gate) => {
+                self.instruction_kinds.insert(InstructionKind::Standard);
+                self.standard_gates.insert(*gate);
+                self.has_gate_like_operation_over_two_qubits |= operation.qubits.len() > 2;
+                self.has_direction_sensitive_two_qubit_operation |=
+                    gate.num_qubits() == 2 && !gate.is_invariant_under_operand_swap();
+            }
             Instruction::ClassicalData(op) => {
-                self.has_classical_data = true;
+                self.instruction_kinds
+                    .insert(InstructionKind::ClassicalData);
+                self.public.has_classical_data = true;
                 if op.result().is_some() {
-                    self.has_measurement = true;
+                    self.public.has_measurement = true;
                 }
             }
             Instruction::ClassicalControl(op) => {
-                self.has_classical_control = true;
+                self.instruction_kinds
+                    .insert(InstructionKind::ClassicalControl);
+                self.public.has_classical_control = true;
+                self.has_control_flow = true;
                 self.scan_control_flow(op);
             }
             Instruction::CircuitGate(_) => {
-                self.has_circuit_gate_definitions = true;
+                self.instruction_kinds.insert(InstructionKind::CircuitGate);
+                self.public.has_circuit_gate_definitions = true;
+                self.has_gate_like_operation_over_two_qubits |= operation.qubits.len() > 2;
             }
             Instruction::UnitaryGate(gate) => {
-                self.has_unitary_gates = true;
+                self.instruction_kinds.insert(InstructionKind::UnitaryGate);
+                self.public.has_unitary_gates = true;
                 if gate.circuit().is_some() {
-                    self.has_unitary_circuit_definitions = true;
+                    self.public.has_unitary_circuit_definitions = true;
                 }
+                self.has_gate_like_operation_over_two_qubits |= operation.qubits.len() > 2;
             }
             Instruction::McGate(_) => {
-                self.has_mc_gates = true;
+                self.instruction_kinds.insert(InstructionKind::McGate);
+                self.public.has_mc_gates = true;
+                self.has_gate_like_operation_over_two_qubits |= operation.qubits.len() > 2;
             }
-            _ => {}
+            Instruction::Directive(directive) => {
+                self.instruction_kinds.insert(InstructionKind::Directive);
+                match directive {
+                    Directive::Measure => self.public.has_measurement = true,
+                    Directive::Reset => self.has_reset = true,
+                    Directive::Barrier => {}
+                }
+            }
+            Instruction::Delay => self.instruction_kinds.insert(InstructionKind::Delay),
         }
     }
 
@@ -108,40 +201,45 @@ impl CircuitAnalysis {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::CircuitAnalysis;
-    use crate::circuit::{Circuit, ClassicalExpr, Qubit};
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StandardGateSet(u64);
 
-    #[test]
-    fn analysis_detects_runtime_classical_and_definitions_recursively() {
-        let mut inner = Circuit::new(1);
-        let measured = inner.measure(Qubit::new(0)).unwrap();
-        inner
-            .if_(measured.expr().to_bool().unwrap(), |body| {
-                body.x(Qubit::new(0))?;
-                Ok(())
-            })
-            .unwrap();
-        let gate = inner.to_gate("measured").unwrap();
+impl StandardGateSet {
+    fn insert(&mut self, gate: StandardGate) {
+        self.0 |= 1_u64 << gate as u8;
+    }
 
-        let mut circuit = Circuit::new(1);
-        let value = circuit.measure(Qubit::new(0)).unwrap();
-        circuit
-            .if_(ClassicalExpr::bit_to_bool(value.expr()).unwrap(), |body| {
-                body.append(gate.clone(), [Qubit::new(0)], [], None)?;
-                Ok(())
-            })
-            .unwrap();
-
-        let analysis = CircuitAnalysis::analyze(&circuit);
-        assert!(analysis.has_measurement);
-        assert!(analysis.has_classical_data);
-        assert!(analysis.has_classical_control);
-        assert!(analysis.has_runtime_classical);
-        assert!(analysis.needs_classical_handle_preservation);
-        assert!(analysis.has_circuit_gate_definitions);
-        assert!(!analysis.has_unitary_circuit_definitions);
-        assert!(!analysis.has_mc_gates);
+    const fn contains(self, gate: StandardGate) -> bool {
+        self.0 & (1_u64 << gate as u8) != 0
     }
 }
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InstructionKind {
+    Standard,
+    McGate,
+    UnitaryGate,
+    CircuitGate,
+    Directive,
+    ClassicalData,
+    ClassicalControl,
+    Delay,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct InstructionKindSet(u16);
+
+impl InstructionKindSet {
+    fn insert(&mut self, kind: InstructionKind) {
+        self.0 |= 1_u16 << kind as u8;
+    }
+
+    const fn contains(self, kind: InstructionKind) -> bool {
+        self.0 & (1_u16 << kind as u8) != 0
+    }
+}
+
+#[cfg(test)]
+#[path = "./analysis_test.rs"]
+mod analysis_test;

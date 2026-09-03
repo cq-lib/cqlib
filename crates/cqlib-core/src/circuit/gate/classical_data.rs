@@ -25,7 +25,7 @@ use std::fmt;
 /// schedule. They produce or overwrite runtime classical storage, while
 /// [`ClassicalExpr`] remains side-effect-free and only reads runtime classical
 /// variables or immutable values.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ClassicalDataOp {
     /// Stores an expression value into a mutable classical variable.
     Store {
@@ -50,6 +50,15 @@ pub enum ClassicalDataOp {
 }
 
 impl ClassicalDataOp {
+    /// Returns the stable snake-case operation name.
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Store { .. } => "store",
+            Self::MeasureBit { .. } => "measure_bit",
+            Self::MeasureBits { .. } => "measure_bits",
+        }
+    }
+
     /// Returns the mutable store target, if this is a store operation.
     pub fn target(&self) -> Option<ClassicalVar> {
         match self {
@@ -77,10 +86,6 @@ impl ClassicalDataOp {
 
 impl fmt::Display for ClassicalDataOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Store { .. } => write!(f, "store"),
-            Self::MeasureBit { .. } => write!(f, "measure_bit"),
-            Self::MeasureBits { .. } => write!(f, "measure_bits"),
-        }
+        f.write_str(self.name())
     }
 }

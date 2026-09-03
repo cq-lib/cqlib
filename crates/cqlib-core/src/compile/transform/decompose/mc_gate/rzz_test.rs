@@ -11,15 +11,15 @@
 // that they have been altered from the originals.
 
 use super::rzz::{decompose_mc_rzz_n_clean, decompose_mc_rzz_no_aux};
+use super::test_utils::{
+    EPSILON, assert_selected_matrix_columns_equal_up_to_global_phase, assert_standard_operation,
+    assert_value_operations_equal, circuit_from_value_operations, mc_gate_matrix,
+};
 use crate::circuit::value_instruction::ValueInstruction;
 use crate::circuit::{
     Instruction, Parameter, ParameterValue, Qubit, StandardGate, circuit_to_matrix,
 };
 use crate::compile::error::CompilerError;
-use crate::util::test_utils::{
-    EPSILON, assert_selected_matrix_columns_equal_up_to_global_phase, assert_standard_operation,
-    assert_value_operations_equal, circuit_from_value_operations, mc_gate_matrix,
-};
 #[test]
 fn zero_controls_emits_bare_rzz() {
     let first = Qubit::new(0);

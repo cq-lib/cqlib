@@ -34,6 +34,8 @@ use crate::circuit::Circuit;
 use crate::circuit::circuit_param::CircuitParam;
 use crate::circuit::error::CircuitError;
 use crate::circuit::gate::Instruction;
+#[cfg(any(test, debug_assertions))]
+use crate::circuit::{ParameterValue, Qubit, ValueOperation};
 use ndarray::Array2;
 use ndarray::parallel::prelude::*;
 use num_complex::Complex64;
@@ -196,7 +198,7 @@ pub fn circuit_to_matrix(
                 }
             }
             Instruction::CircuitGate(circuit_gate) => {
-                let symbols = circuit_gate.symbols();
+                let symbols = circuit_gate.signature_params();
                 let expected = symbols.len();
                 let actual = params.len();
                 if actual != expected {
@@ -242,6 +244,80 @@ pub fn circuit_to_matrix(
         matrix.mapv_inplace(|value| phase * value);
     }
 
+    Ok(matrix)
+}
+
+/// Builds a dense unitary directly from resolved value operations.
+///
+/// This internal path avoids constructing and validating a temporary `Circuit`
+/// in compiler passes that already hold finite, standard-gate operations.
+#[cfg(any(test, debug_assertions))]
+pub(crate) fn value_operations_to_matrix(
+    qubits: &[Qubit],
+    operations: &[ValueOperation],
+    global_phase: f64,
+) -> Result<Array2<Complex64>, CircuitError> {
+    let num_qubits = qubits.len();
+    let dim = 1usize.checked_shl(num_qubits as u32).ok_or_else(|| {
+        CircuitError::InvalidOperation(format!(
+            "cannot build matrix for {num_qubits} qubits: dimension overflows usize"
+        ))
+    })?;
+    dim.checked_mul(dim).ok_or_else(|| {
+        CircuitError::InvalidOperation(format!(
+            "cannot build matrix for {num_qubits} qubits: matrix element count overflows usize"
+        ))
+    })?;
+    let mut qubit_bit_map = HashMap::with_capacity(num_qubits);
+    for (bit, qubit) in qubits.iter().copied().enumerate() {
+        if qubit_bit_map.insert(qubit.index(), bit).is_some() {
+            return Err(CircuitError::InvalidOperation(
+                "matrix qubit order contains duplicates".to_string(),
+            ));
+        }
+    }
+
+    let mut matrix = Array2::eye(dim);
+    for operation in operations {
+        let Some(Instruction::Standard(gate)) = operation.instruction.as_instruction() else {
+            return Err(CircuitError::NoMatrixRepresentation);
+        };
+        let bits = operation
+            .qubits
+            .iter()
+            .map(|qubit| {
+                qubit_bit_map
+                    .get(&qubit.index())
+                    .copied()
+                    .ok_or(CircuitError::QubitNotFound(qubit.id()))
+            })
+            .collect::<Result<SmallVec<[usize; 3]>, _>>()?;
+        let params = operation
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, param)| match param {
+                ParameterValue::Fixed(value) if value.is_finite() => Ok(*value),
+                ParameterValue::Fixed(value) => {
+                    Err(CircuitError::InvalidParameterValue(index, *value))
+                }
+                ParameterValue::Param(_) => Err(CircuitError::SymbolicParameterError),
+            })
+            .collect::<Result<SmallVec<[f64; 4]>, _>>()?;
+        let gate_matrix = gate
+            .matrix(params.as_slice())
+            .map_err(|_| CircuitError::NoMatrixRepresentation)?;
+        let reversed_bits = bits.iter().copied().rev().collect::<SmallVec<[usize; 3]>>();
+        apply_gate_to_matrix(&mut matrix, gate_matrix.as_ref(), &reversed_bits)?;
+    }
+
+    if global_phase != 0.0 {
+        if !global_phase.is_finite() {
+            return Err(CircuitError::InvalidParameterValue(0, global_phase));
+        }
+        let phase = Complex64::from_polar(1.0, global_phase);
+        matrix.mapv_inplace(|value| phase * value);
+    }
     Ok(matrix)
 }
 

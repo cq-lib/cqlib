@@ -18,6 +18,7 @@
 use crate::circuit::error::CircuitError as PyCircuitError;
 use crate::circuit::gate::PyFrozenCircuit;
 use crate::circuit::symbolic_matrix::PySymbolicMatrix;
+use crate::utils::hash_value;
 use cqlib_core::circuit::CircuitError;
 use cqlib_core::circuit::gate::UnitaryGate;
 use num_complex::Complex64;
@@ -27,7 +28,7 @@ use pyo3::{PyResult, Python, pyclass, pymethods};
 use std::sync::Arc;
 
 /// User-defined unitary gate with stable definition identity.
-#[pyclass(name = "UnitaryGate", module = "cqlib.circuit.gates")]
+#[pyclass(name = "UnitaryGate", module = "cqlib.circuit.gates", from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyUnitaryGate {
     inner: UnitaryGate,
@@ -219,12 +220,7 @@ impl PyUnitaryGate {
     }
 
     fn __hash__(&self) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {

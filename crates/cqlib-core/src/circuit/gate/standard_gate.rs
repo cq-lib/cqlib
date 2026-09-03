@@ -46,7 +46,7 @@ use std::hash::Hash;
 /// `StandardGate` is designed to be lightweight (`Copy`, `repr(u8)`) for efficient
 /// storage and transmission.
 #[repr(u8)]
-#[derive(Eq, Hash, PartialEq, Debug, Default, Clone, Copy)]
+#[derive(Eq, Hash, Ord, PartialEq, PartialOrd, Debug, Default, Clone, Copy)]
 pub enum StandardGate {
     /// Identity gate (No-operation).
     #[default]
@@ -89,15 +89,15 @@ pub enum StandardGate {
     // --- Pauli Gates ---
     /// Pauli-X gate (Bit-flip, NOT).
     X,
-    /// XY Interaction (ISWAP-like family).
+    /// Single-qubit pi rotation about an axis in the XY plane.
     XY,
     /// $\\sqrt{X}$ gate (SX).
     X2P,
     /// $\\sqrt{X}^\dagger$ gate (SXdg).
     X2M,
-    /// $\\sqrt{XY}$ positive.
+    /// Positive half-pi single-qubit rotation about an axis in the XY plane.
     XY2P,
-    /// $\\sqrt{XY}$ negative.
+    /// Negative half-pi single-qubit rotation about an axis in the XY plane.
     XY2M,
     /// Pauli-Y gate (Bit-phase-flip).
     Y,
@@ -185,13 +185,99 @@ const GATE_INFO_TABLE: [(u8, u8, u8); 36] = [
     (0, 2, 2), // FSIM
 ];
 
+const ALL_STANDARD_GATES: [StandardGate; 36] = [
+    StandardGate::I,
+    StandardGate::H,
+    StandardGate::RX,
+    StandardGate::RXX,
+    StandardGate::RXY,
+    StandardGate::RY,
+    StandardGate::RYY,
+    StandardGate::RZ,
+    StandardGate::RZX,
+    StandardGate::RZZ,
+    StandardGate::S,
+    StandardGate::SDG,
+    StandardGate::SWAP,
+    StandardGate::T,
+    StandardGate::TDG,
+    StandardGate::U,
+    StandardGate::X,
+    StandardGate::XY,
+    StandardGate::X2P,
+    StandardGate::X2M,
+    StandardGate::XY2P,
+    StandardGate::XY2M,
+    StandardGate::Y,
+    StandardGate::Y2P,
+    StandardGate::Y2M,
+    StandardGate::Z,
+    StandardGate::Phase,
+    StandardGate::GPhase,
+    StandardGate::CX,
+    StandardGate::CCX,
+    StandardGate::CY,
+    StandardGate::CZ,
+    StandardGate::CRX,
+    StandardGate::CRY,
+    StandardGate::CRZ,
+    StandardGate::FSIM,
+];
+
 impl fmt::Display for StandardGate {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
+        f.write_str(self.name())
     }
 }
 
 impl StandardGate {
+    /// Returns the stable operation name used by circuit APIs and statistics.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::I => "I",
+            Self::H => "H",
+            Self::RX => "RX",
+            Self::RXX => "RXX",
+            Self::RXY => "RXY",
+            Self::RY => "RY",
+            Self::RYY => "RYY",
+            Self::RZ => "RZ",
+            Self::RZX => "RZX",
+            Self::RZZ => "RZZ",
+            Self::S => "S",
+            Self::SDG => "SDG",
+            Self::SWAP => "SWAP",
+            Self::T => "T",
+            Self::TDG => "TDG",
+            Self::U => "U",
+            Self::X => "X",
+            Self::XY => "XY",
+            Self::X2P => "X2P",
+            Self::X2M => "X2M",
+            Self::XY2P => "XY2P",
+            Self::XY2M => "XY2M",
+            Self::Y => "Y",
+            Self::Y2P => "Y2P",
+            Self::Y2M => "Y2M",
+            Self::Z => "Z",
+            Self::Phase => "Phase",
+            Self::GPhase => "GPhase",
+            Self::CX => "CX",
+            Self::CCX => "CCX",
+            Self::CY => "CY",
+            Self::CZ => "CZ",
+            Self::CRX => "CRX",
+            Self::CRY => "CRY",
+            Self::CRZ => "CRZ",
+            Self::FSIM => "FSIM",
+        }
+    }
+
+    /// Returns all standard gates in enum discriminant order.
+    pub fn all() -> &'static [Self] {
+        &ALL_STANDARD_GATES
+    }
+
     /// Returns the unitary matrix representation of the gate.
     ///
     /// The matrix is returned as a `Cow<Array2<Complex<f64>>>`.
@@ -370,6 +456,19 @@ impl StandardGate {
         )
     }
 
+    /// Returns whether exchanging the two operands leaves this two-qubit gate unchanged.
+    ///
+    /// This is an exact semantic property used by physical layout and device
+    /// lowering. It is deliberately narrower than being self-inverse or having
+    /// no control qubits: callers may reverse the ordered operands only for the
+    /// gate families listed here.
+    pub(crate) fn is_invariant_under_operand_swap(&self) -> bool {
+        matches!(
+            self,
+            Self::CZ | Self::SWAP | Self::RXX | Self::RYY | Self::RZZ | Self::FSIM
+        )
+    }
+
     /// Returns the number of control qubits defined for this gate.
     ///
     /// For example:
@@ -400,5 +499,69 @@ impl StandardGate {
     /// - `U` -> 3
     pub fn num_params(&self) -> usize {
         GATE_INFO_TABLE[*self as usize].2 as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StandardGate;
+
+    #[test]
+    fn operand_swap_invariance_is_exhaustive_for_two_qubit_standard_gates() {
+        let expected = [
+            StandardGate::RXX,
+            StandardGate::RYY,
+            StandardGate::RZZ,
+            StandardGate::SWAP,
+            StandardGate::CZ,
+            StandardGate::FSIM,
+        ];
+
+        for gate in StandardGate::all()
+            .iter()
+            .copied()
+            .filter(|gate| gate.num_qubits() == 2)
+        {
+            assert_eq!(
+                gate.is_invariant_under_operand_swap(),
+                expected.contains(&gate),
+                "unexpected operand-swap classification for {gate}"
+            );
+        }
+    }
+
+    #[test]
+    fn classified_two_qubit_gates_are_matrix_invariant_under_operand_swap() {
+        let cases: &[(StandardGate, &[f64])] = &[
+            (StandardGate::RXX, &[0.37]),
+            (StandardGate::RYY, &[-0.41]),
+            (StandardGate::RZZ, &[0.23]),
+            (StandardGate::SWAP, &[]),
+            (StandardGate::CZ, &[]),
+            (StandardGate::FSIM, &[0.31, -0.17]),
+        ];
+        let swapped_basis = [0, 2, 1, 3];
+
+        for (gate, params) in cases {
+            let matrix = gate.matrix(params).unwrap();
+            for row in 0..4 {
+                for column in 0..4 {
+                    let swapped = matrix[[swapped_basis[row], swapped_basis[column]]];
+                    assert!(
+                        (matrix[[row, column]] - swapped).norm() < 1e-12,
+                        "{gate} is not invariant at ({row}, {column})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn xy_pulse_family_remains_single_qubit() {
+        for gate in [StandardGate::XY, StandardGate::XY2P, StandardGate::XY2M] {
+            assert_eq!(gate.num_qubits(), 1);
+            assert_eq!(gate.matrix(&[0.37]).unwrap().dim(), (2, 2));
+            assert!(!gate.is_invariant_under_operand_swap());
+        }
     }
 }

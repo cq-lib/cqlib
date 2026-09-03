@@ -12,10 +12,9 @@
 
 //! Python bindings for cqlib-core evolution module.
 
+use crate::utils::hash_value;
 use cqlib_core::qis::evolution::TrotterMode;
 use pyo3::prelude::*;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// Trotter-Suzuki decomposition modes for Hamiltonian time evolution.
 ///
@@ -24,7 +23,7 @@ use std::hash::{Hash, Hasher};
 ///
 /// Variants:
 ///     FirstOrder: First-order Lie-Trotter decomposition. Error scales as O(t^2/n).
-///     SecondOrder: Second-order Strange splitting (symmetric). Error scales as O(t^3/n^2).
+///     SecondOrder: Second-order Strang splitting (symmetric). Error scales as O(t^3/n^2).
 ///     Randomized: Randomized first-order Trotter with specified random seed.
 ///
 /// Examples:
@@ -32,7 +31,7 @@ use std::hash::{Hash, Hasher};
 ///     >>> mode1 = TrotterMode.first_order()
 ///     >>> mode2 = TrotterMode.second_order()
 ///     >>> mode3 = TrotterMode.randomized(42)  # with seed 42
-#[pyclass(name = "TrotterMode", module = "cqlib.qis")]
+#[pyclass(name = "TrotterMode", module = "cqlib.qis", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyTrotterMode {
     pub(crate) inner: TrotterMode,
@@ -67,7 +66,7 @@ impl PyTrotterMode {
 
     /// Returns the second-order Trotter mode.
     ///
-    /// Second-order Strange splitting (symmetric decomposition):
+    /// Second-order Strang splitting (symmetric decomposition):
     /// U(t) ≈ [e^(-i c_1 t/2n · P_1) ... e^(-i c_m t/2n · P_m) ·
     ///         e^(-i c_m t/2n · P_m) ... e^(-i c_1 t/2n · P_1)]^n
     ///
@@ -113,17 +112,10 @@ impl PyTrotterMode {
     }
 
     fn __eq__(&self, other: &PyTrotterMode) -> bool {
-        match (&self.inner, &other.inner) {
-            (TrotterMode::FirstOrder, TrotterMode::FirstOrder) => true,
-            (TrotterMode::SecondOrder, TrotterMode::SecondOrder) => true,
-            (TrotterMode::Randomized(a), TrotterMode::Randomized(b)) => a == b,
-            _ => false,
-        }
+        self.inner == other.inner
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 }

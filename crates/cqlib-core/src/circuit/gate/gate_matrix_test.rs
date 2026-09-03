@@ -11,7 +11,7 @@
 // that they have been altered from the originals.
 
 use super::*;
-use crate::util::test_utils::assert_is_unitary;
+use crate::circuit::test_utils::assert_is_unitary;
 use std::f64::consts::PI;
 
 fn assert_matrix_approx_eq(a: &Array2<Complex<f64>>, b: &Array2<Complex<f64>>) {

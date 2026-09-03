@@ -26,7 +26,7 @@ use crate::circuit::gate::circuit_gate::{CircuitGate, FrozenCircuit};
 use crate::circuit::gate::directive::Directive;
 use crate::circuit::gate::standard_gate::StandardGate;
 use crate::circuit::gate::{ClassicalDataOp, MCGate, UnitaryGate, gate_matrix};
-use crate::circuit::{ClassicalControlOp, Parameter, circuit_to_matrix};
+use crate::circuit::{ClassicalControlOp, ClassicalValue, Parameter, circuit_to_matrix};
 use alloc::borrow::Cow;
 use ndarray::Array2;
 use num_complex::Complex64;
@@ -42,7 +42,7 @@ use std::sync::Arc;
 /// - Use [`Instruction::UnitaryGate`] or [`Instruction::CircuitGate`] for custom unitary behavior.
 /// - Use [`Instruction::Directive`] for non-reversible actions such as measurement and reset.
 /// - Use [`Instruction::ClassicalControl`] for expression-based dynamic control flow.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Instruction {
     /// A standard, natively supported quantum gate (e.g., `H`, `CX`).
     Standard(StandardGate),
@@ -72,6 +72,112 @@ pub enum Instruction {
 }
 
 impl Instruction {
+    /// Returns the stable concrete operation name or user-defined gate label.
+    ///
+    /// Unlike [`Self::instruction_type`], this distinguishes individual gates.
+    /// It is independent of `Debug` and of presentation-only formatting.
+    pub fn name(&self) -> String {
+        match self {
+            Self::Standard(gate) => gate.name().to_string(),
+            Self::McGate(gate) => gate.name(),
+            Self::UnitaryGate(gate) => gate.label().to_string(),
+            Self::CircuitGate(gate) => gate.name().to_string(),
+            Self::Directive(directive) => directive.name().to_string(),
+            Self::ClassicalData(operation) => operation.name().to_string(),
+            Self::ClassicalControl(operation) => operation.name().to_string(),
+            Self::Delay => "delay".to_string(),
+        }
+    }
+
+    /// Returns a stable category name for this instruction.
+    pub const fn instruction_type(&self) -> &'static str {
+        match self {
+            Self::Standard(_) => "standard",
+            Self::McGate(_) => "mcgate",
+            Self::UnitaryGate(_) => "unitary",
+            Self::CircuitGate(_) => "circuit",
+            Self::Directive(_) => "directive",
+            Self::ClassicalData(_) => "classical_data",
+            Self::ClassicalControl(_) => "classical_control",
+            Self::Delay => "delay",
+        }
+    }
+
+    pub const fn is_standard(&self) -> bool {
+        matches!(self, Self::Standard(_))
+    }
+
+    pub const fn is_mcgate(&self) -> bool {
+        matches!(self, Self::McGate(_))
+    }
+
+    pub const fn is_unitary(&self) -> bool {
+        matches!(self, Self::UnitaryGate(_))
+    }
+
+    pub const fn is_circuit_gate(&self) -> bool {
+        matches!(self, Self::CircuitGate(_))
+    }
+
+    pub const fn is_directive(&self) -> bool {
+        matches!(self, Self::Directive(_))
+    }
+
+    pub const fn is_classical_data(&self) -> bool {
+        matches!(self, Self::ClassicalData(_))
+    }
+
+    pub const fn is_classical_control(&self) -> bool {
+        matches!(self, Self::ClassicalControl(_))
+    }
+
+    pub const fn is_delay(&self) -> bool {
+        matches!(self, Self::Delay)
+    }
+
+    /// Returns whether this instruction is a unitary quantum gate.
+    pub const fn is_quantum_gate(&self) -> bool {
+        match self {
+            Self::Standard(_) | Self::McGate(_) | Self::UnitaryGate(_) | Self::CircuitGate(_) => {
+                true
+            }
+            Self::Directive(_)
+            | Self::ClassicalData(_)
+            | Self::ClassicalControl(_)
+            | Self::Delay => false,
+        }
+    }
+
+    /// Returns the standard gate represented directly by this instruction.
+    pub fn standard_gate(&self) -> Option<StandardGate> {
+        match self {
+            Self::Standard(gate) => Some(*gate),
+            _ => None,
+        }
+    }
+
+    /// Returns true when this instruction directly or recursively contains a measurement.
+    pub fn has_measurement(&self) -> bool {
+        match self {
+            Self::Directive(Directive::Measure)
+            | Self::ClassicalData(ClassicalDataOp::MeasureBit { .. })
+            | Self::ClassicalData(ClassicalDataOp::MeasureBits { .. }) => true,
+            Self::ClassicalControl(control) => control.has_measurement(),
+            _ => false,
+        }
+    }
+
+    /// Returns true when this instruction directly or recursively reads `value`.
+    pub fn reads_value(&self, value: ClassicalValue) -> bool {
+        match self {
+            Self::ClassicalData(ClassicalDataOp::Store {
+                value: expression, ..
+            }) => expression.values().contains(&value),
+            Self::ClassicalControl(control) => control.reads_value(value),
+            _ => false,
+        }
+    }
+
     /// Breaks a standard gate into its canonical base gate plus explicit
     /// control count.
     ///
@@ -349,16 +455,7 @@ impl Instruction {
 
 impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Instruction::Standard(g) => write!(f, "{}", g),
-            Instruction::McGate(g) => write!(f, "{}", g),
-            Instruction::UnitaryGate(g) => write!(f, "{}", g),
-            Instruction::CircuitGate(g) => write!(f, "{}", g.name),
-            Instruction::Directive(i) => write!(f, "{}", i),
-            Instruction::ClassicalData(i) => write!(f, "{}", i),
-            Instruction::Delay => write!(f, "delay"),
-            Instruction::ClassicalControl(g) => write!(f, "{}", g),
-        }
+        f.write_str(&self.name())
     }
 }
 

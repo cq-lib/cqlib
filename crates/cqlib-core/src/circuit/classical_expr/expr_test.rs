@@ -271,6 +271,28 @@ fn pack_bits_and_concat_build_bit_vectors() {
 }
 
 #[test]
+fn measurement_store_bit_recognizes_single_bit_updates() {
+    let target = ClassicalVar::new(test_circuit_id(), 0, ClassicalType::bit_vec(3).unwrap());
+    let result = ClassicalValue::new(test_circuit_id(), 0, ClassicalType::Bit);
+    let target_expr = target.expr();
+    let preserved = |index| ClassicalExpr::extract_bit(target_expr.clone(), index).unwrap();
+
+    let store = ClassicalExpr::pack_bits([preserved(0), result.expr(), preserved(2)]).unwrap();
+    assert_eq!(store.measurement_store_bit(target, result), Some(1));
+
+    let duplicated =
+        ClassicalExpr::pack_bits([result.expr(), result.expr(), preserved(2)]).unwrap();
+    assert_eq!(duplicated.measurement_store_bit(target, result), None);
+
+    let wrong_source =
+        ClassicalExpr::pack_bits([preserved(1), result.expr(), preserved(2)]).unwrap();
+    assert_eq!(wrong_source.measurement_store_bit(target, result), None);
+
+    let wrong_width = ClassicalExpr::pack_bits([preserved(0), result.expr()]).unwrap();
+    assert_eq!(wrong_width.measurement_store_bit(target, result), None);
+}
+
+#[test]
 fn variables_are_collected_recursively() {
     let bit0 = ClassicalExpr::var(ClassicalVar::new(test_circuit_id(), 0, ClassicalType::Bit));
     let bit1 = ClassicalExpr::var(ClassicalVar::new(test_circuit_id(), 1, ClassicalType::Bit));

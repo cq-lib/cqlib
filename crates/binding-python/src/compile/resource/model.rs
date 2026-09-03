@@ -12,17 +12,20 @@
 
 use crate::circuit::PyQubit;
 use crate::circuit::bit::PyIntListOrQubitList;
+use crate::utils::hash_value;
 use cqlib_core::circuit::Qubit;
 use cqlib_core::compile::resource::{
     AncillaRequirement, ResourceLease, ResourcePlan, ResourceRequest,
 };
 use pyo3::prelude::*;
 use std::collections::BTreeSet;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// State-restoration contract for ancillary qubits.
-#[pyclass(name = "AncillaRequirement", module = "cqlib.compile.resource")]
+#[pyclass(
+    name = "AncillaRequirement",
+    module = "cqlib.compile.resource",
+    from_py_object
+)]
 #[derive(Clone, Copy, Debug)]
 pub struct PyAncillaRequirement {
     pub(crate) inner: AncillaRequirement,
@@ -71,13 +74,7 @@ impl PyAncillaRequirement {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        match self.inner {
-            AncillaRequirement::CleanZero => 0_u8,
-            AncillaRequirement::Dirty => 1_u8,
-        }
-        .hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {
@@ -90,7 +87,11 @@ impl PyAncillaRequirement {
 }
 
 /// Python value object describing an ancillary-resource request.
-#[pyclass(name = "ResourceRequest", module = "cqlib.compile.resource")]
+#[pyclass(
+    name = "ResourceRequest",
+    module = "cqlib.compile.resource",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyResourceRequest {
     pub(crate) inner: ResourceRequest,
@@ -181,7 +182,11 @@ impl PyResourceRequest {
 }
 
 /// Side-effect-free, manager-specific allocation preview.
-#[pyclass(name = "ResourcePlan", module = "cqlib.compile.resource")]
+#[pyclass(
+    name = "ResourcePlan",
+    module = "cqlib.compile.resource",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyResourcePlan {
     pub(crate) inner: ResourcePlan,
@@ -244,7 +249,11 @@ impl PyResourcePlan {
 }
 
 /// Credential for an active ancillary-resource lease.
-#[pyclass(name = "ResourceLease", module = "cqlib.compile.resource")]
+#[pyclass(
+    name = "ResourceLease",
+    module = "cqlib.compile.resource",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyResourceLease {
     pub(crate) inner: ResourceLease,

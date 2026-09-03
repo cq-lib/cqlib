@@ -410,6 +410,45 @@ fn test_builtin_qelib1_gate_declarations_are_allowed() {
 }
 
 #[test]
+fn test_register_broadcast_standard_gates() {
+    let circuit = loads(
+        r#"
+        OPENQASM 2.0;
+        include "qelib1.inc";
+        qreg q[3];
+        qreg r[3];
+        h q;
+        cx q,r;
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(circuit.operations().len(), 6);
+    assert_standard_gate(&circuit, 0, StandardGate::H, &[0], &[]);
+    assert_standard_gate(&circuit, 1, StandardGate::H, &[1], &[]);
+    assert_standard_gate(&circuit, 2, StandardGate::H, &[2], &[]);
+    assert_standard_gate(&circuit, 3, StandardGate::CX, &[0, 3], &[]);
+    assert_standard_gate(&circuit, 4, StandardGate::CX, &[1, 4], &[]);
+    assert_standard_gate(&circuit, 5, StandardGate::CX, &[2, 5], &[]);
+}
+
+#[test]
+fn test_integer_overflow_reports_parse_error_instead_of_panicking() {
+    let error = loads(
+        r#"
+        OPENQASM 2.0;
+        include "qelib1.inc";
+        qreg q[1];
+        creg c[1];
+        if(c==2037035976334486086268445688409378161051468393665936250636140449354381299763336706183397376) h q[0];
+        "#,
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, QasmParseError::ParseError(_)));
+}
+
+#[test]
 fn test_qelib1_reserved_gate_names_match_static_tables() {
     use std::collections::HashSet;
 
@@ -727,7 +766,7 @@ fn test_if_statement_rejects_conditional_barrier() {
     )
     .unwrap_err();
 
-    assert!(error.to_string().contains("Barrier"));
+    assert!(matches!(error, QasmParseError::ParseError(_)));
 }
 
 #[test]
@@ -1098,5 +1137,319 @@ fn test_null_resolver_recludes_includes() {
         err.contains("raw string mode") || err.contains("Cannot include"),
         "Expected error about raw string mode, got: {}",
         err
+    );
+}
+
+#[test]
+fn test_custom_gate_parameter_binding_uses_declared_order() {
+    let circuit = loads(
+        r#"
+        OPENQASM 2.0;
+        qreg q[1];
+        gate g(a, b) q {
+            rx(b) q;
+            ry(a) q;
+        }
+        g(1.0, 2.0) q[0];
+        "#,
+    )
+    .unwrap();
+
+    let decomposed = circuit.decompose().unwrap();
+    assert_standard_gate(&decomposed, 0, StandardGate::RX, &[0], &[2.0]);
+    assert_standard_gate(&decomposed, 1, StandardGate::RY, &[0], &[1.0]);
+}
+
+#[test]
+fn test_custom_gate_declared_but_unused_parameters_keep_call_arity() {
+    let circuit = loads(
+        r#"
+        OPENQASM 2.0;
+        qreg q[1];
+        gate g(theta) q { x q; }
+        g(pi) q[0];
+        "#,
+    )
+    .unwrap();
+
+    let decomposed = circuit.decompose().unwrap();
+    assert_standard_gate(&decomposed, 0, StandardGate::X, &[0], &[]);
+}
+
+#[test]
+fn test_custom_gate_parameter_expressions_substitute_by_formal_name() {
+    let circuit = loads(
+        r#"
+        OPENQASM 2.0;
+        qreg q[1];
+        gate g(a, b) q { rx(a + b) q; }
+        g(1.0, 2.0) q[0];
+        "#,
+    )
+    .unwrap();
+
+    let decomposed = circuit.decompose().unwrap();
+    assert_standard_gate(&decomposed, 0, StandardGate::RX, &[0], &[3.0]);
+}
+
+#[test]
+fn test_gate_invocation_broadcasts_single_register_argument() {
+    let circuit = loads(
+        r#"
+        OPENQASM 2.0;
+        qreg q[4];
+        x q;
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(circuit.operations().len(), 4);
+    for index in 0..4 {
+        assert_standard_gate(&circuit, index, StandardGate::X, &[index as u32], &[]);
+    }
+}
+
+#[test]
+fn test_gate_invocation_broadcasts_multiple_register_arguments_by_index() {
+    let circuit = loads(
+        r#"
+        OPENQASM 2.0;
+        qreg a[3];
+        qreg b[3];
+        cx a, b;
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(circuit.operations().len(), 3);
+    assert_standard_gate(&circuit, 0, StandardGate::CX, &[0, 3], &[]);
+    assert_standard_gate(&circuit, 1, StandardGate::CX, &[1, 4], &[]);
+    assert_standard_gate(&circuit, 2, StandardGate::CX, &[2, 5], &[]);
+}
+
+#[test]
+fn test_gate_invocation_rejects_mismatched_register_broadcast_widths() {
+    let error = loads(
+        r#"
+        OPENQASM 2.0;
+        qreg a[2];
+        qreg b[3];
+        cx a, b;
+        "#,
+    )
+    .unwrap_err();
+
+    assert!(
+        error.to_string().contains("width")
+            || error.to_string().contains("broadcast")
+            || error.to_string().contains("Mismatched")
+    );
+}
+
+#[test]
+fn test_parser_rejects_empty_lists_and_trailing_commas() {
+    for qasm in [
+        r#"OPENQASM 2.0; qreg q[1]; gate g { }"#,
+        r#"OPENQASM 2.0; qreg q[1]; barrier ;"#,
+        r#"OPENQASM 2.0; qreg q[1]; x ;"#,
+        r#"OPENQASM 2.0; qreg q[1]; x q[0],;"#,
+    ] {
+        assert!(
+            parser::MainParser::new().parse(qasm).is_err(),
+            "invalid list syntax should fail to parse: {qasm}"
+        );
+    }
+}
+
+#[test]
+fn test_parser_rejects_non_uop_statements_inside_gate_body() {
+    for qasm in [
+        r#"OPENQASM 2.0; qreg q[1]; creg c[1]; gate bad a { measure a -> c[0]; }"#,
+        r#"OPENQASM 2.0; qreg q[1]; gate bad a { reset a; }"#,
+        r#"OPENQASM 2.0; qreg q[1]; creg c[1]; gate bad a { if (c == 1) x a; }"#,
+    ] {
+        assert!(
+            parser::MainParser::new().parse(qasm).is_err(),
+            "invalid gate body should fail to parse: {qasm}"
+        );
+    }
+}
+
+#[test]
+fn test_parser_rejects_non_qop_if_body() {
+    for qasm in [
+        r#"OPENQASM 2.0; qreg q[1]; creg c[1]; if (c == 1) barrier q;"#,
+        r#"OPENQASM 2.0; qreg q[1]; creg c[1]; if (c == 1) qreg r[1];"#,
+        r#"OPENQASM 2.0; qreg q[1]; creg c[1]; if (c == 1) gate g a { x a; }"#,
+    ] {
+        assert!(
+            parser::MainParser::new().parse(qasm).is_err(),
+            "invalid if-body should fail to parse: {qasm}"
+        );
+    }
+}
+
+#[test]
+fn test_duplicate_declarations_and_namespace_conflicts_are_rejected() {
+    for qasm in [
+        r#"OPENQASM 2.0; qreg q[1]; qreg q[2];"#,
+        r#"OPENQASM 2.0; qreg x[1]; creg x[1];"#,
+        r#"OPENQASM 2.0; gate g a { x a; } gate g b { h b; } qreg q[1]; g q[0];"#,
+    ] {
+        assert!(
+            loads(qasm).is_err(),
+            "duplicate declaration or namespace conflict should fail: {qasm}"
+        );
+    }
+}
+
+#[test]
+fn test_gate_formal_name_conflicts_are_rejected() {
+    for qasm in [
+        r#"OPENQASM 2.0; gate g a, a { x a; } qreg q[1]; g q[0];"#,
+        r#"OPENQASM 2.0; gate g(theta, theta) q { rx(theta) q; } qreg q[1]; g(1.0) q[0];"#,
+        r#"OPENQASM 2.0; gate g(theta) theta { x theta; } qreg q[1]; g(1.0) q[0];"#,
+    ] {
+        assert!(
+            loads(qasm).is_err(),
+            "duplicate or conflicting gate formals should fail: {qasm}"
+        );
+    }
+}
+
+#[test]
+fn test_nested_include_paths_are_resolved_relative_to_including_file() {
+    use std::collections::HashMap;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    struct NestedResolver {
+        files: HashMap<PathBuf, String>,
+    }
+
+    impl QasmSourceResolver for NestedResolver {
+        fn resolve_source(&self, path: &Path) -> Result<String, io::Error> {
+            self.files.get(path).cloned().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, format!("File not found: {path:?}"))
+            })
+        }
+    }
+
+    let files = HashMap::from([
+        (
+            PathBuf::from("root/lib/a.inc"),
+            r#"include "b.inc"; gate outer a { inner a; }"#.to_string(),
+        ),
+        (
+            PathBuf::from("root/lib/b.inc"),
+            r#"gate inner a { x a; }"#.to_string(),
+        ),
+    ]);
+    let resolver = Box::new(NestedResolver { files });
+
+    let circuit = parse_qasm_with_context(
+        r#"
+        OPENQASM 2.0;
+        include "lib/a.inc";
+        qreg q[1];
+        outer q[0];
+        "#,
+        Some(PathBuf::from("root")),
+        resolver,
+    )
+    .unwrap();
+
+    assert_eq!(circuit.num_qubits(), 1);
+}
+
+#[test]
+fn test_qasm2_loader_rejects_unsupported_version_and_invalid_integer_forms() {
+    assert!(
+        loads("OPENQASM 3.0; qreg q[1];").is_err(),
+        "QASM2 loader should reject non-2.0 versions"
+    );
+    assert!(
+        parser::MainParser::new()
+            .parse("OPENQASM 2.0; qreg q[01];")
+            .is_err(),
+        "nninteger should reject leading zeroes"
+    );
+    assert!(
+        loads("OPENQASM 2.0; qreg q[999999999999999999999999999999];").is_err(),
+        "oversized integer literals should return an error instead of panicking"
+    );
+}
+
+#[test]
+fn test_uppercase_gate_names_follow_qasm2_identifier_rules() {
+    for qasm in [
+        r#"OPENQASM 2.0; qreg q[1]; X q[0];"#,
+        r#"OPENQASM 2.0; qreg q[1]; U2(0, 0) q[0];"#,
+        r#"OPENQASM 2.0; qreg q[1]; RX(0) q[0];"#,
+    ] {
+        assert!(
+            parser::MainParser::new().parse(qasm).is_err(),
+            "uppercase non-special gate should fail to parse: {qasm}"
+        );
+    }
+
+    assert!(
+        parser::MainParser::new()
+            .parse("OPENQASM 2.0; qreg q[2]; U(0, 0, 0) q[0]; CX q[0], q[1];")
+            .is_ok(),
+        "uppercase U and CX are QASM2 special cases"
+    );
+}
+
+#[test]
+fn test_opaque_invocations_and_duplicate_opaque_names_are_rejected() {
+    for qasm in [
+        r#"OPENQASM 2.0; opaque foo a; qreg q[1]; foo q[0];"#,
+        r#"OPENQASM 2.0; opaque foo(theta) a; qreg q[1]; foo(pi) q[0];"#,
+        r#"OPENQASM 2.0; opaque foo a; gate foo b { x b; } qreg q[1]; foo q[0];"#,
+    ] {
+        assert!(
+            loads(qasm).is_err(),
+            "opaque invocation or duplicate opaque name should fail: {qasm}"
+        );
+    }
+}
+
+#[test]
+fn test_division_by_zero_is_reported_without_panic_after_parameter_binding() {
+    assert!(
+        loads("OPENQASM 2.0; qreg q[1]; rx(1/0) q[0];").is_err(),
+        "constant division by zero should fail during load"
+    );
+
+    let circuit = loads(
+        r#"
+        OPENQASM 2.0;
+        qreg q[1];
+        gate g(theta) q { rx(1/theta) q; }
+        g(2) q[0];
+        "#,
+    )
+    .unwrap();
+    let decomposed = circuit.decompose().unwrap();
+    assert_standard_gate(&decomposed, 0, StandardGate::RX, &[0], &[0.5]);
+
+    let circuit = loads(
+        r#"
+        OPENQASM 2.0;
+        qreg q[1];
+        gate g(theta) q { rx(1/theta) q; }
+        g(0) q[0];
+        "#,
+    )
+    .unwrap();
+    let result = std::panic::catch_unwind(|| circuit.decompose());
+    assert!(
+        result.is_ok(),
+        "decompose should return an error, not panic"
+    );
+    assert!(
+        result.unwrap().is_err(),
+        "division by zero after parameter binding should be an error"
     );
 }

@@ -11,20 +11,40 @@
 // that they have been altered from the originals.
 
 use crate::circuit::PyCircuit;
-use cqlib_core::compile::transform::TransformResult;
+use cqlib_core::circuit::Circuit;
+use cqlib_core::compile::transform::TransformOutcome;
 use cqlib_core::compile::transform::decompose::DecompositionRuleStats;
 use pyo3::prelude::*;
 
 /// Common result returned by circuit-to-circuit transforms.
-#[pyclass(name = "TransformResult", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "TransformResult",
+    module = "cqlib.compile.transform",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyTransformResult {
-    pub(crate) inner: TransformResult,
+    circuit: Circuit,
+    changed: bool,
 }
 
-impl From<TransformResult> for PyTransformResult {
-    fn from(inner: TransformResult) -> Self {
-        Self { inner }
+impl PyTransformResult {
+    /// Resolves the core's borrowed-input outcome into Python's owned result.
+    ///
+    /// The input circuit has already been cloned at the Python boundary. Move
+    /// that clone into the result when the transform is unchanged instead of
+    /// cloning it a second time.
+    pub(crate) fn from_outcome(original: Circuit, outcome: TransformOutcome) -> Self {
+        match outcome {
+            TransformOutcome::Unchanged => Self {
+                circuit: original,
+                changed: false,
+            },
+            TransformOutcome::Changed(circuit) => Self {
+                circuit,
+                changed: true,
+            },
+        }
     }
 }
 
@@ -32,23 +52,23 @@ impl From<TransformResult> for PyTransformResult {
 impl PyTransformResult {
     #[getter]
     fn circuit(&self) -> PyCircuit {
-        self.inner.circuit.clone().into()
+        self.circuit.clone().into()
     }
 
     #[getter]
     fn changed(&self) -> bool {
-        self.inner.changed
+        self.changed
     }
 
     fn __repr__(&self) -> String {
         format!(
             "TransformResult(changed={})",
-            if self.inner.changed { "True" } else { "False" }
+            if self.changed { "True" } else { "False" }
         )
     }
 
     fn __eq__(&self, other: &Self) -> bool {
-        self.inner == other.inner
+        self.circuit == other.circuit && self.changed == other.changed
     }
 
     fn __copy__(&self) -> Self {
@@ -63,7 +83,8 @@ impl PyTransformResult {
 /// Pass-local runtime decomposition-rule cache counters.
 #[pyclass(
     name = "DecompositionRuleStats",
-    module = "cqlib.compile.transform.decompose"
+    module = "cqlib.compile.transform.decompose",
+    skip_from_py_object
 )]
 #[derive(Clone, Copy, Debug)]
 pub struct PyDecompositionRuleStats {

@@ -139,3 +139,53 @@ rule decompose_rzx_to_cz {
     match { RZX(theta) 0 1 }
     rewrite { CZ 0 1, H 1, RZ(theta) 1, H 1, CZ 0 1 }
 }
+
+rule decompose_cz_to_rx_ry_rzz {
+    match { CZ 0 1 }
+    rewrite { RX(-π/2) 0, RY(π/2) 0, RX(π/2) 0, RX(-π/2) 1, RY(π/2) 1, RX(π/2) 1, RZZ(-π/2) 0 1 }
+}
+
+rule decompose_cx_to_rx_ry_rzz {
+    match { CX 0 1 }
+    rewrite { RY(π/2) 1, RX(π) 1, RX(-π/2) 0, RY(π/2) 0, RX(π/2) 0, RX(-π/2) 1, RY(π/2) 1, RX(π/2) 1, RZZ(-π/2) 0 1, RY(π/2) 1, RX(π) 1, GPhase(-3π/4) }
+}
+
+rule decompose_rxx_to_rx_ry_rzz {
+    match { RXX(theta) 0 1 }
+    rewrite { RY(-π/2) 0, RY(-π/2) 1, RZZ(theta) 0 1, RY(π/2) 1, RY(π/2) 0 }
+}
+
+rule decompose_ryy_to_rx_ry_rzz {
+    match { RYY(theta) 0 1 }
+    rewrite { RX(π/2) 0, RX(π/2) 1, RZZ(theta) 0 1, RX(-π/2) 1, RX(-π/2) 0 }
+}
+
+rule decompose_rzx_to_rx_ry_rzz {
+    match { RZX(theta) 0 1 }
+    rewrite { RY(-π/2) 1, RZZ(theta) 0 1, RY(π/2) 1 }
+}
+
+rule decompose_cx_to_rzx {
+    match { CX 0 1 }
+    rewrite { RZ(π/2) 0, RX(π/2) 1, RZX(-π/2) 0 1, GPhase(π/4) }
+}
+
+rule decompose_cz_to_rzx {
+    match { CZ 0 1 }
+    rewrite { H 1, RZ(π/2) 0, RX(π/2) 1, RZX(-π/2) 0 1, H 1, GPhase(π/4) }
+}
+
+rule decompose_cy_to_rzx {
+    match { CY 0 1 }
+    rewrite { SDG 1, RZ(π/2) 0, RX(π/2) 1, RZX(-π/2) 0 1, S 1, GPhase(π/4) }
+}
+
+rule decompose_swap_to_rzx {
+    match { SWAP 0 1 }
+    rewrite {
+        RZ(π/2) 0, RX(π/2) 1, RZX(-π/2) 0 1,
+        RZ(π/2) 1, RX(π/2) 0, RZX(-π/2) 1 0,
+        RZ(π/2) 0, RX(π/2) 1, RZX(-π/2) 0 1,
+        GPhase(3*π/4)
+    }
+}

@@ -11,6 +11,10 @@
 # that they have been altered from the originals.
 
 from cqlib import Qubit
+from .qubit import LogicalQubit, PhysicalQubit
+
+_LogicalQubitLike = int | Qubit | LogicalQubit
+_PhysicalQubitLike = int | Qubit | PhysicalQubit
 
 
 class Layout:
@@ -36,15 +40,15 @@ class Layout:
         >>> layout.num_vacant_physical  # 2
         >>> layout.num_physical         # 4
         >>>
-        >>> layout.get_physical(0)  # Qubit(100) or similar
-        >>> layout.get_logical(100) # Qubit(0) or similar
+        >>> layout.get_physical(0)  # PhysicalQubit(100) or similar
+        >>> layout.get_logical(100) # LogicalQubit(0) or similar
 
     Key Usage — custom initial mapping::
 
         >>> init_map = {0: 101, 1: 100}
         >>> layout = Layout([0, 1], [100, 101, 102], init_map=init_map)
         >>>
-        >>> layout.get_physical(0)  # Qubit(101)
+        >>> layout.get_physical(0)  # PhysicalQubit(101)
 
     Key Usage — from pairs::
 
@@ -63,9 +67,9 @@ class Layout:
 
     def __init__(
         self,
-        logical: list[int] | list[Qubit],
-        physical: list[int] | list[Qubit],
-        init_map: dict[Qubit, Qubit] | None = None,
+        logical: list[_LogicalQubitLike],
+        physical: list[_PhysicalQubitLike],
+        init_map: dict[_LogicalQubitLike, _PhysicalQubitLike] | None = None,
     ) -> None:
         """Creates a new layout mapping logical to physical qubits.
 
@@ -73,9 +77,6 @@ class Layout:
         qubits are mapped to remaining physical qubits in the order
         supplied by ``logical`` and ``physical``. Extra physical qubits
         remain vacant.
-
-        Note: ``logical`` and ``physical`` must each be all ``int`` or all
-        ``Qubit``.
 
         Args:
             logical: List of logical qubit identifiers.
@@ -122,19 +123,23 @@ class Layout:
 
     # ---- Lookup methods ----
 
-    def get_physical(self, logical_id: int | Qubit) -> Qubit | None:
+    def get_physical(self, logical_id: _LogicalQubitLike) -> PhysicalQubit | None:
         """Get the physical qubit mapped to a logical qubit.
 
-        Returns ``None`` if the logical qubit is not bound.
+        Returns ``None`` if the logical qubit is not bound. Use the
+        ``.qubit`` property on the result for an explicit bridge to a
+        circuit :class:`cqlib.Qubit`.
 
         Args:
             logical_id: The logical qubit to look up.
         """
 
-    def get_logical(self, physical_id: int | Qubit) -> Qubit | None:
+    def get_logical(self, physical_id: _PhysicalQubitLike) -> LogicalQubit | None:
         """Get the logical qubit carried by a physical qubit.
 
-        Returns ``None`` if the physical qubit is vacant.
+        Returns ``None`` if the physical qubit is vacant. Use the
+        ``.qubit`` property on the result for an explicit bridge to a
+        circuit :class:`cqlib.Qubit`.
 
         Args:
             physical_id: The physical qubit to look up.
@@ -143,18 +148,18 @@ class Layout:
     # ---- Iterators ----
 
     @property
-    def logical_qubits(self) -> list[Qubit]:
+    def logical_qubits(self) -> list[LogicalQubit]:
         """All mapped logical qubits."""
 
     @property
-    def physical_qubits(self) -> list[Qubit]:
+    def physical_qubits(self) -> list[PhysicalQubit]:
         """All physical qubits available to the layout."""
 
     @property
-    def vacant_physical_qubits(self) -> list[Qubit]:
+    def vacant_physical_qubits(self) -> list[PhysicalQubit]:
         """All vacant physical qubits (not carrying a logical qubit)."""
 
-    def is_physical_vacant(self, physical_id: int | Qubit) -> bool:
+    def is_physical_vacant(self, physical_id: _PhysicalQubitLike) -> bool:
         """Check whether a physical qubit is in the layout and vacant.
 
         Args:
@@ -164,14 +169,14 @@ class Layout:
     # ---- Mapping dictionaries ----
 
     @property
-    def l2p_map(self) -> dict[Qubit, Qubit]:
+    def l2p_map(self) -> dict[LogicalQubit, PhysicalQubit]:
         """The logical-to-physical qubit mapping.
 
         Returns a dict mapping each logical qubit to its physical qubit.
         """
 
     @property
-    def p2l_map(self) -> dict[Qubit, Qubit]:
+    def p2l_map(self) -> dict[PhysicalQubit, LogicalQubit]:
         """The physical-to-logical qubit mapping.
 
         Returns a dict mapping each occupied physical qubit to its
@@ -180,7 +185,7 @@ class Layout:
 
     # ---- Mutation (routing operations) ----
 
-    def bind(self, logical_id: int | Qubit, physical_id: int | Qubit) -> None:
+    def bind(self, logical_id: _LogicalQubitLike, physical_id: _PhysicalQubitLike) -> None:
         """Bind an unmapped logical qubit to a vacant physical qubit.
 
         May introduce a new logical qubit to the layout. The caller must
@@ -196,7 +201,7 @@ class Layout:
                 either qubit already participates in a mapping.
         """
 
-    def unbind(self, logical_id: int | Qubit) -> Qubit:
+    def unbind(self, logical_id: _LogicalQubitLike) -> PhysicalQubit:
         """Remove the mapping for a logical qubit and return the released
         physical qubit.
 
@@ -211,7 +216,7 @@ class Layout:
         """
 
     def swap_physical(
-        self, phys_a: int | Qubit, phys_b: int | Qubit
+        self, phys_a: _PhysicalQubitLike, phys_b: _PhysicalQubitLike
     ) -> None:
         """Swap the logical qubits carried by two physical qubits.
 

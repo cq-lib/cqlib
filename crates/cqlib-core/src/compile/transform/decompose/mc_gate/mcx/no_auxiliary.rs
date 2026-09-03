@@ -29,7 +29,7 @@
 
 use crate::circuit::{ParameterValue, Qubit, StandardGate, operation::ValueOperation};
 use crate::compile::error::CompilerError;
-use crate::util::qubit::find_duplicate_qubit;
+use crate::compile::transform::decompose::mc_gate::validation::find_duplicate_qubit;
 use std::f64::consts::PI;
 
 use super::{
@@ -142,7 +142,7 @@ pub fn decompose_mcx_no_aux(
 
 /// Chooses Figure 7 only when its parity precondition and cost threshold hold.
 pub(super) fn select_hp24_path(total_qubits: usize) -> Hp24Path {
-    if total_qubits % 2 == 0 && total_qubits >= ONE_DIRTY_INCREMENT_MIN_QUBITS {
+    if total_qubits & 1 == 0 && total_qubits >= ONE_DIRTY_INCREMENT_MIN_QUBITS {
         Hp24Path::OneDirty
     } else {
         Hp24Path::TwoDirty
@@ -414,7 +414,7 @@ pub(super) fn emit_increment_one_dirty(
     internal_dirty: Qubit,
     direction: IncrementDirection,
 ) -> Result<(), CompilerError> {
-    if data_qubits.is_empty() || data_qubits.len() % 2 == 0 {
+    if data_qubits.is_empty() || data_qubits.len() & 1 == 0 {
         return Err(CompilerError::TransformFailed {
             name: DECOMPOSE_MCX_NAME,
             reason: format!(

@@ -11,12 +11,12 @@
 // that they have been altered from the originals.
 
 use super::hadamard::{decompose_hadamard_n_clean, decompose_hadamard_no_aux};
-use crate::circuit::{Qubit, StandardGate, circuit_to_matrix};
-use crate::compile::error::CompilerError;
-use crate::util::test_utils::{
+use super::test_utils::{
     EPSILON, assert_fixed_parameter_operation, assert_selected_matrix_columns_approx_eq,
     assert_standard_operation, circuit_from_value_operations, mc_gate_matrix,
 };
+use crate::circuit::{Qubit, StandardGate, circuit_to_matrix};
+use crate::compile::error::CompilerError;
 use std::f64::consts::PI;
 
 #[test]

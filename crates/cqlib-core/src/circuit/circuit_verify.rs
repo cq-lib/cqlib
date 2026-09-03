@@ -121,12 +121,13 @@ impl ClassicalVerifier<'_> {
         context_name: &str,
     ) -> Result<HashSet<ClassicalValue>, CircuitError> {
         for (index, operation) in operations.iter().enumerate() {
-            let operation_context = format!("{context_name} operation {index}");
             match &operation.instruction {
                 Instruction::ClassicalData(op) => {
+                    let operation_context = format!("{context_name} operation {index}");
                     self.verify_data_op(op, operation, &mut available, &operation_context)?;
                 }
                 Instruction::ClassicalControl(op) => {
+                    let operation_context = format!("{context_name} operation {index}");
                     self.verify_control_op(op, &available, context, &operation_context)?;
                     match op {
                         ClassicalControlOp::Break => {

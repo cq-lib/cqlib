@@ -157,6 +157,15 @@ class Statevector:
         """
         ...
 
+    def apply_pauli_rotation(self, pauli: PauliString, theta: float) -> None:
+        """Applies ``exp(-i * theta / 2 * P)`` using a fused native kernel.
+
+        Args:
+            pauli: Hermitian Pauli string with the same number of qubits.
+            theta: Rotation angle in radians.
+        """
+        ...
+
     def apply_x(self, qubit: int) -> None:
         """Applies the Pauli-X (NOT) gate to the specified qubit.
 

@@ -15,17 +15,20 @@
 use crate::circuit::{PyCircuit, PyInstruction};
 use crate::compile::error::compiler_error_to_py_err;
 use crate::compile::knowledge::library::PyRuleKind;
+use crate::utils::hash_value;
 use cqlib_core::compile::knowledge::library::RuleKind;
 use cqlib_core::compile::transform::{
     KnowledgeRewriteResult, KnowledgeRewriteStats, KnowledgeRewriter, RewriteConfig, RewriteMode,
     rewrite_circuit,
 };
 use pyo3::prelude::*;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// High-level knowledge-rule application mode.
-#[pyclass(name = "RewriteMode", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "RewriteMode",
+    module = "cqlib.compile.transform",
+    from_py_object
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PyRewriteMode {
     inner: RewriteMode,
@@ -72,9 +75,7 @@ impl PyRewriteMode {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.name().hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {
@@ -87,7 +88,11 @@ impl PyRewriteMode {
 }
 
 /// Configuration for knowledge-based local circuit rewrite.
-#[pyclass(name = "RewriteConfig", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "RewriteConfig",
+    module = "cqlib.compile.transform",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyRewriteConfig {
     pub(crate) inner: RewriteConfig,
@@ -122,12 +127,13 @@ impl PyRewriteConfig {
             },
         );
         format!(
-            "RewriteConfig(max_rounds={}, max_window_ops={}, max_pattern_len={}, recurse_control_flow={}, skip_labeled_ops={}, enabled_kinds=[{}], mode={}, target_instructions={})",
+            "RewriteConfig(max_rounds={}, max_window_ops={}, max_pattern_len={}, recurse_control_flow={}, skip_labeled_ops={}, preserve_two_qubit_connectivity={}, enabled_kinds=[{}], mode={}, target_instructions={})",
             self.inner.max_rounds(),
             self.inner.max_window_ops(),
             self.inner.max_pattern_len(),
             python_bool(self.inner.recurses_control_flow()),
             python_bool(self.inner.skips_labeled_ops()),
+            python_bool(self.inner.preserve_two_qubit_connectivity()),
             enabled_kinds,
             PyRewriteMode::from(self.inner.mode()).__repr__(),
             target_instructions,
@@ -139,7 +145,7 @@ impl PyRewriteConfig {
 impl PyRewriteConfig {
     /// Creates a rewrite configuration from a production or lowering preset.
     #[new]
-    #[pyo3(signature = (*, max_rounds=8, max_window_ops=16, max_pattern_len=8, recurse_control_flow=true, skip_labeled_ops=true, enabled_kinds=None, mode=None, target_instructions=None))]
+    #[pyo3(signature = (*, max_rounds=8, max_window_ops=16, max_pattern_len=8, recurse_control_flow=true, skip_labeled_ops=true, preserve_two_qubit_connectivity=false, enabled_kinds=None, mode=None, target_instructions=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         max_rounds: u8,
@@ -147,6 +153,7 @@ impl PyRewriteConfig {
         max_pattern_len: usize,
         recurse_control_flow: bool,
         skip_labeled_ops: bool,
+        preserve_two_qubit_connectivity: bool,
         enabled_kinds: Option<Vec<PyRuleKind>>,
         mode: Option<PyRewriteMode>,
         target_instructions: Option<Vec<PyInstruction>>,
@@ -161,6 +168,7 @@ impl PyRewriteConfig {
         .with_max_pattern_len(max_pattern_len)
         .recurse_control_flow(recurse_control_flow)
         .skip_labeled_ops(skip_labeled_ops)
+        .with_preserve_two_qubit_connectivity(preserve_two_qubit_connectivity)
         .with_mode(mode);
 
         if let Some(kinds) = enabled_kinds {
@@ -218,6 +226,11 @@ impl PyRewriteConfig {
     }
 
     #[getter]
+    fn preserve_two_qubit_connectivity(&self) -> bool {
+        self.inner.preserve_two_qubit_connectivity()
+    }
+
+    #[getter]
     fn enabled_kinds(&self) -> Vec<PyRuleKind> {
         self.inner
             .enabled_kinds()
@@ -257,7 +270,11 @@ impl PyRewriteConfig {
 }
 
 /// Aggregate statistics produced by one knowledge rewrite run.
-#[pyclass(name = "KnowledgeRewriteStats", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "KnowledgeRewriteStats",
+    module = "cqlib.compile.transform",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyKnowledgeRewriteStats {
     inner: KnowledgeRewriteStats,
@@ -315,7 +332,11 @@ impl PyKnowledgeRewriteStats {
 }
 
 /// Rewritten circuit and fixed-point run metadata.
-#[pyclass(name = "KnowledgeRewriteResult", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "KnowledgeRewriteResult",
+    module = "cqlib.compile.transform",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyKnowledgeRewriteResult {
     inner: KnowledgeRewriteResult,
@@ -362,7 +383,11 @@ impl PyKnowledgeRewriteResult {
 }
 
 /// Configurable knowledge-based local circuit rewriter.
-#[pyclass(name = "KnowledgeRewriter", module = "cqlib.compile.transform")]
+#[pyclass(
+    name = "KnowledgeRewriter",
+    module = "cqlib.compile.transform",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyKnowledgeRewriter {
     inner: KnowledgeRewriter,

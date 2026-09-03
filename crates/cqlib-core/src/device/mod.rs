@@ -23,6 +23,27 @@
 //! - [`Layout`]: Logical to physical qubit mapping
 //! - [`NoiseModel`]: Noise simulation parameters
 //! - [`ExecutionResult`]: Measurement outcome collection
+//!
+//! ## Instruction capability semantics
+//!
+//! [`Topology`] describes directed physical connectivity only; a coupling edge
+//! does not by itself name the instructions executable on that edge.
+//! [`Device::native_gates`] is the device-wide default capability set. A qubit
+//! or directed edge with no local native instructions inherits the matching
+//! one- or two-qubit defaults. A non-empty local native-instruction list is a
+//! complete override for that physical location.
+//!
+//! Local capabilities are never synchronized back into the device defaults,
+//! and replacing the defaults does not remove local capabilities. Two-qubit
+//! capabilities are ordered: support on `(control, target)` does not imply
+//! support on `(target, control)`. Calibration data describes a supported
+//! instruction but does not create support for an otherwise unsupported one.
+//!
+//! Native capability writers validate their inputs and return [`DeviceError`].
+//! Device defaults accept standard gates acting on at most two qubits, while
+//! qubit and edge properties accept exactly one- and two-qubit standard gates,
+//! respectively. Validation completes before mutation, so a rejected update
+//! preserves the previous capability set.
 
 pub mod device_impl;
 pub mod error;
@@ -33,7 +54,7 @@ pub mod result;
 pub mod topology;
 
 pub use device_impl::{Device, EdgeProp, InstructionProp, QubitProp};
-pub use error::{DeviceError, LayoutError, TopologyError};
+pub use error::{DeviceError, DeviceValidationError, LayoutError, TopologyError};
 pub use layout::Layout;
 pub use noise::{NoiseModel, OperationKey, ReadoutError, SingleQubitNoise, TwoQubitNoise};
 pub use qubit::{LogicalQubit, PhysicalQubit};

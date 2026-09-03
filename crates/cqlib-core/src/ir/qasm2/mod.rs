@@ -19,8 +19,15 @@
 //! user `gate` definitions, `opaque` declarations, external includes, and the
 //! OpenQASM 2.0 conditional form `if (creg == integer) qop;`.
 //! `include "qelib1.inc";` is handled as a built-in special include: Cqlib
-//! registers the qelib1 gate names internally and does not require a local
-//! `qelib1.inc` file.
+//! registers qelib1 gate names internally and does not require a local
+//! `qelib1.inc` file. For compatibility, qelib1 gates are available even when
+//! the include is omitted, and those names cannot be redefined.
+//!
+//! The loader intentionally accepts a few expression extensions used by
+//! existing Cqlib inputs: scientific notation without a decimal point
+//! (`1e-5`) and the unary functions `asin`, `acos`, and `atan`. Gate
+//! definitions are collected before operations are generated, so forward
+//! references to gates declared later in the source are accepted.
 //!
 //! Dumping emits normalized OpenQASM 2.0 with `include "qelib1.inc";`, `qreg`
 //! and `creg` declarations, generated gate definitions, and operations. It

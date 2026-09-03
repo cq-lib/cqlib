@@ -207,7 +207,7 @@ impl RuleLibrary {
             &first_operation.instruction,
         )
         .ok_or_else(|| RuleLibraryError::UnsupportedInstruction {
-            instruction: format!("{:?}", first_operation.instruction),
+            instruction: first_operation.instruction.to_string(),
         })?;
         let pattern_len = rule.operations.len();
         let rewrite_len = rule.target.len();
@@ -327,7 +327,7 @@ impl RuleLibrary {
     ) -> Result<&[RuleId], RuleLibraryError> {
         let key = KnowledgeInstructionKey::from_instruction(instruction).ok_or_else(|| {
             RuleLibraryError::UnsupportedInstruction {
-                instruction: format!("{instruction:?}"),
+                instruction: instruction.to_string(),
             }
         })?;
 
@@ -362,7 +362,7 @@ impl RuleLibrary {
             .map(|instruction| {
                 KnowledgeInstructionKey::from_instruction(instruction).ok_or_else(|| {
                     RuleLibraryError::UnsupportedInstruction {
-                        instruction: format!("{instruction:?}"),
+                        instruction: instruction.to_string(),
                     }
                 })
             })
@@ -372,7 +372,7 @@ impl RuleLibrary {
             .map(|instruction| {
                 KnowledgeInstructionKey::from_instruction(instruction).ok_or_else(|| {
                     RuleLibraryError::UnsupportedInstruction {
-                        instruction: format!("{instruction:?}"),
+                        instruction: instruction.to_string(),
                     }
                 })
             })
@@ -407,7 +407,7 @@ fn build_gate_metadata(rule: &Rule) -> Result<RuleGateMetadata, RuleLibraryError
         match_instruction_keys.push(
             KnowledgeInstructionKey::from_instruction(&item.instruction).ok_or_else(|| {
                 RuleLibraryError::UnsupportedInstruction {
-                    instruction: format!("{:?}", item.instruction),
+                    instruction: item.instruction.to_string(),
                 }
             })?,
         );
@@ -417,7 +417,7 @@ fn build_gate_metadata(rule: &Rule) -> Result<RuleGateMetadata, RuleLibraryError
         rewrite_instruction_keys.push(
             KnowledgeInstructionKey::from_instruction(&item.instruction).ok_or_else(|| {
                 RuleLibraryError::UnsupportedInstruction {
-                    instruction: format!("{:?}", item.instruction),
+                    instruction: item.instruction.to_string(),
                 }
             })?,
         );

@@ -276,6 +276,10 @@ pub mod rotation;
 pub mod rzz;
 pub mod swap;
 pub mod unitary;
+mod validation;
+
+#[cfg(test)]
+mod test_utils;
 
 pub use decomposer::{
     DecomposeMcGates, McGateDecomposeConfig, decompose_mc_gates, decompose_mc_gates_for_device,

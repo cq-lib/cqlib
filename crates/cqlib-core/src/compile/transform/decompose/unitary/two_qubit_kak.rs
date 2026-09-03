@@ -34,9 +34,9 @@
 //! success. This primitive emits no circuit operations and makes no
 //! target-basis or hardware-topology decisions.
 
+use super::matrix::{c, det_2x2};
 use crate::circuit::StandardGate;
 use crate::compile::CompilerError;
-use crate::util::matrix::{c, det_2x2};
 use faer::Mat;
 use faer::Side::Lower;
 use lazy_static::lazy_static;

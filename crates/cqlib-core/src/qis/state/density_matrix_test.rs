@@ -13,12 +13,38 @@
 use crate::circuit::{Circuit, Qubit, StandardGate};
 use crate::qis::QisError;
 use crate::qis::hamiltonian::Hamiltonian;
+use crate::qis::metrics::purity_mixed;
 use crate::qis::pauli::{Pauli, PauliString};
 use crate::qis::state::density_matrix::DensityMatrix;
 use crate::qis::state::statevector::Statevector;
 use approx::assert_relative_eq;
 use num_complex::Complex64;
 use std::f64::consts::PI;
+
+#[test]
+fn maximally_mixed_constructs_normalized_uniform_states() {
+    for num_qubits in 0..=2 {
+        let dm = DensityMatrix::maximally_mixed(num_qubits);
+        let dim = 1usize << num_qubits;
+        let expected = 1.0 / dim as f64;
+
+        assert_eq!(dm.num_qubits, num_qubits);
+        assert_eq!(dm.data().len(), dim * dim);
+        for row in 0..dim {
+            for col in 0..dim {
+                let value = dm.data()[row * dim + col];
+                if row == col {
+                    assert_relative_eq!(value.re, expected);
+                    assert_relative_eq!(value.im, 0.0);
+                } else {
+                    assert_eq!(value, Complex64::new(0.0, 0.0));
+                }
+            }
+        }
+        assert_relative_eq!(dm.trace().re, 1.0);
+        assert_relative_eq!(purity_mixed(&dm).unwrap(), expected);
+    }
+}
 
 #[test]
 fn test_from_state_normalization() {
@@ -749,13 +775,13 @@ fn test_measure_out_of_bounds() {
 #[test]
 fn test_measure_deterministic_zero_and_one() {
     let mut zero = DensityMatrix::new(1);
-    assert_eq!(zero.measure(0).unwrap(), false);
+    assert!(!zero.measure(0).unwrap());
     assert_relative_eq!(zero.data[0].re, 1.0);
     assert_relative_eq!(zero.data[3].re, 0.0);
 
     let mut one = DensityMatrix::new(1);
     one.apply_x(0).unwrap();
-    assert_eq!(one.measure(0).unwrap(), true);
+    assert!(one.measure(0).unwrap());
     assert_relative_eq!(one.data[0].re, 0.0);
     assert_relative_eq!(one.data[3].re, 1.0);
 }
@@ -912,8 +938,8 @@ fn test_psd_gershgorin_false_negative_equal_superposition() {
     let size = dim * dim;
     let mut data = vec![Complex64::new(0.0, 0.0); size];
     let val = Complex64::new(0.25, 0.0);
-    for i in 0..size {
-        data[i] = val;
+    for item in data.iter_mut().take(size) {
+        *item = val;
     }
     let dm = DensityMatrix {
         data,
@@ -925,10 +951,11 @@ fn test_psd_gershgorin_false_negative_equal_superposition() {
         "equal superposition must be Hermitian"
     );
     assert!((dm.trace().re - 1.0).abs() < 1e-10, "trace must be 1");
-    // Gershgorin-based check must NOT reject this valid PSD matrix.
+    // Regression: the old Gershgorin-based check rejected this valid PSD
+    // matrix; the eigenvalue-based check must not.
     assert!(
         dm.is_positive_semidefinite_approx(1e-10),
-        "Gershgorin must not false-negative a PSD equal-superposition pure state"
+        "PSD equal-superposition pure state must pass (old Gershgorin check false-negatived it)"
     );
 }
 
@@ -943,9 +970,9 @@ fn test_psd_valid_pure_non_diagonally_dominant() {
     let sqrt_06 = 0.6_f64.sqrt();
     let sqrt_04 = 0.4_f64.sqrt();
     let mut data = vec![Complex64::new(0.0, 0.0); size];
-    data[0 * dim + 0] = Complex64::new(0.6, 0.0);
-    data[0 * dim + 3] = Complex64::new(sqrt_06 * sqrt_04, 0.0);
-    data[3 * dim + 0] = Complex64::new(sqrt_06 * sqrt_04, 0.0);
+    data[0] = Complex64::new(0.6, 0.0);
+    data[3] = Complex64::new(sqrt_06 * sqrt_04, 0.0);
+    data[3 * dim] = Complex64::new(sqrt_06 * sqrt_04, 0.0);
     data[3 * dim + 3] = Complex64::new(0.4, 0.0);
     let dm = DensityMatrix {
         data,
@@ -1015,7 +1042,7 @@ fn test_psd_negative_eigenvalue_rejected() {
     let size = dim * dim;
     let mut data = vec![Complex64::new(0.0, 0.0); size];
     data[0] = Complex64::new(-0.1, 0.0);
-    data[1 * dim + 1] = Complex64::new(1.1, 0.0);
+    data[dim + 1] = Complex64::new(1.1, 0.0);
     let dm = DensityMatrix {
         data,
         num_qubits: n,
@@ -1038,7 +1065,7 @@ fn test_psd_tiny_negative_eigenvalue_accepted_with_tolerance() {
     let eps = 1e-12_f64;
     let mut data = vec![Complex64::new(0.0, 0.0); size];
     data[0] = Complex64::new(1.0 + eps, 0.0);
-    data[1 * dim + 1] = Complex64::new(-eps, 0.0);
+    data[dim + 1] = Complex64::new(-eps, 0.0);
     let dm = DensityMatrix {
         data,
         num_qubits: n,

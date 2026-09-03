@@ -88,23 +88,27 @@ fn vf2_perfect_layout_uses_fidelity_objective_to_choose_candidate() {
         .add_edge_properties(
             p0,
             p1,
-            EdgeProp::new().with_native_instruction(InstructionProp::new(
-                Instruction::Standard(StandardGate::CX),
-                0.09,
-            )),
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    0.09,
+                ))
+                .unwrap(),
         )
         .unwrap();
     device
         .add_edge_properties(
             p1,
             p2,
-            EdgeProp::new().with_native_instruction(InstructionProp::new(
-                Instruction::Standard(StandardGate::CX),
-                0.01,
-            )),
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    0.01,
+                ))
+                .unwrap(),
         )
         .unwrap();
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let objective = LayoutObjective::auto_from_physical(&physical);
 
     let mut circuit = Circuit::new(2);
@@ -175,7 +179,7 @@ fn vf2_perfect_layout_scores_interaction_free_circuit() {
     device
         .add_qubit_properties(p1, crate::device::QubitProp::new(0.01))
         .unwrap();
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let objective = LayoutObjective::auto_from_physical(&physical);
     let circuit = Circuit::new(2);
     let analysis = analyze_circuit_for_layout(&circuit).unwrap();

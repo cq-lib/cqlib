@@ -981,3 +981,193 @@ rule comm_gphase_cx {
     match { GPhase(a), CX 0 1 }
     rewrite { CX 0 1, GPhase(a) }
 }
+
+rule comm_cx_t_ctrl {
+    match { CX 0 1, T 0 }
+    rewrite { T 0, CX 0 1 }
+}
+
+rule comm_gphase_x {
+    match { GPhase(a), X 0 }
+    rewrite { X 0, GPhase(a) }
+}
+
+rule comm_gphase_y {
+    match { GPhase(a), Y 0 }
+    rewrite { Y 0, GPhase(a) }
+}
+
+rule comm_gphase_z {
+    match { GPhase(a), Z 0 }
+    rewrite { Z 0, GPhase(a) }
+}
+
+rule comm_gphase_h {
+    match { GPhase(a), H 0 }
+    rewrite { H 0, GPhase(a) }
+}
+
+rule comm_gphase_s {
+    match { GPhase(a), S 0 }
+    rewrite { S 0, GPhase(a) }
+}
+
+rule comm_gphase_sdg {
+    match { GPhase(a), SDG 0 }
+    rewrite { SDG 0, GPhase(a) }
+}
+
+rule comm_gphase_t {
+    match { GPhase(a), T 0 }
+    rewrite { T 0, GPhase(a) }
+}
+
+rule comm_gphase_tdg {
+    match { GPhase(a), TDG 0 }
+    rewrite { TDG 0, GPhase(a) }
+}
+
+rule comm_gphase_x2p {
+    match { GPhase(a), X2P 0 }
+    rewrite { X2P 0, GPhase(a) }
+}
+
+rule comm_gphase_x2m {
+    match { GPhase(a), X2M 0 }
+    rewrite { X2M 0, GPhase(a) }
+}
+
+rule comm_gphase_y2p {
+    match { GPhase(a), Y2P 0 }
+    rewrite { Y2P 0, GPhase(a) }
+}
+
+rule comm_gphase_y2m {
+    match { GPhase(a), Y2M 0 }
+    rewrite { Y2M 0, GPhase(a) }
+}
+
+rule comm_gphase_phase {
+    match { GPhase(a), Phase(b) 0 }
+    rewrite { Phase(b) 0, GPhase(a) }
+}
+
+rule comm_gphase_rxy {
+    match { GPhase(g), RXY(a, b) 0 }
+    rewrite { RXY(a, b) 0, GPhase(g) }
+}
+
+rule comm_gphase_u {
+    match { GPhase(g), U(a, b, c) 0 }
+    rewrite { U(a, b, c) 0, GPhase(g) }
+}
+
+rule comm_gphase_rxx {
+    match { GPhase(a), RXX(b) 0 1 }
+    rewrite { RXX(b) 0 1, GPhase(a) }
+}
+
+rule comm_gphase_ryy {
+    match { GPhase(a), RYY(b) 0 1 }
+    rewrite { RYY(b) 0 1, GPhase(a) }
+}
+
+rule comm_gphase_rzz {
+    match { GPhase(a), RZZ(b) 0 1 }
+    rewrite { RZZ(b) 0 1, GPhase(a) }
+}
+
+rule comm_gphase_rzx {
+    match { GPhase(a), RZX(b) 0 1 }
+    rewrite { RZX(b) 0 1, GPhase(a) }
+}
+
+rule comm_gphase_swap {
+    match { GPhase(a), SWAP 0 1 }
+    rewrite { SWAP 0 1, GPhase(a) }
+}
+
+rule comm_gphase_ccx {
+    match { GPhase(a), CCX 0 1 2 }
+    rewrite { CCX 0 1 2, GPhase(a) }
+}
+
+rule comm_gphase_crx {
+    match { GPhase(a), CRX(b) 0 1 }
+    rewrite { CRX(b) 0 1, GPhase(a) }
+}
+
+rule comm_gphase_cry {
+    match { GPhase(a), CRY(b) 0 1 }
+    rewrite { CRY(b) 0 1, GPhase(a) }
+}
+
+rule comm_gphase_crz {
+    match { GPhase(a), CRZ(b) 0 1 }
+    rewrite { CRZ(b) 0 1, GPhase(a) }
+}
+
+rule comm_gphase_fsim {
+    match { GPhase(g), FSIM(a, b) 0 1 }
+    rewrite { FSIM(a, b) 0 1, GPhase(g) }
+}
+
+rule comm_swap_cz {
+    match { SWAP 0 1, CZ 0 1 }
+    rewrite { CZ 0 1, SWAP 0 1 }
+}
+
+rule comm_swap_rxx {
+    match { SWAP 0 1, RXX(a) 0 1 }
+    rewrite { RXX(a) 0 1, SWAP 0 1 }
+}
+
+rule comm_swap_ryy {
+    match { SWAP 0 1, RYY(a) 0 1 }
+    rewrite { RYY(a) 0 1, SWAP 0 1 }
+}
+
+rule comm_swap_rzz {
+    match { SWAP 0 1, RZZ(a) 0 1 }
+    rewrite { RZZ(a) 0 1, SWAP 0 1 }
+}
+
+rule comm_swap_fsim {
+    match { SWAP 0 1, FSIM(a, b) 0 1 }
+    rewrite { FSIM(a, b) 0 1, SWAP 0 1 }
+}
+
+rule comm_rzz_cz {
+    match { RZZ(a) 0 1, CZ 0 1 }
+    rewrite { CZ 0 1, RZZ(a) 0 1 }
+}
+
+rule comm_rzz_crz {
+    match { RZZ(a) 0 1, CRZ(b) 0 1 }
+    rewrite { CRZ(b) 0 1, RZZ(a) 0 1 }
+}
+
+rule comm_rzz_crz_swapped {
+    match { RZZ(a) 0 1, CRZ(b) 1 0 }
+    rewrite { CRZ(b) 1 0, RZZ(a) 0 1 }
+}
+
+rule comm_cz_crz {
+    match { CZ 0 1, CRZ(a) 0 1 }
+    rewrite { CRZ(a) 0 1, CZ 0 1 }
+}
+
+rule comm_cz_crz_swapped {
+    match { CZ 0 1, CRZ(a) 1 0 }
+    rewrite { CRZ(a) 1 0, CZ 0 1 }
+}
+
+rule comm_crz_crz {
+    match { CRZ(a) 0 1, CRZ(b) 0 1 }
+    rewrite { CRZ(b) 0 1, CRZ(a) 0 1 }
+}
+
+rule comm_crz_crz_swapped {
+    match { CRZ(a) 0 1, CRZ(b) 1 0 }
+    rewrite { CRZ(b) 1 0, CRZ(a) 0 1 }
+}

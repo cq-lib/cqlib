@@ -13,6 +13,7 @@
 use crate::circuit::gate::circuit_gate::FrozenCircuit;
 use crate::circuit::gate::{StandardGate, UnitaryGate};
 use crate::circuit::parameter::Parameter;
+use crate::circuit::symbolic_matrix::standard_gate_symbolic_matrix;
 use crate::circuit::{Circuit, ClassicalExpr, ClassicalType, Instruction, Qubit};
 use crate::ir::qasm2::dump::{QasmDumpError, dump, dumps, to_path, to_string};
 use crate::ir::qasm2::load::loads;
@@ -294,6 +295,40 @@ fn test_dump_rejects_measurement_in_gate_definition() {
 }
 
 #[test]
+fn test_dump_rejects_reset_in_circuit_gate_definition() {
+    let mut inner = Circuit::new(1);
+    inner.reset(Qubit::new(0)).unwrap();
+    let gate = inner.to_gate("resetting_gate").unwrap();
+
+    let mut circuit = Circuit::new(1);
+    circuit
+        .append(gate, [Qubit::new(0)], std::iter::empty(), None)
+        .unwrap();
+
+    assert!(matches!(
+        dumps(&circuit),
+        Err(QasmDumpError::ResetInGateNotAllowed)
+    ));
+}
+
+#[test]
+fn test_dump_rejects_reset_in_unitary_gate_definition() {
+    let mut inner = Circuit::new(1);
+    inner.reset(Qubit::new(0)).unwrap();
+    let gate = UnitaryGate::new("ResettingUnitary", 1, 0)
+        .with_circuit(Arc::new(FrozenCircuit::new(inner)))
+        .unwrap();
+
+    let mut circuit = Circuit::new(1);
+    circuit.unitary(gate, vec![Qubit::new(0)]).unwrap();
+
+    assert!(matches!(
+        dumps(&circuit),
+        Err(QasmDumpError::ResetInGateNotAllowed)
+    ));
+}
+
+#[test]
 fn test_dump_parameterized_custom_gate() {
     // Sub-circuit with parameter
     let mut sub_circ = Circuit::new(1);
@@ -461,6 +496,143 @@ fn test_dump_unitary_gate_with_circuit() {
 
     // Check gate call
     assert_qasm_contains(&qasm, &["x q[0];", "MyBell q[0],q[1];", "z q[1];"]);
+}
+
+#[test]
+fn test_dump_parameterized_unitary_gate_with_circuit() {
+    let mut inner = Circuit::new(1);
+    inner.rx(Qubit::new(0), Parameter::symbol("theta")).unwrap();
+    let gate = UnitaryGate::new("param_unitary", 1, 1)
+        .with_circuit(Arc::new(FrozenCircuit::new(inner)))
+        .unwrap();
+
+    let mut circuit = Circuit::new(1);
+    circuit
+        .unitary_with_params(gate, vec![Qubit::new(0)], [1.25.into()])
+        .unwrap();
+
+    let qasm = dumps(&circuit).unwrap();
+    assert_qasm_contains(
+        &qasm,
+        &[
+            "gate param_unitary(theta) q0 {",
+            "rx(theta) q0;",
+            "param_unitary(1.25) q[0];",
+        ],
+    );
+    verify_qasm_roundtrip(&qasm, 1);
+}
+
+#[test]
+fn test_dump_parameterized_symbolic_unitary_as_opaque() {
+    let gate = UnitaryGate::new("symbolic_opaque", 1, 1)
+        .with_symbolic_matrix(
+            ["angle"],
+            standard_gate_symbolic_matrix(StandardGate::RX, &[Parameter::symbol("angle")]).unwrap(),
+        )
+        .unwrap();
+
+    let mut circuit = Circuit::new(1);
+    circuit
+        .unitary_with_params(gate, vec![Qubit::new(0)], [0.5.into()])
+        .unwrap();
+
+    let qasm = dumps(&circuit).unwrap();
+    assert_qasm_contains(
+        &qasm,
+        &[
+            "opaque symbolic_opaque(angle) q0;",
+            "symbolic_opaque(0.5) q[0];",
+        ],
+    );
+}
+
+#[test]
+fn test_dump_parameterized_opaque_unitary_generates_parameter_names() {
+    let gate = UnitaryGate::new("opaque_params", 1, 2);
+    let mut circuit = Circuit::new(1);
+    circuit
+        .unitary_with_params(
+            gate,
+            vec![Qubit::new(0)],
+            [Parameter::from(0.25).into(), Parameter::from(0.75).into()],
+        )
+        .unwrap();
+
+    let qasm = dumps(&circuit).unwrap();
+    assert_qasm_contains(
+        &qasm,
+        &[
+            "opaque opaque_params(p0,p1) q0;",
+            "opaque_params(0.25,0.75) q[0];",
+        ],
+    );
+}
+
+#[test]
+fn test_dump_parameterized_unitary_call_inside_circuit_gate() {
+    let mut leaf_body = Circuit::new(1);
+    leaf_body
+        .rx(Qubit::new(0), Parameter::symbol("alpha"))
+        .unwrap();
+    let leaf = UnitaryGate::new("param_leaf", 1, 1)
+        .with_circuit(Arc::new(FrozenCircuit::new(leaf_body)))
+        .unwrap();
+
+    let mut wrapper_body = Circuit::new(1);
+    wrapper_body
+        .unitary_with_params(
+            leaf,
+            vec![Qubit::new(0)],
+            [Parameter::symbol("theta").into()],
+        )
+        .unwrap();
+    let wrapper = wrapper_body.to_gate("unitary_wrapper").unwrap();
+
+    let mut circuit = Circuit::new(1);
+    circuit
+        .append(wrapper, [Qubit::new(0)], [0.3.into()], None)
+        .unwrap();
+
+    let qasm = dumps(&circuit).unwrap();
+    assert_qasm_contains(
+        &qasm,
+        &[
+            "gate unitary_wrapper(theta) q0 {",
+            "param_leaf(theta) q0;",
+            "gate param_leaf(alpha) q0 {",
+            "unitary_wrapper(0.3) q[0];",
+        ],
+    );
+    verify_qasm_roundtrip(&qasm, 1);
+}
+
+#[test]
+fn test_dump_parameterized_unitary_call_inside_condition() {
+    let mut inner = Circuit::new(1);
+    inner.rx(Qubit::new(0), Parameter::symbol("theta")).unwrap();
+    let gate = UnitaryGate::new("conditional_unitary", 1, 1)
+        .with_circuit(Arc::new(FrozenCircuit::new(inner)))
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    let measured = circuit.measure(Qubit::new(0)).unwrap();
+    let condition = ClassicalExpr::bit_to_bool(measured.expr()).unwrap();
+    circuit
+        .if_(condition, move |body| {
+            body.unitary_with_params(gate, vec![Qubit::new(1)], [0.75.into()])?;
+            Ok(())
+        })
+        .unwrap();
+
+    let qasm = dumps(&circuit).unwrap();
+    assert_qasm_contains(
+        &qasm,
+        &[
+            "gate conditional_unitary(theta) q0 {",
+            "if (v0 == 1) conditional_unitary(0.75) q[1];",
+        ],
+    );
+    verify_qasm_roundtrip(&qasm, 2);
 }
 
 #[test]
@@ -1257,6 +1429,28 @@ fn test_dump_all_standard_gates() {
     }
 
     verify_qasm_roundtrip(&qasm, 3);
+}
+
+#[test]
+fn test_dump_qelib1_cu1_without_redefinition_roundtrips() {
+    let circuit = loads(
+        r#"
+        OPENQASM 2.0;
+        include "qelib1.inc";
+        qreg q[2];
+        cu1(pi/2) q[0],q[1];
+        "#,
+    )
+    .unwrap();
+
+    let qasm = dumps(&circuit).unwrap();
+
+    assert!(!qasm.contains("gate cu1"), "got:\n{qasm}");
+    assert!(
+        qasm.contains("cu1(1.5707963267948966) q[0],q[1];"),
+        "got:\n{qasm}"
+    );
+    loads(&qasm).expect("dumped qelib1 cu1 call should reload");
 }
 
 #[test]

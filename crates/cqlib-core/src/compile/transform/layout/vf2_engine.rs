@@ -12,11 +12,10 @@
 
 //! Non-induced VF2++ search used by perfect layout.
 //!
-//! This module keeps the public layout layer independent from Qiskit while
-//! using `rustworkx-core`/`petgraph` as the graph substrate. The search state
-//! follows the same shape as Qiskit's Rust VF2 core: ordered graph copies,
-//! bidirectional mappings, frontier state, adjacency matrices, lookahead
-//! feasibility checks, and an extension call limit.
+//! This module uses `rustworkx-core`/`petgraph` as the graph substrate. Its
+//! search state combines ordered graph copies, bidirectional mappings, frontier
+//! state, adjacency matrices, lookahead feasibility checks, and an extension
+//! call limit.
 //!
 //! The engine deliberately returns only node-index mappings. Layout-specific
 //! concepts such as logical qubit IDs, physical qubit IDs, direction penalties,
@@ -308,11 +307,11 @@ impl Search {
 
     /// Records and reports whether another extension would exceed call limit.
     fn reached_call_limit(&mut self) -> bool {
-        if let Some(limit) = self.config.call_limit {
-            if self.stats.calls >= limit {
-                self.stats.stopped_by_call_limit = true;
-                return true;
-            }
+        if let Some(limit) = self.config.call_limit
+            && self.stats.calls >= limit
+        {
+            self.stats.stopped_by_call_limit = true;
+            return true;
         }
         false
     }

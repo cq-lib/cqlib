@@ -187,7 +187,7 @@ class DensityMatrixNoise:
         """Applies the phase gate with optional noise."""
         ...
 
-    def apply_gphase(self, theta: float) -> None:
+    def apply_gphase(self, phi: float) -> None:
         """Applies the global phase gate with optional noise."""
         ...
 

@@ -1,6 +1,6 @@
 // This code is part of Cqlib.
 //
-// (C) Copyright China Telecom Quantum Group 2026
+// (C) Copyright China Telecom Quantum Group 2025-2026
 //
 // This code is licensed under the Apache License, Version 2.0. You may
 // obtain a copy of this license in the LICENSE.txt file in the root directory
@@ -16,7 +16,8 @@ pub mod device;
 pub mod error_mitigation;
 pub mod ir;
 pub mod qis;
-// pub mod visualization;
+mod utils;
+pub mod visualization;
 
 use pyo3::prelude::*;
 
@@ -30,6 +31,7 @@ fn binding_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     error_mitigation::register_error_mitigation_module(m)?;
     ir::register_ir_module(m)?;
     qis::register_qis_module(m)?;
+    visualization::register_visualization_module(m)?;
 
     Ok(())
 }

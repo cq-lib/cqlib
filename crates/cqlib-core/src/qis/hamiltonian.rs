@@ -17,8 +17,9 @@
 //! with complex coefficients. It is primarily used for defining system energies,
 //! observables for expectation value calculations, and operators for time evolution.
 
-use crate::qis::Phase;
 use crate::qis::pauli::PauliString;
+use crate::qis::{Phase, QisError};
+use ndarray::Array2;
 use num_complex::Complex64;
 use std::fmt;
 use std::ops::Add;
@@ -66,11 +67,40 @@ impl Hamiltonian {
     /// # Arguments
     /// * `pauli` - The Pauli string to wrap into a Hamiltonian.
     pub fn from_pauli(pauli: PauliString) -> Self {
-        let n = pauli.num_qubits;
-        Self {
-            num_qubits: n,
-            terms: vec![(pauli, Complex64::new(1.0, 0.0))],
+        pauli.into()
+    }
+
+    /// Returns the dense complex matrix represented by this Hamiltonian.
+    ///
+    /// Every term must act on the same number of qubits as the Hamiltonian.
+    /// An empty Hamiltonian produces the zero matrix for its declared qubit
+    /// count.
+    ///
+    /// This method is intended for small-system analysis and verification.
+    /// The returned matrix has dimensions $2^N \times 2^N$ and requires
+    /// $O(4^N)$ memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QisError::QubitMismatch`] when a term's qubit count differs
+    /// from [`Hamiltonian::num_qubits`].
+    pub fn to_matrix(&self) -> Result<Array2<Complex64>, QisError> {
+        for (pauli, _) in &self.terms {
+            if pauli.num_qubits != self.num_qubits {
+                return Err(QisError::QubitMismatch {
+                    expected: self.num_qubits,
+                    actual: pauli.num_qubits,
+                });
+            }
         }
+
+        let dim = 1usize << self.num_qubits;
+        let mut matrix = Array2::from_elem((dim, dim), Complex64::new(0.0, 0.0));
+        for (pauli, coefficient) in &self.terms {
+            let term = pauli.to_matrix().mapv(|value| value * *coefficient);
+            matrix += &term;
+        }
+        Ok(matrix)
     }
 
     /// Creates a Hamiltonian from a list of Pauli strings and their corresponding coefficients.
@@ -83,6 +113,24 @@ impl Hamiltonian {
     pub fn from_list(
         ops: Vec<(PauliString, Complex64)>,
     ) -> Result<Self, crate::qis::error::QisError> {
+        Self::try_from(ops)
+    }
+}
+
+impl From<PauliString> for Hamiltonian {
+    fn from(pauli: PauliString) -> Self {
+        let num_qubits = pauli.num_qubits;
+        Self {
+            num_qubits,
+            terms: vec![(pauli, Complex64::new(1.0, 0.0))],
+        }
+    }
+}
+
+impl TryFrom<Vec<(PauliString, Complex64)>> for Hamiltonian {
+    type Error = QisError;
+
+    fn try_from(ops: Vec<(PauliString, Complex64)>) -> Result<Self, Self::Error> {
         if ops.is_empty() {
             // Handle the empty case by returning a 0-qubit empty Hamiltonian.
             // Depending on design, this could also panic, but allowing an empty
@@ -104,7 +152,9 @@ impl Hamiltonian {
             terms: ops,
         })
     }
+}
 
+impl Hamiltonian {
     /// Adds a new Pauli string term with a given coefficient to the Hamiltonian.
     ///
     /// # Arguments
@@ -272,3 +322,7 @@ impl Add for Hamiltonian {
         self
     }
 }
+
+#[cfg(test)]
+#[path = "hamiltonian_test.rs"]
+mod tests;

@@ -128,4 +128,9 @@ class ZNEMitigation:
     def __copy__(self) -> ZNEMitigation: ...
     def __deepcopy__(self, memo: dict) -> ZNEMitigation: ...
 
-__all__: list[str]
+__all__ = [
+    "Estimator",
+    "ExtrapolateMethod",
+    "ZneConfig",
+    "ZNEMitigation",
+]

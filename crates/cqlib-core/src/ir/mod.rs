@@ -96,3 +96,7 @@ pub use qasm3::dump::{dump as qasm3_dump, dumps as qasm3_dumps};
 pub use qasm3::load::{load as qasm3_load, loads as qasm3_loads};
 pub use qcis::dump::{dump as qcis_dump, dumps as qcis_dumps};
 pub use qcis::load::{load as qcis_load, loads as qcis_loads};
+
+pub(crate) fn io_errors_equivalent(lhs: &std::io::Error, rhs: &std::io::Error) -> bool {
+    lhs.kind() == rhs.kind() && lhs.to_string() == rhs.to_string()
+}

@@ -15,11 +15,12 @@
 //! Directives are instructions rather than unitary gates. They do not expose a
 //! matrix; only barriers have an inverse.
 
+use crate::utils::hash_value;
 use cqlib_core::circuit::gate::directive::Directive;
 use pyo3::prelude::*;
 
 /// Non-unitary barrier, measurement, or reset instruction.
-#[pyclass(name = "Directive", module = "cqlib.circuit.gates")]
+#[pyclass(name = "Directive", module = "cqlib.circuit.gates", from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PyDirective {
     pub(crate) inner: Directive,
@@ -94,13 +95,9 @@ impl PyDirective {
     ///
     /// # Returns
     ///
-    /// A string: "Barrier", "Measure", or "Reset".
+    /// A string: "barrier", "measure", or "reset".
     fn name(&self) -> String {
-        match self.inner {
-            Directive::Barrier => "Barrier".to_string(),
-            Directive::Measure => "Measure".to_string(),
-            Directive::Reset => "Reset".to_string(),
-        }
+        self.inner.name().to_string()
     }
 
     /// Returns true if this is a barrier directive.
@@ -135,6 +132,18 @@ impl PyDirective {
         self.name()
     }
 
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyDirective>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyDirective>()?;
+        Ok(self.inner == other.inner)
+    }
+
+    fn __hash__(&self) -> u64 {
+        hash_value(&self.inner)
+    }
+
     fn __copy__(&self) -> Self {
         *self
     }
@@ -153,5 +162,13 @@ mod tests {
         assert!(PyDirective::barrier().inverse().is_some());
         assert!(PyDirective::measure().inverse().is_none());
         assert!(PyDirective::reset().inverse().is_none());
+    }
+
+    #[test]
+    fn names_delegate_to_stable_core_names() {
+        assert_eq!(PyDirective::barrier().name(), "barrier");
+        assert_eq!(PyDirective::measure().name(), "measure");
+        assert_eq!(PyDirective::reset().name(), "reset");
+        assert_eq!(PyDirective::barrier().__str__(), "barrier");
     }
 }

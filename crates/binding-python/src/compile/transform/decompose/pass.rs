@@ -33,9 +33,11 @@ pub fn py_expand_definitions(
     circuit: PyRef<'_, PyCircuit>,
 ) -> PyResult<PyTransformResult> {
     let circuit = circuit.inner.clone();
-    py.detach(move || DecomposeDefinitions.transform(&circuit, None))
-        .map(PyTransformResult::from)
-        .map_err(compiler_error_to_py_err)
+    py.detach(move || {
+        let outcome = DecomposeDefinitions.transform(&circuit, None)?;
+        Ok(PyTransformResult::from_outcome(circuit, outcome))
+    })
+    .map_err(compiler_error_to_py_err)
 }
 
 /// Synthesizes matrix-backed one- and two-qubit unitary gates.
@@ -48,9 +50,11 @@ pub fn py_decompose_unitaries(
 ) -> PyResult<PyTransformResult> {
     let circuit = circuit.inner.clone();
     let config = config.map_or_else(UnitaryDecomposeConfig::default, |value| value.inner);
-    py.detach(move || DecomposeUnitaries::new(config).transform(&circuit, None))
-        .map(PyTransformResult::from)
-        .map_err(compiler_error_to_py_err)
+    py.detach(move || {
+        let outcome = DecomposeUnitaries::new(config).transform(&circuit, None)?;
+        Ok(PyTransformResult::from_outcome(circuit, outcome))
+    })
+    .map_err(compiler_error_to_py_err)
 }
 
 /// Synthesizes matrix-backed unitaries and returns pass-local rule-cache stats.
@@ -63,9 +67,14 @@ pub fn py_decompose_unitaries_with_rule_stats(
 ) -> PyResult<(PyTransformResult, PyDecompositionRuleStats)> {
     let circuit = circuit.inner.clone();
     let config = config.map_or_else(UnitaryDecomposeConfig::default, |value| value.inner);
-    py.detach(move || decompose_unitaries_with_rule_stats(&circuit, config))
-        .map(|(result, stats)| (result.into(), stats.into()))
-        .map_err(compiler_error_to_py_err)
+    py.detach(move || {
+        let (outcome, stats) = decompose_unitaries_with_rule_stats(&circuit, config)?;
+        Ok((
+            PyTransformResult::from_outcome(circuit, outcome),
+            stats.into(),
+        ))
+    })
+    .map_err(compiler_error_to_py_err)
 }
 
 /// Decomposes multi-controlled gates using configured ancillary resources.
@@ -81,9 +90,11 @@ pub fn py_decompose_mc_gates(
 ) -> PyResult<PyTransformResult> {
     let circuit = circuit.inner.clone();
     let config = config.map_or_else(McGateDecomposeConfig::default, |value| value.inner);
-    py.detach(move || DecomposeMcGates::new(config).transform(&circuit, None))
-        .map(PyTransformResult::from)
-        .map_err(compiler_error_to_py_err)
+    py.detach(move || {
+        let outcome = DecomposeMcGates::new(config).transform(&circuit, None)?;
+        Ok(PyTransformResult::from_outcome(circuit, outcome))
+    })
+    .map_err(compiler_error_to_py_err)
 }
 
 /// Decomposes multi-controlled gates and returns pass-local rule-cache stats.
@@ -99,9 +110,14 @@ pub fn py_decompose_mc_gates_with_rule_stats(
 ) -> PyResult<(PyTransformResult, PyDecompositionRuleStats)> {
     let circuit = circuit.inner.clone();
     let config = config.map_or_else(McGateDecomposeConfig::default, |value| value.inner);
-    py.detach(move || decompose_mc_gates_with_rule_stats(&circuit, config))
-        .map(|(result, stats)| (result.into(), stats.into()))
-        .map_err(compiler_error_to_py_err)
+    py.detach(move || {
+        let (outcome, stats) = decompose_mc_gates_with_rule_stats(&circuit, config)?;
+        Ok((
+            PyTransformResult::from_outcome(circuit, outcome),
+            stats.into(),
+        ))
+    })
+    .map_err(compiler_error_to_py_err)
 }
 
 /// Decomposes multi-controlled gates while enforcing device capacity.
@@ -116,7 +132,9 @@ pub fn py_decompose_mc_gates_for_device(
     let circuit = circuit.inner.clone();
     let device = device.inner.clone();
     let resource_policy = resource_policy.map_or_else(Default::default, |value| value.inner);
-    py.detach(move || decompose_mc_gates_for_device(&circuit, &device, resource_policy))
-        .map(PyTransformResult::from)
-        .map_err(compiler_error_to_py_err)
+    py.detach(move || {
+        let outcome = decompose_mc_gates_for_device(&circuit, &device, resource_policy)?;
+        Ok(PyTransformResult::from_outcome(circuit, outcome))
+    })
+    .map_err(compiler_error_to_py_err)
 }

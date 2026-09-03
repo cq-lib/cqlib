@@ -49,9 +49,8 @@ The main repository layout is:
 ```text
 crates/cqlib-core/        Rust core library
 crates/cqlib/             Public Rust crate
-crates/binding-python/    Python bindings
+crates/binding-python/    Python bindings and tests
 crates/binding-c/         C bindings
-tests/python/             Python integration tests
 docs/                     Documentation files
 ```
 
@@ -63,7 +62,7 @@ Keep common changes scoped to the relevant module when possible, and avoid combi
 
 The project currently requires:
 
-- Rust 1.85+
+- Rust 1.89+
 - Python 3.10+
 - A C 11+ toolchain for C binding development
 
@@ -148,12 +147,6 @@ Run Python tests:
 
 ```bash
 maturin develop -m crates/binding-python/Cargo.toml
-pytest tests/python/
-```
-
-If you changed functionality covered by `crates/binding-python/tests`, also run:
-
-```bash
 pytest crates/binding-python/tests/
 ```
 

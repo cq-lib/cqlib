@@ -23,6 +23,7 @@ pub mod circuit_to_matrix;
 pub mod classical;
 pub mod classical_expr;
 pub mod control_flow;
+pub mod dag;
 pub mod error;
 pub mod gate;
 pub mod instruction;
@@ -45,6 +46,7 @@ pub use classical_expr::PyClassicalExpr;
 pub use control_flow::{
     PyClassicalControlOp, PySwitchBuilder, PyValueControlBody, PyValueSwitchCase,
 };
+pub use dag::{PyCircuitDag, PyDagControlFlow, PyDagSwitchCase, PyDagWire};
 pub use gate::{
     PyCircuitGate, PyDirective, PyFrozenCircuit, PyMcGate, PyStandardGate, PyUnitaryGate,
 };
@@ -80,6 +82,10 @@ pub(crate) fn register_circuit_module(parent: &Bound<'_, PyModule>) -> PyResult<
     m.add_class::<PyValueSwitchCase>()?;
     m.add_class::<PyClassicalControlOp>()?;
     m.add_class::<PySwitchBuilder>()?;
+    m.add_class::<PyDagWire>()?;
+    m.add_class::<PyDagSwitchCase>()?;
+    m.add_class::<PyDagControlFlow>()?;
+    m.add_class::<PyCircuitDag>()?;
     m.add_class::<PyCircuit>()?;
     m.add_function(pyo3::wrap_pyfunction!(py_circuit_to_matrix, &m)?)?;
     gate::register_gate_classes(&m)?;

@@ -24,16 +24,14 @@ pub ProgramBody: OpenQASMProgram = {
 };
 
 Statement: Statement = {
-    "qreg" <id:Id> "[" <n:Int> "]" ";" => Statement::QReg(id, n),
-    "creg" <id:Id> "[" <n:Int> "]" ";" => Statement::CReg(id, n),
+    Decl,
     "include" <s:QuotedStr> ";" => Statement::Include(s),
-    "barrier" <a:ArgList> ";" => Statement::Barrier(a),
-    "reset" <a:Arg> ";" => Statement::Reset(a),
-    "measure" <q:Arg> "->" <c:Arg> ";" => Statement::Measure(q, c),
-    "if" "(" <creg:Id> "==" <value:Int> ")" <s:Statement> =>
+    Qop,
+    "if" "(" <creg:Id> "==" <value:Int> ")" <s:Qop> =>
         Statement::If(creg, value, Box::new(s)),
+    "barrier" <a:ArgList> ";" => Statement::Barrier(a),
     // 门声明
-    "gate" <name:Id> <p:("(" <IdList> ")")?> <q:IdList> "{" <body:Statement*> "}" => {
+    "gate" <name:Id> <p:ParamIdList?> <q:IdList> "{" <body:GateBody> "}" => {
         Statement::GateDecl(Box::new(GateDeclData {
             name,
             params: p.unwrap_or(vec![]),
@@ -41,10 +39,44 @@ Statement: Statement = {
             body
         }))
     },
-    "opaque" <name:Id> <p:("(" <IdList> ")")?> <q:IdList> ";" => Statement::Opaque(name, p.unwrap_or(vec![]), q),
-    // 门调用
-    <name:GateId> <p:("(" <ExpList> ")")?> <args:ArgList> ";" =>
+    "opaque" <name:Id> <p:ParamIdList?> <q:IdList> ";" => Statement::Opaque(name, p.unwrap_or(vec![]), q),
+};
+
+Decl: Statement = {
+    "qreg" <id:Id> "[" <n:Int> "]" ";" => Statement::QReg(id, n),
+    "creg" <id:Id> "[" <n:Int> "]" ";" => Statement::CReg(id, n),
+};
+
+Qop: Statement = {
+    Uop,
+    "measure" <q:Arg> "->" <c:Arg> ";" => Statement::Measure(q, c),
+    "reset" <a:Arg> ";" => Statement::Reset(a),
+};
+
+Uop: Statement = {
+    <name:GateId> <p:ParamExpList?> <args:ArgList> ";" =>
         Statement::CustomGate(name, p.unwrap_or(vec![]), args),
+};
+
+GateBody: Vec<Statement> = {
+    <s:GateBodyStatement*> => s,
+};
+
+GateBodyStatement: Statement = {
+    Uop,
+    "barrier" <ids:IdList> ";" => {
+        Statement::Barrier(ids.into_iter().map(Argument::Id).collect())
+    },
+};
+
+ParamIdList: Vec<String> = {
+    "(" ")" => vec![],
+    "(" <ids:IdList> ")" => ids,
+};
+
+ParamExpList: Vec<Expression> = {
+    "(" ")" => vec![],
+    "(" <exprs:ExpList> ")" => exprs,
 };
 
 GateId: String = {
@@ -105,12 +137,18 @@ Arg: Argument = {
 
 // 基础词法规则
 Id: String = <s:r"[a-z][a-zA-Z0-9_]*"> => s.to_string();
-Int: i64 = <s:r"[0-9]+"> => i64::from_str(s).unwrap();
+Int: i64 = <s:r"0|[1-9][0-9]*"> => i64::from_str(s).unwrap_or(-1);
 Real: f64 = <s:r"([0-9]+\.[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?|[0-9]+[eE][-+]?[0-9]+"> => f64::from_str(s).unwrap();
 QuotedStr: String = <s:r#""[^"]*""#> => s[1..s.len()-1].to_string();
 
 // 列表宏
-Comma<T>: Vec<T> = { <v:(<T> ",")*> <e:T?> => match e { None => v, Some(e) => { let mut v = v; v.push(e); v } } };
+Comma<T>: Vec<T> = {
+    <first:T> <rest:("," <T>)*> => {
+        let mut values = vec![first];
+        values.extend(rest);
+        values
+    }
+};
 IdList = Comma<Id>;
 ExpList = Comma<Exp>;
 ArgList = Comma<Arg>;

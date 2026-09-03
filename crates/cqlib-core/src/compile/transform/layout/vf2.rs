@@ -21,7 +21,7 @@
 use super::vf2_engine::{Vf2Graph, Vf2SearchConfig, find_non_induced_mappings};
 use super::{
     CircuitLayoutAnalysis, Interaction, LayoutDiagnostics, LayoutObjective, LayoutResult,
-    LayoutScore, PhysicalLayoutGraph, analyze_circuit_for_layout, build_physical_layout_graph,
+    LayoutScore, PhysicalLayoutGraph, analyze_circuit_for_layout,
 };
 use crate::circuit::Circuit;
 use crate::compile::CompilerError;
@@ -79,12 +79,24 @@ impl Default for Vf2LayoutConfig {
     }
 }
 
+/// Outcome of an opportunistic prepared VF2 search.
+///
+/// SABRE layout treats VF2 as a bounded candidate generator.  A search that
+/// proves there is no perfect mapping and a search that merely exhausts its
+/// call budget are deliberately distinct outcomes.
+pub(crate) enum Vf2PreparedOutcome {
+    Found(LayoutResult),
+    NoCandidate,
+    BudgetExhausted,
+}
+
 /// Searches for a perfect initial layout using non-induced VF2++ matching.
 ///
 /// A perfect layout maps every required logical interaction onto adjacent
-/// physical qubits. Physical extra edges are allowed, matching Qiskit's
-/// non-induced `VF2Layout` semantics. Coupling direction is not a hard
-/// feasibility constraint; direction mismatch is scored by [`LayoutObjective`].
+/// physical qubits. Physical extra edges are allowed because the logical
+/// interaction graph is matched as a non-induced subgraph. Coupling direction
+/// is not a hard feasibility constraint; direction mismatch is scored by
+/// [`LayoutObjective`].
 /// Logical qubits that do not participate in required interactions are filled
 /// deterministically after the VF2 match is found.
 ///
@@ -124,7 +136,7 @@ pub fn vf2_perfect_layout(
     config: &Vf2LayoutConfig,
 ) -> Result<LayoutResult, CompilerError> {
     let analysis = analyze_circuit_for_layout(circuit)?;
-    let physical = build_physical_layout_graph(device)?;
+    let physical = PhysicalLayoutGraph::from_device(device)?;
     vf2_perfect_layout_prepared(&analysis, &physical, objective, config)
 }
 
@@ -138,6 +150,26 @@ pub fn vf2_perfect_layout_prepared(
     objective: &LayoutObjective,
     config: &Vf2LayoutConfig,
 ) -> Result<LayoutResult, CompilerError> {
+    match try_vf2_perfect_layout_prepared(analysis, physical, objective, config)? {
+        Vf2PreparedOutcome::Found(result) => Ok(result),
+        Vf2PreparedOutcome::NoCandidate => Err(CompilerError::InvalidInput(
+            "vf2 perfect layout could not find a perfect mapping".to_string(),
+        )),
+        Vf2PreparedOutcome::BudgetExhausted => Err(CompilerError::InvalidInput(
+            "vf2 perfect layout could not find a perfect mapping before the call limit was reached"
+                .to_string(),
+        )),
+    }
+}
+
+/// Runs the prepared VF2 search while preserving no-solution versus budget
+/// exhaustion for callers that use VF2 as an optional prepass.
+pub(crate) fn try_vf2_perfect_layout_prepared(
+    analysis: &CircuitLayoutAnalysis,
+    physical: &PhysicalLayoutGraph,
+    objective: &LayoutObjective,
+    config: &Vf2LayoutConfig,
+) -> Result<Vf2PreparedOutcome, CompilerError> {
     if config.candidate_limit == 0 {
         return Err(CompilerError::InvalidInput(
             "vf2 perfect layout candidate_limit must be greater than zero".to_string(),
@@ -166,7 +198,7 @@ pub fn vf2_perfect_layout_prepared(
         let mapping = complete_mapping(BTreeMap::new(), analysis, physical, objective, &activity);
         let layout = layout_from_mapping(analysis, physical, mapping, "vf2 perfect layout")?;
         let score = objective.score_layout(analysis, physical, &layout)?;
-        return Ok(LayoutResult {
+        return Ok(Vf2PreparedOutcome::Found(LayoutResult {
             layout,
             diagnostics: LayoutDiagnostics {
                 is_perfect: true,
@@ -175,7 +207,7 @@ pub fn vf2_perfect_layout_prepared(
                 notes: Vec::new(),
             },
             score: Some(score),
-        });
+        }));
     }
 
     // Build a compact graph containing only logical qubits that participate in
@@ -285,14 +317,11 @@ pub fn vf2_perfect_layout_prepared(
     }
 
     let Some((layout, score)) = best else {
-        let reason = if search_stats.stopped_by_call_limit {
-            " before the call limit was reached"
+        return Ok(if search_stats.stopped_by_call_limit {
+            Vf2PreparedOutcome::BudgetExhausted
         } else {
-            ""
-        };
-        return Err(CompilerError::InvalidInput(format!(
-            "vf2 perfect layout could not find a perfect mapping{reason}"
-        )));
+            Vf2PreparedOutcome::NoCandidate
+        });
     };
 
     let mut notes = Vec::new();
@@ -300,7 +329,7 @@ pub fn vf2_perfect_layout_prepared(
         notes.push("vf2 search stopped after reaching call_limit".to_string());
     }
 
-    Ok(LayoutResult {
+    Ok(Vf2PreparedOutcome::Found(LayoutResult {
         layout,
         diagnostics: LayoutDiagnostics {
             is_perfect: true,
@@ -309,7 +338,7 @@ pub fn vf2_perfect_layout_prepared(
             notes,
         },
         score: Some(score),
-    })
+    }))
 }
 
 /// Completes a partial VF2 mapping with deterministic assignments.

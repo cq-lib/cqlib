@@ -11,14 +11,21 @@
 // that they have been altered from the originals.
 
 use crate::circuit::{PyParameter, PyValueOperation};
+use crate::compile::knowledge::library::PyRuleLibrary;
+use crate::utils::python_bool;
 use cqlib_core::circuit::{Instruction, Parameter, Qubit, ValueOperation};
 use cqlib_core::compile::commutation::{
     Commutation, CommutationChecker, CommutationConfig, algebraic_commutation, check_commutation,
 };
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 /// Python wrapper for a proven commutation relationship.
-#[pyclass(name = "Commutation", module = "cqlib.compile.commutation")]
+#[pyclass(
+    name = "Commutation",
+    module = "cqlib.compile.commutation",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyCommutation {
     inner: Commutation,
@@ -79,10 +86,14 @@ impl PyCommutation {
 }
 
 /// Python wrapper for commutation checker configuration.
-#[pyclass(name = "CommutationConfig", module = "cqlib.compile.commutation")]
+#[pyclass(
+    name = "CommutationConfig",
+    module = "cqlib.compile.commutation",
+    from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyCommutationConfig {
-    inner: CommutationConfig,
+    pub(crate) inner: CommutationConfig,
 }
 
 impl From<CommutationConfig> for PyCommutationConfig {
@@ -126,12 +137,7 @@ impl PyCommutationConfig {
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "CommutationConfig(enable_rule_oracle={}, enable_matrix_fallback={}, max_matrix_qubits={})",
-            self.inner.enable_rule_oracle,
-            self.inner.enable_matrix_fallback,
-            self.inner.max_matrix_qubits
-        )
+        self.repr_value()
     }
 
     fn __eq__(&self, other: &Self) -> bool {
@@ -147,8 +153,24 @@ impl PyCommutationConfig {
     }
 }
 
+impl PyCommutationConfig {
+    /// Returns the eval-able Python constructor form of this configuration.
+    pub(crate) fn repr_value(&self) -> String {
+        format!(
+            "CommutationConfig(enable_rule_oracle={}, enable_matrix_fallback={}, max_matrix_qubits={})",
+            python_bool(self.inner.enable_rule_oracle),
+            python_bool(self.inner.enable_matrix_fallback),
+            self.inner.max_matrix_qubits
+        )
+    }
+}
+
 /// Reusable Python wrapper around the core commutation checker.
-#[pyclass(name = "CommutationChecker", module = "cqlib.compile.commutation")]
+#[pyclass(
+    name = "CommutationChecker",
+    module = "cqlib.compile.commutation",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyCommutationChecker {
     inner: CommutationChecker,
@@ -170,6 +192,29 @@ impl PyCommutationChecker {
         Self {
             inner: CommutationChecker::with_config(config.inner),
         }
+    }
+
+    /// Builds a checker using commute rules from an already loaded library.
+    ///
+    /// Only rules registered under ``RuleKind.commute()`` participate in
+    /// proofs. ``config=None`` uses the default configuration, matching
+    /// :meth:`builtin`. Raises ``ValueError`` when ``enable_rule_oracle`` is
+    /// disabled, because the library would otherwise be silently ignored.
+    #[staticmethod]
+    #[pyo3(signature = (library, config=None))]
+    fn from_library(
+        library: PyRef<'_, PyRuleLibrary>,
+        config: Option<PyCommutationConfig>,
+    ) -> PyResult<Self> {
+        let config = config.unwrap_or_else(|| CommutationConfig::default().into());
+        if !config.inner.enable_rule_oracle {
+            return Err(PyValueError::new_err(
+                "config.enable_rule_oracle must be True when building a checker from a library",
+            ));
+        }
+        Ok(Self {
+            inner: CommutationChecker::from_library(&library.inner, config.inner),
+        })
     }
 
     /// Returns a copy of the active checker configuration.

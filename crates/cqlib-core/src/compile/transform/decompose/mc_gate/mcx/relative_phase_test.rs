@@ -12,14 +12,14 @@
 
 use super::relative_phase::emit_relative_phase_toffoli;
 use super::test_utils::EPSILON;
+use crate::circuit::test_utils::assert_matrix_approx_eq;
 use crate::circuit::value_instruction::ValueInstruction;
 use crate::circuit::{
     Circuit, Instruction, Qubit, StandardGate, circuit_to_matrix, operation::ValueOperation,
 };
 use crate::compile::error::CompilerError;
-use crate::util::test_utils::{
-    assert_matrix_approx_eq, assert_standard_operation, circuit_from_value_operations,
-    single_nonzero_matrix_output,
+use crate::compile::transform::decompose::mc_gate::test_utils::{
+    assert_standard_operation, circuit_from_value_operations, single_nonzero_matrix_output,
 };
 use ndarray::Array2;
 use smallvec::smallvec;

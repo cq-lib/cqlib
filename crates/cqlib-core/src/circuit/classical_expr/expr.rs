@@ -1061,6 +1061,45 @@ impl ClassicalExpr {
             }),
         })
     }
+
+    /// Returns the target bit replaced by a single-bit measurement result.
+    ///
+    /// The expression must reconstruct the complete `BitVec` target in index
+    /// order, preserving every other bit from the target itself and using
+    /// `result` exactly once.
+    pub(crate) fn measurement_store_bit(
+        &self,
+        target: ClassicalVar,
+        result: ClassicalValue,
+    ) -> Option<u32> {
+        let ClassicalType::BitVec(width) = target.ty() else {
+            return None;
+        };
+        let ClassicalExprKind::PackBits { bits } = self.kind() else {
+            return None;
+        };
+        if bits.len() != width.get() as usize {
+            return None;
+        }
+
+        let mut measured_index = None;
+        for (index, bit) in bits.iter().enumerate() {
+            match bit.kind() {
+                ClassicalExprKind::Value(value) if *value == result => {
+                    if measured_index.replace(index as u32).is_some() {
+                        return None;
+                    }
+                }
+                ClassicalExprKind::ExtractBit {
+                    value,
+                    index: source_index,
+                } if *source_index == index as u32
+                    && matches!(value.kind(), ClassicalExprKind::Var(var) if *var == target) => {}
+                _ => return None,
+            }
+        }
+        measured_index
+    }
 }
 
 impl From<ClassicalVar> for ClassicalExpr {

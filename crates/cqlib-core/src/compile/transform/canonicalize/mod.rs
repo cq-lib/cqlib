@@ -86,8 +86,9 @@
 //!   phase is nonzero;
 //! - no removable strict no-op remains (including self-stores on classical
 //!   variables);
-//! - barriers are sorted, deduplicated, label-free, non-empty, and no adjacent
-//!   barrier pair is mergeable;
+//! - local barrier scopes are sorted and deduplicated; an empty scope denotes a
+//!   global barrier over every circuit qubit; all barriers are label-free and
+//!   no adjacent barrier pair is mergeable;
 //! - the parameter and symbol tables are consistent and contain no unused
 //!   parameter entries;
 //! - classical variable and value tables are preserved with stable handles;
@@ -140,7 +141,6 @@
 
 mod canonicalizer;
 mod config;
-mod equivalence;
 mod ops;
 mod verify;
 

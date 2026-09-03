@@ -16,7 +16,8 @@ pub mod routing;
 
 pub use routing::{
     PySabreConfig, PySabreHeuristicConfig, PySabreRoutingDiagnostics, PySabreRoutingResult,
-    PySabreTrialObjective, py_sabre_route,
+    PySabreVf2PrepassConfig, py_normalize_initial_layout, py_sabre_route,
+    py_validate_reachable_interactions,
 };
 
 use pyo3::prelude::*;
@@ -25,12 +26,17 @@ use pyo3::prelude::*;
 pub(crate) fn register_sabre_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let m = PyModule::new(parent.py(), "sabre")?;
 
-    m.add_class::<PySabreTrialObjective>()?;
     m.add_class::<PySabreHeuristicConfig>()?;
+    m.add_class::<PySabreVf2PrepassConfig>()?;
     m.add_class::<PySabreConfig>()?;
     m.add_class::<PySabreRoutingDiagnostics>()?;
     m.add_class::<PySabreRoutingResult>()?;
     m.add_function(pyo3::wrap_pyfunction!(py_sabre_route, &m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(py_normalize_initial_layout, &m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(
+        py_validate_reachable_interactions,
+        &m
+    )?)?;
 
     parent.add_submodule(&m)?;
     parent

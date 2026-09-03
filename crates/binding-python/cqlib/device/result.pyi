@@ -78,7 +78,7 @@ class Outcome:
         Formats the outcome as a binary string.
 
         Args:
-            num_qubits: Total number of qubits (pads with leading zeros if needed)
+            num_qubits: Width of the output bitstring in bits (pads or truncates to this length)
 
         Returns:
             Binary string of length `num_qubits`
@@ -224,7 +224,7 @@ class ExecutionResult:
             task_id: Unique job identifier
             qubits: List of measured qubits (either all ints or all Qubits)
             shots: Number of measurement shots
-            num_qubits: Total number of qubits in the circuit
+            num_qubits: Number of measured qubits (width of the measurement bitstrings)
             backend: Optional backend name
         """
         ...
@@ -245,12 +245,13 @@ class ExecutionResult:
             task_id: Unique job identifier
             qubits: List of measured qubits.
             shots: Number of measurement shots
-            num_qubits: Total number of qubits in the circuit
+            num_qubits: Number of measured qubits (width of the measurement bitstrings)
             counts: Dictionary mapping bitstrings to occurrence counts
             backend: Optional backend name
 
         Raises:
-            ValueError: If any bitstring contains invalid characters.
+            ValueError: If any bitstring contains invalid characters or its
+                length is not equal to num_qubits.
         """
         ...
 
@@ -269,7 +270,8 @@ class ExecutionResult:
             counts: Dictionary mapping bitstrings to occurrence counts
 
         Raises:
-            ValueError: If any bitstring contains invalid characters.
+            ValueError: If any bitstring contains invalid characters or its
+                length is not equal to num_qubits.
         """
         ...
 

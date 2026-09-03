@@ -40,7 +40,11 @@ use super::hamiltonian_evolution::PyEvolutionStrategy;
 ///     >>> circuit = ansatz.build_circuit("p")
 ///     >>> ansatz.num_parameters()
 ///     6
-#[pyclass(name = "QAOAAnsatz", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "QAOAAnsatz",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyQAOAAnsatz {
     pub(crate) inner: QAOAAnsatz,

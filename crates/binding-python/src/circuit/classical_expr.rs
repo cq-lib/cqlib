@@ -18,13 +18,12 @@
 
 use crate::circuit::classical::{PyClassicalType, PyClassicalValue, PyClassicalVar};
 use crate::circuit::error::CircuitError as PyCircuitError;
+use crate::utils::hash_value;
 use cqlib_core::circuit::ClassicalExpr;
 use pyo3::prelude::*;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// Typed classical expression used by dynamic-circuit control flow.
-#[pyclass(name = "ClassicalExpr", module = "cqlib.circuit")]
+#[pyclass(name = "ClassicalExpr", module = "cqlib.circuit", from_py_object)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PyClassicalExpr {
     pub(crate) inner: ClassicalExpr,
@@ -253,9 +252,7 @@ impl PyClassicalExpr {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __repr__(&self) -> String {

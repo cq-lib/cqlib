@@ -212,13 +212,13 @@ pub fn entanglement_entropy_pure(sv: &Statevector, subsys_a: &[usize]) -> Result
         ));
     }
 
-    if let Some(&max_idx) = sorted_a.last() {
-        if max_idx >= sv.num_qubits {
-            return Err(QisError::IndexOutOfBounds {
-                index: max_idx,
-                max: sv.num_qubits - 1,
-            });
-        }
+    if let Some(&max_idx) = sorted_a.last()
+        && max_idx >= sv.num_qubits
+    {
+        return Err(QisError::IndexOutOfBounds {
+            index: max_idx,
+            max: sv.num_qubits - 1,
+        });
     }
 
     // Build density matrix from pure state: ρ = |ψ⟩⟨ψ|

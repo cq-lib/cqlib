@@ -11,6 +11,9 @@
 # that they have been altered from the originals.
 
 from cqlib import Qubit
+from .qubit import PhysicalQubit
+
+_PhysicalQubitLike = int | Qubit | PhysicalQubit
 
 
 class Topology:
@@ -45,9 +48,9 @@ class Topology:
         >>> topo.supports_directed_coupling(1, 0)          # False
         >>> topo.supports_coupling_either_direction(0, 1)  # True (1→0 may exist separately)
         >>>
-        >>> topo.successors(1)        # [Qubit(2)]  — outgoing
-        >>> topo.predecessors(1)      # [Qubit(0)]  — incoming
-        >>> topo.neighbors_undirected(1)  # [Qubit(0), Qubit(2)]
+        >>> topo.successors(1)        # [PhysicalQubit(2)]  — outgoing
+        >>> topo.predecessors(1)      # [PhysicalQubit(0)]  — incoming
+        >>> topo.neighbors_undirected(1)  # [PhysicalQubit(0), PhysicalQubit(2)]
         >>>
         >>> topo.out_degree(0)  # 1
         >>> topo.in_degree(2)   # 1
@@ -62,12 +65,10 @@ class Topology:
 
     def __init__(
         self,
-        qubits: list[int] | list[Qubit],
-        couplings: list[tuple[int | Qubit, int | Qubit, str]],
+        qubits: list[_PhysicalQubitLike],
+        couplings: list[tuple[_PhysicalQubitLike, _PhysicalQubitLike, str]],
     ) -> None:
         """Create a topology with given qubits and directed couplings.
-
-        Note: The ``qubits`` list must be all ``int`` or all ``Qubit``.
 
         Args:
             qubits: List of qubit identifiers. Duplicates are rejected.
@@ -81,7 +82,7 @@ class Topology:
         """
 
     @staticmethod
-    def line(qubits: list[int] | list[Qubit]) -> "Topology":
+    def line(qubits: list[_PhysicalQubitLike]) -> "Topology":
         """Create a directed line topology.
 
         Couplings: ``qubits[0] → qubits[1] → ... → qubits[n-1]``.
@@ -89,8 +90,7 @@ class Topology:
         Args:
             qubits: List of qubit IDs in line order.
 
-        Raises:
-            ValueError: If fewer than 2 qubits are provided.
+        Empty and one-qubit lines are valid.
         """
 
     # ---- Size properties ----
@@ -104,12 +104,12 @@ class Topology:
         """Number of directed coupling edges."""
 
     @property
-    def qubits(self) -> list[Qubit]:
+    def qubits(self) -> list[PhysicalQubit]:
         """All physical qubits in the topology."""
 
     # ---- Mutation methods ----
 
-    def add_qubits(self, qubits: list[int] | list[Qubit]) -> None:
+    def add_qubits(self, qubits: list[_PhysicalQubitLike]) -> None:
         """Add physical qubits to the topology.
 
         Raises:
@@ -118,7 +118,7 @@ class Topology:
 
     def add_couplings(
         self,
-        couplings: list[tuple[int | Qubit, int | Qubit, str]],
+        couplings: list[tuple[_PhysicalQubitLike, _PhysicalQubitLike, str]],
     ) -> None:
         """Add directed couplings.
 
@@ -129,7 +129,7 @@ class Topology:
                 already exists, or a self-coupling is requested.
         """
 
-    def remove_qubits(self, qubits: list[int] | list[Qubit]) -> None:
+    def remove_qubits(self, qubits: list[_PhysicalQubitLike]) -> None:
         """Remove qubits and all their incident couplings.
 
         Raises:
@@ -137,7 +137,7 @@ class Topology:
         """
 
     def remove_couplings(
-        self, couplings: list[tuple[int | Qubit, int | Qubit]]
+        self, couplings: list[tuple[_PhysicalQubitLike, _PhysicalQubitLike]]
     ) -> None:
         """Remove specific directed couplings.
 
@@ -151,7 +151,7 @@ class Topology:
     # ---- Connectivity queries (directed) ----
 
     def supports_directed_coupling(
-        self, control: int | Qubit, target: int | Qubit
+        self, control: _PhysicalQubitLike, target: _PhysicalQubitLike
     ) -> bool:
         """Check for a directed coupling ``control → target``.
 
@@ -167,7 +167,7 @@ class Topology:
         """
 
     def supports_coupling_either_direction(
-        self, a: int | Qubit, b: int | Qubit
+        self, a: _PhysicalQubitLike, b: _PhysicalQubitLike
     ) -> bool:
         """Check for a coupling in either direction.
 
@@ -180,7 +180,7 @@ class Topology:
 
     # ---- Neighbor queries ----
 
-    def successors(self, qubit: int | Qubit) -> list[Qubit]:
+    def successors(self, qubit: _PhysicalQubitLike) -> list[PhysicalQubit]:
         """All qubits reachable via outgoing couplings from ``qubit``.
 
         Args:
@@ -189,17 +189,17 @@ class Topology:
         Example::
 
             >>> topo = Topology([0, 1, 2], [(0, 1, ""), (0, 2, "")])
-            >>> topo.successors(0)  # [Qubit(1), Qubit(2)]
+            >>> topo.successors(0)  # [PhysicalQubit(1), PhysicalQubit(2)]
         """
 
-    def predecessors(self, qubit: int | Qubit) -> list[Qubit]:
+    def predecessors(self, qubit: _PhysicalQubitLike) -> list[PhysicalQubit]:
         """All qubits with incoming couplings to ``qubit``.
 
         Args:
             qubit: Target qubit.
         """
 
-    def neighbors_undirected(self, qubit: int | Qubit) -> list[Qubit]:
+    def neighbors_undirected(self, qubit: _PhysicalQubitLike) -> list[PhysicalQubit]:
         """All qubits coupled to ``qubit`` in either direction.
 
         Bidirectional couplings are deduplicated.
@@ -208,20 +208,20 @@ class Topology:
             qubit: The qubit to query.
         """
 
-    def undirected_edges(self) -> list[tuple[Qubit, Qubit]]:
+    def undirected_edges(self) -> list[tuple[PhysicalQubit, PhysicalQubit]]:
         """All unique coupling pairs ignoring direction.
 
         Pairs are ordered by qubit ID. Bidirectional couplings collapse
         to a single pair.
 
         Returns:
-            List of unique ``(Qubit, Qubit)`` pairs.
+            List of unique ``(PhysicalQubit, PhysicalQubit)`` pairs.
         """
 
     # ---- Metadata queries ----
 
     def get_coupling_name(
-        self, control: int | Qubit, target: int | Qubit
+        self, control: _PhysicalQubitLike, target: _PhysicalQubitLike
     ) -> str | None:
         """Get the name of a directed coupling.
 
@@ -233,16 +233,16 @@ class Topology:
             The coupling name string, or ``None`` if it does not exist.
         """
 
-    def contains_qubit(self, qubit: int | Qubit) -> bool:
+    def contains_qubit(self, qubit: _PhysicalQubitLike) -> bool:
         """Check if a qubit exists in the topology."""
 
-    def out_degree(self, qubit: int | Qubit) -> int:
+    def out_degree(self, qubit: _PhysicalQubitLike) -> int:
         """Number of outgoing couplings from a qubit.
 
         Returns 0 if the qubit does not exist.
         """
 
-    def in_degree(self, qubit: int | Qubit) -> int:
+    def in_degree(self, qubit: _PhysicalQubitLike) -> int:
         """Number of incoming couplings to a qubit.
 
         Returns 0 if the qubit does not exist.

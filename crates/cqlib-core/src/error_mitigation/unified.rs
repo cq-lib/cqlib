@@ -70,7 +70,7 @@ impl PartialEq for RunArgs {
                                 && lhs
                                     .iter()
                                     .zip(rhs.iter())
-                                    .all(|(lhs, rhs)| lhs.to_string() == rhs.to_string())
+                                    .all(|(lhs, rhs)| lhs.name() == rhs.name())
                         }
                         _ => false,
                     }

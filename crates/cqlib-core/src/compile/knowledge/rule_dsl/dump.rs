@@ -60,16 +60,16 @@ fn write_rule(w: &mut impl Write, rule: &Rule) -> std::fmt::Result {
     }
     writeln!(w, "    }}")?;
 
-    if let Some(conditions) = &rule.conditions {
-        if !conditions.is_empty() {
-            writeln!(w, "    require {{")?;
-            for cond in conditions {
-                write!(w, "        ")?;
-                write_condition(w, cond)?;
-                writeln!(w)?;
-            }
-            writeln!(w, "    }}")?;
+    if let Some(conditions) = &rule.conditions
+        && !conditions.is_empty()
+    {
+        writeln!(w, "    require {{")?;
+        for cond in conditions {
+            write!(w, "        ")?;
+            write_condition(w, cond)?;
+            writeln!(w)?;
         }
+        writeln!(w, "    }}")?;
     }
 
     writeln!(w, "    rewrite {{")?;
@@ -147,21 +147,21 @@ fn write_rule_item(w: &mut impl Write, op: &RuleItem) -> std::fmt::Result {
         _ => unreachable!("unsupported instruction cannot appear in a RuleItem"),
     };
     write!(w, "{}", gate_name)?;
-    if let Some(params) = &op.params {
-        if !params.is_empty() {
-            write!(w, "(")?;
-            for (i, pp) in params.iter().enumerate() {
-                if i > 0 {
-                    write!(w, ", ")?;
-                }
-                let p = match pp {
-                    ParameterValue::Fixed(v) => Parameter::from(*v),
-                    ParameterValue::Param(p) => p.clone(),
-                };
-                write!(w, "{}", p)?;
+    if let Some(params) = &op.params
+        && !params.is_empty()
+    {
+        write!(w, "(")?;
+        for (i, pp) in params.iter().enumerate() {
+            if i > 0 {
+                write!(w, ", ")?;
             }
-            write!(w, ")")?;
+            let p = match pp {
+                ParameterValue::Fixed(v) => Parameter::from(*v),
+                ParameterValue::Param(p) => p.clone(),
+            };
+            write!(w, "{}", p)?;
         }
+        write!(w, ")")?;
     }
     for q in &op.qubits {
         write!(w, " {}", q)?;

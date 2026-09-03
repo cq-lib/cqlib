@@ -329,3 +329,45 @@ rule specialize_u_to_z {
     require { a == 0 mod 4*π, b == 0 mod 2*π, c == π mod 2*π }
     rewrite { Z 0 }
 }
+
+rule specialize_fsim_zero_theta {
+    match { FSIM(theta, phi) 0 1 }
+    require { theta == 0 mod 2*π }
+    rewrite { Phase(-phi/2) 0, CRZ(-phi) 0 1 }
+}
+
+rule specialize_u_zero_theta {
+    match { U(theta, phi, lambda) 0 }
+    require { theta == 0 mod 4*π }
+    rewrite { Phase(phi + lambda) 0 }
+}
+
+rule specialize_rzz_pi_2_to_cz {
+    match { RZZ(a) 0 1 }
+    require { a == π/2 mod 4*π }
+    rewrite { S 0, S 1, CZ 0 1, GPhase(-π/4) }
+}
+
+rule specialize_rzz_neg_pi_2_to_cz {
+    match { RZZ(a) 0 1 }
+    require { a == -π/2 mod 4*π }
+    rewrite { SDG 0, SDG 1, CZ 0 1, GPhase(π/4) }
+}
+
+rule specialize_rzx_pi {
+    match { RZX(a) 0 1 }
+    require { a == π mod 4*π }
+    rewrite { Z 0, X 1, GPhase(-π/2) }
+}
+
+rule specialize_fsim_pi_zero_to_zz {
+    match { FSIM(a, b) 0 1 }
+    require { a == π mod 2*π, b == 0 mod 2*π }
+    rewrite { Z 0, Z 1 }
+}
+
+rule specialize_fsim_to_cz {
+    match { FSIM(a, b) 0 1 }
+    require { a == 0 mod 2*π, b == π mod 2*π }
+    rewrite { CZ 0 1 }
+}

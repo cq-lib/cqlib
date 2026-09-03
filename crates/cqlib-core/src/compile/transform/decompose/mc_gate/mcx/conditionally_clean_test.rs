@@ -22,12 +22,12 @@ use crate::circuit::{
     Instruction, Qubit, StandardGate, circuit_to_matrix, operation::ValueOperation,
 };
 use crate::compile::error::CompilerError;
-use crate::qis::Statevector;
-use crate::util::test_utils::{
+use crate::compile::transform::decompose::mc_gate::test_utils::{
     assert_statevectors_equal_up_to_global_phase, assert_value_operations_equal,
     assert_value_operations_only_use_qubits, circuit_from_value_operations,
     single_nonzero_matrix_output, statevector_after_value_operations,
 };
+use crate::qis::Statevector;
 use num_complex::Complex64;
 use std::collections::{BTreeMap, HashMap};
 use std::f64::consts::{FRAC_1_SQRT_2, PI};

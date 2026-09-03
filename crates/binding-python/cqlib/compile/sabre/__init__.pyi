@@ -24,15 +24,26 @@ Example::
         circuit,
         Device.line("line3", 3),
         Layout.from_pairs([(0, 0), (1, 2)], physical_count=3),
-        SabreConfig(routing_trials=1, seed=7),
+        config=SabreConfig(routing_trials=1, seed=7),
     )
 """
 
 from .routing import SabreConfig as SabreConfig
 from .routing import SabreHeuristicConfig as SabreHeuristicConfig
+from .routing import SabreVf2PrepassConfig as SabreVf2PrepassConfig
 from .routing import SabreRoutingDiagnostics as SabreRoutingDiagnostics
 from .routing import SabreRoutingResult as SabreRoutingResult
-from .routing import SabreTrialObjective as SabreTrialObjective
 from .routing import sabre_route as sabre_route
+from .routing import normalize_initial_layout as normalize_initial_layout
+from .routing import validate_reachable_interactions as validate_reachable_interactions
 
-__all__: list[str]
+__all__ = [
+    "SabreHeuristicConfig",
+    "SabreVf2PrepassConfig",
+    "SabreConfig",
+    "SabreRoutingDiagnostics",
+    "SabreRoutingResult",
+    "sabre_route",
+    "normalize_initial_layout",
+    "validate_reachable_interactions",
+]

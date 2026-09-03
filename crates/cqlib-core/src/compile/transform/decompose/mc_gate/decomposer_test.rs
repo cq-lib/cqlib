@@ -10,21 +10,48 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+use super::test_utils::{EPSILON, assert_selected_matrix_columns_equal_up_to_global_phase};
 use super::{
-    McGateDecomposeConfig, decompose_mc_gates, decompose_mc_gates_for_device,
-    decompose_mc_gates_with_rule_stats,
+    McGateDecomposeConfig, decompose_mc_gates as decompose_mc_gates_outcome,
+    decompose_mc_gates_for_device as decompose_mc_gates_for_device_outcome,
+    decompose_mc_gates_with_rule_stats as decompose_mc_gates_with_rule_stats_outcome,
 };
+use crate::circuit::test_utils::assert_matrix_approx_eq;
 use crate::circuit::{
     Circuit, CircuitError, CircuitParam, ClassicalControlOp, ClassicalExpr, Instruction, MCGate,
     Operation, Parameter, ParameterValue, Qubit, StandardGate, circuit_to_matrix,
 };
 use crate::compile::CompilerError;
 use crate::compile::resource::{ResourceLimits, ResourcePolicy};
+use crate::compile::transform::decompose::DecompositionRuleStats;
+use crate::compile::transform::{ResolvedTransform, resolve_transform_for_test};
 use crate::device::{Device, PhysicalQubit, Topology};
-use crate::util::test_utils::{
-    EPSILON, assert_matrix_approx_eq, assert_selected_matrix_columns_equal_up_to_global_phase,
-};
 use std::collections::{HashMap, HashSet};
+
+fn decompose_mc_gates(
+    circuit: &Circuit,
+    config: McGateDecomposeConfig,
+) -> Result<ResolvedTransform, CompilerError> {
+    decompose_mc_gates_outcome(circuit, config)
+        .map(|outcome| resolve_transform_for_test(outcome, circuit))
+}
+
+fn decompose_mc_gates_with_rule_stats(
+    circuit: &Circuit,
+    config: McGateDecomposeConfig,
+) -> Result<(ResolvedTransform, DecompositionRuleStats), CompilerError> {
+    decompose_mc_gates_with_rule_stats_outcome(circuit, config)
+        .map(|(outcome, stats)| (resolve_transform_for_test(outcome, circuit), stats))
+}
+
+fn decompose_mc_gates_for_device(
+    circuit: &Circuit,
+    device: &Device,
+    resource_policy: ResourcePolicy,
+) -> Result<ResolvedTransform, CompilerError> {
+    decompose_mc_gates_for_device_outcome(circuit, device, resource_policy)
+        .map(|outcome| resolve_transform_for_test(outcome, circuit))
+}
 
 fn config(max_clean: usize, allow_dirty: bool) -> McGateDecomposeConfig {
     McGateDecomposeConfig {

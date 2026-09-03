@@ -18,14 +18,15 @@
 //! qubits. It does not insert SWAP operations; it only prepares an initial
 //! mapping for later routing.
 
+use super::analysis::GateInteraction;
+use super::scoring::score_adjacent_interaction;
 use super::{
     CircuitLayoutAnalysis, Interaction, LayoutDiagnostics, LayoutObjective, LayoutResult,
-    PhysicalLayoutGraph, analyze_circuit_for_layout, build_physical_layout_graph,
-    is_perfect_layout,
+    PhysicalLayoutGraph, analyze_circuit_for_layout, is_perfect_layout,
 };
 use crate::circuit::Circuit;
 use crate::compile::CompilerError;
-use crate::device::{Device, Layout};
+use crate::device::{Device, Layout, PhysicalQubit};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
@@ -73,7 +74,7 @@ pub fn greedy_layout(
     objective: &LayoutObjective,
 ) -> Result<LayoutResult, CompilerError> {
     let analysis = analyze_circuit_for_layout(circuit)?;
-    let physical = build_physical_layout_graph(device)?;
+    let physical = PhysicalLayoutGraph::from_device(device)?;
     greedy_layout_prepared(&analysis, &physical, objective)
 }
 
@@ -86,6 +87,28 @@ pub fn greedy_layout_prepared(
     physical: &PhysicalLayoutGraph,
     objective: &LayoutObjective,
 ) -> Result<LayoutResult, CompilerError> {
+    match greedy_layout_candidate_prepared(analysis, physical, objective)? {
+        GreedyCandidateOutcome::Found(result) => Ok(result),
+        GreedyCandidateOutcome::Disconnected { left, right } => Err(CompilerError::InvalidInput(
+            format!("physical qubits {left} and {right} are disconnected in the usable topology"),
+        )),
+    }
+}
+
+/// Structured result used when greedy layout is an optional SABRE prepass.
+pub(crate) enum GreedyCandidateOutcome {
+    Found(LayoutResult),
+    Disconnected {
+        left: PhysicalQubit,
+        right: PhysicalQubit,
+    },
+}
+
+pub(crate) fn greedy_layout_candidate_prepared(
+    analysis: &CircuitLayoutAnalysis,
+    physical: &PhysicalLayoutGraph,
+    objective: &LayoutObjective,
+) -> Result<GreedyCandidateOutcome, CompilerError> {
     if analysis.logical_qubits.len() > physical.physical_qubits().len() {
         return Err(CompilerError::InvalidInput(format!(
             "greedy layout requires at least as many usable physical qubits as logical qubits; got {} logical qubits and {} usable physical qubits",
@@ -117,13 +140,17 @@ pub fn greedy_layout_prepared(
 
     // Highest-weight interactions are placed first. Stable tie-breakers keep
     // the result reproducible when several edges have equal weight.
-    let mut interactions = analysis
+    let mut interaction_indices = analysis
         .interactions
         .interactions()
         .iter()
-        .filter(|interaction| interaction.weight > 0.0)
+        .enumerate()
+        .filter(|(_, interaction)| interaction.weight > 0.0)
+        .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    interactions.sort_by(|a, b| {
+    interaction_indices.sort_by(|a, b| {
+        let a = &analysis.interactions.interactions()[*a];
+        let b = &analysis.interactions.interactions()[*b];
         b.weight
             .total_cmp(&a.weight)
             .then_with(|| a.first_seen_order.cmp(&b.first_seen_order))
@@ -131,7 +158,12 @@ pub fn greedy_layout_prepared(
             .then_with(|| a.right.cmp(&b.right))
     });
 
-    for interaction in interactions {
+    for interaction_index in interaction_indices {
+        let interaction = &analysis.interactions.interactions()[interaction_index];
+        let scored_interaction = ScoredInteraction {
+            interaction,
+            gate_contributions: analysis.interactions.gate_contributions(interaction_index),
+        };
         let left_logical = logical_index[&interaction.left];
         let right_logical = logical_index[&interaction.right];
         match (mapping[left_logical], mapping[right_logical]) {
@@ -139,7 +171,7 @@ pub fn greedy_layout_prepared(
             // If one endpoint is already placed, expand from that anchor.
             (Some(left_physical), None) => {
                 let (right_physical, evaluated) = choose_single_candidate(
-                    interaction,
+                    scored_interaction,
                     right_logical,
                     left_physical,
                     true,
@@ -154,7 +186,7 @@ pub fn greedy_layout_prepared(
             }
             (None, Some(right_physical)) => {
                 let (left_physical, evaluated) = choose_single_candidate(
-                    interaction,
+                    scored_interaction,
                     left_logical,
                     right_physical,
                     false,
@@ -171,7 +203,7 @@ pub fn greedy_layout_prepared(
             // pair and reserve both qubits.
             (None, None) => {
                 let (left_physical, right_physical, evaluated) = choose_pair_candidate(
-                    interaction,
+                    scored_interaction,
                     left_logical,
                     right_logical,
                     &vacant,
@@ -233,6 +265,20 @@ pub fn greedy_layout_prepared(
         ))
     })?;
 
+    if let Some((left, right)) = analysis
+        .interactions
+        .interactions()
+        .iter()
+        .filter_map(|interaction| {
+            Some((
+                layout.get_physical(interaction.left)?,
+                layout.get_physical(interaction.right)?,
+            ))
+        })
+        .find(|(left, right)| physical.distance(*left, *right).is_none())
+    {
+        return Ok(GreedyCandidateOutcome::Disconnected { left, right });
+    }
     let score = objective.score_layout(analysis, physical, &layout)?;
     let diagnostics = LayoutDiagnostics {
         is_perfect: is_perfect_layout(analysis, physical, &layout),
@@ -241,11 +287,11 @@ pub fn greedy_layout_prepared(
         notes: Vec::new(),
     };
 
-    Ok(LayoutResult {
+    Ok(GreedyCandidateOutcome::Found(LayoutResult {
         layout,
         score: Some(score),
         diagnostics,
-    })
+    }))
 }
 
 /// Chooses physical qubits for an interaction with both endpoints unmapped.
@@ -255,7 +301,7 @@ pub fn greedy_layout_prepared(
 /// considered so the caller gets a deterministic failure or least-bad choice.
 #[allow(clippy::too_many_arguments)]
 fn choose_pair_candidate(
-    interaction: &Interaction,
+    interaction: ScoredInteraction<'_>,
     left_logical: usize,
     right_logical: usize,
     vacant: &[bool],
@@ -330,7 +376,7 @@ fn choose_pair_candidate(
 /// `interaction`, preserving direction-sensitive scoring.
 #[allow(clippy::too_many_arguments)]
 fn choose_single_candidate(
-    interaction: &Interaction,
+    interaction: ScoredInteraction<'_>,
     candidate_logical: usize,
     anchored_physical: usize,
     anchor_is_left: bool,
@@ -450,6 +496,12 @@ fn choose_idle_candidate(
 }
 
 #[derive(Debug, Clone, Copy)]
+struct ScoredInteraction<'a> {
+    interaction: &'a Interaction,
+    gate_contributions: &'a [GateInteraction],
+}
+
+#[derive(Debug, Clone, Copy)]
 struct CandidateCost {
     /// Whether the two physical candidates are disconnected in the usable graph.
     disconnected: bool,
@@ -466,7 +518,7 @@ impl CandidateCost {
     /// quality is still evaluated later by [`LayoutObjective::score_layout`].
     #[allow(clippy::too_many_arguments)]
     fn for_interaction(
-        interaction: &Interaction,
+        interaction: ScoredInteraction<'_>,
         left_logical: usize,
         right_logical: usize,
         left_physical: usize,
@@ -483,27 +535,18 @@ impl CandidateCost {
             };
         };
 
-        let direction = if distance == 1 {
-            let mut direction = 0.0;
-            if interaction.directed_weight_left_to_right > 0.0
-                && !physical.supports_directed_coupling_by_index(left_physical, right_physical)
-            {
-                direction += interaction.directed_weight_left_to_right;
-            }
-            if interaction.directed_weight_right_to_left > 0.0
-                && !physical.supports_directed_coupling_by_index(right_physical, left_physical)
-            {
-                direction += interaction.directed_weight_right_to_left;
-            }
-            direction
+        let adjacent = if distance == 1 {
+            score_adjacent_interaction(
+                interaction.gate_contributions,
+                left_physical,
+                right_physical,
+                physical,
+            )
         } else {
-            0.0
+            Default::default()
         };
         let two_qubit_error = if distance == 1 && objective.two_qubit_error_weight != 0.0 {
-            physical
-                .two_qubit_error_undirected_by_index(left_physical, right_physical)
-                .map(|error| interaction.weight * error)
-                .unwrap_or(0.0)
+            adjacent.effective_two_qubit_error
         } else {
             0.0
         };
@@ -513,8 +556,10 @@ impl CandidateCost {
         Self {
             disconnected: false,
             distance,
-            objective_total: objective.distance_weight * interaction.weight * f64::from(distance)
-                + objective.direction_weight * direction
+            objective_total: objective.distance_weight
+                * interaction.interaction.weight
+                * f64::from(distance)
+                + objective.direction_weight * adjacent.direction
                 + objective.two_qubit_error_weight * two_qubit_error
                 + objective.readout_error_weight * readout,
         }
@@ -559,7 +604,7 @@ fn compare_cost(a: CandidateCost, b: CandidateCost) -> Ordering {
 /// reproducible across runs.
 #[allow(clippy::too_many_arguments)]
 fn update_best_pair(
-    interaction: &Interaction,
+    interaction: ScoredInteraction<'_>,
     left_logical: usize,
     right_logical: usize,
     left_physical: usize,

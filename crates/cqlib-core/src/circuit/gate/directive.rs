@@ -68,15 +68,20 @@ pub enum Directive {
 
 impl fmt::Display for Directive {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Barrier => write!(f, "Barrier"),
-            Self::Measure => write!(f, "Measure"),
-            Self::Reset => write!(f, "Reset"),
-        }
+        f.write_str(self.name())
     }
 }
 
 impl Directive {
+    /// Returns the stable lowercase operation name.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Barrier => "barrier",
+            Self::Measure => "measure",
+            Self::Reset => "reset",
+        }
+    }
+
     /// Returns the inverse of the directive if it exists.
     ///
     /// # Returns

@@ -45,7 +45,7 @@ use std::fmt;
 /// assert_eq!(mcz.num_ctrl_qubits(), 3);
 /// assert_eq!(mcz.num_qubits(), 4);
 /// ```
-#[derive(Eq, Hash, PartialEq, Debug, Clone)]
+#[derive(Eq, Hash, Ord, PartialEq, PartialOrd, Debug, Clone)]
 pub struct MCGate {
     /// Number of additional control qubits (beyond any inherent controls).
     num_controls: u8,
@@ -191,14 +191,19 @@ impl MCGate {
     pub fn base_gate(&self) -> &StandardGate {
         &self.gate
     }
+
+    /// Returns the stable operation name used by circuit APIs and statistics.
+    pub fn name(&self) -> String {
+        if self.num_controls == 0 {
+            self.gate.name().to_string()
+        } else {
+            format!("C{}-{}", self.num_controls, self.gate.name())
+        }
+    }
 }
 
 impl fmt::Display for MCGate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.num_controls == 0 {
-            write!(f, "{}", self.gate)
-        } else {
-            write!(f, "C{}-{}", self.num_controls, self.gate)
-        }
+        f.write_str(&self.name())
     }
 }

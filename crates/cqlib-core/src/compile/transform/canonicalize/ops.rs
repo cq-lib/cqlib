@@ -24,7 +24,6 @@ use super::config::CanonicalizeConfig;
 pub(super) fn is_strict_noop(
     instruction: &Instruction,
     params: &[Parameter],
-    qubits: &[Qubit],
 ) -> Result<bool, CompilerError> {
     Ok(match instruction {
         Instruction::Standard(StandardGate::I) => true,
@@ -32,7 +31,6 @@ pub(super) fn is_strict_noop(
             Some(param) => parameter_is_exact_zero(param)?,
             None => false,
         },
-        Instruction::Directive(Directive::Barrier) => qubits.is_empty(),
         Instruction::Delay => match params.first() {
             Some(param) => parameter_is_exact_zero(param)?,
             None => false,
@@ -92,9 +90,11 @@ pub(super) fn canonicalize_operation_qubits(
         return qubits.clone();
     }
 
-    // Barrier scopes are sets for canonicalization purposes. Sorting by the
-    // stable qubit id gives deterministic output independent of construction
-    // order, and deduplication removes redundant synchronization operands.
+    // A non-empty barrier scope is a set for canonicalization purposes. An
+    // empty scope is the global-barrier sentinel and must remain empty.
+    // Sorting by the stable qubit id gives deterministic output independent of
+    // construction order, and deduplication removes redundant synchronization
+    // operands.
     let mut out = qubits.clone();
     out.sort_unstable_by_key(|qubit| qubit.id());
     out.dedup();
@@ -117,23 +117,24 @@ pub(super) fn push_operation(
     }
 
     operation.label = None;
-    if let Some(last) = out.last_mut() {
-        if matches!(last.instruction, Instruction::Directive(Directive::Barrier)) {
-            // Adjacent barriers are a single synchronization boundary whenever
-            // one scope covers the other. Partial overlap is deliberately not
-            // merged because neither barrier fully subsumes the other.
-            match barrier_relation(&last.qubits, &operation.qubits) {
-                BarrierRelation::Equal | BarrierRelation::LeftSuperset => {
-                    last.label = None;
-                    return;
-                }
-                BarrierRelation::RightSuperset => {
-                    *last = operation;
-                    last.label = None;
-                    return;
-                }
-                BarrierRelation::DisjointOrOverlap => {}
+    if let Some(last) = out.last_mut()
+        && matches!(last.instruction, Instruction::Directive(Directive::Barrier))
+    {
+        // Adjacent barriers are a single synchronization boundary whenever
+        // one scope covers the other. An empty scope is global and therefore
+        // covers every local scope. Partial local overlap is deliberately not
+        // merged because neither barrier fully subsumes the other.
+        match barrier_relation(&last.qubits, &operation.qubits) {
+            BarrierRelation::Equal | BarrierRelation::LeftSuperset => {
+                last.label = None;
+                return;
             }
+            BarrierRelation::RightSuperset => {
+                *last = operation;
+                last.label = None;
+                return;
+            }
+            BarrierRelation::DisjointOrOverlap => {}
         }
     }
     out.push(operation);
@@ -148,6 +149,15 @@ pub(super) enum BarrierRelation {
 }
 
 pub(super) fn barrier_relation(lhs: &[Qubit], rhs: &[Qubit]) -> BarrierRelation {
+    // Empty barrier operands represent the full circuit qubit universe, not
+    // the empty set. Handle that sentinel before ordinary set comparison.
+    match (lhs.is_empty(), rhs.is_empty()) {
+        (true, true) => return BarrierRelation::Equal,
+        (true, false) => return BarrierRelation::LeftSuperset,
+        (false, true) => return BarrierRelation::RightSuperset,
+        (false, false) => {}
+    }
+
     if lhs == rhs {
         return BarrierRelation::Equal;
     }

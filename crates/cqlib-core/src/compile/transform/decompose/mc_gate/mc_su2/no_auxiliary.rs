@@ -21,9 +21,7 @@
 
 use super::{
     Su2RotationAxis,
-    utils::{
-        scale_parameter, standard_controlled_rotation, standard_rotation, validate_distinct_qubits,
-    },
+    utils::{scale_parameter, validate_distinct_qubits},
 };
 use crate::circuit::{ParameterValue, Qubit, StandardGate, operation::ValueOperation};
 use crate::compile::error::CompilerError;
@@ -56,14 +54,14 @@ pub fn decompose_mc_su2_no_aux(
     match controls {
         [] => {
             return Ok(vec![ValueOperation::from_standard(
-                standard_rotation(axis),
+                axis.rotation_gate(),
                 [target],
                 [theta.clone()],
             )]);
         }
         [control] => {
             return Ok(vec![ValueOperation::from_standard(
-                standard_controlled_rotation(axis),
+                axis.controlled_rotation_gate(),
                 [*control, target],
                 [theta.clone()],
             )]);
@@ -79,7 +77,7 @@ pub fn decompose_mc_su2_no_aux(
     let positive_quarter_theta = scale_parameter(theta, 0.25);
     let inner_rotation = match axis {
         Su2RotationAxis::X => StandardGate::RZ,
-        Su2RotationAxis::Y | Su2RotationAxis::Z => standard_rotation(axis),
+        Su2RotationAxis::Y | Su2RotationAxis::Z => axis.rotation_gate(),
     };
     let mut operations = Vec::with_capacity(2 * (first_mcx.len() + second_mcx.len()) + 6);
 

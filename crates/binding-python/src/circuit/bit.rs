@@ -50,10 +50,9 @@
 //! ```
 
 use crate::circuit::error::QubitError as PyQubitError;
+use crate::utils::hash_value;
 use cqlib_core::circuit::Qubit;
 use pyo3::prelude::*;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// A qubit in a quantum register.
 ///
@@ -83,7 +82,7 @@ use std::hash::{Hash, Hasher};
 /// - Qubits with the same index are considered equal.
 /// - Qubits can be used as dictionary keys (hashable).
 /// - Comparison operators (`<`, `<=`, `>`, `>=`) compare by index.
-#[pyclass(name = "Qubit", module = "cqlib.circuit")]
+#[pyclass(name = "Qubit", module = "cqlib.circuit", from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PyQubit {
     /// The underlying core `Qubit` type.
@@ -190,9 +189,7 @@ impl PyQubit {
 
     /// Computes a hash for use in dictionaries and sets.
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     /// Less-than comparison (by index).

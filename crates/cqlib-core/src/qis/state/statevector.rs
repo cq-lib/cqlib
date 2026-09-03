@@ -40,6 +40,7 @@
 //! assert!((probs[3] - 0.5).abs() < 1e-10);
 //! ```
 
+use super::aligned_buffer::AlignedBuffer;
 use crate::circuit::Measurement;
 use crate::circuit::circuit_impl::Circuit;
 use crate::circuit::circuit_param::CircuitParam;
@@ -50,7 +51,7 @@ use crate::circuit::gate::instruction::Instruction;
 use crate::device::{ExecutionResult, Outcome};
 use crate::qis::error::QisError;
 use crate::qis::observable::Observable;
-use crate::util::aligned::AlignedBuffer;
+use crate::qis::pauli::{PauliString, Phase};
 use num_complex::Complex64;
 use rand::Rng;
 use rayon::prelude::*;
@@ -1093,8 +1094,9 @@ impl Statevector {
                 // Apply matrix multiplication
                 for row in 0..gate_dim {
                     let mut sum = Complex64::default();
-                    for col in 0..gate_dim {
-                        sum += matrix_rows[row][col] * input_buf[col];
+                    for (matrix_value, input_value) in matrix_rows[row].iter().zip(input_buf.iter())
+                    {
+                        sum += matrix_value * input_value;
                     }
                     output_buf[row] = sum;
                 }
@@ -1107,6 +1109,112 @@ impl Statevector {
         };
 
         with_maybe_par!(self.num_qubits, self.data, chunk_size, kernel);
+        Ok(())
+    }
+
+    /// Applies a native Pauli-string rotation in place.
+    ///
+    /// The operation is
+    ///
+    /// `exp(-i * theta / 2 * P)`
+    ///
+    /// where `P` is a Hermitian [`PauliString`]. This fused kernel avoids
+    /// decomposing a Pauli exponential into basis changes, a CNOT ladder, and
+    /// an RZ gate. It is intended for high-frequency variational workloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Pauli string has a different number of qubits or
+    /// carries an imaginary global phase (and is therefore not Hermitian).
+    pub fn apply_pauli_rotation(
+        &mut self,
+        pauli: &PauliString,
+        theta: f64,
+    ) -> Result<(), QisError> {
+        if pauli.num_qubits != self.num_qubits {
+            return Err(QisError::QubitMismatch {
+                expected: self.num_qubits,
+                actual: pauli.num_qubits,
+            });
+        }
+        if matches!(pauli.phase, Phase::I | Phase::MinusI) {
+            return Err(QisError::NotHermitian);
+        }
+        if theta.abs() < 1e-15 {
+            return Ok(());
+        }
+
+        let x_mask = pauli.x_mask();
+        let z_mask = pauli.z_mask();
+        let base_factor = pauli.phase.to_complex() * pauli.y_phase();
+        let half = theta * 0.5;
+        let cosine = half.cos();
+        let minus_i_sine = Complex64::new(0.0, -half.sin());
+
+        #[inline(always)]
+        fn source_phase(index: usize, z_mask: usize, base: Complex64) -> Complex64 {
+            if (index & z_mask).count_ones() & 1 == 0 {
+                base
+            } else {
+                -base
+            }
+        }
+
+        if x_mask == 0 {
+            if self.num_qubits < PARALLEL_THRESHOLD {
+                self.data
+                    .iter_mut()
+                    .enumerate()
+                    .for_each(|(index, amplitude)| {
+                        let phase = source_phase(index, z_mask, base_factor);
+                        *amplitude *= Complex64::new(cosine, 0.0) + minus_i_sine * phase;
+                    });
+            } else {
+                self.data
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(index, amplitude)| {
+                        let phase = source_phase(index, z_mask, base_factor);
+                        *amplitude *= Complex64::new(cosine, 0.0) + minus_i_sine * phase;
+                    });
+            }
+            return Ok(());
+        }
+
+        // Split on the highest flipped bit. Every Pauli pair then contains one
+        // amplitude in the lower half and one in the upper half of a chunk, so
+        // disjoint pairs can be updated safely without an auxiliary statevector.
+        let highest_bit = usize::BITS as usize - 1 - x_mask.leading_zeros() as usize;
+        let dist = 1usize << highest_bit;
+        let chunk_size = 2 * dist;
+        let low_flip_mask = x_mask ^ dist;
+
+        let apply_chunk = |chunk_index: usize, chunk: &mut [Complex64]| {
+            let base_index = chunk_index * chunk_size;
+            for lower_index in 0..dist {
+                let upper_index = dist + (lower_index ^ low_flip_mask);
+                let source_lower = base_index + lower_index;
+                let source_upper = base_index + upper_index;
+                let lower_phase = source_phase(source_lower, z_mask, base_factor);
+                let upper_phase = source_phase(source_upper, z_mask, base_factor);
+                let lower = chunk[lower_index];
+                let upper = chunk[upper_index];
+                chunk[lower_index] = cosine * lower + minus_i_sine * upper_phase * upper;
+                chunk[upper_index] = cosine * upper + minus_i_sine * lower_phase * lower;
+            }
+        };
+
+        if self.num_qubits < PARALLEL_THRESHOLD {
+            self.data
+                .chunks_mut(chunk_size)
+                .enumerate()
+                .for_each(|(chunk_index, chunk)| apply_chunk(chunk_index, chunk));
+        } else {
+            self.data
+                .par_chunks_mut(chunk_size)
+                .enumerate()
+                .for_each(|(chunk_index, chunk)| apply_chunk(chunk_index, chunk));
+        }
         Ok(())
     }
 

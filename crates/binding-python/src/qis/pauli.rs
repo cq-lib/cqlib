@@ -15,16 +15,15 @@
 use crate::qis::qis_error_to_py_err;
 use crate::qis::state::density_matrix::PyDensityMatrix;
 use crate::qis::state::statevector::PyStatevector;
+use crate::utils::hash_value;
 use cqlib_core::qis::Observable;
 use cqlib_core::qis::pauli::{Pauli, PauliString, Phase};
-use numpy::PyArray2;
-use pyo3::exceptions::PyValueError;
+use numpy::{PyArray2, ToPyArray};
+use pyo3::exceptions::{PyIndexError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyComplex, PyDict, PyTuple};
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
 use std::fmt;
-use std::hash::{Hash, Hasher};
 
 /// Phase factor in the Pauli group, isomorphic to Z4 (the cyclic group of order 4).
 ///
@@ -35,7 +34,7 @@ use std::hash::{Hash, Hasher};
 ///     I (1): $i^1 = i$
 ///     Minus (-1): $i^2 = -1$
 ///     MinusI (-i): $i^3 = -i$
-#[pyclass(name = "Phase", module = "cqlib.qis")]
+#[pyclass(name = "Phase", module = "cqlib.qis", skip_from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PyPhase {
     pub(crate) inner: Phase,
@@ -129,9 +128,7 @@ impl PyPhase {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __repr__(&self) -> String {
@@ -157,7 +154,7 @@ impl PyPhase {
 ///     Y: Pauli-Y operator
 ///     Z: Pauli-Z (phase-flip) operator
 ///     I: Identity operator
-#[pyclass(name = "Pauli", module = "cqlib.qis")]
+#[pyclass(name = "Pauli", module = "cqlib.qis", from_py_object)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PyPauli {
     pub(crate) inner: Pauli,
@@ -244,9 +241,7 @@ impl PyPauli {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __repr__(&self) -> String {
@@ -262,7 +257,7 @@ impl PyPauli {
 ///
 /// A Pauli string is a tensor product of single-qubit Pauli operators across
 /// multiple qubits: $P = \\bigotimes_{i=0}^{N-1} P_i$ where $P_i \\in \\{I, X, Y, Z\\}$.
-#[pyclass(name = "PauliString", module = "cqlib.qis")]
+#[pyclass(name = "PauliString", module = "cqlib.qis", from_py_object)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PyPauliString {
     pub(crate) inner: PauliString,
@@ -412,6 +407,88 @@ impl PyPauliString {
         Ok(self.inner.commutes_with(&other.inner))
     }
 
+    /// Returns the dense matrix representation as a NumPy array.
+    ///
+    /// The matrix is the tensor product of the single-qubit Pauli operators
+    /// in little-endian order: qubit 0 is the least-significant tensor factor,
+    /// i.e. the string expands as P_{N-1} ⊗ ... ⊗ P_0. The global phase is included.
+    ///
+    /// Memory usage is O(4^N); intended for small-system analysis and verification.
+    ///
+    /// Returns:
+    ///     A NumPy array of shape (2^num_qubits, 2^num_qubits) with complex128 dtype.
+    ///
+    /// Examples:
+    ///     >>> from cqlib.qis import PauliString
+    ///     >>> PauliString.from_str("Z").to_matrix()
+    ///     array([[ 1.+0.j,  0.+0.j],
+    ///            [ 0.+0.j, -1.+0.j]])
+    #[allow(clippy::wrong_self_convention)]
+    fn to_matrix<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<num_complex::Complex64>> {
+        self.inner.to_matrix().to_pyarray(py)
+    }
+
+    /// Returns the qubit indices where the Pauli is not identity, in ascending order.
+    ///
+    /// Returns:
+    ///     A sorted list of qubit indices supporting a non-identity Pauli (X, Y, or Z).
+    ///
+    /// Examples:
+    ///     >>> from cqlib.qis import PauliString
+    ///     >>> PauliString.from_str("XZI").support()  # X on qubit 2, Z on qubit 1
+    ///     [1, 2]
+    fn support(&self) -> Vec<usize> {
+        self.inner.support()
+    }
+
+    /// Returns the number of qubits (the number of single-qubit Pauli operators).
+    fn __len__(&self) -> usize {
+        self.inner.num_qubits
+    }
+
+    /// Returns an iterator over single-qubit Pauli operators in ascending qubit index.
+    ///
+    /// Identity operators are included. Iteration uses snapshot semantics: modifications
+    /// to the PauliString after creating the iterator do not affect the iteration.
+    ///
+    /// Equivalent to calling `get_pauli(i)` for i in range(num_qubits), but lazy.
+    fn __iter__(slf: PyRef<'_, Self>) -> PyPauliStringIter {
+        PyPauliStringIter {
+            inner: slf.inner.clone(),
+            cursor: 0,
+            parent: slf.into(),
+        }
+    }
+
+    /// Returns the Pauli operator at the given qubit index.
+    ///
+    /// Supports negative indexing: index -1 refers to the highest qubit index.
+    ///
+    /// Args:
+    ///     index: Qubit index (negative values count from the end)
+    ///
+    /// Returns:
+    ///     The Pauli operator at the specified index
+    ///
+    /// Raises:
+    ///     IndexError: If index is out of bounds
+    fn __getitem__(&self, index: isize) -> PyResult<PyPauli> {
+        let len = self.inner.num_qubits;
+        let resolved_index = if index < 0 {
+            len.checked_add_signed(index)
+        } else {
+            usize::try_from(index).ok()
+        };
+        match resolved_index {
+            Some(index) if index < len => Ok(PyPauli {
+                inner: self.inner.get_pauli(index),
+            }),
+            _ => Err(PyIndexError::new_err(format!(
+                "qubit index {index} out of bounds for PauliString with {len} qubits"
+            ))),
+        }
+    }
+
     /// Computes the expectation value given a probability distribution.
     ///
     /// This calculates ⟨P⟩ = Σ_s p(s) ⟨s|P|s⟩, where p(s) is the probability of basis state |s⟩.
@@ -532,12 +609,6 @@ impl PyPauliString {
         self.inner == other.inner
     }
 
-    fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.inner.hash(&mut hasher);
-        hasher.finish()
-    }
-
     fn __str__(&self) -> String {
         self.inner.to_string()
     }
@@ -557,5 +628,57 @@ impl PyPauliString {
         Self {
             inner: self.inner.clone(),
         }
+    }
+}
+
+/// Lazy iterator over the single-qubit Pauli operators of a PauliString.
+///
+/// Created by `PauliString.__iter__`. Yields `Pauli` objects in ascending
+/// qubit index order (identities included), raising StopIteration when exhausted.
+///
+/// Iteration uses snapshot semantics: modifications to the parent PauliString
+/// after creating the iterator do not affect the iteration.
+#[pyclass(name = "PauliStringIter", module = "cqlib.qis")]
+pub struct PyPauliStringIter {
+    /// Snapshot of the iterated PauliString.
+    inner: PauliString,
+    /// Next qubit index to yield.
+    cursor: usize,
+    /// Reference to the parent PauliString, kept alive for the iterator's lifetime.
+    /// Never read directly: dropping the iterator releases the parent.
+    #[allow(dead_code)]
+    parent: Py<PyPauliString>,
+}
+
+#[pymethods]
+impl PyPauliStringIter {
+    /// Returns the next Pauli operator, or raises StopIteration when exhausted.
+    fn __next__(&mut self) -> Option<PyPauli> {
+        if self.cursor < self.inner.num_qubits {
+            let pauli = PyPauli {
+                inner: self.inner.get_pauli(self.cursor),
+            };
+            self.cursor += 1;
+            Some(pauli)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the iterator itself (iterators are iterable).
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Returns the number of remaining items.
+    fn __length_hint__(&self) -> usize {
+        self.inner.num_qubits.saturating_sub(self.cursor)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<PauliStringIter object at {:p}>",
+            std::ptr::addr_of!(*self)
+        )
     }
 }

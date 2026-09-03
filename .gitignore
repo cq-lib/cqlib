@@ -78,6 +78,7 @@ docs/_build/
 *.lo
 *.o
 *.obj
+*.dSYM/
 
 # Precompiled Headers
 *.gch
@@ -125,3 +126,11 @@ target
 **/mutants.out*/
 
 proptest-regressions
+
+# Visualization test render outputs; commit only references/ baselines.
+/crates/cqlib-core/src/visualization/**/figure/*.png
+/crates/cqlib-core/src/visualization/**/figure/*.svg
+/crates/cqlib-core/src/visualization/**/figure/diffs/
+/crates/binding-python/tests/visualization/figure/*.png
+/crates/binding-python/tests/visualization/figure/*.svg
+/crates/binding-python/tests/visualization/figure/diffs/

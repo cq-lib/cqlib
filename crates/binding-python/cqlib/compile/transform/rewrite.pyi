@@ -58,6 +58,7 @@ class RewriteConfig:
         max_pattern_len: int = 8,
         recurse_control_flow: bool = True,
         skip_labeled_ops: bool = True,
+        preserve_two_qubit_connectivity: bool = False,
         enabled_kinds: Sequence[RuleKind] | None = None,
         mode: RewriteMode | None = None,
         target_instructions: Sequence[Instruction] | None = None,
@@ -65,8 +66,8 @@ class RewriteConfig:
         """Create a rewrite configuration.
 
         Raises:
-            ValueError: If the target basis is empty or contains a non-gate
-                instruction.
+            CompilerConfigError: If the target basis is empty or contains a
+                non-gate instruction.
         """
         ...
     @staticmethod
@@ -87,6 +88,10 @@ class RewriteConfig:
     def recurse_control_flow(self) -> bool: ...
     @property
     def skip_labeled_ops(self) -> bool: ...
+    @property
+    def preserve_two_qubit_connectivity(self) -> bool:
+        """Whether rewrites must avoid introducing new two-qubit pairs."""
+        ...
     @property
     def enabled_kinds(self) -> list[RuleKind]:
         """Copies of the enabled rule categories in selection order."""
@@ -147,8 +152,9 @@ class KnowledgeRewriter:
         """Rewrite ``circuit`` without modifying it.
 
         Raises:
-            ValueError: If configuration, circuit rebuilding, or target-basis
-                validation fails.
+            CompilerConfigError: If configuration or target-basis validation
+                fails.
+            CircuitError: If circuit rebuilding fails.
         """
         ...
     def __repr__(self) -> str: ...
@@ -162,9 +168,17 @@ def rewrite_circuit(
     """Rewrite a circuit using production defaults or an explicit config.
 
     Raises:
-        ValueError: If configuration, circuit rebuilding, or target-basis
-            validation fails.
+        CompilerConfigError: If configuration or target-basis validation
+            fails.
+        CircuitError: If circuit rebuilding fails.
     """
     ...
 
-__all__: list[str]
+__all__ = [
+    "RewriteMode",
+    "RewriteConfig",
+    "KnowledgeRewriter",
+    "KnowledgeRewriteStats",
+    "KnowledgeRewriteResult",
+    "rewrite_circuit",
+]

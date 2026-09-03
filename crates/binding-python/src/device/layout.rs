@@ -54,9 +54,10 @@
 //!   physical qubits.
 //! - Layout owns the set of physical qubits and tracks which are vacant.
 
-use crate::circuit::PyQubit;
-use crate::circuit::bit::{PyIntListOrQubitList, PyIntOrQubit};
-use cqlib_core::circuit::Qubit;
+use crate::device::qubit::{
+    PyLogicalQubit, PyLogicalQubitLike, PyLogicalQubitList, PyPhysicalQubit, PyPhysicalQubitLike,
+    PyPhysicalQubitList,
+};
 use cqlib_core::device::{Layout, LogicalQubit, PhysicalQubit};
 use pyo3::exceptions::PyValueError;
 use pyo3::{Bound, PyAny, PyResult, pyclass, pymethods};
@@ -94,7 +95,7 @@ use std::collections::HashMap;
 /// # Get all mappings
 /// print(layout.l2p_map)  # {LogicalQubit(0): PhysicalQubit(100), ...}
 /// ```
-#[pyclass(name = "Layout", module = "cqlib.device")]
+#[pyclass(name = "Layout", module = "cqlib.device", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyLayout {
     pub(crate) inner: Layout,
@@ -156,29 +157,13 @@ impl PyLayout {
     #[new]
     #[pyo3(signature = (logical, physical, init_map=None))]
     fn new(
-        logical: PyIntListOrQubitList,
-        physical: PyIntListOrQubitList,
-        init_map: Option<HashMap<PyQubit, PyQubit>>,
+        logical: PyLogicalQubitList,
+        physical: PyPhysicalQubitList,
+        init_map: Option<HashMap<PyLogicalQubitLike, PyPhysicalQubitLike>>,
     ) -> PyResult<Self> {
-        let logical: Vec<LogicalQubit> = <PyIntListOrQubitList as Into<Vec<Qubit>>>::into(logical)
-            .into_iter()
-            .map(LogicalQubit::from_qubit)
-            .collect();
-        let physical: Vec<PhysicalQubit> =
-            <PyIntListOrQubitList as Into<Vec<Qubit>>>::into(physical)
-                .into_iter()
-                .map(PhysicalQubit::from_qubit)
-                .collect();
-        let init_map = init_map.map(|m| {
-            m.into_iter()
-                .map(|(l, p)| {
-                    (
-                        LogicalQubit::from_qubit(l.inner),
-                        PhysicalQubit::from_qubit(p.inner),
-                    )
-                })
-                .collect()
-        });
+        let logical = Vec::<LogicalQubit>::from(logical);
+        let physical = Vec::<PhysicalQubit>::from(physical);
+        let init_map = init_map.map(|m| m.into_iter().map(|(l, p)| (l.into(), p.into())).collect());
 
         let inner = Layout::new(logical, physical, init_map)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -247,11 +232,8 @@ impl PyLayout {
     ///
     /// The mapped physical qubit, or `None` if the logical qubit is not
     /// bound.
-    fn get_physical(&self, logical_id: PyIntOrQubit) -> PyResult<Option<PyQubit>> {
-        Ok(self
-            .inner
-            .get_physical(LogicalQubit::from_qubit(logical_id.into()))
-            .map(|pq| PyQubit { inner: pq.qubit() }))
+    fn get_physical(&self, logical_id: PyLogicalQubitLike) -> Option<PyPhysicalQubit> {
+        self.inner.get_physical(logical_id.into()).map(Into::into)
     }
 
     /// Returns the logical qubit carried by a physical qubit.
@@ -264,29 +246,20 @@ impl PyLayout {
     ///
     /// The logical qubit mapped to this physical qubit, or `None` if the
     /// physical qubit is vacant.
-    fn get_logical(&self, physical_id: PyIntOrQubit) -> PyResult<Option<PyQubit>> {
-        Ok(self
-            .inner
-            .get_logical(PhysicalQubit::from_qubit(physical_id.into()))
-            .map(|lq| PyQubit { inner: lq.qubit() }))
+    fn get_logical(&self, physical_id: PyPhysicalQubitLike) -> Option<PyLogicalQubit> {
+        self.inner.get_logical(physical_id.into()).map(Into::into)
     }
 
     /// Returns all mapped logical qubits.
     #[getter]
-    fn logical_qubits(&self) -> Vec<PyQubit> {
-        self.inner
-            .logical_qubits()
-            .map(|lq| PyQubit { inner: lq.qubit() })
-            .collect()
+    fn logical_qubits(&self) -> Vec<PyLogicalQubit> {
+        self.inner.logical_qubits().map(Into::into).collect()
     }
 
     /// Returns all physical qubits available to the layout.
     #[getter]
-    fn physical_qubits(&self) -> Vec<PyQubit> {
-        self.inner
-            .physical_qubits()
-            .map(|pq| PyQubit { inner: pq.qubit() })
-            .collect()
+    fn physical_qubits(&self) -> Vec<PyPhysicalQubit> {
+        self.inner.physical_qubits().map(Into::into).collect()
     }
 
     /// Returns all vacant physical qubits.
@@ -294,10 +267,10 @@ impl PyLayout {
     /// Vacant physical qubits are physical positions not currently
     /// carrying a logical qubit.
     #[getter]
-    fn vacant_physical_qubits(&self) -> Vec<PyQubit> {
+    fn vacant_physical_qubits(&self) -> Vec<PyPhysicalQubit> {
         self.inner
             .vacant_physical_qubits()
-            .map(|pq| PyQubit { inner: pq.qubit() })
+            .map(Into::into)
             .collect()
     }
 
@@ -307,20 +280,19 @@ impl PyLayout {
     /// # Arguments
     ///
     /// * `physical_id`: The physical qubit to check.
-    fn is_physical_vacant(&self, physical_id: PyIntOrQubit) -> bool {
-        self.inner
-            .is_physical_vacant(PhysicalQubit::from_qubit(physical_id.into()))
+    fn is_physical_vacant(&self, physical_id: PyPhysicalQubitLike) -> bool {
+        self.inner.is_physical_vacant(physical_id.into())
     }
 
     /// Returns the logical-to-physical qubit mapping.
     ///
     /// Maps each logical qubit to its assigned physical qubit.
     #[getter]
-    fn l2p_map(&self) -> HashMap<PyQubit, PyQubit> {
+    fn l2p_map(&self) -> HashMap<PyLogicalQubit, PyPhysicalQubit> {
         self.inner
             .l2p_map()
             .iter()
-            .map(|(l, p)| (PyQubit { inner: l.qubit() }, PyQubit { inner: p.qubit() }))
+            .map(|(l, p)| ((*l).into(), (*p).into()))
             .collect()
     }
 
@@ -329,11 +301,11 @@ impl PyLayout {
     /// Maps each physical qubit to its assigned logical qubit (if any).
     /// Vacant physical qubits are not included.
     #[getter]
-    fn p2l_map(&self) -> HashMap<PyQubit, PyQubit> {
+    fn p2l_map(&self) -> HashMap<PyPhysicalQubit, PyLogicalQubit> {
         self.inner
             .p2l_map()
             .iter()
-            .map(|(p, l)| (PyQubit { inner: p.qubit() }, PyQubit { inner: l.qubit() }))
+            .map(|(p, l)| ((*p).into(), (*l).into()))
             .collect()
     }
 
@@ -352,12 +324,13 @@ impl PyLayout {
     ///
     /// Raises `ValueError` if the physical qubit does not belong to the
     /// layout, or if either qubit already participates in a mapping.
-    fn bind(&mut self, logical_id: PyIntOrQubit, physical_id: PyIntOrQubit) -> PyResult<()> {
+    fn bind(
+        &mut self,
+        logical_id: PyLogicalQubitLike,
+        physical_id: PyPhysicalQubitLike,
+    ) -> PyResult<()> {
         self.inner
-            .bind(
-                LogicalQubit::from_qubit(logical_id.into()),
-                PhysicalQubit::from_qubit(physical_id.into()),
-            )
+            .bind(logical_id.into(), physical_id.into())
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
@@ -375,14 +348,11 @@ impl PyLayout {
     /// # Errors
     ///
     /// Raises `ValueError` if the logical qubit is not bound.
-    fn unbind(&mut self, logical_id: PyIntOrQubit) -> PyResult<PyQubit> {
-        let physical = self
-            .inner
-            .unbind(LogicalQubit::from_qubit(logical_id.into()))
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(PyQubit {
-            inner: physical.qubit(),
-        })
+    fn unbind(&mut self, logical_id: PyLogicalQubitLike) -> PyResult<PyPhysicalQubit> {
+        self.inner
+            .unbind(logical_id.into())
+            .map(Into::into)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
     /// Swaps the logical qubits carried by two physical qubits.
@@ -422,12 +392,13 @@ impl PyLayout {
     /// phys_after = layout.get_physical(0)
     /// assert phys_before != phys_after
     /// ```
-    fn swap_physical(&mut self, phys_a: PyIntOrQubit, phys_b: PyIntOrQubit) -> PyResult<()> {
+    fn swap_physical(
+        &mut self,
+        phys_a: PyPhysicalQubitLike,
+        phys_b: PyPhysicalQubitLike,
+    ) -> PyResult<()> {
         self.inner
-            .swap_physical(
-                PhysicalQubit::from_qubit(phys_a.into()),
-                PhysicalQubit::from_qubit(phys_b.into()),
-            )
+            .swap_physical(phys_a.into(), phys_b.into())
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 

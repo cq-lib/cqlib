@@ -30,7 +30,7 @@ pub(crate) enum QubitOrigin {
 ///
 /// A consumer must satisfy the selected contract before releasing its lease.
 /// The resource manager records this requirement but does not prove it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AncillaRequirement {
     /// The qubit must enter and leave the consumer in `|0>`.
     CleanZero,

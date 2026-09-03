@@ -107,6 +107,10 @@ class ClassicalControlOp:
             stop: Half-open upper bound expression (UInt).
             step: Increment expression (UInt).
             body: Loop body operations.
+
+        Raises:
+            CircuitError: If ``var`` is not ``UInt``, or ``start``/``stop``/
+                ``step`` do not match its width.
         """
         ...
     @staticmethod
@@ -117,6 +121,10 @@ class ClassicalControlOp:
             target: UInt-typed switch expression.
             cases: List of :class:`ValueSwitchCase` values.
             default: Optional fallback body.
+
+        Raises:
+            CircuitError: If ``target`` is not ``UInt``, a case value does not
+                fit the target width, or case values are duplicated.
         """
         ...
     @staticmethod

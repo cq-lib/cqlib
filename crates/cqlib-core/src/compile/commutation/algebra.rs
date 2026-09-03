@@ -181,10 +181,9 @@ pub fn algebraic_commutation(
     if let (Some(lhs), Some(rhs)) = (
         axis_op_for_instruction(lhs_inst, lhs_qubits, lhs_params),
         axis_op_for_instruction(rhs_inst, rhs_qubits, rhs_params),
-    ) {
-        if let Some(result) = axis_ops_commutation(&lhs, &rhs) {
-            return Some(result);
-        }
+    ) && let Some(result) = axis_ops_commutation(&lhs, &rhs)
+    {
+        return Some(result);
     }
 
     if let Some(result) = controlled_commutation(

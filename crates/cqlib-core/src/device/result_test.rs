@@ -34,7 +34,7 @@ fn test_outcome_from_bitstring_basic() {
     assert!(!out.is_one(2), "Bit 2 (Out of bounds) should be 0");
 
     // Verify round-trip string (Big-Endian visual)
-    assert_eq!(out.to_string(2), "10");
+    assert_eq!(out.to_bitstring(2), "10");
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn test_outcome_endianness_mapping() {
     assert!(!out.is_one(2));
 
     // Print verification
-    assert_eq!(out.to_string(3), "001");
+    assert_eq!(out.to_bitstring(3), "001");
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn test_outcome_large_bitstring() {
     assert_eq!(out.0.len(), 2, "Should require 2 u64 chunks");
 
     // Verify round-trip
-    assert_eq!(out.to_string(66), s);
+    assert_eq!(out.to_bitstring(66), s);
 }
 
 #[test]
@@ -85,8 +85,8 @@ fn test_outcome_padding() {
     // Result is 1 (binary 1), but in 5-qubit system should be "00001"
     let out = Outcome::from_bitstring("1").unwrap();
 
-    assert_eq!(out.to_string(5), "00001");
-    assert_eq!(out.to_string(1), "1");
+    assert_eq!(out.to_bitstring(5), "00001");
+    assert_eq!(out.to_bitstring(1), "1");
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn test_outcome_invalid_input() {
 fn test_outcome_empty() {
     let out = Outcome::from_bitstring("").unwrap();
     assert_eq!(out.0.len(), 0);
-    assert_eq!(out.to_string(0), "");
+    assert_eq!(out.to_bitstring(0), "");
 }
 
 #[test]
@@ -208,6 +208,20 @@ fn test_result_calc_probabilities() {
 }
 
 #[test]
+fn finish_clears_probabilities_computed_from_previous_counts() {
+    let mut res = ExecutionResult::new("t1".into(), mock_qubits(1), 10, 1, None, None);
+    let zero = Outcome::from_bitstring("0").unwrap();
+    let one = Outcome::from_bitstring("1").unwrap();
+
+    res.finish(HashMap::from([(zero.clone(), 10)]), None);
+    res.calc_probabilities();
+    assert!(res.probabilities().is_some());
+
+    res.finish(HashMap::from([(one, 10)]), None);
+    assert!(res.probabilities().is_none());
+}
+
+#[test]
 fn test_result_fail_and_cancel() {
     let mut res = ExecutionResult::new("t2".into(), vec![], 100, 0, None, None);
 
@@ -282,7 +296,7 @@ fn test_outcome_all_zeros() {
     for i in 0..5 {
         assert!(!out.is_one(i), "Bit {} should be 0", i);
     }
-    assert_eq!(out.to_string(5), "00000");
+    assert_eq!(out.to_bitstring(5), "00000");
 }
 
 #[test]
@@ -291,12 +305,75 @@ fn test_outcome_all_ones() {
     for i in 0..4 {
         assert!(out.is_one(i), "Bit {} should be 1", i);
     }
-    assert_eq!(out.to_string(4), "1111");
+    assert_eq!(out.to_bitstring(4), "1111");
 }
 
 #[test]
-fn test_outcome_to_string_truncate() {
+fn test_outcome_to_bitstring_truncate() {
     // Value is "101" (5), but only print 2 bits -> "01"
     let out = Outcome::from_bitstring("101").unwrap();
-    assert_eq!(out.to_string(2), "01");
+    assert_eq!(out.to_bitstring(2), "01");
+}
+
+#[test]
+fn outcome_implements_from_str() {
+    let outcome: Outcome = "101001".parse().unwrap();
+    assert_eq!(outcome.to_bitstring(6), "101001");
+    assert_eq!("10x".parse::<Outcome>(), Outcome::from_bitstring("10x"));
+}
+
+#[test]
+fn outcome_does_not_retain_input_width() {
+    let padded: Outcome = "001".parse().unwrap();
+    let compact: Outcome = "1".parse().unwrap();
+
+    assert_eq!(padded, compact);
+    assert_eq!(padded.to_bitstring(3), "001");
+    assert_eq!(padded.to_bitstring(1), "1");
+    assert_eq!(
+        Outcome::from_bitstring("101").unwrap().to_bitstring(2),
+        "01"
+    );
+}
+
+#[test]
+fn status_compares_by_value_and_hashes_consistently() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    assert_eq!(Status::Completed, Status::Completed);
+
+    let failed = Status::Failed {
+        error_msg: "boom".to_string(),
+        error_code: 1,
+    };
+    assert_eq!(
+        failed,
+        Status::Failed {
+            error_msg: "boom".to_string(),
+            error_code: 1,
+        }
+    );
+    assert_ne!(
+        failed,
+        Status::Failed {
+            error_msg: "other".to_string(),
+            error_code: 1,
+        }
+    );
+    assert_ne!(Status::Completed, Status::Cancelled);
+
+    let hash_of = |status: &Status| {
+        let mut hasher = DefaultHasher::new();
+        status.hash(&mut hasher);
+        hasher.finish()
+    };
+    assert_eq!(hash_of(&Status::Completed), hash_of(&Status::Completed));
+    assert_eq!(
+        hash_of(&failed),
+        hash_of(&Status::Failed {
+            error_msg: "boom".to_string(),
+            error_code: 1,
+        })
+    );
 }

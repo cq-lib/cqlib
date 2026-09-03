@@ -16,13 +16,13 @@ use crate::circuit::value_instruction::ValueInstruction;
 use crate::circuit::{
     Instruction, Parameter, ParameterValue, Qubit, StandardGate, circuit_to_matrix,
 };
-use crate::compile::{
-    error::CompilerError, transform::decompose::mc_gate::mcx::decompose_mcx_n_clean,
-};
-use crate::util::test_utils::{
+use crate::compile::transform::decompose::mc_gate::test_utils::{
     EPSILON, assert_fixed_parameter_operation, assert_selected_matrix_columns_approx_eq,
     assert_value_operations_equal, assert_value_operations_only_use_qubits,
-    circuit_from_value_operations, controlled_rotation, mc_gate_matrix, rotation,
+    circuit_from_value_operations, mc_gate_matrix,
+};
+use crate::compile::{
+    error::CompilerError, transform::decompose::mc_gate::mcx::decompose_mcx_n_clean,
 };
 use smallvec::smallvec;
 
@@ -69,9 +69,9 @@ fn zero_and_one_controls_do_not_consume_ancillas() {
 
             assert_eq!(operations.len(), 1);
             let gate = if controls.is_empty() {
-                rotation(axis)
+                axis.rotation_gate()
             } else {
-                controlled_rotation(axis)
+                axis.controlled_rotation_gate()
             };
             let mut qubits = controls.clone();
             qubits.push(target);
@@ -229,9 +229,9 @@ fn decomposition_has_mcx_controlled_rotation_mcx_structure() {
             decompose_mc_su2_n_clean(axis, &theta, &controls, target, &clean_ancillas).unwrap();
         let mut expected = mcx.clone();
         expected.push(ValueOperation {
-            instruction: ValueInstruction::Instruction(Instruction::Standard(controlled_rotation(
-                axis,
-            ))),
+            instruction: ValueInstruction::Instruction(Instruction::Standard(
+                axis.controlled_rotation_gate(),
+            )),
             qubits: smallvec![accumulator, target],
             params: smallvec![theta],
             label: None,
@@ -274,7 +274,7 @@ fn clean_subspace_semantics_match_mcgate_and_restore_ancillas() {
             let expected = mc_gate_matrix(
                 num_qubits,
                 controls.len() as u8,
-                rotation(axis),
+                axis.rotation_gate(),
                 qubits,
                 [ParameterValue::Fixed(theta)],
             );

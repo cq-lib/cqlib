@@ -10,22 +10,33 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+//! Gate style maps for figure visualization.
+//!
+//! This module loads built-in JSON style dictionaries (`default`, `gray`) and merges
+//! optional runtime overrides for figure rendering.
+
 use serde::Deserialize;
 use std::collections::HashMap;
 
 /// Per-gate visual style settings (compatible with Python style JSON schema).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct GateStyle {
+    /// Optional gate border color in CSS color syntax.
     #[serde(default)]
     pub border_color: Option<String>,
+    /// Optional gate fill color in CSS color syntax.
     #[serde(default)]
     pub background_color: Option<String>,
+    /// Optional gate label font size.
     #[serde(default)]
     pub font_size: Option<f64>,
+    /// Optional gate label text color in CSS color syntax.
     #[serde(default)]
     pub text_color: Option<String>,
+    /// Optional connector or wire color in CSS color syntax.
     #[serde(default)]
     pub line_color: Option<String>,
+    /// Optional connector or wire stroke width.
     #[serde(default)]
     pub line_width: Option<f64>,
 }
@@ -38,7 +49,10 @@ pub struct StyleBook {
 }
 
 impl StyleBook {
-    /// Load style map by name and apply optional runtime overrides.
+    /// Load a built-in style map by name and apply optional runtime overrides.
+    ///
+    /// Supported built-in names are `default` and `gray`. Unknown names fall back to
+    /// `default`.
     pub fn new(style_name: &str, overrides: &HashMap<String, GateStyle>) -> Self {
         let mut styles = load_style(style_name);
         for (k, v) in overrides {
@@ -78,25 +92,4 @@ fn load_style(style_name: &str) -> HashMap<String, GateStyle> {
         fallback.insert("default".to_string(), GateStyle::default());
         fallback
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_style_book_falls_back_to_default_for_unknown_gate() {
-        let overrides = HashMap::new();
-        let book = StyleBook::new("default", &overrides);
-        let style = book.get("UNKNOWN_GATE");
-        assert_eq!(style.text_color.as_deref(), Some("black"));
-    }
-
-    #[test]
-    fn test_style_book_loads_gray_style() {
-        let overrides = HashMap::new();
-        let book = StyleBook::new("gray", &overrides);
-        let style = book.get("default");
-        assert_eq!(style.background_color.as_deref(), Some("white"));
-    }
 }

@@ -23,6 +23,7 @@ use crate::circuit::{
     ClassicalExpr, ClassicalExprKind, ClassicalType, ClassicalUnaryOp, ClassicalValue,
     ClassicalVar, Qubit,
 };
+use crate::ir::io_errors_equivalent;
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
@@ -51,9 +52,7 @@ pub enum Qasm3DumpError {
 impl PartialEq for Qasm3DumpError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::IoError(lhs), Self::IoError(rhs)) => {
-                lhs.kind() == rhs.kind() && lhs.to_string() == rhs.to_string()
-            }
+            (Self::IoError(lhs), Self::IoError(rhs)) => io_errors_equivalent(lhs, rhs),
             (Self::FormatError(lhs), Self::FormatError(rhs)) => lhs == rhs,
             (Self::UnsupportedInstruction(lhs), Self::UnsupportedInstruction(rhs)) => lhs == rhs,
             (Self::UnsupportedClassicalData(lhs), Self::UnsupportedClassicalData(rhs)) => {
@@ -184,36 +183,129 @@ pub fn dumps(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
     }
 
     writeln!(&mut output)?;
-    if circuit.num_qubits() == 1 {
-        writeln!(&mut output, "qubit q;")?;
-    } else {
-        writeln!(&mut output, "qubit[{}] q;", circuit.num_qubits())?;
-    }
+    let mut name_allocator =
+        NameAllocator::new(reserved_top_level_names(&defined_gates, &unitary_gate_defs));
+    let param_map = dump_input_parameters(circuit, &mut output, &mut name_allocator)?;
     let skipped_values = skipped_classical_value_declarations(circuit.operations())?;
-    let classical_names = ClassicalNameMap::new(circuit, &mut output, &skipped_values)?;
+    let qubit_register = name_allocator.take("q");
+    let auto_measurements =
+        AutoMeasurementMap::new(circuit.operations(), name_allocator.take("meas"))?;
+    let qubit_map = logical_qubit_map(circuit, &qubit_register);
+    writeln!(&mut output, "qubit[{}] {qubit_register};", qubit_map.len())?;
+    dump_qubit_mapping_comment(&mut output, &qubit_map)?;
+    let classical_names =
+        ClassicalNameMap::new(circuit, &mut output, &skipped_values, &mut name_allocator)?;
+    auto_measurements.dump_declaration(&mut output)?;
     writeln!(&mut output)?;
-    dump_global_phase(circuit, &mut output)?;
+    dump_global_phase(circuit, &mut output, &param_map)?;
 
-    let mut qubit_map = HashMap::new();
-    for qubit in circuit.qubits() {
-        let name = if circuit.num_qubits() == 1 && qubit.index() == 0 {
-            "q".to_string()
-        } else {
-            format!("q[{}]", qubit.index())
-        };
-        qubit_map.insert(qubit, name);
-    }
-    let param_map = HashMap::new();
     dump_operations(
         circuit,
         circuit.operations(),
         &mut output,
         &qubit_map,
+        &qubit_register,
         &param_map,
         &classical_names,
+        &auto_measurements,
         false,
     )?;
     Ok(output)
+}
+
+#[derive(Debug)]
+struct NameAllocator {
+    used: HashSet<String>,
+}
+
+impl NameAllocator {
+    fn new(used: HashSet<String>) -> Self {
+        Self { used }
+    }
+
+    fn take(&mut self, preferred: &str) -> String {
+        if self.used.insert(preferred.to_string()) {
+            return preferred.to_string();
+        }
+
+        let mut suffix = 0usize;
+        loop {
+            let candidate = format!("{preferred}{suffix}");
+            if self.used.insert(candidate.clone()) {
+                return candidate;
+            }
+            suffix += 1;
+        }
+    }
+
+    fn take_indexed(&mut self, prefix: &str, index: usize) -> String {
+        self.take(&format!("{prefix}{index}"))
+    }
+}
+
+fn reserved_top_level_names(
+    defined_gates: &IndexMap<String, CircuitGate>,
+    unitary_gate_defs: &IndexMap<String, Arc<FrozenCircuit>>,
+) -> HashSet<String> {
+    defined_gates
+        .keys()
+        .chain(unitary_gate_defs.keys())
+        .cloned()
+        .collect()
+}
+
+fn dump_input_parameters(
+    circuit: &Circuit,
+    output: &mut String,
+    name_allocator: &mut NameAllocator,
+) -> Result<HashMap<String, Parameter>, Qasm3DumpError> {
+    let mut param_map = HashMap::new();
+    for symbol in circuit.symbols() {
+        let name = name_allocator.take(symbol);
+        writeln!(output, "input angle[64] {name};")?;
+        if name != *symbol {
+            param_map.insert(symbol.clone(), Parameter::symbol(&name));
+        }
+    }
+    Ok(param_map)
+}
+
+fn logical_qubit_map(circuit: &Circuit, register_name: &str) -> HashMap<Qubit, String> {
+    let mut qubits = circuit.qubits();
+    qubits.sort_by_key(|qubit| qubit.index());
+    qubits
+        .into_iter()
+        .enumerate()
+        .map(|(logical_index, qubit)| (qubit, format!("{register_name}[{logical_index}]")))
+        .collect()
+}
+
+fn dump_qubit_mapping_comment(
+    output: &mut String,
+    qubit_map: &HashMap<Qubit, String>,
+) -> Result<(), Qasm3DumpError> {
+    if qubit_map.is_empty() {
+        return Ok(());
+    }
+
+    let mut mappings = qubit_map.iter().collect::<Vec<_>>();
+    mappings.sort_by_key(|(_, name)| {
+        name.trim_start_matches("q[")
+            .trim_end_matches(']')
+            .parse::<usize>()
+            .unwrap_or(usize::MAX)
+    });
+    if mappings
+        .iter()
+        .all(|(qubit, name)| **name == format!("q[{}]", qubit.index()))
+    {
+        return Ok(());
+    }
+
+    for (qubit, name) in mappings {
+        writeln!(output, "// {name} -> Q{}", qubit.index())?;
+    }
+    Ok(())
 }
 
 /// Serialize a circuit to an OpenQASM 3 string.
@@ -223,10 +315,18 @@ pub fn to_string(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
     dumps(circuit)
 }
 
-fn dump_global_phase(circuit: &Circuit, output: &mut String) -> Result<(), Qasm3DumpError> {
+fn dump_global_phase(
+    circuit: &Circuit,
+    output: &mut String,
+    param_map: &HashMap<String, Parameter>,
+) -> Result<(), Qasm3DumpError> {
     let phase = circuit.global_phase();
     if phase.is_zero() {
         return Ok(());
+    }
+    let mut phase = phase.clone();
+    for (symbol, replacement) in param_map {
+        phase = phase.replace(symbol, replacement.clone());
     }
     writeln!(output, "gphase({});", phase.to_string().replace("π", "pi"))?;
     Ok(())
@@ -243,10 +343,11 @@ impl ClassicalNameMap {
         circuit: &Circuit,
         output: &mut String,
         skipped_values: &HashSet<ClassicalValue>,
+        name_allocator: &mut NameAllocator,
     ) -> Result<Self, Qasm3DumpError> {
         let mut map = Self::default();
         for (index, ty) in circuit.classical_vars().iter().copied().enumerate() {
-            let name = format!("c{index}");
+            let name = name_allocator.take_indexed("c", index);
             writeln!(output, "{} {name};", classical_decl_type(ty)?)?;
             map.vars
                 .insert(ClassicalVar::new(circuit.id(), index as u32, ty), name);
@@ -256,7 +357,7 @@ impl ClassicalNameMap {
             if skipped_values.contains(&value) {
                 continue;
             }
-            let name = format!("v{index}");
+            let name = name_allocator.take_indexed("v", index);
             writeln!(output, "{} {name};", classical_decl_type(ty)?)?;
             map.values.insert(value, name);
         }
@@ -390,11 +491,17 @@ fn collect_control_gates(
 }
 
 fn dump_gate_definition(gate: &CircuitGate, output: &mut String) -> Result<(), Qasm3DumpError> {
-    if operations_contain_measurement(gate.circuit.circuit.operations()) {
+    if gate
+        .circuit
+        .circuit
+        .operations()
+        .iter()
+        .any(|operation| operation.instruction.has_measurement())
+    {
         return Err(Qasm3DumpError::MeasureInGateNotAllowed);
     }
 
-    let params: Vec<String> = gate.symbols().iter().cloned().collect();
+    let params: Vec<String> = gate.signature_params().iter().cloned().collect();
     let params = if params.is_empty() {
         String::new()
     } else {
@@ -418,8 +525,10 @@ fn dump_gate_definition(gate: &CircuitGate, output: &mut String) -> Result<(), Q
         gate.circuit.circuit.operations(),
         output,
         &qubit_map,
+        "",
         &HashMap::new(),
         &ClassicalNameMap::default(),
+        &AutoMeasurementMap::default(),
         true,
     )?;
     writeln!(output, "}}")?;
@@ -431,7 +540,12 @@ fn dump_unitary_gate_definition(
     frozen: &FrozenCircuit,
     output: &mut String,
 ) -> Result<(), Qasm3DumpError> {
-    if operations_contain_measurement(frozen.circuit.operations()) {
+    if frozen
+        .circuit
+        .operations()
+        .iter()
+        .any(|operation| operation.instruction.has_measurement())
+    {
         return Err(Qasm3DumpError::MeasureInGateNotAllowed);
     }
     let qubits: Vec<String> = (0..frozen.circuit.qubits().len())
@@ -447,31 +561,26 @@ fn dump_unitary_gate_definition(
         frozen.circuit.operations(),
         output,
         &qubit_map,
+        "",
         &HashMap::new(),
         &ClassicalNameMap::default(),
+        &AutoMeasurementMap::default(),
         true,
     )?;
     writeln!(output, "}}")?;
     Ok(())
 }
 
-fn operations_contain_measurement(operations: &[Operation]) -> bool {
-    operations.iter().any(|op| match &op.instruction {
-        Instruction::Directive(Directive::Measure)
-        | Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
-        | Instruction::ClassicalData(ClassicalDataOp::MeasureBits { .. }) => true,
-        Instruction::ClassicalControl(control) => control.has_measurement(),
-        _ => false,
-    })
-}
-
+#[allow(clippy::too_many_arguments)]
 fn dump_operations(
     circuit: &Circuit,
     operations: &[Operation],
     output: &mut String,
     qubit_map: &HashMap<Qubit, String>,
+    qubit_register: &str,
     param_map: &HashMap<String, Parameter>,
     classical_names: &ClassicalNameMap,
+    auto_measurements: &AutoMeasurementMap,
     in_gate_body: bool,
 ) -> Result<(), Qasm3DumpError> {
     let mut index = 0;
@@ -480,11 +589,11 @@ fn dump_operations(
         let op = &operations[index];
         if let Instruction::ClassicalData(ClassicalDataOp::Store { target, value }) =
             &op.instruction
+            && accepting_initializers
+            && is_zero_initializer(*target, value)
         {
-            if accepting_initializers && is_zero_initializer(*target, value) {
-                index += 1;
-                continue;
-            }
+            index += 1;
+            continue;
         }
         accepting_initializers = false;
 
@@ -516,7 +625,7 @@ fn dump_operations(
                 if consumes_store
                     && operations[index + 2..]
                         .iter()
-                        .any(|operation| operation_reads_value(operation, *result))
+                        .any(|operation| operation.instruction.reads_value(*result))
                 {
                     return Err(Qasm3DumpError::UnsupportedClassicalData(format!(
                         "measurement value {} is read after being stored into a mutable variable",
@@ -526,19 +635,26 @@ fn dump_operations(
                 if !consumes_store
                     && !operations[index + 1..]
                         .iter()
-                        .any(|operation| operation_reads_value(operation, *result))
+                        .any(|operation| operation.instruction.reads_value(*result))
                 {
                     destination = MeasurementDestination::Discard(*result);
                 }
-                dump_measurement(op, *result, destination, output, qubit_map, classical_names)?;
+                dump_measurement(
+                    op,
+                    *result,
+                    destination,
+                    output,
+                    qubit_map,
+                    qubit_register,
+                    classical_names,
+                    auto_measurements,
+                )?;
                 if consumes_store {
                     index += 1;
                 }
             }
             Instruction::ClassicalData(ClassicalDataOp::Store { .. }) => {
-                return Err(Qasm3DumpError::UnsupportedClassicalData(
-                    "general store assignment".to_string(),
-                ));
+                dump_classical_store(op, output, classical_names)?;
             }
             Instruction::ClassicalControl(control) => {
                 if in_gate_body {
@@ -551,8 +667,10 @@ fn dump_operations(
                     circuit,
                     output,
                     qubit_map,
+                    qubit_register,
                     param_map,
                     classical_names,
+                    auto_measurements,
                 )?;
             }
             Instruction::Delay => {
@@ -579,12 +697,145 @@ fn is_zero_initializer(target: ClassicalVar, value: &ClassicalExpr) -> bool {
     }
 }
 
+fn dump_classical_store(
+    op: &Operation,
+    output: &mut String,
+    names: &ClassicalNameMap,
+) -> Result<(), Qasm3DumpError> {
+    let Instruction::ClassicalData(ClassicalDataOp::Store { target, value }) = &op.instruction
+    else {
+        return Err(Qasm3DumpError::UnsupportedClassicalData(
+            "non-store classical operation".to_string(),
+        ));
+    };
+    if target.ty() == ClassicalType::Bit {
+        return Err(Qasm3DumpError::UnsupportedClassicalData(
+            "scalar bit store assignment".to_string(),
+        ));
+    }
+    writeln!(
+        output,
+        "{} = {};",
+        names.var(*target)?,
+        classical_expr_to_qasm(value, names)?
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 enum MeasurementDestination {
     Value(ClassicalValue),
     Discard(ClassicalValue),
     VarWhole(ClassicalVar),
     VarBit(ClassicalVar, u32),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AutoMeasurementTarget {
+    start: usize,
+    width: usize,
+}
+
+#[derive(Debug, Default)]
+struct AutoMeasurementMap {
+    targets: HashMap<ClassicalValue, AutoMeasurementTarget>,
+    width: usize,
+    name: String,
+}
+
+impl AutoMeasurementMap {
+    fn new(operations: &[Operation], name: String) -> Result<Self, Qasm3DumpError> {
+        let mut map = Self {
+            name,
+            ..Self::default()
+        };
+        collect_auto_measurements(operations, &mut map)?;
+        Ok(map)
+    }
+
+    fn insert(&mut self, value: ClassicalValue) {
+        let width = value.ty().width() as usize;
+        let target = AutoMeasurementTarget {
+            start: self.width,
+            width,
+        };
+        self.width += width;
+        self.targets.insert(value, target);
+    }
+
+    fn target(&self, value: ClassicalValue) -> Option<AutoMeasurementTarget> {
+        self.targets.get(&value).copied()
+    }
+
+    fn dump_declaration(&self, output: &mut String) -> Result<(), Qasm3DumpError> {
+        if self.width > 0 {
+            writeln!(output, "bit[{}] {};", self.width, self.name)?;
+        }
+        Ok(())
+    }
+}
+
+fn collect_auto_measurements(
+    operations: &[Operation],
+    map: &mut AutoMeasurementMap,
+) -> Result<(), Qasm3DumpError> {
+    let mut index = 0;
+    while index < operations.len() {
+        let op = &operations[index];
+        match &op.instruction {
+            Instruction::ClassicalData(ClassicalDataOp::MeasureBit { result })
+            | Instruction::ClassicalData(ClassicalDataOp::MeasureBits { result }) => {
+                let next = operations.get(index + 1);
+                let (_, consumes_store) = measurement_destination(&op.instruction, *result, next)?;
+                let remaining_start = index + 1 + usize::from(consumes_store);
+                let read_later = operations[remaining_start..]
+                    .iter()
+                    .any(|operation| operation.instruction.reads_value(*result));
+                if !consumes_store && !read_later {
+                    map.insert(*result);
+                }
+                if consumes_store {
+                    index += 1;
+                }
+            }
+            Instruction::ClassicalControl(control) => {
+                collect_auto_measurements_in_control(control, map)?;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn collect_auto_measurements_in_control(
+    control: &ClassicalControlOp,
+    map: &mut AutoMeasurementMap,
+) -> Result<(), Qasm3DumpError> {
+    match control {
+        ClassicalControlOp::If(op) => {
+            collect_auto_measurements(op.then_body().operations(), map)?;
+            if let Some(body) = op.else_body() {
+                collect_auto_measurements(body.operations(), map)?;
+            }
+        }
+        ClassicalControlOp::Switch(op) => {
+            for case in op.cases() {
+                collect_auto_measurements(case.body().operations(), map)?;
+            }
+            if let Some(body) = op.default() {
+                collect_auto_measurements(body.operations(), map)?;
+            }
+        }
+        ClassicalControlOp::While(op) => {
+            collect_auto_measurements(op.body().operations(), map)?;
+        }
+        ClassicalControlOp::For(op) => {
+            collect_auto_measurements(op.body().operations(), map)?;
+        }
+        ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+    }
+    Ok(())
 }
 
 fn skipped_classical_value_declarations(
@@ -610,7 +861,7 @@ fn collect_skipped_classical_values(
                 let remaining_start = index + 1 + usize::from(consumes_store);
                 let read_later = operations[remaining_start..]
                     .iter()
-                    .any(|operation| operation_reads_value(operation, *result));
+                    .any(|operation| operation.instruction.reads_value(*result));
                 if !read_later {
                     skipped.insert(*result);
                 }
@@ -692,10 +943,9 @@ fn measurement_destination(
     if matches!(
         instruction,
         Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
-    ) {
-        if let Some(bit) = stored_measurement_bit(*target, result, value) {
-            return Ok((MeasurementDestination::VarBit(*target, bit), true));
-        }
+    ) && let Some(bit) = value.measurement_store_bit(*target, result)
+    {
+        return Ok((MeasurementDestination::VarBit(*target, bit), true));
     }
 
     Err(Qasm3DumpError::UnsupportedClassicalData(
@@ -703,54 +953,31 @@ fn measurement_destination(
     ))
 }
 
-fn stored_measurement_bit(
-    target: ClassicalVar,
-    result: ClassicalValue,
-    expression: &ClassicalExpr,
-) -> Option<u32> {
-    let ClassicalType::BitVec(width) = target.ty() else {
-        return None;
-    };
-    let ClassicalExprKind::PackBits { bits } = expression.kind() else {
-        return None;
-    };
-    if bits.len() != width.get() as usize {
-        return None;
-    }
-
-    let mut measured_index = None;
-    for (index, bit) in bits.iter().enumerate() {
-        match bit.kind() {
-            ClassicalExprKind::Value(value) if *value == result => {
-                if measured_index.replace(index as u32).is_some() {
-                    return None;
-                }
-            }
-            ClassicalExprKind::ExtractBit {
-                value,
-                index: source_index,
-            } if *source_index == index as u32
-                && matches!(value.kind(), ClassicalExprKind::Var(var) if *var == target) => {}
-            _ => return None,
-        }
-    }
-    measured_index
-}
-
+#[allow(clippy::too_many_arguments)]
 fn dump_measurement(
     op: &Operation,
     result: ClassicalValue,
     destination: MeasurementDestination,
     output: &mut String,
     qubit_map: &HashMap<Qubit, String>,
+    qubit_register: &str,
     names: &ClassicalNameMap,
+    auto_measurements: &AutoMeasurementMap,
 ) -> Result<(), Qasm3DumpError> {
     let qubits = map_qubits(op, qubit_map);
     let (target, width) = match destination {
         MeasurementDestination::Value(value) => {
             (names.value(value)?.to_string(), value.ty().width())
         }
-        MeasurementDestination::Discard(value) => (String::new(), value.ty().width()),
+        MeasurementDestination::Discard(value) => {
+            let Some(target) = auto_measurements.target(value) else {
+                return Err(Qasm3DumpError::UnsupportedClassicalData(format!(
+                    "discarded measurement value {} has no generated classical target",
+                    value.index()
+                )));
+            };
+            (auto_measurements.name.clone(), target.width as u32)
+        }
         MeasurementDestination::VarWhole(var) => (names.var(var)?.to_string(), var.ty().width()),
         MeasurementDestination::VarBit(var, bit) => (format!("{}[{bit}]", names.var(var)?), 1),
     };
@@ -764,22 +991,42 @@ fn dump_measurement(
 
     if width == 1 {
         let source = measurement_source(&qubits[0], qubit_map.len());
-        if matches!(destination, MeasurementDestination::Discard(_)) {
-            writeln!(output, "measure {source};")?;
+        if let MeasurementDestination::Discard(value) = destination {
+            let target = auto_measurements.target(value).unwrap();
+            writeln!(
+                output,
+                "{}[{}] = measure {source};",
+                auto_measurements.name, target.start
+            )?;
         } else {
             writeln!(output, "{target} = measure {source};")?;
         }
-    } else if is_full_register_measurement(&qubits, qubit_map.len()) {
-        if matches!(destination, MeasurementDestination::Discard(_)) {
-            writeln!(output, "measure q;")?;
+    } else if is_full_register_measurement(&qubits, qubit_register, qubit_map.len()) {
+        if let MeasurementDestination::Discard(value) = destination {
+            let target = auto_measurements.target(value).unwrap();
+            for (index, qubit) in qubits.iter().enumerate() {
+                let source = measurement_source(qubit, qubit_map.len());
+                writeln!(
+                    output,
+                    "{}[{}] = measure {source};",
+                    auto_measurements.name,
+                    target.start + index
+                )?;
+            }
         } else {
-            writeln!(output, "{target} = measure q;")?;
+            writeln!(output, "{target} = measure {qubit_register};")?;
         }
     } else {
         for (index, qubit) in qubits.iter().enumerate() {
             let source = measurement_source(qubit, qubit_map.len());
-            if matches!(destination, MeasurementDestination::Discard(_)) {
-                writeln!(output, "measure {source};")?;
+            if let MeasurementDestination::Discard(value) = destination {
+                let target = auto_measurements.target(value).unwrap();
+                writeln!(
+                    output,
+                    "{}[{}] = measure {source};",
+                    auto_measurements.name,
+                    target.start + index
+                )?;
             } else {
                 writeln!(output, "{target}[{index}] = measure {source};")?;
             }
@@ -789,30 +1036,20 @@ fn dump_measurement(
 }
 
 fn measurement_source(qubit: &str, qubit_count: usize) -> &str {
-    if qubit_count == 1 && qubit == "q[0]" {
-        "q"
-    } else {
-        qubit
-    }
+    let _ = qubit_count;
+    qubit
 }
 
-fn is_full_register_measurement(qubits: &[String], qubit_count: usize) -> bool {
+fn is_full_register_measurement(
+    qubits: &[String],
+    qubit_register: &str,
+    qubit_count: usize,
+) -> bool {
     qubits.len() == qubit_count
         && qubits
             .iter()
             .enumerate()
-            .all(|(index, qubit)| qubit == &format!("q[{index}]"))
-}
-
-fn operation_reads_value(operation: &Operation, value: ClassicalValue) -> bool {
-    match &operation.instruction {
-        Instruction::ClassicalData(ClassicalDataOp::Store {
-            value: expression, ..
-        }) => expression.values().contains(&value),
-        Instruction::ClassicalData(_) => false,
-        Instruction::ClassicalControl(control) => control.reads_value(value),
-        _ => false,
-    }
+            .all(|(index, qubit)| qubit == &format!("{qubit_register}[{index}]"))
 }
 
 fn dump_standard_gate(
@@ -935,13 +1172,16 @@ fn dump_directive(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dump_control_flow(
     control: &ClassicalControlOp,
     circuit: &Circuit,
     output: &mut String,
     qubit_map: &HashMap<Qubit, String>,
+    qubit_register: &str,
     param_map: &HashMap<String, Parameter>,
     classical_names: &ClassicalNameMap,
+    auto_measurements: &AutoMeasurementMap,
 ) -> Result<(), Qasm3DumpError> {
     match control {
         ClassicalControlOp::If(op) => {
@@ -952,8 +1192,10 @@ fn dump_control_flow(
                 op.then_body().operations(),
                 output,
                 qubit_map,
+                qubit_register,
                 param_map,
                 classical_names,
+                auto_measurements,
                 false,
             )?;
             if let Some(body) = op.else_body() {
@@ -963,8 +1205,10 @@ fn dump_control_flow(
                     body.operations(),
                     output,
                     qubit_map,
+                    qubit_register,
                     param_map,
                     classical_names,
+                    auto_measurements,
                     false,
                 )?;
             }
@@ -980,8 +1224,10 @@ fn dump_control_flow(
                     case.body().operations(),
                     output,
                     qubit_map,
+                    qubit_register,
                     param_map,
                     classical_names,
+                    auto_measurements,
                     false,
                 )?;
                 writeln!(output, "}}")?;
@@ -993,8 +1239,10 @@ fn dump_control_flow(
                     body.operations(),
                     output,
                     qubit_map,
+                    qubit_register,
                     param_map,
                     classical_names,
+                    auto_measurements,
                     false,
                 )?;
                 writeln!(output, "}}")?;
@@ -1028,13 +1276,7 @@ fn classical_expr_to_qasm(
         ClassicalExprKind::Var(var) => names.var(*var)?.to_string(),
         ClassicalExprKind::Value(value) => names.value(*value)?.to_string(),
         ClassicalExprKind::BoolLiteral(value) => value.to_string(),
-        ClassicalExprKind::BitLiteral(value) => {
-            if *value {
-                "1".to_string()
-            } else {
-                "0".to_string()
-            }
-        }
+        ClassicalExprKind::BitLiteral(value) => value.to_string(),
         ClassicalExprKind::UIntLiteral { value, .. } => value.to_string(),
         ClassicalExprKind::BitVecLiteral { width, value } => {
             format!("\"{value:0width$b}\"", width = width.get() as usize)

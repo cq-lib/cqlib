@@ -669,7 +669,7 @@ pub fn xy_gate(theta: f64) -> Array2<Complex<f64>> {
 
 /// Returns the XY2P gate (Plus Half-Pi XY).
 ///
-/// This acts as a $\sqrt{XY}$ gate or a +90° rotation.
+/// This is a +90° single-qubit rotation about the XY-plane axis selected by `theta`.
 ///
 /// Defined as:
 /// ```text
@@ -697,7 +697,7 @@ pub fn xy2p_gate(theta: f64) -> Array2<Complex<f64>> {
 
 /// Returns the XY2M gate (Minus Half-Pi XY).
 ///
-/// This acts as a $\sqrt{XY}^\dagger$ gate or a -90° rotation.
+/// This is a -90° single-qubit rotation about the XY-plane axis selected by `theta`.
 ///
 /// Defined as:
 /// ```text

@@ -172,7 +172,7 @@ fn physical_graph_filters_invalid_qubits_and_computes_undirected_distances() {
         .with_invalid_qubits(HashSet::from_iter([p2]))
         .unwrap();
 
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
 
     assert_eq!(physical.physical_qubits(), &[p0, p1, p3]);
     assert_eq!(physical.distance(p0, p1), Some(1));
@@ -206,14 +206,16 @@ fn objective_auto_uses_fidelity_data_when_available() {
         .add_edge_properties(
             p0,
             p1,
-            EdgeProp::new().with_native_instruction(InstructionProp::new(
-                Instruction::Standard(StandardGate::CX),
-                0.02,
-            )),
+            EdgeProp::new()
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::CX),
+                    0.02,
+                ))
+                .unwrap(),
         )
         .unwrap();
 
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let objective = LayoutObjective::auto_from_physical(&physical);
     let layout = Layout::new(vec![l0, l1], vec![p0, p1], None).unwrap();
     let score = objective
@@ -237,7 +239,7 @@ fn topology_only_objective_ignores_error_data() {
         .unwrap()
         .with_default_readout_error(0.02)
         .with_default_two_qubit_error(0.03);
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let objective = LayoutObjective::topology_only();
 
     assert!(physical.has_fidelity_data());
@@ -362,7 +364,7 @@ fn trivial_layout_uses_fidelity_objective_when_requested() {
         .unwrap()
         .with_default_readout_error(0.02)
         .with_default_two_qubit_error(0.03);
-    let physical = build_physical_layout_graph(&device).unwrap();
+    let physical = PhysicalLayoutGraph::from_device(&device).unwrap();
     let objective = LayoutObjective::auto_from_physical(&physical);
 
     let mut circuit = Circuit::new(2);

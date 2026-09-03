@@ -88,7 +88,7 @@ impl RuleItem {
             ),
             other => {
                 return Err(RuleValidationError::UnsupportedInstruction {
-                    instruction: format!("{other:?}"),
+                    instruction: other.to_string(),
                 });
             }
         };
@@ -129,13 +129,7 @@ impl RuleItem {
     pub fn equivalent_to(&self, other: &Self) -> bool {
         let lhs_params = self.params.as_deref().unwrap_or(&[]);
         let rhs_params = other.params.as_deref().unwrap_or(&[]);
-        let instructions_match = match (&self.instruction, &other.instruction) {
-            (Instruction::Standard(lhs), Instruction::Standard(rhs)) => lhs == rhs,
-            (Instruction::McGate(lhs), Instruction::McGate(rhs)) => lhs == rhs,
-            _ => false,
-        };
-
-        instructions_match
+        self.instruction == other.instruction
             && self.qubits == other.qubits
             && lhs_params.len() == rhs_params.len()
             && lhs_params.iter().zip(rhs_params).all(|(lhs, rhs)| {

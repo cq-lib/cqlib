@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from cqlib.circuit import Parameter, ValueOperation
+from cqlib.compile.knowledge import RuleLibrary
 
 class Commutation:
     """A proven relationship between two commuting operations.
@@ -59,7 +60,7 @@ class Commutation:
     def __deepcopy__(self, memo: dict) -> Commutation:
         """Return a deep copy of this proof."""
         ...
-    def __eq__(self, other: Commutation) -> bool:
+    def __eq__(self, other: object) -> bool:
         """Return whether two proofs describe the same relationship."""
         ...
 
@@ -113,7 +114,7 @@ class CommutationConfig:
     def __deepcopy__(self, memo: dict) -> CommutationConfig:
         """Return a deep copy of this configuration."""
         ...
-    def __eq__(self, other: CommutationConfig) -> bool:
+    def __eq__(self, other: object) -> bool:
         """Return whether every configuration option is equal."""
         ...
 
@@ -148,6 +149,45 @@ class CommutationChecker:
     @staticmethod
     def with_config(config: CommutationConfig) -> CommutationChecker:
         """Build a checker using builtin rules and an explicit configuration."""
+        ...
+    @staticmethod
+    def from_library(
+        library: RuleLibrary, config: CommutationConfig | None = None
+    ) -> CommutationChecker:
+        """Build a checker using commute rules from an already loaded library.
+
+        Only rules registered under ``RuleKind.commute()`` participate in
+        proofs; builtin rules are not included unless the library contains
+        them (see :meth:`RuleLibrary.builtin`). ``config=None`` uses the
+        default configuration, matching :meth:`builtin`.
+
+        Args:
+            library: Rule library supplying the commutation rules.
+            config: Checker configuration; defaults are applied when omitted.
+
+        Returns:
+            A checker whose rule oracle was built from ``library``.
+
+        Raises:
+            ValueError: If ``config.enable_rule_oracle`` is ``False``, because
+                the library would otherwise be silently ignored.
+
+        Example::
+
+            from cqlib.circuit import Qubit, StandardGate, ValueOperation
+            from cqlib.compile.commutation import CommutationChecker
+            from cqlib.compile.knowledge import RuleKind, RuleLibrary
+
+            library = RuleLibrary.from_dsl(
+                "rule comm_s_t { match { S 0, T 0 } rewrite { T 0, S 0 } }",
+                RuleKind.commute(),
+            )
+            checker = CommutationChecker.from_library(library)
+            lhs = ValueOperation.from_standard_gate(StandardGate.S, [Qubit(0)])
+            rhs = ValueOperation.from_standard_gate(StandardGate.T, [Qubit(0)])
+            proof = checker.check(lhs, rhs)
+            assert proof is not None and proof.is_exact()
+        """
         ...
     @property
     def config(self) -> CommutationConfig:
@@ -212,4 +252,10 @@ def algebraic_commutation(
     """
     ...
 
-__all__: list[str]
+__all__ = [
+    "Commutation",
+    "CommutationConfig",
+    "CommutationChecker",
+    "check_commutation",
+    "algebraic_commutation",
+]

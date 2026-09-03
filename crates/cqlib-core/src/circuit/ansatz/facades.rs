@@ -232,7 +232,8 @@ pub fn zz_feature_map(
 ///
 /// * `num_qubits` - The number of qubits (= number of input features). Must be ≥ 1.
 /// * `reps` - The number of repetition layers.
-/// * `paulis` - Pauli string templates with labels. Use [`parse`] for construction.
+/// * `paulis` - Pauli string templates with labels. Use the [`std::str::FromStr`]
+///   implementation for construction.
 /// * `entanglement` - Connectivity pattern for multi-qubit interactions.
 ///
 /// # Returns

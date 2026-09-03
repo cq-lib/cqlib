@@ -10,7 +10,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-mod config;
+pub(crate) mod config;
 mod mc_gate;
 mod pass;
 mod unitary;

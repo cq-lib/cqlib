@@ -37,7 +37,11 @@ use super::two_local::PyEntanglementTopology;
 ///     >>> circuit = ae.build_circuit("x")
 ///     >>> ae.num_parameters()
 ///     4
-#[pyclass(name = "AngleEncoding", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "AngleEncoding",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyAngleEncoding {
     pub(crate) inner: AngleEncoding,
@@ -133,7 +137,11 @@ impl PyAngleEncoding {
 }
 
 /// Computational basis encoding from a bitstring.
-#[pyclass(name = "BasisEncoding", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "BasisEncoding",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyBasisEncoding {
     pub(crate) inner: BasisEncoding,
@@ -204,7 +212,11 @@ impl PyBasisEncoding {
 }
 
 /// A first-order Z feature map without entanglement.
-#[pyclass(name = "ZFeatureMap", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "ZFeatureMap",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyZFeatureMap {
     pub(crate) inner: ZFeatureMap,
@@ -286,7 +298,11 @@ impl PyZFeatureMap {
 }
 
 /// An IQP-style diagonal feature map.
-#[pyclass(name = "IQPFeatureMap", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "IQPFeatureMap",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyIQPFeatureMap {
     pub(crate) inner: IQPFeatureMap,
@@ -392,7 +408,11 @@ impl PyIQPFeatureMap {
 ///     >>> circuit = fm.build_circuit("x")
 ///     >>> fm.num_parameters()
 ///     3
-#[pyclass(name = "ZZFeatureMap", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "ZZFeatureMap",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyZZFeatureMap {
     pub(crate) inner: ZZFeatureMap,
@@ -532,7 +552,11 @@ impl PyZZFeatureMap {
 ///     ...     .paulis([PauliString.from_str("Z"), PauliString.from_str("ZZ")])
 ///     ...     .entanglement(EntanglementTopology.full()))
 ///     >>> circuit = fm.build_circuit("x")
-#[pyclass(name = "PauliFeatureMap", module = "cqlib.circuit.ansatz")]
+#[pyclass(
+    name = "PauliFeatureMap",
+    module = "cqlib.circuit.ansatz",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyPauliFeatureMap {
     pub(crate) inner: PauliFeatureMap,

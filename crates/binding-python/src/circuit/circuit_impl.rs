@@ -17,18 +17,20 @@
 //! construction boundary for custom instructions and structured control flow.
 
 use crate::circuit::bit::{PyIntListOrQubitList, PyIntOrQubit, PyIntQubitList, PyQubit};
-use crate::circuit::error::{CircuitError as PyCircuitError, ParameterError as PyParameterError};
+use crate::circuit::error::{
+    CircuitError as PyCircuitError, ParameterError as PyParameterError, circuit_error_to_py_err,
+};
 use crate::circuit::{
-    PyCircuitGate, PyCircuitId, PyClassicalControlOp, PyClassicalExpr, PyClassicalType,
-    PyClassicalVar, PyMcGate, PyMeasurement, PyParameter, PyStandardGate, PySwitchBuilder,
-    PySymbolicMatrix, PyUnitaryGate, PyValueOperation,
+    PyCircuitDag, PyCircuitGate, PyCircuitId, PyClassicalControlOp, PyClassicalExpr,
+    PyClassicalType, PyClassicalVar, PyMcGate, PyMeasurement, PyParameter, PyStandardGate,
+    PySwitchBuilder, PySymbolicMatrix, PyUnitaryGate, PyValueOperation,
 };
 use cqlib_core::circuit::error::ParameterError;
 use cqlib_core::circuit::gate::Instruction;
 use cqlib_core::circuit::symbolic_matrix::circuit_to_symbolic_matrix;
 use cqlib_core::circuit::{
-    Circuit, CircuitError, ClassicalControlOp, ExternalControlScope, ForOp, IfOp, Parameter,
-    ParameterValue, SwitchOp, ValueInstruction, ValueOperation, WhileOp,
+    Circuit, CircuitDag, ClassicalControlOp, ExternalControlScope, ForOp, IfOp, Parameter,
+    ParameterValue, Qubit, SwitchOp, ValueInstruction, ValueOperation, WhileOp,
 };
 use num_complex::Complex64;
 use numpy::{PyArray2, ToPyArray};
@@ -60,7 +62,7 @@ impl PyParamLike {
 }
 
 /// Mutable quantum circuit with gate, parameter, and dynamic-control support.
-#[pyclass(name = "Circuit", module = "cqlib.circuit")]
+#[pyclass(name = "Circuit", module = "cqlib.circuit", skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyCircuit {
     pub(crate) inner: Circuit,
@@ -134,9 +136,24 @@ impl PyCircuit {
             .collect()
     }
 
+    /// Returns interned symbol names in insertion order.
+    ///
+    /// This registry is stable and may contain symbols no longer referenced by
+    /// executable IR. Use `used_symbols` or `uses_symbol` for live dependencies.
     #[getter]
     fn symbols(&self) -> Vec<String> {
         self.inner.symbols().iter().cloned().collect()
+    }
+
+    /// Returns symbol names actually referenced by executable IR.
+    #[getter]
+    fn used_symbols(&self) -> Vec<String> {
+        self.inner.used_symbols().into_iter().collect()
+    }
+
+    /// Returns whether executable IR currently references `symbol`.
+    fn uses_symbol(&self, symbol: &str) -> bool {
+        self.inner.uses_symbol(symbol)
     }
 
     #[getter]
@@ -459,14 +476,49 @@ impl PyCircuit {
     }
 
     /// Returns one operation with circuit-local parameters resolved.
+    ///
+    /// Raises `IndexError` when `index` is out of bounds.
     fn operation(&self, index: usize) -> PyResult<PyValueOperation> {
         self.inner
             .index(index)
             .map(PyValueOperation::from)
-            .map_err(|error| match error {
-                CircuitError::InvalidOperation(message) => PyIndexError::new_err(message),
-                error => PyCircuitError::new_err(error.to_string()),
+            .map_err(circuit_error_to_py_err)
+    }
+
+    /// Removes one top-level operation and returns it.
+    fn remove_operation(&mut self, index: usize) -> PyResult<PyValueOperation> {
+        let removed = self
+            .inner
+            .index(index)
+            .map(PyValueOperation::from)
+            .map_err(circuit_error_to_py_err)?;
+        self.inner
+            .remove_operation(index)
+            .map_err(circuit_error_to_py_err)?;
+        Ok(removed)
+    }
+
+    /// Removes multiple top-level operations and returns them in original-index order.
+    fn remove_operations(&mut self, indices: Vec<usize>) -> PyResult<Vec<PyValueOperation>> {
+        let mut indices = indices;
+        indices.sort_unstable();
+        indices.dedup();
+
+        let removed = indices
+            .iter()
+            .copied()
+            .map(|index| {
+                self.inner
+                    .index(index)
+                    .map(PyValueOperation::from)
+                    .map_err(circuit_error_to_py_err)
             })
+            .collect::<PyResult<Vec<_>>>()?;
+
+        self.inner
+            .remove_operations(indices)
+            .map_err(circuit_error_to_py_err)?;
+        Ok(removed)
     }
 
     #[getter]
@@ -479,6 +531,13 @@ impl PyCircuit {
                     .map_err(|error| PyCircuitError::new_err(error.to_string()))
             })
             .collect()
+    }
+
+    /// Builds the operation dependency DAG analysis view for this circuit.
+    fn dag(&self) -> PyResult<PyCircuitDag> {
+        CircuitDag::from_circuit(&self.inner)
+            .map(PyCircuitDag::from)
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
 
     /// Returns the circuit depth (longest ASAP path over qubit wires).
@@ -512,7 +571,7 @@ impl PyCircuit {
         self.inner
             .append(
                 Instruction::Standard(gate.inner),
-                Vec::<cqlib_core::circuit::Qubit>::from(qubits),
+                Vec::<Qubit>::from(qubits),
                 gate.params.into_iter().map(ParameterValue::from),
                 label.as_deref(),
             )
@@ -530,7 +589,7 @@ impl PyCircuit {
         self.inner
             .append(
                 Instruction::McGate(Box::new(gate.inner)),
-                Vec::<cqlib_core::circuit::Qubit>::from(qubits),
+                Vec::<Qubit>::from(qubits),
                 gate.params.into_iter().map(ParameterValue::from),
                 label.as_deref(),
             )
@@ -824,6 +883,11 @@ impl PyCircuit {
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
 
+    /// Inserts a compiler barrier.
+    ///
+    /// A non-empty list constrains optimization and reordering on exactly those qubits. An empty
+    /// list creates a global barrier over every qubit in this circuit. Barriers have no physical
+    /// effect on the quantum state.
     fn barrier(&mut self, qubits: PyIntListOrQubitList) -> PyResult<()> {
         self.inner
             .barrier(qubits.into())
@@ -837,7 +901,7 @@ impl PyCircuit {
     }
 
     fn delay(&mut self, qubit: PyIntOrQubit, duration: PyParamLike) -> PyResult<()> {
-        let qubit: cqlib_core::circuit::Qubit = qubit.into();
+        let qubit: Qubit = qubit.into();
         self.inner
             .delay(qubit, duration.into_value()?)
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
@@ -891,17 +955,15 @@ impl PyCircuit {
     }
 
     /// Returns an inverse circuit when every operation is reversible.
-    fn inverse(&self) -> PyResult<Self> {
-        self.inner
-            .inverse()
+    fn inverse(&self, py: Python<'_>) -> PyResult<Self> {
+        py.detach(|| self.inner.inverse())
             .map(Self::from)
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
 
     /// Recursively expands circuit-defined gates.
-    fn decompose(&self) -> PyResult<Self> {
-        self.inner
-            .decompose()
+    fn decompose(&self, py: Python<'_>) -> PyResult<Self> {
+        py.detach(|| self.inner.decompose())
             .map(Self::from)
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
@@ -961,16 +1023,20 @@ impl PyCircuit {
         py: Python<'py>,
         qubits_order: Option<Vec<usize>>,
     ) -> PyResult<Bound<'py, PyArray2<Complex64>>> {
-        self.inner
-            .to_matrix(qubits_order.as_deref())
-            .map(|matrix| matrix.to_pyarray(py))
-            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+        let matrix = py
+            .detach(|| self.inner.to_matrix(qubits_order.as_deref()))
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))?;
+        Ok(matrix.to_pyarray(py))
     }
 
     /// Computes a dense unitary matrix while preserving symbolic parameters.
     #[pyo3(signature = (qubits_order=None))]
-    fn to_symbolic_matrix(&self, qubits_order: Option<Vec<usize>>) -> PyResult<PySymbolicMatrix> {
-        circuit_to_symbolic_matrix(&self.inner, qubits_order.as_deref())
+    fn to_symbolic_matrix(
+        &self,
+        py: Python<'_>,
+        qubits_order: Option<Vec<usize>>,
+    ) -> PyResult<PySymbolicMatrix> {
+        py.detach(|| circuit_to_symbolic_matrix(&self.inner, qubits_order.as_deref()))
             .map(PySymbolicMatrix::from)
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
@@ -980,6 +1046,20 @@ impl PyCircuit {
         self.inner
             .validate()
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    /// Compares two circuits by structural equality.
+    ///
+    /// Circuit identity, the order of the interned parameter table, and other
+    /// process-local classical handles are ignored; qubits, resolved
+    /// parameters, and the ordered operation sequence must match. Cost is
+    /// linear in the circuit's IR size. Circuits are unhashable.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if !other.is_instance_of::<PyCircuit>() {
+            return Ok(false);
+        }
+        let other = other.extract::<PyRef<'_, PyCircuit>>()?;
+        Ok(self.inner == other.inner)
     }
 
     fn __len__(&self) -> usize {
@@ -1022,7 +1102,9 @@ impl PyCircuit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cqlib_core::circuit::Qubit;
+    use cqlib_core::circuit::{
+        ClassicalExpr, Qubit, StandardGate, UnitaryGate, ValueClassicalControlOp, ValueControlBody,
+    };
 
     #[test]
     fn repr_contains_circuit_identity_and_shape() {
@@ -1048,8 +1130,6 @@ mod tests {
 
     #[test]
     fn xy_family_matches_core_builders() {
-        use cqlib_core::circuit::StandardGate;
-
         let mut circuit = PyCircuit::from(Circuit::new(1));
         circuit
             .xy(PyIntOrQubit::Int(0), PyParamLike::Float(0.1))
@@ -1079,8 +1159,6 @@ mod tests {
 
     #[test]
     fn append_unitary_gate_preserves_parameter_contract() {
-        use cqlib_core::circuit::gate::UnitaryGate;
-
         let mut circuit = PyCircuit::from(Circuit::new(1));
         let gate = PyUnitaryGate::from(UnitaryGate::new("custom", 1, 1));
         circuit
@@ -1102,8 +1180,6 @@ mod tests {
 
     #[test]
     fn append_control_uses_value_level_control_flow() {
-        use cqlib_core::circuit::{ClassicalExpr, ValueClassicalControlOp, ValueControlBody};
-
         let mut circuit = PyCircuit::from(Circuit::new(1));
         circuit
             .append_control(PyClassicalControlOp::from(ValueClassicalControlOp::If {
@@ -1126,12 +1202,17 @@ mod tests {
 
     #[test]
     fn symbolic_matrix_preserves_unbound_parameters() {
+        Python::initialize();
         let mut circuit = Circuit::new(1);
         circuit
             .rx(Qubit::new(0), Parameter::symbol("theta"))
             .unwrap();
 
-        let matrix = PyCircuit::from(circuit).to_symbolic_matrix(None).unwrap();
+        let matrix = Python::attach(|py| {
+            PyCircuit::from(circuit)
+                .to_symbolic_matrix(py, None)
+                .unwrap()
+        });
 
         assert!(matrix.inner.iter().any(|value| {
             value.re.get_symbols().contains("theta") || value.im.get_symbols().contains("theta")

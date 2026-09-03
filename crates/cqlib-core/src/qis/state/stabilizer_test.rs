@@ -187,7 +187,8 @@ fn test_from_circuit_rejects_non_clifford_gate_set() {
     use num_complex::Complex64;
     use std::f64::consts::PI;
 
-    let builders: Vec<(&str, Box<dyn Fn(&mut Circuit)>)> = vec![
+    type CircuitBuilder = (&'static str, Box<dyn Fn(&mut Circuit)>);
+    let builders: Vec<CircuitBuilder> = vec![
         (
             "T",
             Box::new(|c| {
@@ -408,7 +409,7 @@ fn test_measure_statistics_approx_50_50() {
     }
     // Generous bounds: 30% to 70%
     assert!(
-        ones >= 60 && ones <= 140,
+        (60..=140).contains(&ones),
         "Expected ~50% ones, got {ones}/{total}"
     );
 }
@@ -910,11 +911,11 @@ fn test_repeated_deterministic_measurements() {
     let mut s = StabilizerState::new(4);
     // First pass: all deterministically 0
     for q in 0..4 {
-        assert_eq!(s.measure(q).unwrap(), false, "qubit {q} first pass");
+        assert!(!s.measure(q).unwrap(), "qubit {q} first pass");
     }
     // Second pass: state now collapsed but still |0000⟩, all deterministic
     for q in 0..4 {
-        assert_eq!(s.measure(q).unwrap(), false, "qubit {q} second pass");
+        assert!(!s.measure(q).unwrap(), "qubit {q} second pass");
     }
 }
 
@@ -1087,7 +1088,7 @@ fn test_reset_from_one() {
     let mut s = StabilizerState::new(1);
     s.apply_x(0).unwrap(); // |0⟩ → |1⟩
     s.reset(0).unwrap(); // → |0⟩
-    assert_eq!(s.measure(0).unwrap(), false, "after reset should be |0⟩");
+    assert!(!s.measure(0).unwrap(), "after reset should be |0⟩");
 }
 
 /// reset() on |0⟩ is a no-op.
@@ -1095,7 +1096,7 @@ fn test_reset_from_one() {
 fn test_reset_from_zero() {
     let mut s = StabilizerState::new(1);
     s.reset(0).unwrap();
-    assert_eq!(s.measure(0).unwrap(), false);
+    assert!(!s.measure(0).unwrap());
 }
 
 /// reset() on a superposition state always yields |0⟩.
@@ -1105,7 +1106,7 @@ fn test_reset_from_superposition() {
         let mut s = StabilizerState::new(1);
         s.apply_h(0).unwrap(); // |+⟩ random collapse
         s.reset(0).unwrap(); // must always be |0⟩ after
-        assert_eq!(s.measure(0).unwrap(), false);
+        assert!(!s.measure(0).unwrap());
     }
 }
 
@@ -1244,7 +1245,7 @@ fn test_apply_circuit_measure_bits_result_order() {
         panic!("expected BitVec measurement result");
     };
     assert_eq!(*width, 3);
-    assert_eq!(bits.to_string(*width as usize), "101");
+    assert_eq!(bits.to_bitstring(*width as usize), "101");
     assert!(bits.is_one(0), "first measured qubit maps to bit 0");
     assert!(!bits.is_one(1));
     assert!(bits.is_one(2));

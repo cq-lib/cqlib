@@ -12,10 +12,10 @@
 
 //! Shared MC-SU(2) synthesis helpers.
 
-use super::{DECOMPOSE_MC_SU2_NAME, Su2RotationAxis};
-use crate::circuit::{ParameterValue, Qubit, StandardGate};
+use super::DECOMPOSE_MC_SU2_NAME;
+use crate::circuit::{ParameterValue, Qubit};
 use crate::compile::error::CompilerError;
-use crate::util::qubit::find_duplicate_qubit;
+use crate::compile::transform::decompose::mc_gate::validation::find_duplicate_qubit;
 
 /// Returns a scaled clone while preserving symbolic expressions.
 pub(super) fn scale_parameter(theta: &ParameterValue, factor: f64) -> ParameterValue {
@@ -37,22 +37,4 @@ pub(super) fn validate_distinct_qubits(qubit_groups: &[&[Qubit]]) -> Result<(), 
     }
 
     Ok(())
-}
-
-/// Maps a rotation axis to its standard single-qubit gate.
-pub(super) fn standard_rotation(axis: Su2RotationAxis) -> StandardGate {
-    match axis {
-        Su2RotationAxis::X => StandardGate::RX,
-        Su2RotationAxis::Y => StandardGate::RY,
-        Su2RotationAxis::Z => StandardGate::RZ,
-    }
-}
-
-/// Maps a rotation axis to its standard controlled gate.
-pub(super) fn standard_controlled_rotation(axis: Su2RotationAxis) -> StandardGate {
-    match axis {
-        Su2RotationAxis::X => StandardGate::CRX,
-        Su2RotationAxis::Y => StandardGate::CRY,
-        Su2RotationAxis::Z => StandardGate::CRZ,
-    }
 }

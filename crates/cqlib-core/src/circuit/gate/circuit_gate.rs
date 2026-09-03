@@ -44,6 +44,7 @@ use std::sync::{Arc, OnceLock};
 #[derive(Debug, Clone)]
 pub struct FrozenCircuit {
     pub(crate) circuit: Circuit,
+    used_symbols: Arc<IndexSet<String>>,
     symbolic_matrix_cache: Arc<OnceLock<Arc<SymbolicMatrix>>>,
 }
 
@@ -61,8 +62,10 @@ impl FrozenCircuit {
     ///
     /// A new `FrozenCircuit` wrapping the provided circuit.
     pub fn new(circuit: Circuit) -> Self {
+        let used_symbols = Arc::new(circuit.used_symbols());
         Self {
             circuit,
+            used_symbols,
             symbolic_matrix_cache: Arc::new(OnceLock::new()),
         }
     }
@@ -84,6 +87,14 @@ impl FrozenCircuit {
         &self.circuit
     }
 
+    /// Returns symbols referenced by the frozen circuit's executable IR.
+    ///
+    /// The set is computed when the circuit is frozen and preserves the inner
+    /// circuit's stable symbol-registry order.
+    pub fn used_symbols(&self) -> &IndexSet<String> {
+        &self.used_symbols
+    }
+
     /// Returns the cached symbolic matrix for this frozen circuit.
     ///
     /// The matrix is computed in the circuit's default qubit order on the
@@ -97,6 +108,19 @@ impl FrozenCircuit {
         let matrix = Arc::new(circuit_to_symbolic_matrix(&self.circuit, None)?);
         let _ = self.symbolic_matrix_cache.set(matrix.clone());
         Ok(self.symbolic_matrix_cache.get().cloned().unwrap_or(matrix))
+    }
+}
+
+impl PartialEq for FrozenCircuit {
+    /// Compares two frozen circuits by their defining circuit and used-symbol
+    /// set.
+    ///
+    /// The defining circuits compare with [`Circuit`]'s structural equality,
+    /// which ignores process-local circuit identity. The derived symbolic
+    /// matrix cache never participates: freezing equal circuits and then
+    /// materializing the matrix on only one side keeps them equal.
+    fn eq(&self, other: &Self) -> bool {
+        self.circuit == other.circuit && self.used_symbols == other.used_symbols
     }
 }
 
@@ -140,7 +164,27 @@ pub struct CircuitGate {
     pub name: Arc<String>,
     pub(crate) num_qubits: usize,
     pub(crate) num_params: usize,
+    pub(crate) signature_params: IndexSet<String>,
     pub(crate) circuit: Arc<FrozenCircuit>,
+}
+
+impl PartialEq for CircuitGate {
+    /// Compares two circuit gates by name, ordered signature, and defining circuit.
+    ///
+    /// The defining circuits compare with [`Circuit`]'s
+    /// structural equality, which ignores process-local circuit identity. The
+    /// frozen matrix cache never participates. Signature order is significant
+    /// because call parameters are bound positionally.
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.num_qubits == other.num_qubits
+            && self.num_params == other.num_params
+            && self
+                .signature_params
+                .iter()
+                .eq(other.signature_params.iter())
+            && self.circuit.circuit() == other.circuit.circuit()
+    }
 }
 
 impl CircuitGate {
@@ -172,14 +216,65 @@ impl CircuitGate {
     /// ```
     pub fn new(name: impl Into<String>, circuit: FrozenCircuit) -> Result<Self, CircuitError> {
         let num_qubits = circuit.circuit.qubits().len();
-        let num_params = circuit.circuit.symbols().len();
+        let signature_params = circuit.used_symbols().clone();
+        let num_params = signature_params.len();
 
         Ok(Self {
             name: Arc::new(name.into()),
             num_qubits,
             num_params,
+            signature_params,
             circuit: Arc::new(circuit),
         })
+    }
+
+    /// Creates a new circuit-based gate with an explicit call signature.
+    ///
+    /// This is useful for frontends whose gate signatures are declared separately
+    /// from the symbols that happen to appear in the implementation. Declared but
+    /// unused parameters remain part of the gate arity.
+    pub fn with_signature(
+        name: impl Into<String>,
+        circuit: FrozenCircuit,
+        params: impl IntoIterator<Item = String>,
+    ) -> Result<Self, CircuitError> {
+        let mut signature_params = IndexSet::new();
+        for param in params {
+            if !signature_params.insert(param.clone()) {
+                return Err(CircuitError::InvalidOperation(format!(
+                    "duplicate circuit gate parameter '{param}'"
+                )));
+            }
+        }
+
+        for symbol in circuit.used_symbols() {
+            if !signature_params.contains(symbol) {
+                return Err(CircuitError::InvalidOperation(format!(
+                    "circuit gate implementation references undeclared parameter '{symbol}'"
+                )));
+            }
+        }
+
+        let num_qubits = circuit.circuit.qubits().len();
+        let num_params = signature_params.len();
+
+        Ok(Self {
+            name: Arc::new(name.into()),
+            num_qubits,
+            num_params,
+            signature_params,
+            circuit: Arc::new(circuit),
+        })
+    }
+
+    /// Returns the positional parameter signature used when invoking this gate.
+    pub fn signature_params(&self) -> &IndexSet<String> {
+        &self.signature_params
+    }
+
+    /// Returns the symbols actually referenced by this gate's backing circuit.
+    pub fn used_symbols(&self) -> &IndexSet<String> {
+        self.circuit.used_symbols()
     }
 
     /// Returns the set of symbolic parameter names used in the circuit.
@@ -198,7 +293,7 @@ impl CircuitGate {
     /// assert!(symbols.is_empty());
     /// ```
     pub fn symbols(&self) -> IndexSet<String> {
-        self.circuit.circuit.symbols().clone()
+        self.used_symbols().clone()
     }
 
     /// Returns the number of qubits this gate acts on.
@@ -304,6 +399,132 @@ impl CircuitGate {
     pub fn inverse(&self) -> Result<Self, CircuitError> {
         let inverted_circuit = self.circuit.circuit.inverse()?;
         let frozen_inverted = FrozenCircuit::new(inverted_circuit);
-        CircuitGate::new(format!("{}_dg", self.name), frozen_inverted)
+        CircuitGate::with_signature(
+            format!("{}_dg", self.name),
+            frozen_inverted,
+            self.signature_params.iter().cloned(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::circuit::{Circuit, Parameter, Qubit};
+
+    #[test]
+    fn signature_params_are_distinct_from_used_symbols() {
+        let mut circuit = Circuit::new(1);
+        circuit
+            .rx(Qubit::new(0), Parameter::symbol("used"))
+            .unwrap();
+
+        let gate = CircuitGate::with_signature(
+            "declared",
+            FrozenCircuit::new(circuit),
+            ["unused".to_string(), "used".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(gate.num_params(), 2);
+        assert_eq!(
+            gate.signature_params().iter().cloned().collect::<Vec<_>>(),
+            vec!["unused".to_string(), "used".to_string()]
+        );
+        assert!(gate.symbols().contains("used"));
+        assert!(!gate.symbols().contains("unused"));
+        assert_eq!(gate.used_symbols(), &gate.symbols());
+    }
+
+    #[test]
+    fn explicit_signature_ignores_interned_but_unreferenced_symbols() {
+        let mut circuit = Circuit::new(1);
+        circuit.add_parameter(Parameter::symbol("stale"));
+        circuit
+            .rx(Qubit::new(0), Parameter::symbol("used"))
+            .unwrap();
+
+        let gate = CircuitGate::with_signature(
+            "declared",
+            FrozenCircuit::new(circuit),
+            ["declared_unused".to_string(), "used".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            gate.signature_params()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["declared_unused", "used"]
+        );
+        assert_eq!(
+            gate.used_symbols()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["used"]
+        );
+    }
+
+    #[test]
+    fn explicit_signature_still_rejects_actually_used_undeclared_symbols() {
+        let mut circuit = Circuit::new(1);
+        circuit
+            .rx(Qubit::new(0), Parameter::symbol("used"))
+            .unwrap();
+
+        let error = CircuitGate::with_signature(
+            "missing",
+            FrozenCircuit::new(circuit),
+            ["different".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, CircuitError::InvalidOperation(message) if message.contains("used"))
+        );
+    }
+
+    #[test]
+    fn inverse_preserves_explicit_signature_and_live_dependencies() {
+        let mut circuit = Circuit::new(1);
+        circuit.add_parameter(Parameter::symbol("stale"));
+        circuit
+            .rx(Qubit::new(0), Parameter::symbol("used"))
+            .unwrap();
+        let gate = CircuitGate::with_signature(
+            "forward",
+            FrozenCircuit::new(circuit),
+            ["declared_unused".to_string(), "used".to_string()],
+        )
+        .unwrap();
+
+        let inverse = gate.inverse().unwrap();
+
+        assert_eq!(inverse.signature_params(), gate.signature_params());
+        assert_eq!(inverse.used_symbols(), gate.used_symbols());
+    }
+
+    #[test]
+    fn frozen_circuits_compare_structurally_ignoring_matrix_cache() {
+        let make_frozen = || {
+            let mut circuit = Circuit::new(1);
+            circuit.h(Qubit::new(0)).unwrap();
+            FrozenCircuit::new(circuit)
+        };
+
+        let a = make_frozen();
+        let b = make_frozen();
+        assert_eq!(a, b);
+
+        // Materializing the symbolic-matrix cache on one side must not
+        // change equality.
+        a.symbolic_matrix().unwrap();
+        assert_eq!(a, b);
+
+        let mut other = Circuit::new(1);
+        other.x(Qubit::new(0)).unwrap();
+        assert_ne!(a, FrozenCircuit::new(other));
     }
 }

@@ -28,7 +28,10 @@ pub(crate) fn compiler_error_to_py_err(error: CoreCompilerError) -> PyErr {
     match error {
         CoreCompilerError::Circuit(_) => CircuitError::new_err(message),
         CoreCompilerError::InvalidInput(_) => CompilerConfigError::new_err(message),
-        CoreCompilerError::TransformFailed { .. } => CompilerTransformError::new_err(message),
+        CoreCompilerError::TransformFailed { .. }
+        | CoreCompilerError::DeviceLoweringFailed(_)
+        | CoreCompilerError::SabreRoutingFailed(_)
+        | CoreCompilerError::DeviceValidationFailed(_) => CompilerTransformError::new_err(message),
         CoreCompilerError::InvariantViolation(_) => CompilerInternalError::new_err(message),
     }
 }
@@ -54,7 +57,9 @@ pub(super) fn register_errors(module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cqlib_core::circuit::CircuitError as CoreCircuitError;
+    use cqlib_core::circuit::{CircuitError as CoreCircuitError, Instruction, StandardGate};
+    use cqlib_core::compile::error::{DeviceLoweringFailure, SabreRoutingFailure};
+    use cqlib_core::device::{DeviceValidationError, PhysicalQubit};
 
     #[test]
     fn maps_all_compiler_error_variants() {
@@ -75,6 +80,28 @@ mod tests {
                 reason: "did not converge".to_owned(),
             });
             assert!(transform.is_instance_of::<CompilerTransformError>(py));
+
+            let device_lowering = compiler_error_to_py_err(
+                CoreCompilerError::DeviceLoweringFailed(DeviceLoweringFailure {
+                    instruction: Instruction::Standard(StandardGate::H),
+                    qargs: vec![PhysicalQubit::new(0)],
+                    attempted_candidates: Vec::new(),
+                }),
+            );
+            assert!(device_lowering.is_instance_of::<CompilerTransformError>(py));
+
+            let sabre = compiler_error_to_py_err(CoreCompilerError::SabreRoutingFailed(
+                SabreRoutingFailure::MovementAssignmentInfeasible,
+            ));
+            assert!(sabre.is_instance_of::<CompilerTransformError>(py));
+
+            let validation = compiler_error_to_py_err(CoreCompilerError::DeviceValidationFailed(
+                DeviceValidationError::UnusablePhysicalQubit {
+                    device: "test".to_owned(),
+                    qubit: PhysicalQubit::new(0),
+                },
+            ));
+            assert!(validation.is_instance_of::<CompilerTransformError>(py));
 
             let internal = compiler_error_to_py_err(CoreCompilerError::InvariantViolation(
                 "broken contract".to_owned(),

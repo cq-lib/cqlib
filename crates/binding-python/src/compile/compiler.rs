@@ -13,118 +13,167 @@
 use crate::circuit::{PyCircuit, PyInstruction};
 use crate::compile::error::{CompilerConfigError, compiler_error_to_py_err};
 use crate::compile::resource::PyResourcePolicy;
+use crate::compile::target_basis_item::PyTargetBasisItem;
 use crate::device::device_impl::PyDevice;
 use crate::device::layout::PyLayout;
-use cqlib_core::circuit::{Instruction, StandardGate};
+use crate::utils::{hash_value, python_string_literal};
+use cqlib_core::circuit::Instruction;
 use cqlib_core::compile::resource::ResourcePolicy;
 use cqlib_core::compile::{
-    CompileConfig, CompileMode, CompileResult, CompilerWorkflow, WorkflowStepReport, compile,
+    CompileConfig, CompileMode, CompileResult, CompileTarget, CompilerWorkflow,
+    DeviceCompilationMetadata, DeviceCompileTarget, WorkflowStepReport, compile_owned,
 };
+use pyo3::exceptions::PyUserWarning;
 use pyo3::prelude::*;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 
-/// Python-facing target-basis item accepted by compile configuration builders.
-///
-/// The Python API accepts either case-insensitive standard-gate names for
-/// concise call sites or fully constructed `Instruction` objects when callers
-/// need to pass an instruction value directly. String names are normalized with
-/// ASCII uppercase before matching the standard-gate table; unknown names are
-/// reported as configuration errors.
-#[derive(FromPyObject)]
-pub enum PyTargetBasisItem {
-    Name(String),
-    Instruction(PyInstruction),
+fn convert_target_basis(items: Vec<PyTargetBasisItem>) -> PyResult<Vec<Instruction>> {
+    if items.is_empty() {
+        return Err(CompilerConfigError::new_err(
+            "compile target basis must not be empty",
+        ));
+    }
+    items
+        .into_iter()
+        .map(PyTargetBasisItem::into_instruction)
+        .collect()
 }
 
-impl PyTargetBasisItem {
-    fn into_instruction(self) -> PyResult<Instruction> {
-        let name = match self {
-            Self::Name(name) => name,
-            Self::Instruction(instruction) => return Ok(instruction.inner),
-        };
+fn validate_strict_device_target(target: DeviceCompileTarget) -> PyResult<DeviceCompileTarget> {
+    if target.device.native_gates().is_empty() {
+        return Err(CompilerConfigError::new_err(
+            "device has no native gates; provide target_basis for topology routing or use an explicit CompileTarget.topology_basis()",
+        ));
+    }
+    Ok(target)
+}
 
-        let gate = match name.to_ascii_uppercase().as_str() {
-            "I" => StandardGate::I,
-            "H" => StandardGate::H,
-            "RX" => StandardGate::RX,
-            "RXX" => StandardGate::RXX,
-            "RXY" => StandardGate::RXY,
-            "RY" => StandardGate::RY,
-            "RYY" => StandardGate::RYY,
-            "RZ" => StandardGate::RZ,
-            "RZX" => StandardGate::RZX,
-            "RZZ" => StandardGate::RZZ,
-            "S" => StandardGate::S,
-            "SDG" => StandardGate::SDG,
-            "SWAP" => StandardGate::SWAP,
-            "T" => StandardGate::T,
-            "TDG" => StandardGate::TDG,
-            "U" => StandardGate::U,
-            "X" => StandardGate::X,
-            "XY" => StandardGate::XY,
-            "X2P" => StandardGate::X2P,
-            "X2M" => StandardGate::X2M,
-            "XY2P" => StandardGate::XY2P,
-            "XY2M" => StandardGate::XY2M,
-            "Y" => StandardGate::Y,
-            "Y2P" => StandardGate::Y2P,
-            "Y2M" => StandardGate::Y2M,
-            "Z" => StandardGate::Z,
-            "PHASE" => StandardGate::Phase,
-            "GPHASE" => StandardGate::GPhase,
-            "CX" => StandardGate::CX,
-            "CCX" => StandardGate::CCX,
-            "CY" => StandardGate::CY,
-            "CZ" => StandardGate::CZ,
-            "CRX" => StandardGate::CRX,
-            "CRY" => StandardGate::CRY,
-            "CRZ" => StandardGate::CRZ,
-            "FSIM" => StandardGate::FSIM,
-            _ => {
-                return Err(CompilerConfigError::new_err(format!(
-                    "unknown standard gate in target_basis: {name:?}"
-                )));
-            }
-        };
-        Ok(Instruction::Standard(gate))
+fn device_compile_target(
+    device: PyRef<'_, PyDevice>,
+    initial_layout: Option<PyRef<'_, PyLayout>>,
+    seed: Option<u32>,
+) -> DeviceCompileTarget {
+    DeviceCompileTarget {
+        device: device.inner.clone(),
+        initial_layout: initial_layout.map(|layout| layout.inner.clone()),
+        seed,
     }
 }
 
-/// Builds the core compiler configuration from Python-facing optional fields.
-///
-/// This is the shared conversion point for `CompileConfig`, `CompilerWorkflow`,
-/// and `compile`. It applies Python-level defaults, converts target-basis
-/// entries into core instructions, clones mutable device/layout inputs, and
-/// falls back to the conservative default resource policy when none is given.
-fn build_compile_config<'py>(
-    mode: Option<PyCompileMode>,
+#[derive(FromPyObject)]
+pub enum PyCompileModeInput {
+    Mode(PyCompileMode),
+    Name(String),
+}
+
+impl PyCompileModeInput {
+    fn into_mode(self) -> PyResult<CompileMode> {
+        match self {
+            Self::Mode(mode) => Ok(mode.inner),
+            Self::Name(name) => match name.to_ascii_lowercase().as_str() {
+                "normal" => Ok(CompileMode::Normal),
+                "enhanced" => Ok(CompileMode::Enhanced),
+                _ => Err(CompilerConfigError::new_err(format!(
+                    "unknown compile mode {name:?}; expected 'normal' or 'enhanced'"
+                ))),
+            },
+        }
+    }
+}
+
+fn resolve_entrypoint_target(
+    py: Python<'_>,
+    target: Option<PyCompileTarget>,
     target_basis: Option<Vec<PyTargetBasisItem>>,
-    device: Option<PyRef<'py, PyDevice>>,
-    initial_layout: Option<PyRef<'py, PyLayout>>,
-    resource_policy: Option<PyResourcePolicy>,
+    device: Option<PyRef<'_, PyDevice>>,
+    initial_layout: Option<PyRef<'_, PyLayout>>,
     seed: Option<u32>,
+) -> PyResult<Option<PyCompileTarget>> {
+    if target.is_some() && (target_basis.is_some() || device.is_some()) {
+        return Err(CompilerConfigError::new_err(
+            "target cannot be combined with target_basis or device",
+        ));
+    }
+    if let Some(mut target) = target {
+        let physical_target = match &mut target.inner {
+            CompileTarget::Device(target) => Some(target),
+            CompileTarget::TopologyBasis { device_target, .. } => Some(device_target),
+            CompileTarget::Logical | CompileTarget::Basis(_) => None,
+        };
+        if let Some(physical_target) = physical_target {
+            if let Some(initial_layout) = initial_layout {
+                physical_target.initial_layout = Some(initial_layout.inner.clone());
+            }
+            if seed.is_some() {
+                physical_target.seed = seed;
+            }
+            return Ok(Some(target));
+        }
+        if initial_layout.is_some() {
+            return Err(CompilerConfigError::new_err(
+                "initial_layout requires a physical device target",
+            ));
+        }
+        if seed.is_some() {
+            return Err(CompilerConfigError::new_err(
+                "seed requires a physical device target",
+            ));
+        }
+        return Ok(Some(target));
+    }
+    if device.is_none() && initial_layout.is_some() {
+        return Err(CompilerConfigError::new_err(
+            "initial_layout requires a target device",
+        ));
+    }
+    if device.is_none() && seed.is_some() {
+        return Err(CompilerConfigError::new_err(
+            "seed requires a target device",
+        ));
+    }
+
+    let basis = target_basis.map(convert_target_basis).transpose()?;
+    let Some(device) = device else {
+        return Ok(basis.map(|basis| CompileTarget::Basis(basis).into()));
+    };
+    let device_target = device_compile_target(device, initial_layout, seed);
+    let Some(basis) = basis else {
+        return Ok(Some(
+            CompileTarget::Device(validate_strict_device_target(device_target)?).into(),
+        ));
+    };
+
+    PyErr::warn(
+        py,
+        &py.get_type::<PyUserWarning>(),
+        c"combining device and target_basis uses the device only for capacity, layout, and routing; output is not guaranteed to satisfy the device's native capabilities; use an explicit CompileTarget.topology_basis() to acknowledge this behavior",
+        1,
+    )?;
+    Ok(Some(
+        CompileTarget::TopologyBasis {
+            device_target,
+            basis,
+        }
+        .into(),
+    ))
+}
+
+/// Builds the core compiler configuration from Python-facing snapshots.
+fn build_compile_config(
+    mode: Option<PyCompileModeInput>,
+    target: Option<PyCompileTarget>,
+    resource_policy: Option<PyResourcePolicy>,
 ) -> PyResult<CompileConfig> {
     Ok(CompileConfig {
-        mode: mode.map_or(CompileMode::Normal, |mode| mode.inner),
-        target_basis: target_basis
-            .map(|basis| {
-                basis
-                    .into_iter()
-                    .map(PyTargetBasisItem::into_instruction)
-                    .collect()
-            })
-            .transpose()?,
-        device: device.map(|device| device.inner.clone()),
-        initial_layout: initial_layout.map(|layout| layout.inner.clone()),
+        mode: mode.map_or(Ok(CompileMode::Normal), PyCompileModeInput::into_mode)?,
+        target: target.map_or(CompileTarget::Logical, |target| target.inner),
         resource_policy: resource_policy
             .map_or_else(ResourcePolicy::default, |policy| policy.inner),
-        seed,
     })
 }
 
 /// Optimization effort selected for the compiler workflow.
-#[pyclass(name = "CompileMode", module = "cqlib.compile")]
+#[pyclass(name = "CompileMode", module = "cqlib.compile", from_py_object)]
 #[derive(Clone, Copy, Debug)]
 pub struct PyCompileMode {
     pub(crate) inner: CompileMode,
@@ -145,9 +194,225 @@ impl From<PyCompileMode> for CompileMode {
 impl PyCompileMode {
     pub(crate) fn repr_label(&self) -> &'static str {
         match self.inner {
-            CompileMode::Normal => "CompileMode.normal()",
-            CompileMode::Enhanced => "CompileMode.enhanced()",
+            CompileMode::Normal => "CompileMode.Normal",
+            CompileMode::Enhanced => "CompileMode.Enhanced",
         }
+    }
+}
+
+/// Device-specific inputs for a physical compilation target.
+#[pyclass(name = "DeviceCompileTarget", module = "cqlib.compile", from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PyDeviceCompileTarget {
+    pub(crate) inner: DeviceCompileTarget,
+}
+
+impl From<DeviceCompileTarget> for PyDeviceCompileTarget {
+    fn from(inner: DeviceCompileTarget) -> Self {
+        Self { inner }
+    }
+}
+
+#[pymethods]
+impl PyDeviceCompileTarget {
+    /// Creates an immutable snapshot of device compilation inputs.
+    #[new]
+    #[pyo3(signature = (device, *, initial_layout=None, seed=None))]
+    fn new(
+        device: PyRef<'_, PyDevice>,
+        initial_layout: Option<PyRef<'_, PyLayout>>,
+        seed: Option<u32>,
+    ) -> Self {
+        Self {
+            inner: DeviceCompileTarget {
+                device: device.inner.clone(),
+                initial_layout: initial_layout.map(|layout| layout.inner.clone()),
+                seed,
+            },
+        }
+    }
+
+    #[getter]
+    fn device(&self) -> PyDevice {
+        self.inner.device.clone().into()
+    }
+
+    #[getter]
+    fn initial_layout(&self) -> Option<PyLayout> {
+        self.inner.initial_layout.clone().map(Into::into)
+    }
+
+    #[getter]
+    fn seed(&self) -> Option<u32> {
+        self.inner.seed
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DeviceCompileTarget(device=Device(name={:?}), initial_layout={}, seed={:?})",
+            self.inner.device.name(),
+            if self.inner.initial_layout.is_some() {
+                "Layout(...)"
+            } else {
+                "None"
+            },
+            self.inner.seed,
+        )
+    }
+
+    fn __copy__(&self) -> Self {
+        self.clone()
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+}
+
+/// Mutually exclusive logical, basis, or physical-device compile target.
+#[pyclass(name = "CompileTarget", module = "cqlib.compile", from_py_object)]
+#[derive(Clone, Debug)]
+pub struct PyCompileTarget {
+    pub(crate) inner: CompileTarget,
+}
+
+impl From<CompileTarget> for PyCompileTarget {
+    fn from(inner: CompileTarget) -> Self {
+        Self { inner }
+    }
+}
+
+#[pymethods]
+impl PyCompileTarget {
+    /// Returns a target that preserves logical operations.
+    #[staticmethod]
+    fn logical() -> Self {
+        CompileTarget::Logical.into()
+    }
+
+    /// Returns a target that lowers to an explicit standard-gate basis.
+    #[staticmethod]
+    fn basis(instructions: Vec<PyTargetBasisItem>) -> PyResult<Self> {
+        let instructions = convert_target_basis(instructions)?;
+        Ok(CompileTarget::Basis(instructions).into())
+    }
+
+    /// Returns a strict physical-device compile target.
+    #[staticmethod]
+    #[pyo3(signature = (device, *, initial_layout=None, seed=None))]
+    fn device(
+        device: PyRef<'_, PyDevice>,
+        initial_layout: Option<PyRef<'_, PyLayout>>,
+        seed: Option<u32>,
+    ) -> PyResult<Self> {
+        Ok(
+            CompileTarget::Device(validate_strict_device_target(device_compile_target(
+                device,
+                initial_layout,
+                seed,
+            ))?)
+            .into(),
+        )
+    }
+
+    /// Returns a target that routes on a device and lowers to an explicit basis.
+    #[staticmethod]
+    #[pyo3(signature = (device, instructions, *, initial_layout=None, seed=None))]
+    fn topology_basis(
+        device: PyRef<'_, PyDevice>,
+        instructions: Vec<PyTargetBasisItem>,
+        initial_layout: Option<PyRef<'_, PyLayout>>,
+        seed: Option<u32>,
+    ) -> PyResult<Self> {
+        let basis = convert_target_basis(instructions)?;
+        Ok(CompileTarget::TopologyBasis {
+            device_target: device_compile_target(device, initial_layout, seed),
+            basis,
+        }
+        .into())
+    }
+
+    #[getter]
+    fn kind(&self) -> &'static str {
+        match self.inner {
+            CompileTarget::Logical => "logical",
+            CompileTarget::Basis(_) => "basis",
+            CompileTarget::Device(_) => "device",
+            CompileTarget::TopologyBasis { .. } => "topology_basis",
+        }
+    }
+
+    #[getter]
+    fn basis_instructions(&self) -> Option<Vec<PyInstruction>> {
+        match &self.inner {
+            CompileTarget::Basis(instructions)
+            | CompileTarget::TopologyBasis {
+                basis: instructions,
+                ..
+            } => Some(instructions.iter().cloned().map(Into::into).collect()),
+            CompileTarget::Logical | CompileTarget::Device(_) => None,
+        }
+    }
+
+    #[getter]
+    fn device_target(&self) -> Option<PyDeviceCompileTarget> {
+        match &self.inner {
+            CompileTarget::Device(target) => Some(target.clone().into()),
+            CompileTarget::TopologyBasis { device_target, .. } => {
+                Some(device_target.clone().into())
+            }
+            CompileTarget::Logical | CompileTarget::Basis(_) => None,
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        match &self.inner {
+            CompileTarget::Logical => "CompileTarget.logical()".to_string(),
+            CompileTarget::Basis(instructions) => format!(
+                "CompileTarget.basis([{}])",
+                instructions
+                    .iter()
+                    .map(|instruction| python_string_literal(&instruction.name()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            CompileTarget::Device(target) => format!(
+                "CompileTarget.device(Device(name={:?}), initial_layout={}, seed={:?})",
+                target.device.name(),
+                if target.initial_layout.is_some() {
+                    "Layout(...)"
+                } else {
+                    "None"
+                },
+                target.seed,
+            ),
+            CompileTarget::TopologyBasis {
+                device_target,
+                basis,
+            } => format!(
+                "CompileTarget.topology_basis(Device(name={:?}), [{}], initial_layout={}, seed={:?})",
+                device_target.device.name(),
+                basis
+                    .iter()
+                    .map(|instruction| python_string_literal(&instruction.name()))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if device_target.initial_layout.is_some() {
+                    "Layout(...)"
+                } else {
+                    "None"
+                },
+                device_target.seed,
+            ),
+        }
+    }
+
+    fn __copy__(&self) -> Self {
+        self.clone()
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
     }
 }
 
@@ -162,6 +427,10 @@ impl PyCompileMode {
     }
 
     /// Returns the enhanced compiler mode.
+    ///
+    /// This raises optimization and routing effort, adds target-aware cleanup,
+    /// and enables validated SABRE Pareto route selection for strict device
+    /// targets.
     #[staticmethod]
     fn enhanced() -> Self {
         Self {
@@ -185,13 +454,7 @@ impl PyCompileMode {
     }
 
     fn __hash__(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        match self.inner {
-            CompileMode::Normal => 0_u8,
-            CompileMode::Enhanced => 1_u8,
-        }
-        .hash(&mut hasher);
-        hasher.finish()
+        hash_value(&self.inner)
     }
 
     fn __copy__(&self) -> Self {
@@ -204,7 +467,7 @@ impl PyCompileMode {
 }
 
 /// Immutable compiler workflow configuration snapshot.
-#[pyclass(name = "CompileConfig", module = "cqlib.compile")]
+#[pyclass(name = "CompileConfig", module = "cqlib.compile", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyCompileConfig {
     pub(crate) inner: CompileConfig,
@@ -224,53 +487,18 @@ impl From<PyCompileConfig> for CompileConfig {
 
 impl PyCompileConfig {
     pub(crate) fn repr(&self) -> String {
-        let target_basis = self.inner.target_basis.as_ref().map_or_else(
-            || "None".to_string(),
-            |basis| {
-                format!(
-                    "[{}]",
-                    basis
-                        .iter()
-                        .map(|instruction| format!("{:?}", instruction.to_string()))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            },
-        );
-        let device = self.inner.device.as_ref().map_or_else(
-            || "None".to_string(),
-            |device| format!("Device(name={:?})", device.name()),
-        );
-        let initial_layout = self.inner.initial_layout.as_ref().map_or_else(
-            || "None".to_string(),
-            |layout| {
-                format!(
-                    "Layout(num_logical={}, num_vacant_physical={}, num_physical={})",
-                    layout.num_logical(),
-                    layout.num_vacant_physical(),
-                    layout.num_physical(),
-                )
-            },
-        );
         let policy = self.inner.resource_policy;
-        let seed = self
-            .inner
-            .seed
-            .map_or_else(|| "None".to_string(), |seed| seed.to_string());
 
         format!(
-            "CompileConfig(mode={}, target_basis={}, device={}, initial_layout={}, resource_policy=ResourcePolicy(max_pre_layout_clean_ancillas={}, allow_dirty_borrowing={}), seed={})",
+            "CompileConfig(mode={}, target={}, resource_policy=ResourcePolicy(max_pre_layout_clean_ancillas={}, allow_dirty_borrowing={}))",
             PyCompileMode::from(self.inner.mode).repr_label(),
-            target_basis,
-            device,
-            initial_layout,
+            PyCompileTarget::from(self.inner.target.clone()).__repr__(),
             policy.max_pre_layout_clean_ancillas,
             if policy.allow_dirty_borrowing {
                 "True"
             } else {
                 "False"
             },
-            seed,
         )
     }
 }
@@ -279,24 +507,13 @@ impl PyCompileConfig {
 impl PyCompileConfig {
     /// Creates an immutable compiler workflow configuration snapshot.
     #[new]
-    #[pyo3(signature = (*, mode=None, target_basis=None, device=None, initial_layout=None, resource_policy=None, seed=None))]
+    #[pyo3(signature = (*, mode=None, target=None, resource_policy=None))]
     fn new(
-        mode: Option<PyCompileMode>,
-        target_basis: Option<Vec<PyTargetBasisItem>>,
-        device: Option<PyRef<'_, PyDevice>>,
-        initial_layout: Option<PyRef<'_, PyLayout>>,
+        mode: Option<PyCompileModeInput>,
+        target: Option<PyCompileTarget>,
         resource_policy: Option<PyResourcePolicy>,
-        seed: Option<u32>,
     ) -> PyResult<Self> {
-        build_compile_config(
-            mode,
-            target_basis,
-            device,
-            initial_layout,
-            resource_policy,
-            seed,
-        )
-        .map(Self::from)
+        Ok(build_compile_config(mode, target, resource_policy)?.into())
     }
 
     #[getter]
@@ -305,31 +522,13 @@ impl PyCompileConfig {
     }
 
     #[getter]
-    fn target_basis(&self) -> Option<Vec<PyInstruction>> {
-        self.inner
-            .target_basis
-            .as_ref()
-            .map(|basis| basis.iter().cloned().map(PyInstruction::from).collect())
-    }
-
-    #[getter]
-    fn device(&self) -> Option<PyDevice> {
-        self.inner.device.clone().map(PyDevice::from)
-    }
-
-    #[getter]
-    fn initial_layout(&self) -> Option<PyLayout> {
-        self.inner.initial_layout.clone().map(PyLayout::from)
+    fn target(&self) -> PyCompileTarget {
+        self.inner.target.clone().into()
     }
 
     #[getter]
     fn resource_policy(&self) -> PyResourcePolicy {
         self.inner.resource_policy.into()
-    }
-
-    #[getter]
-    fn seed(&self) -> Option<u32> {
-        self.inner.seed
     }
 
     fn __repr__(&self) -> String {
@@ -345,8 +544,75 @@ impl PyCompileConfig {
     }
 }
 
+/// Physical layout metadata returned by device compilation.
+#[pyclass(
+    name = "DeviceCompilationMetadata",
+    module = "cqlib.compile",
+    skip_from_py_object
+)]
+#[derive(Clone, Debug)]
+pub struct PyDeviceCompilationMetadata {
+    inner: DeviceCompilationMetadata,
+}
+
+impl From<DeviceCompilationMetadata> for PyDeviceCompilationMetadata {
+    fn from(inner: DeviceCompilationMetadata) -> Self {
+        Self { inner }
+    }
+}
+
+#[pymethods]
+impl PyDeviceCompilationMetadata {
+    #[getter]
+    fn initial_layout(&self) -> PyLayout {
+        self.inner.initial_layout.clone().into()
+    }
+
+    #[getter]
+    fn final_layout(&self) -> PyLayout {
+        self.inner.final_layout.clone().into()
+    }
+
+    /// Original logical output to rewritten logical output mapping accumulated
+    /// before physical layout.
+    #[getter]
+    fn virtual_permutation(&self) -> HashMap<u32, u32> {
+        self.inner
+            .virtual_permutation
+            .original_output_to_rewritten_output()
+            .iter()
+            .map(|(original, rewritten)| (original.id(), rewritten.id()))
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DeviceCompilationMetadata(initial_layout={:?}, final_layout={:?}, virtual_permutation={:?})",
+            self.inner.initial_layout,
+            self.inner.final_layout,
+            self.virtual_permutation()
+        )
+    }
+
+    fn __copy__(&self) -> Self {
+        self.clone()
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
 /// Per-step execution record produced by a compiler workflow run.
-#[pyclass(name = "WorkflowStepReport", module = "cqlib.compile")]
+#[pyclass(
+    name = "WorkflowStepReport",
+    module = "cqlib.compile",
+    skip_from_py_object
+)]
 #[derive(Clone, Debug)]
 pub struct PyWorkflowStepReport {
     pub(crate) inner: WorkflowStepReport,
@@ -408,7 +674,7 @@ impl PyWorkflowStepReport {
 }
 
 /// Result returned by `cqlib.compile.compile`.
-#[pyclass(name = "CompileResult", module = "cqlib.compile")]
+#[pyclass(name = "CompileResult", module = "cqlib.compile", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyCompileResult {
     pub(crate) inner: CompileResult,
@@ -437,6 +703,11 @@ impl PyCompileResult {
         self.inner.mode.into()
     }
 
+    /// Returns reports for the retained output path in workflow order.
+    ///
+    /// Enhanced strict-device runs summarize discarded Pareto branches in the
+    /// final `select.sabre_pareto_beam` report instead of returning every branch
+    /// as a complete step sequence.
     #[getter]
     fn steps(&self) -> Vec<PyWorkflowStepReport> {
         self.inner
@@ -445,6 +716,21 @@ impl PyCompileResult {
             .cloned()
             .map(PyWorkflowStepReport::from)
             .collect()
+    }
+
+    #[getter]
+    fn device_metadata(&self) -> Option<PyDeviceCompilationMetadata> {
+        self.inner.device_metadata.clone().map(Into::into)
+    }
+
+    /// Returns the first workflow report with the requested step name.
+    fn step(&self, name: &str) -> Option<PyWorkflowStepReport> {
+        self.inner.step(name).cloned().map(Into::into)
+    }
+
+    /// Returns whether a non-skipped report with this name changed the circuit.
+    fn step_changed(&self, name: &str) -> bool {
+        self.inner.step_changed(name)
     }
 
     fn __repr__(&self) -> String {
@@ -470,7 +756,11 @@ impl PyCompileResult {
 }
 
 /// Reusable compiler optimization workflow.
-#[pyclass(name = "CompilerWorkflow", module = "cqlib.compile")]
+#[pyclass(
+    name = "CompilerWorkflow",
+    module = "cqlib.compile",
+    skip_from_py_object
+)]
 pub struct PyCompilerWorkflow {
     inner: CompilerWorkflow,
 }
@@ -483,10 +773,10 @@ impl PyCompilerWorkflow {
     fn new(config: Option<PyCompileConfig>) -> PyResult<Self> {
         let config = match config {
             Some(config) => config.inner,
-            None => build_compile_config(None, None, None, None, None, None)?,
+            None => build_compile_config(None, None, None)?,
         };
         Ok(Self {
-            inner: CompilerWorkflow::new(config),
+            inner: CompilerWorkflow::try_new(config).map_err(compiler_error_to_py_err)?,
         })
     }
 
@@ -498,8 +788,7 @@ impl PyCompilerWorkflow {
     /// Runs the workflow without modifying the input circuit.
     fn run(&self, py: Python<'_>, circuit: PyRef<'_, PyCircuit>) -> PyResult<PyCompileResult> {
         let circuit = circuit.inner.clone();
-        let config = self.inner.config().clone();
-        py.detach(move || CompilerWorkflow::new(config).run(&circuit))
+        py.detach(|| self.inner.run_owned(circuit))
             .map(PyCompileResult::from)
             .map_err(compiler_error_to_py_err)
     }
@@ -511,29 +800,24 @@ impl PyCompilerWorkflow {
 
 /// Compiles a circuit with the configured compiler workflow.
 #[pyfunction(name = "compile")]
-#[pyo3(signature = (circuit, *, mode=None, target_basis=None, device=None, initial_layout=None, resource_policy=None, seed=None))]
+#[pyo3(signature = (circuit, *, mode=None, target=None, target_basis=None, device=None, initial_layout=None, resource_policy=None, seed=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn py_compile(
     py: Python<'_>,
     circuit: PyRef<'_, PyCircuit>,
-    mode: Option<PyCompileMode>,
+    mode: Option<PyCompileModeInput>,
+    target: Option<PyCompileTarget>,
     target_basis: Option<Vec<PyTargetBasisItem>>,
     device: Option<PyRef<'_, PyDevice>>,
     initial_layout: Option<PyRef<'_, PyLayout>>,
     resource_policy: Option<PyResourcePolicy>,
     seed: Option<u32>,
 ) -> PyResult<PyCompileResult> {
-    let config = build_compile_config(
-        mode,
-        target_basis,
-        device,
-        initial_layout,
-        resource_policy,
-        seed,
-    )?;
+    let target = resolve_entrypoint_target(py, target, target_basis, device, initial_layout, seed)?;
+    let config = build_compile_config(mode, target, resource_policy)?;
     let circuit = circuit.inner.clone();
 
-    py.detach(move || compile(&circuit, config))
+    py.detach(move || compile_owned(circuit, config))
         .map(PyCompileResult::from)
         .map_err(compiler_error_to_py_err)
 }

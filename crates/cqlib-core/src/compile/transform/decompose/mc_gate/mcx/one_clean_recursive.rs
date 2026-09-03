@@ -33,7 +33,7 @@
 
 use crate::circuit::{Qubit, operation::ValueOperation};
 use crate::compile::error::CompilerError;
-use crate::util::qubit::find_duplicate_qubit;
+use crate::compile::transform::decompose::mc_gate::validation::find_duplicate_qubit;
 
 use super::{
     DECOMPOSE_MCX_NAME,

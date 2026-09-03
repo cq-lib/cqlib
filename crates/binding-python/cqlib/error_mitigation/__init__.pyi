@@ -31,4 +31,17 @@ from .zne import (
     ZneConfig as ZneConfig,
 )
 
-__all__: list[str]
+__all__ = [
+    "Estimator",
+    "ErrorMitigationError",
+    "ExtrapolateMethod",
+    "ZneConfig",
+    "VirtualDistillationConfig",
+    "MitigationMethod",
+    "RunArgs",
+    "ProcessArgs",
+    "MitigatedResult",
+    "ZNEMitigation",
+    "VirtualDistillation",
+    "ErrorMitigation",
+]

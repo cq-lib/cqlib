@@ -12,24 +12,60 @@
 
 use crate::circuit::Circuit;
 use crate::compile::CompilerError;
-use crate::compile::transform::analysis::CircuitAnalysis;
+use crate::compile::transform::analysis::{CircuitAnalysis, WorkflowCircuitAnalysis};
 
-/// Common output shape for compiler transforms over a circuit.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TransformResult {
-    /// Transformed circuit.
-    pub circuit: Circuit,
-    /// Whether the transform changed the compiler IR representation.
-    ///
-    /// A transform reports `false` when it found no applicable operation or
-    /// reached the same representation. This is a transform-local contract:
-    /// callers should not pre-scan circuits to infer whether a transform should
-    /// run.
-    pub changed: bool,
+/// Conservative workflow scheduling decision for one compiler pass.
+///
+/// `ProvenNoOp` is stronger than ordinary inapplicability: executing the pass
+/// on the exact analyzed circuit revision must return `TransformOutcome::Unchanged`
+/// and must not suppress an error that the pass would otherwise report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PassApplicability {
+    Run,
+    ProvenNoOp(&'static str),
 }
 
-/// Common interface for compiler transforms that consume one circuit and produce
-/// a rebuilt circuit.
+/// Workflow-only precondition declaration.
+///
+/// This remains separate from the public [`Transformer`] contract so adding
+/// scheduling facts does not expand the Rust or Python API surface.
+pub(crate) trait WorkflowPass {
+    fn applicability(&self, analysis: &WorkflowCircuitAnalysis) -> PassApplicability;
+}
+
+/// Outcome of applying a compiler transform to a circuit.
+///
+/// `Unchanged` means the input compiler IR can be retained exactly as-is.
+/// `Changed` carries the replacement circuit that callers must adopt.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)] // Boxing would allocate on every changed pass.
+pub enum TransformOutcome {
+    /// The input circuit representation can be retained without rebuilding it.
+    Unchanged,
+    /// The transform produced a replacement circuit representation.
+    Changed(Circuit),
+}
+
+impl TransformOutcome {
+    /// Whether the transform produced a replacement circuit.
+    pub const fn changed(&self) -> bool {
+        matches!(self, Self::Changed(_))
+    }
+
+    /// Resolves the outcome into an owned circuit.
+    ///
+    /// This helper is intended for APIs that promise an owned circuit. Core
+    /// workflows should match on the outcome directly so `Unchanged` remains
+    /// zero-copy.
+    pub fn into_circuit(self, original: &Circuit) -> Circuit {
+        match self {
+            Self::Unchanged => original.clone(),
+            Self::Changed(circuit) => circuit,
+        }
+    }
+}
+
+/// Common interface for compiler transforms over an immutable circuit.
 ///
 /// # Implementing
 ///
@@ -51,5 +87,43 @@ pub trait Transformer {
         &self,
         circuit: &Circuit,
         analysis: Option<&CircuitAnalysis>,
-    ) -> Result<TransformResult, CompilerError>;
+    ) -> Result<TransformOutcome, CompilerError>;
 }
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct ResolvedTransform {
+    pub(crate) circuit: Circuit,
+    pub(crate) changed: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn resolve_transform_for_test(
+    outcome: TransformOutcome,
+    original: &Circuit,
+) -> ResolvedTransform {
+    let changed = outcome.changed();
+    ResolvedTransform {
+        circuit: outcome.into_circuit(original),
+        changed,
+    }
+}
+
+#[cfg(test)]
+pub(crate) trait TransformerTestExt: Transformer {
+    fn transform_resolved(
+        &self,
+        circuit: &Circuit,
+        analysis: Option<&CircuitAnalysis>,
+    ) -> Result<ResolvedTransform, CompilerError> {
+        self.transform(circuit, analysis)
+            .map(|outcome| resolve_transform_for_test(outcome, circuit))
+    }
+}
+
+#[cfg(test)]
+impl<T: Transformer + ?Sized> TransformerTestExt for T {}
+
+#[cfg(test)]
+#[path = "./transformer_test.rs"]
+mod transformer_test;

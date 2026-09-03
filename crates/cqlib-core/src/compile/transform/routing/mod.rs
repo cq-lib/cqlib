@@ -31,11 +31,11 @@
 //!   skips automatic layout selection.
 //!
 //! The public compiler workflow uses [`route_with_layout`] when
-//! [`CompileConfig::initial_layout`](crate::compile::CompileConfig::initial_layout)
+//! [`DeviceCompileTarget::initial_layout`](crate::compile::DeviceCompileTarget::initial_layout)
 //! is set, otherwise it uses [`route_sabre`]. Routed circuits use physical
 //! qubit identifiers and guarantee undirected physical adjacency for routed
-//! two-qubit operations. Target-basis translation and directed native-gate
-//! legalization remain separate compiler stages.
+//! two-qubit operations. Target-basis translation and exact directed device
+//! lowering remain separate compiler stages.
 //!
 //! # Example
 //!
@@ -83,3 +83,8 @@
 pub mod sabre;
 
 pub use sabre::{RoutedCircuit, SabreRouteResult, route_sabre, route_with_layout};
+pub(crate) use sabre::{
+    SabreParetoRouteCandidate, prepare_sabre_pareto_routes_with_session_on_physical,
+    route_sabre_tracked_on_topology, route_sabre_tracked_with_session_on_physical,
+    route_with_layout_tracked_on_topology, route_with_layout_tracked_with_session_on_physical,
+};

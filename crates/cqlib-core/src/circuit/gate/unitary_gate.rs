@@ -256,7 +256,7 @@ impl UnitaryGate {
                 actual: self.num_params as usize,
             });
         }
-        validate_matrix_shape(self.num_qubits, &mat)?;
+        self.validate_matrix_shape(&mat)?;
 
         self.matrix = Some(Arc::new(UnitaryMatrix::Numeric(mat)));
         self.matrix_params = None;
@@ -276,7 +276,7 @@ impl UnitaryGate {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        validate_symbolic_matrix_shape(self.num_qubits, &matrix)?;
+        self.validate_symbolic_matrix_shape(&matrix)?;
         let params: Vec<String> = params.into_iter().map(Into::into).collect();
         self.validate_symbolic_matrix_params(&params, &matrix)?;
 
@@ -307,7 +307,7 @@ impl UnitaryGate {
                         .collect();
                     let matrix = evaluate_symbolic_matrix(matrix, &Some(bindings))
                         .map_err(|_| CircuitError::SymbolicParameterError)?;
-                    validate_matrix_shape(self.num_qubits, &matrix)?;
+                    self.validate_matrix_shape(&matrix)?;
                     return Ok(Cow::Owned(matrix));
                 }
             }
@@ -315,7 +315,7 @@ impl UnitaryGate {
 
         if let Some(circuit) = self.circuit.as_ref() {
             let inner = circuit.circuit();
-            let symbols = inner.symbols();
+            let symbols = circuit.used_symbols();
             let mut bindings = HashMap::new();
             for (symbol, value) in symbols.iter().zip(params.iter()) {
                 bindings.insert(symbol.as_str(), *value);
@@ -370,7 +370,7 @@ impl UnitaryGate {
                 .re
                 .get_symbols()
                 .into_iter()
-                .chain(value.im.get_symbols().into_iter())
+                .chain(value.im.get_symbols())
             {
                 if !seen.contains(symbol.as_str()) {
                     return Err(CircuitError::InvalidOperation(format!(
@@ -392,7 +392,7 @@ impl UnitaryGate {
             });
         }
 
-        let actual_params = circuit.circuit().symbols().len();
+        let actual_params = circuit.used_symbols().len();
         if actual_params != self.num_params as usize {
             return Err(CircuitError::ParameterCountMismatch {
                 expected: self.num_params as usize,
@@ -416,63 +416,64 @@ impl UnitaryGate {
         self.circuit = Some(circuit);
         Ok(self)
     }
-}
 
-fn validate_matrix_shape(num_qubits: u16, mat: &Array2<Complex<f64>>) -> Result<(), CircuitError> {
-    validate_symbolic_matrix_shape(num_qubits, mat)?;
+    fn validate_matrix_shape(&self, mat: &Array2<Complex<f64>>) -> Result<(), CircuitError> {
+        self.validate_symbolic_matrix_shape(mat)?;
 
-    // Reject matrices containing NaN or infinite elements.
-    for ((row, col), val) in mat.indexed_iter() {
-        if !val.re.is_finite() || !val.im.is_finite() {
-            return Err(CircuitError::InvalidOperation(format!(
-                "Matrix contains non-finite element at ({row}, {col}): {val}"
-            )));
-        }
-    }
-
-    // Reject non-unitary matrices: U†U must be approximately I.
-    const UNITARITY_EPS: f64 = 1e-10;
-    let conj_t = mat.t().mapv(|x| x.conj());
-    let product = conj_t.dot(mat);
-    for (i, val) in product.diag().iter().enumerate() {
-        let diff = (val - Complex::new(1.0, 0.0)).norm();
-        if diff > UNITARITY_EPS {
-            return Err(CircuitError::InvalidOperation(format!(
-                "Matrix is not unitary: (U†U)[{i},{i}] = {val}, expected 1.0"
-            )));
-        }
-    }
-    for ((i, j), val) in product.indexed_iter() {
-        if i != j {
-            let diff = val.norm();
-            if diff > UNITARITY_EPS {
+        // Reject matrices containing NaN or infinite elements.
+        for ((row, col), val) in mat.indexed_iter() {
+            if !val.re.is_finite() || !val.im.is_finite() {
                 return Err(CircuitError::InvalidOperation(format!(
-                    "Matrix is not unitary: (U†U)[{i},{j}] = {val}, expected 0.0"
+                    "Matrix contains non-finite element at ({row}, {col}): {val}"
                 )));
             }
         }
+
+        // Reject non-unitary matrices: U†U must be approximately I.
+        const UNITARITY_EPS: f64 = 1e-10;
+        let conj_t = mat.t().mapv(|x| x.conj());
+        let product = conj_t.dot(mat);
+        for (i, val) in product.diag().iter().enumerate() {
+            let diff = (val - Complex::new(1.0, 0.0)).norm();
+            if diff > UNITARITY_EPS {
+                return Err(CircuitError::InvalidOperation(format!(
+                    "Matrix is not unitary: (U†U)[{i},{i}] = {val}, expected 1.0"
+                )));
+            }
+        }
+        for ((i, j), val) in product.indexed_iter() {
+            if i != j {
+                let diff = val.norm();
+                if diff > UNITARITY_EPS {
+                    return Err(CircuitError::InvalidOperation(format!(
+                        "Matrix is not unitary: (U†U)[{i},{j}] = {val}, expected 0.0"
+                    )));
+                }
+            }
+        }
+
+        Ok(())
     }
 
-    Ok(())
-}
+    fn validate_symbolic_matrix_shape<T>(&self, mat: &Array2<T>) -> Result<(), CircuitError> {
+        let expected_dim = 1usize.checked_shl(self.num_qubits as u32).ok_or_else(|| {
+            CircuitError::InvalidOperation(format!(
+                "cannot build matrix for {} qubits: dimension overflows usize",
+                self.num_qubits
+            ))
+        })?;
+        if mat.shape() != [expected_dim, expected_dim] {
+            return Err(CircuitError::InvalidOperation(format!(
+                "Matrix dimension mismatch. Expected {}x{}, got {}x{}",
+                expected_dim,
+                expected_dim,
+                mat.nrows(),
+                mat.ncols()
+            )));
+        }
 
-fn validate_symbolic_matrix_shape<T>(num_qubits: u16, mat: &Array2<T>) -> Result<(), CircuitError> {
-    let expected_dim = 1usize.checked_shl(num_qubits as u32).ok_or_else(|| {
-        CircuitError::InvalidOperation(format!(
-            "cannot build matrix for {num_qubits} qubits: dimension overflows usize"
-        ))
-    })?;
-    if mat.shape() != [expected_dim, expected_dim] {
-        return Err(CircuitError::InvalidOperation(format!(
-            "Matrix dimension mismatch. Expected {}x{}, got {}x{}",
-            expected_dim,
-            expected_dim,
-            mat.nrows(),
-            mat.ncols()
-        )));
+        Ok(())
     }
-
-    Ok(())
 }
 
 impl fmt::Debug for UnitaryGate {

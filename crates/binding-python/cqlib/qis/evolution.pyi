@@ -18,7 +18,7 @@ class TrotterMode:
 
     Variants:
         - ``FirstOrder``: First-order Lie-Trotter decomposition. Error scales as :math:`O(t^2/n)`.
-        - ``SecondOrder``: Second-order Strange splitting (symmetric). Error scales as :math:`O(t^3/n^2)`.
+        - ``SecondOrder``: Second-order Strang splitting (symmetric). Error scales as :math:`O(t^3/n^2)`.
         - ``Randomized``: Randomized first-order Trotter with specified random seed.
 
     Examples:
@@ -46,7 +46,7 @@ class TrotterMode:
     def second_order() -> "TrotterMode":
         """Returns the second-order Trotter mode.
 
-        Second-order Strange splitting (symmetric decomposition):
+        Second-order Strang splitting (symmetric decomposition):
         :math:`U(t) \\approx [e^{-i c_1 t/2n \\cdot P_1} ... e^{-i c_m t/2n \\cdot P_m} \\cdot e^{-i c_m t/2n \\cdot P_m} ... e^{-i c_1 t/2n \\cdot P_1}]^n`
 
         Error scales as :math:`O(t^3/n^2)`.
@@ -74,3 +74,4 @@ class TrotterMode:
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
+    def __hash__(self) -> int: ...

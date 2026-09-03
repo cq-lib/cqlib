@@ -22,12 +22,14 @@
 //! # Transform Contract
 //!
 //! Circuit-to-circuit passes implement [`Transformer`]. A transformer takes an
-//! immutable circuit reference and returns a [`TransformResult`] containing a
-//! rebuilt circuit and a `changed` flag. The flag reports whether that
-//! transform changed the compiler IR representation. Callers should not
-//! pre-scan a circuit to infer whether a transform should run; the transform
-//! itself owns traversal of any operation forms it supports, including
-//! structured classical-control bodies.
+//! immutable circuit reference and returns a [`TransformOutcome`].
+//! [`TransformOutcome::Unchanged`] retains the input IR exactly as-is, while
+//! [`TransformOutcome::Changed`] carries its replacement. Standalone callers
+//! do not need to pre-scan a circuit: every transform still owns a complete
+//! correctness check over all operation forms it supports. The compiler
+//! workflow may additionally use revision-scoped structural facts to avoid
+//! invoking a transform when those facts prove it cannot change or reject the
+//! current circuit.
 //!
 //! Layout and routing algorithms expose richer result types because they
 //! return placement scores, final layouts, SWAP counts, and routing
@@ -38,8 +40,12 @@
 //!
 //! - [`canonicalize`] validates and normalizes the compiler IR without doing
 //!   semantic optimization or hardware lowering.
+//! - [`commutative_cancellation`] cancels self-inverse gate pairs through a
+//!   global, unbounded commutation-set analysis.
 //! - [`decompose`] expands circuit-backed definitions, synthesizes
 //!   matrix-backed unitaries, and lowers multi-controlled gates.
+//! - [`device_lowering`] maps routed physical gates to exact ordered device
+//!   instructions, including direction and local capability overrides.
 //! - [`rewrite`] applies compiler knowledge rules for conservative
 //!   optimization or explicit target-basis lowering.
 //! - [`layout`] selects an initial logical-to-physical mapping for a device but
@@ -54,26 +60,70 @@
 
 pub mod analysis;
 pub mod canonicalize;
+pub mod commutative_cancellation;
 pub mod decompose;
+pub mod device_lowering;
 pub mod layout;
+pub(crate) mod lowering_support;
+pub mod native_optimization;
+mod native_quality;
+#[cfg(test)]
+mod native_quality_test;
+pub mod one_qubit_optimization;
 pub mod rebuild;
+pub mod resynthesis;
 pub mod rewrite;
 pub mod routing;
+pub mod routing_basis;
+pub mod target_basis;
 pub mod transformer;
+pub mod virtual_permutation;
 
 pub use analysis::CircuitAnalysis;
 pub use canonicalize::{
     CanonicalizeConfig, CanonicalizeResult, Canonicalizer, canonicalize_circuit,
 };
+pub use commutative_cancellation::CommutativeCancellation;
+pub use device_lowering::DeviceLowerer;
 pub use layout::{
     CircuitLayoutAnalysis, Interaction, InteractionGraph, LayoutDiagnostics, LayoutObjective,
-    LayoutResult, LayoutScore, Vf2EdgeRequirement, Vf2LayoutConfig, analyze_circuit_for_layout,
-    greedy_layout, greedy_layout_prepared, sabre_layout, sabre_layout_prepared, trivial_layout,
-    trivial_layout_prepared, vf2_perfect_layout, vf2_perfect_layout_prepared,
+    LayoutResult, LayoutScore, PreparedSabreCircuit, PreparedSabreTarget, Vf2EdgeRequirement,
+    Vf2LayoutConfig, analyze_circuit_for_layout, greedy_layout, greedy_layout_prepared,
+    prepare_sabre_circuit, prepare_sabre_device_target, prepare_sabre_topology_target,
+    sabre_layout, sabre_layout_prepared, trivial_layout, trivial_layout_prepared,
+    vf2_perfect_layout, vf2_perfect_layout_prepared,
+};
+pub use native_optimization::{
+    NativeOptimizationResult, NativeOptimizationSummary, NativeOptimizer,
+};
+pub use native_quality::NativeQualityPolicy;
+pub use one_qubit_optimization::OptimizeOneQubitRuns;
+pub use resynthesis::{
+    DeviceResynthesisPlacement, ResynthesizeTwoQubitBlocks, TwoQubitBlockResynthesisConfig,
+    resynthesize_two_qubit_blocks, resynthesize_two_qubit_blocks_for_device,
 };
 pub use rewrite::{
-    KnowledgeRewriteResult, KnowledgeRewriteStats, KnowledgeRewriter, RewriteConfig, RewriteMode,
-    rewrite_circuit,
+    KnowledgeRewriteDiagnostics, KnowledgeRewriteResult, KnowledgeRewriteStats, KnowledgeRewriter,
+    RewriteConfig, RewriteMode, rewrite_circuit,
+};
+pub(crate) use rewrite::{
+    KnowledgeRewriteSession, OperationReplacement, QubitBijection, RewriteEdits,
+    RewriteExecutionRecord,
 };
 pub use routing::{RoutedCircuit, SabreRouteResult, route_sabre, route_with_layout};
-pub use transformer::{TransformResult, Transformer};
+pub(crate) use routing::{
+    SabreParetoRouteCandidate, prepare_sabre_pareto_routes_with_session_on_physical,
+    route_sabre_tracked_on_topology, route_sabre_tracked_with_session_on_physical,
+    route_with_layout_tracked_on_topology, route_with_layout_tracked_with_session_on_physical,
+};
+pub use routing_basis::LowerToRoutingBasis;
+pub use target_basis::{
+    TargetBasisCost, TargetBasisCostModel, TargetBasisLowerer, TargetBasisSignature,
+};
+#[cfg(test)]
+pub(crate) use transformer::{ResolvedTransform, TransformerTestExt, resolve_transform_for_test};
+pub use transformer::{TransformOutcome, Transformer};
+pub use virtual_permutation::{
+    VirtualPermutation, VirtualPermutationElisionResult, VirtualPermutationElisionStatus,
+    elide_virtual_permutations,
+};

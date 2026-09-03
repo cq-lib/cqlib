@@ -85,4 +85,8 @@ class VirtualDistillation:
     def __copy__(self) -> VirtualDistillation: ...
     def __deepcopy__(self, memo: dict) -> VirtualDistillation: ...
 
-__all__: list[str]
+__all__ = [
+    "Estimator",
+    "VirtualDistillationConfig",
+    "VirtualDistillation",
+]

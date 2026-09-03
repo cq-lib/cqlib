@@ -19,6 +19,7 @@
 //! while constructing a candidate.
 
 use super::analysis::CircuitLayoutAnalysis;
+use super::scoring::score_adjacent_interaction;
 use crate::compile::CompilerError;
 use crate::compile::physical_target::PhysicalLayoutGraph;
 use crate::device::Layout;
@@ -38,11 +39,13 @@ pub struct LayoutObjective {
     /// Weight for directly adjacent interactions whose observed operation
     /// direction is unsupported by the directed coupling graph.
     pub direction_weight: f64,
-    /// Weight for known two-qubit gate error rates.
+    /// Weight for effective two-qubit fidelity cost.
     ///
-    /// Missing calibration entries contribute `0.0`; use
-    /// [`LayoutObjective::fidelity_required`] when missing calibration data
-    /// should reject fidelity-aware layout selection.
+    /// Known gate-specific calibrations contribute their error probability.
+    /// A gate that is native elsewhere on the device but unsupported or
+    /// uncalibrated on the candidate edge contributes the conservative upper
+    /// bound `1.0`. This is a placement-ranking penalty, not a measured error
+    /// rate or circuit-success estimate.
     pub two_qubit_error_weight: f64,
     /// Weight for known readout error rates.
     ///
@@ -71,11 +74,14 @@ impl LayoutObjective {
     /// If the physical graph has no usable error-rate data, this falls back to
     /// [`LayoutObjective::topology_only`] instead of failing.
     pub fn auto_from_physical(physical: &PhysicalLayoutGraph) -> Self {
-        if physical.has_fidelity_data() {
-            Self::fidelity_aware()
-        } else {
-            Self::topology_only()
+        let mut objective = Self::topology_only();
+        if physical.has_two_qubit_error_data() {
+            objective.two_qubit_error_weight = 10.0;
         }
+        if physical.has_readout_error_data() {
+            objective.readout_error_weight = 1.0;
+        }
+        objective
     }
 
     /// Creates a fidelity-aware objective and requires calibration data.
@@ -84,7 +90,7 @@ impl LayoutObjective {
     /// scoring would hide a device-data configuration problem.
     pub fn fidelity_required(physical: &PhysicalLayoutGraph) -> Result<Self, CompilerError> {
         if physical.has_fidelity_data() {
-            Ok(Self::fidelity_aware())
+            Ok(Self::auto_from_physical(physical))
         } else {
             Err(CompilerError::InvalidInput(
                 "layout fidelity scoring was requested but the device has no usable fidelity data"
@@ -139,7 +145,9 @@ impl LayoutObjective {
         let mut direction = 0.0;
         let mut two_qubit_error = 0.0;
 
-        for interaction in analysis.interactions.interactions() {
+        for (interaction_index, interaction) in
+            analysis.interactions.interactions().iter().enumerate()
+        {
             let left_physical = layout.get_physical(interaction.left).ok_or_else(|| {
                 CompilerError::InvariantViolation(format!(
                     "layout does not map logical qubit {}",
@@ -165,22 +173,27 @@ impl LayoutObjective {
                 // Direction and two-qubit error are meaningful only for a
                 // concrete adjacent hardware edge. Non-adjacent interactions
                 // are handled through the distance term and later routing.
-                if interaction.directed_weight_left_to_right > 0.0
-                    && !physical.supports_directed_coupling(left_physical, right_physical)
-                {
-                    direction += interaction.directed_weight_left_to_right;
-                }
-                if interaction.directed_weight_right_to_left > 0.0
-                    && !physical.supports_directed_coupling(right_physical, left_physical)
-                {
-                    direction += interaction.directed_weight_right_to_left;
-                }
+                let left_index = physical.physical_index(left_physical).ok_or_else(|| {
+                    CompilerError::InvariantViolation(format!(
+                        "layout mapped {} outside the physical target",
+                        left_physical
+                    ))
+                })?;
+                let right_index = physical.physical_index(right_physical).ok_or_else(|| {
+                    CompilerError::InvariantViolation(format!(
+                        "layout mapped {} outside the physical target",
+                        right_physical
+                    ))
+                })?;
+                let adjacent = score_adjacent_interaction(
+                    analysis.interactions.gate_contributions(interaction_index),
+                    left_index,
+                    right_index,
+                    physical,
+                );
+                direction += adjacent.direction;
                 if self.two_qubit_error_weight != 0.0 {
-                    if let Some(error) =
-                        physical.two_qubit_error_undirected(left_physical, right_physical)
-                    {
-                        two_qubit_error += interaction.weight * error;
-                    }
+                    two_qubit_error += adjacent.effective_two_qubit_error;
                 }
             }
         }
@@ -215,9 +228,9 @@ impl Default for LayoutObjective {
 
 /// Breakdown of one layout score.
 ///
-/// Raw component fields are unweighted except for the interaction weights
-/// already present in the circuit analysis. The [`LayoutScore::total`] field
-/// applies the objective weights.
+/// Component fields are unweighted by the objective, but include the logical
+/// interaction weights already present in the circuit analysis. The
+/// [`LayoutScore::total`] field applies the objective weights.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayoutScore {
     /// Weighted sum according to [`LayoutObjective`].
@@ -226,7 +239,14 @@ pub struct LayoutScore {
     pub distance: f64,
     /// Raw direction-mismatch component.
     pub direction: f64,
-    /// Raw two-qubit error component.
+    /// Unweighted effective two-qubit placement cost.
+    ///
+    /// In addition to known gate-specific error probabilities, this includes a
+    /// conservative `1.0` cost for native gates that are unsupported or lack
+    /// calibration on the selected physical edge. The value is accumulated
+    /// over weighted logical interactions and may exceed `1.0`; it is not a
+    /// measured error rate and must not be used for calibration reporting or
+    /// circuit-success estimation.
     pub two_qubit_error: f64,
     /// Raw readout error component.
     pub readout_error: f64,

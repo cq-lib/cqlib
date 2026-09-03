@@ -15,7 +15,9 @@ use crate::circuit::circuit_impl::Circuit;
 use crate::circuit::circuit_param::{CircuitParam, ParameterValue};
 use crate::circuit::error::CircuitError;
 use crate::circuit::gate::classical_data::ClassicalDataOp;
-use crate::circuit::gate::{Instruction, StandardGate, UnitaryGate};
+use crate::circuit::gate::{
+    CircuitGate, Directive, FrozenCircuit, Instruction, StandardGate, UnitaryGate,
+};
 use crate::circuit::operation::ValueOperation;
 use crate::circuit::parameter::Parameter;
 use crate::circuit::{
@@ -26,6 +28,7 @@ use crate::circuit::{
 use smallvec::smallvec;
 use std::collections::HashSet;
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 fn control_operation(op: ClassicalControlOp) -> Operation {
     Operation {
@@ -68,6 +71,178 @@ fn test_circuit_basic_construction() {
     ));
     let expected: smallvec::SmallVec<[Qubit; 3]> = smallvec![q0, q1];
     assert_eq!(op1.qubits, expected);
+}
+
+#[test]
+fn uses_symbol_checks_global_phase_and_top_level_operations() {
+    let mut circuit = Circuit::new(1);
+    circuit.set_global_phase(Parameter::symbol("phase"));
+    circuit
+        .rz(
+            Qubit::new(0),
+            Parameter::symbol("theta") + Parameter::symbol("phi"),
+        )
+        .unwrap();
+
+    assert!(circuit.uses_symbol("phase"));
+    assert!(circuit.uses_symbol("theta"));
+    assert!(circuit.uses_symbol("phi"));
+    assert!(!circuit.uses_symbol("missing"));
+}
+
+#[test]
+fn uses_symbol_ignores_registered_but_unreferenced_symbols() {
+    let mut circuit = Circuit::new(1);
+    circuit.add_parameter(Parameter::symbol("unused"));
+    circuit.rx(Qubit::new(0), 0.25).unwrap();
+
+    assert!(circuit.symbols().contains("unused"));
+    assert!(!circuit.uses_symbol("unused"));
+}
+
+#[test]
+fn used_symbols_filters_removed_operations_without_mutating_registry_order() {
+    let mut circuit = Circuit::new(1);
+    circuit.add_parameter(Parameter::symbol("registered_first"));
+    circuit
+        .rx(Qubit::new(0), Parameter::symbol("used_second"))
+        .unwrap();
+    circuit
+        .rz(Qubit::new(0), Parameter::symbol("removed_third"))
+        .unwrap();
+    circuit.remove_operation(1).unwrap();
+
+    assert_eq!(
+        circuit
+            .symbols()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["registered_first", "used_second", "removed_third"]
+    );
+    assert_eq!(
+        circuit
+            .used_symbols()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["used_second"]
+    );
+}
+
+#[test]
+fn used_symbols_drops_replaced_symbolic_global_phase_but_registry_retains_it() {
+    let mut circuit = Circuit::new(1);
+    circuit.set_global_phase(Parameter::symbol("phase"));
+    assert!(circuit.used_symbols().contains("phase"));
+
+    circuit.set_global_phase(Parameter::from(0.25));
+
+    assert!(circuit.symbols().contains("phase"));
+    assert!(!circuit.used_symbols().contains("phase"));
+    assert!(!circuit.uses_symbol("phase"));
+}
+
+#[test]
+fn to_gate_does_not_promote_removed_operation_symbols_to_signature_params() {
+    let mut circuit = Circuit::new(1);
+    circuit
+        .rx(Qubit::new(0), Parameter::symbol("ghost"))
+        .unwrap();
+    circuit.remove_operation(0).unwrap();
+
+    let Instruction::CircuitGate(gate) = circuit.to_gate("empty").unwrap() else {
+        panic!("Circuit::to_gate must return a circuit-gate instruction");
+    };
+    assert_eq!(gate.num_params(), 0);
+    assert!(gate.signature_params().is_empty());
+    assert!(gate.used_symbols().is_empty());
+}
+
+#[test]
+fn circuit_gate_equality_respects_signature_parameter_order() {
+    let mut definition = Circuit::new(1);
+    definition
+        .rx(Qubit::new(0), Parameter::symbol("theta"))
+        .unwrap();
+    definition
+        .ry(Qubit::new(0), Parameter::symbol("phi"))
+        .unwrap();
+
+    let ordered = CircuitGate::with_signature(
+        "G",
+        FrozenCircuit::new(definition.clone()),
+        ["theta".to_string(), "phi".to_string()],
+    )
+    .unwrap();
+    let same_order = CircuitGate::with_signature(
+        "G",
+        FrozenCircuit::new(definition.clone()),
+        ["theta".to_string(), "phi".to_string()],
+    )
+    .unwrap();
+    let reversed = CircuitGate::with_signature(
+        "G",
+        FrozenCircuit::new(definition),
+        ["phi".to_string(), "theta".to_string()],
+    )
+    .unwrap();
+
+    assert_eq!(ordered, same_order);
+    assert_ne!(ordered, reversed);
+}
+
+#[test]
+fn uses_symbol_recurses_through_all_control_flow_bodies() {
+    let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    let counter = circuit.var(ClassicalType::uint(2).unwrap());
+    let selector = circuit.var(ClassicalType::uint(2).unwrap());
+
+    circuit
+        .if_else(
+            ClassicalExpr::bool_literal(true),
+            |body| body.rx(q0, Parameter::symbol("if_then")),
+            |body| body.ry(q0, Parameter::symbol("if_else")),
+        )
+        .unwrap();
+    circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.rz(q0, Parameter::symbol("while_body"))
+        })
+        .unwrap();
+    circuit
+        .for_uint(
+            counter,
+            ClassicalExpr::uint_literal(2, 0).unwrap(),
+            ClassicalExpr::uint_literal(2, 1).unwrap(),
+            ClassicalExpr::uint_literal(2, 1).unwrap(),
+            |body, _| body.rx(q0, Parameter::symbol("for_body")),
+        )
+        .unwrap();
+    circuit
+        .switch(selector.expr(), |case| {
+            case.value(0, |body| body.ry(q0, Parameter::symbol("switch_case")))?;
+            case.default(|body| {
+                body.if_(ClassicalExpr::bool_literal(true), |nested| {
+                    nested.rz(q0, Parameter::symbol("nested_default"))
+                })
+            })?;
+            Ok(())
+        })
+        .unwrap();
+
+    for symbol in [
+        "if_then",
+        "if_else",
+        "while_body",
+        "for_body",
+        "switch_case",
+        "nested_default",
+    ] {
+        assert!(circuit.uses_symbol(symbol), "missing symbol {symbol}");
+    }
+    assert_eq!(circuit.used_symbols(), circuit.symbols().clone());
 }
 
 #[test]
@@ -301,6 +476,430 @@ fn append_rejects_circuit_gate_parameter_mismatch_immediately() {
         })
     ));
     assert!(circuit.operations().is_empty());
+}
+
+#[test]
+fn remove_operation_deletes_top_level_gate() {
+    let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    circuit.h(q0).unwrap();
+    circuit.x(q0).unwrap();
+    circuit.z(q0).unwrap();
+
+    let removed = circuit.remove_operation(1).unwrap();
+
+    assert!(matches!(
+        removed.instruction,
+        Instruction::Standard(StandardGate::X)
+    ));
+    assert_eq!(circuit.operations().len(), 2);
+    assert!(matches!(
+        circuit.operations()[0].instruction,
+        Instruction::Standard(StandardGate::H)
+    ));
+    assert!(matches!(
+        circuit.operations()[1].instruction,
+        Instruction::Standard(StandardGate::Z)
+    ));
+    circuit.validate().unwrap();
+}
+
+#[test]
+fn remove_operation_rejects_out_of_bounds_without_mutation() {
+    let mut circuit = Circuit::new(1);
+    circuit.h(Qubit::new(0)).unwrap();
+
+    let result = circuit.remove_operation(1);
+
+    assert!(matches!(
+        result,
+        Err(CircuitError::OperationIndexOutOfBounds { index: 1, len: 1 })
+    ));
+    assert_eq!(circuit.operations().len(), 1);
+    assert!(matches!(
+        circuit.operations()[0].instruction,
+        Instruction::Standard(StandardGate::H)
+    ));
+}
+
+#[test]
+fn remove_operation_deletes_legacy_measure_directive_without_classical_compaction() {
+    let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    circuit
+        .append(
+            Instruction::Directive(Directive::Measure),
+            [q0],
+            std::iter::empty(),
+            None,
+        )
+        .unwrap();
+    circuit.h(q0).unwrap();
+
+    let removed = circuit.remove_operation(0).unwrap();
+
+    assert!(matches!(
+        removed.instruction,
+        Instruction::Directive(Directive::Measure)
+    ));
+    assert!(circuit.classical_values().is_empty());
+    assert_eq!(circuit.operations().len(), 1);
+    assert!(matches!(
+        circuit.operations()[0].instruction,
+        Instruction::Standard(StandardGate::H)
+    ));
+}
+
+#[test]
+fn remove_operation_compacts_unused_measurement_values_and_rewrites_reads() {
+    let mut circuit = Circuit::new(2);
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let target = circuit.var(ClassicalType::Bit);
+    circuit.measure(q0).unwrap();
+    let second = circuit.measure(q1).unwrap();
+    circuit.store(target, second.expr()).unwrap();
+
+    let removed = circuit.remove_operation(0).unwrap();
+
+    assert!(matches!(
+        removed.instruction,
+        Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
+    ));
+    assert_eq!(circuit.classical_values(), &[ClassicalType::Bit]);
+    let Instruction::ClassicalData(ClassicalDataOp::MeasureBit { result }) =
+        &circuit.operations()[0].instruction
+    else {
+        panic!("remaining first operation should be a measurement");
+    };
+    assert_eq!(result.index(), 0);
+    let Instruction::ClassicalData(ClassicalDataOp::Store { value, .. }) =
+        &circuit.operations()[1].instruction
+    else {
+        panic!("remaining second operation should be a store");
+    };
+    assert!(
+        value
+            .values()
+            .contains(&ClassicalValue::new(circuit.id(), 0, ClassicalType::Bit))
+    );
+    circuit.validate().unwrap();
+}
+
+#[test]
+fn remove_operation_rejects_measurement_still_in_use_without_mutation() {
+    let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    let target = circuit.var(ClassicalType::Bit);
+    let measured = circuit.measure(q0).unwrap();
+    circuit.store(target, measured.expr()).unwrap();
+
+    let result = circuit.remove_operation(0);
+
+    assert!(matches!(
+        result,
+        Err(CircuitError::ClassicalValueStillInUse {
+            index: 0,
+            context
+        }) if context == "operation 1"
+    ));
+    assert_eq!(circuit.operations().len(), 2);
+    assert_eq!(circuit.classical_values(), &[ClassicalType::Bit]);
+    circuit.validate().unwrap();
+}
+
+#[test]
+fn remove_operation_deletes_control_flow_as_whole_and_compacts_body_values() {
+    let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    circuit.h(q0).unwrap();
+    circuit
+        .if_(ClassicalExpr::bool_literal(true), |body| {
+            body.measure(q0)?;
+            Ok(())
+        })
+        .unwrap();
+    circuit.measure(q0).unwrap();
+
+    let removed = circuit.remove_operation(1).unwrap();
+
+    assert!(matches!(
+        removed.instruction,
+        Instruction::ClassicalControl(ClassicalControlOp::If(_))
+    ));
+    assert_eq!(circuit.operations().len(), 2);
+    assert_eq!(circuit.classical_values(), &[ClassicalType::Bit]);
+    let Instruction::ClassicalData(ClassicalDataOp::MeasureBit { result }) =
+        &circuit.operations()[1].instruction
+    else {
+        panic!("remaining trailing operation should be a measurement");
+    };
+    assert_eq!(result.index(), 0);
+    circuit.validate().unwrap();
+}
+
+#[test]
+fn remove_operation_deletes_circuit_gate_as_outer_operation() {
+    let q0 = Qubit::new(0);
+    let mut inner = Circuit::new(1);
+    inner.h(q0).unwrap();
+    let gate = inner.to_gate("inner").unwrap();
+
+    let mut circuit = Circuit::new(1);
+    circuit
+        .append(gate, [q0], std::iter::empty(), None)
+        .unwrap();
+    circuit.x(q0).unwrap();
+
+    let removed = circuit.remove_operation(0).unwrap();
+
+    assert!(matches!(removed.instruction, Instruction::CircuitGate(_)));
+    assert_eq!(circuit.operations().len(), 1);
+    assert!(matches!(
+        circuit.operations()[0].instruction,
+        Instruction::Standard(StandardGate::X)
+    ));
+}
+
+#[test]
+fn remove_operation_keeps_unused_symbolic_parameters() {
+    let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    let theta = Parameter::symbol("theta");
+    circuit.rx(q0, theta.clone()).unwrap();
+    circuit.h(q0).unwrap();
+
+    let removed = circuit.remove_operation(0).unwrap();
+
+    assert!(matches!(
+        removed.instruction,
+        Instruction::Standard(StandardGate::RX)
+    ));
+    assert_eq!(circuit.operations().len(), 1);
+    assert!(circuit.parameters().contains(&theta));
+    assert!(circuit.symbols().contains("theta"));
+    circuit.index(0).unwrap();
+    circuit.validate().unwrap();
+}
+
+#[test]
+fn remove_operations_empty_input_does_not_mutate() {
+    let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    circuit.h(q0).unwrap();
+    circuit.measure(q0).unwrap();
+
+    let removed = circuit.remove_operations([]).unwrap();
+
+    assert!(removed.is_empty());
+    assert_eq!(circuit.operations().len(), 2);
+    assert!(matches!(
+        circuit.operations()[0].instruction,
+        Instruction::Standard(StandardGate::H)
+    ));
+    assert_eq!(circuit.classical_values(), &[ClassicalType::Bit]);
+    circuit.validate().unwrap();
+}
+
+#[test]
+fn remove_operations_deduplicates_indices() {
+    let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    circuit.h(q0).unwrap();
+    circuit.x(q0).unwrap();
+    circuit.z(q0).unwrap();
+
+    let removed = circuit.remove_operations([1, 1, 1]).unwrap();
+
+    assert_eq!(removed.len(), 1);
+    assert!(matches!(
+        removed[0].instruction,
+        Instruction::Standard(StandardGate::X)
+    ));
+    assert_eq!(circuit.operations().len(), 2);
+    assert!(matches!(
+        circuit.operations()[0].instruction,
+        Instruction::Standard(StandardGate::H)
+    ));
+    assert!(matches!(
+        circuit.operations()[1].instruction,
+        Instruction::Standard(StandardGate::Z)
+    ));
+    circuit.validate().unwrap();
+}
+
+#[test]
+fn remove_operations_deletes_multiple_gates_in_original_index_order() {
+    let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    circuit.h(q0).unwrap();
+    circuit.x(q0).unwrap();
+    circuit.z(q0).unwrap();
+    circuit.y(q0).unwrap();
+
+    let removed = circuit.remove_operations([3, 1]).unwrap();
+
+    assert_eq!(removed.len(), 2);
+    assert!(matches!(
+        removed[0].instruction,
+        Instruction::Standard(StandardGate::X)
+    ));
+    assert!(matches!(
+        removed[1].instruction,
+        Instruction::Standard(StandardGate::Y)
+    ));
+    assert_eq!(circuit.operations().len(), 2);
+    assert!(matches!(
+        circuit.operations()[0].instruction,
+        Instruction::Standard(StandardGate::H)
+    ));
+    assert!(matches!(
+        circuit.operations()[1].instruction,
+        Instruction::Standard(StandardGate::Z)
+    ));
+    circuit.validate().unwrap();
+}
+
+#[test]
+fn remove_operations_rejects_out_of_bounds_without_mutation() {
+    let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    circuit.h(q0).unwrap();
+    circuit.x(q0).unwrap();
+
+    let result = circuit.remove_operations([0, 2]);
+
+    assert!(matches!(
+        result,
+        Err(CircuitError::OperationIndexOutOfBounds { index: 2, len: 2 })
+    ));
+    assert_eq!(circuit.operations().len(), 2);
+    assert!(matches!(
+        circuit.operations()[0].instruction,
+        Instruction::Standard(StandardGate::H)
+    ));
+    assert!(matches!(
+        circuit.operations()[1].instruction,
+        Instruction::Standard(StandardGate::X)
+    ));
+    circuit.validate().unwrap();
+}
+
+#[test]
+fn remove_operations_deletes_measurement_with_same_batch_store() {
+    let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    let target = circuit.var(ClassicalType::Bit);
+    let measured = circuit.measure(q0).unwrap();
+    circuit.store(target, measured.expr()).unwrap();
+
+    let removed = circuit.remove_operations([0, 1]).unwrap();
+
+    assert_eq!(removed.len(), 2);
+    assert!(matches!(
+        removed[0].instruction,
+        Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
+    ));
+    assert!(matches!(
+        removed[1].instruction,
+        Instruction::ClassicalData(ClassicalDataOp::Store { .. })
+    ));
+    assert!(circuit.operations().is_empty());
+    assert!(circuit.classical_values().is_empty());
+    circuit.validate().unwrap();
+}
+
+#[test]
+fn remove_operations_rejects_measurement_still_used_by_remaining_operation() {
+    let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    let target = circuit.var(ClassicalType::Bit);
+    let measured = circuit.measure(q0).unwrap();
+    circuit.store(target, measured.expr()).unwrap();
+
+    let result = circuit.remove_operations([0]);
+
+    assert!(matches!(
+        result,
+        Err(CircuitError::ClassicalValueStillInUse {
+            index: 0,
+            context
+        }) if context == "operation 1"
+    ));
+    assert_eq!(circuit.operations().len(), 2);
+    assert_eq!(circuit.classical_values(), &[ClassicalType::Bit]);
+    circuit.validate().unwrap();
+}
+
+#[test]
+fn remove_operations_deletes_measurement_with_same_batch_control_flow() {
+    let mut circuit = Circuit::new(1);
+    let q0 = Qubit::new(0);
+    let measured = circuit.measure(q0).unwrap();
+    let condition = measured.expr().to_bool().unwrap();
+    circuit
+        .if_(condition, |body| {
+            body.x(q0)?;
+            Ok(())
+        })
+        .unwrap();
+
+    let removed = circuit.remove_operations([0, 1]).unwrap();
+
+    assert_eq!(removed.len(), 2);
+    assert!(matches!(
+        removed[0].instruction,
+        Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
+    ));
+    assert!(matches!(
+        removed[1].instruction,
+        Instruction::ClassicalControl(ClassicalControlOp::If(_))
+    ));
+    assert!(circuit.operations().is_empty());
+    assert!(circuit.classical_values().is_empty());
+    circuit.validate().unwrap();
+}
+
+#[test]
+fn remove_operations_compacts_measurement_values_after_batch_delete() {
+    let mut circuit = Circuit::new(2);
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let target = circuit.var(ClassicalType::Bit);
+    circuit.h(q0).unwrap();
+    let first = circuit.measure(q0).unwrap();
+    circuit.store(target, first.expr()).unwrap();
+    circuit.x(q1).unwrap();
+    circuit.measure(q1).unwrap();
+
+    let removed = circuit.remove_operations([1, 2]).unwrap();
+
+    assert_eq!(removed.len(), 2);
+    assert!(matches!(
+        removed[0].instruction,
+        Instruction::ClassicalData(ClassicalDataOp::MeasureBit { .. })
+    ));
+    assert!(matches!(
+        removed[1].instruction,
+        Instruction::ClassicalData(ClassicalDataOp::Store { .. })
+    ));
+    assert_eq!(circuit.operations().len(), 3);
+    assert_eq!(circuit.classical_values(), &[ClassicalType::Bit]);
+    assert!(matches!(
+        circuit.operations()[0].instruction,
+        Instruction::Standard(StandardGate::H)
+    ));
+    assert!(matches!(
+        circuit.operations()[1].instruction,
+        Instruction::Standard(StandardGate::X)
+    ));
+    let Instruction::ClassicalData(ClassicalDataOp::MeasureBit { result }) =
+        &circuit.operations()[2].instruction
+    else {
+        panic!("remaining measurement should be compacted");
+    };
+    assert_eq!(result.index(), 0);
+    circuit.validate().unwrap();
 }
 
 #[test]
@@ -677,8 +1276,8 @@ fn test_assign_parameters() {
     if let CircuitParam::Index(idx) = assigned_circuit.data[1].params[0] {
         let param = &assigned_circuit.parameters[idx as usize];
         let symbols = param.get_symbols();
-        assert!(symbols.contains(&"b".to_string()));
-        assert!(!symbols.contains(&"a".to_string()));
+        assert!(symbols.contains("b"));
+        assert!(!symbols.contains("a"));
     } else {
         panic!(
             "Expected Index for rz, got {:?}",
@@ -1778,4 +2377,52 @@ fn test_from_operations_rejects_undefined_and_duplicate_values() {
         duplicate,
         Err(CircuitError::DuplicateClassicalValueDefinition { .. })
     ));
+}
+
+#[test]
+fn circuit_equality_resolves_reordered_parameter_tables() {
+    let mut left = Circuit::new(1);
+    left.rz(Qubit::new(0), Parameter::symbol("theta")).unwrap();
+    left.rx(Qubit::new(0), Parameter::symbol("phi")).unwrap();
+
+    let mut right = left.clone();
+    right.parameters.swap_indices(0, 1);
+    for operation in Arc::make_mut(&mut right.data) {
+        for parameter in &mut operation.params {
+            if let CircuitParam::Index(index) = parameter {
+                *index = 1 - *index;
+            }
+        }
+    }
+
+    assert_eq!(left, right);
+}
+
+#[test]
+fn static_circuit_clone_shares_operations_until_mutation() {
+    let mut circuit = Circuit::new(1);
+    circuit.x(Qubit::new(0)).unwrap();
+
+    let mut cloned = circuit.clone();
+    assert!(Arc::ptr_eq(&circuit.data, &cloned.data));
+
+    cloned.h(Qubit::new(0)).unwrap();
+    assert!(!Arc::ptr_eq(&circuit.data, &cloned.data));
+    assert_eq!(circuit.operations().len(), 1);
+    assert_eq!(cloned.operations().len(), 2);
+}
+
+#[test]
+fn cloned_control_flow_is_equal_across_circuit_ids() {
+    let mut circuit = Circuit::new(1);
+    let measured = circuit.measure(Qubit::new(0)).unwrap();
+    let condition = ClassicalExpr::bit_to_bool(measured.expr()).unwrap();
+    circuit
+        .if_(condition, |body| body.x(Qubit::new(0)))
+        .unwrap();
+
+    let cloned = circuit.clone();
+    assert_ne!(circuit.id(), cloned.id());
+    assert_eq!(circuit, cloned);
+    assert!(circuit.operations_structurally_equal(&cloned));
 }

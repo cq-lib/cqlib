@@ -82,6 +82,22 @@ class StandardGate:
     Y2M: StandardGate
     FSIM: StandardGate
 
+    @staticmethod
+    def all() -> list[StandardGate]:
+        """Return all unbound standard gate definitions in enum order."""
+        ...
+
+    @staticmethod
+    def from_name(name: str) -> StandardGate:
+        """Resolve a case-insensitive standard-gate name to its definition.
+
+        ``StandardGate.from_name('cx')`` returns ``StandardGate.CX``.
+
+        Raises:
+            ValueError: If ``name`` does not match any standard gate.
+        """
+        ...
+
     @property
     def num_qubits(self) -> int:
         """Total number of qubits this gate acts on."""
@@ -142,5 +158,5 @@ class StandardGate:
         ...
     def __copy__(self) -> StandardGate: ...
     def __deepcopy__(self, memo: dict) -> StandardGate: ...
-    def __eq__(self, other: StandardGate) -> bool: ...
+    def __eq__(self, other: object) -> bool: ...
     def __hash__(self) -> int: ...

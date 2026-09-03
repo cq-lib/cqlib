@@ -211,12 +211,12 @@ impl CommutationChecker {
             return Some(result);
         }
 
-        if let Some(rules) = self.rules.as_ref() {
-            if let Some(result) = rules.check(
+        if let Some(rules) = self.rules.as_ref()
+            && let Some(result) = rules.check(
                 lhs_inst, lhs_qubits, lhs_params, rhs_inst, rhs_qubits, rhs_params,
-            ) {
-                return Some(result);
-            }
+            )
+        {
+            return Some(result);
         }
 
         if self.config.enable_matrix_fallback {
@@ -284,12 +284,8 @@ fn same_application(
     rhs_qubits: &[Qubit],
     rhs_params: &[Parameter],
 ) -> bool {
-    let same_instruction = match (lhs_inst, rhs_inst) {
-        (Instruction::Standard(lhs), Instruction::Standard(rhs)) => lhs == rhs,
-        (Instruction::McGate(lhs), Instruction::McGate(rhs)) => lhs == rhs,
-        (Instruction::UnitaryGate(lhs), Instruction::UnitaryGate(rhs)) => lhs == rhs,
-        _ => false,
-    };
+    let same_instruction =
+        lhs_inst.is_quantum_gate() && rhs_inst.is_quantum_gate() && lhs_inst == rhs_inst;
 
     lhs_qubits == rhs_qubits
         && same_instruction
