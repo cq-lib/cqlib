@@ -61,11 +61,14 @@ def load(path: str) -> Circuit:
     """
     ...
 
-def dumps(circuit: Circuit) -> str:
+def dumps(circuit: Circuit, *, physical_qubits: list[int] | None = None) -> str:
     """Serialize a Circuit to an OpenQASM 3.0 string.
 
     Args:
         circuit: The Circuit object to serialize.
+        physical_qubits: Optional physical identifiers in circuit-qubit order.
+            For example, ``[5, 7]`` maps the first circuit qubit to ``$5`` and
+            the second to ``$7``. If omitted, logical qubits are emitted.
 
     Returns:
         A string containing the OpenQASM 3.0 representation.
@@ -84,12 +87,19 @@ def dumps(circuit: Circuit) -> str:
     """
     ...
 
-def dump(circuit: Circuit, path: str) -> None:
+def dump(
+    circuit: Circuit,
+    path: str,
+    *,
+    physical_qubits: list[int] | None = None,
+) -> None:
     """Serialize a Circuit to an OpenQASM 3.0 file.
 
     Args:
         circuit: The Circuit object to serialize.
         path: Path to the output file.
+        physical_qubits: Optional physical identifiers in circuit-qubit order.
+            If omitted, logical qubits are emitted.
 
     Raises:
         ValueError: If the circuit contains unsupported instructions.

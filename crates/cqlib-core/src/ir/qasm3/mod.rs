@@ -75,8 +75,10 @@
 //! defined once before the circuit body and are still called by their Cqlib
 //! names in the main circuit.
 //!
-//! The top-level qubit collection is emitted as `qubit[n] q`, including the
-//! single-qubit case. Classical variables are emitted as `c0`, `c1`, ... and
+//! By default, the top-level qubit collection is emitted as `qubit[n] q`,
+//! including the single-qubit case. Callers that supply an explicit physical
+//! mapping through [`dump::dumps_with_physical_qubits`] get `$n` operands
+//! instead. Classical variables are emitted as `c0`, `c1`, ... and
 //! immutable classical measurement values as `v0`, `v1`, .... Measurement
 //! followed immediately by a compatible store is folded to OpenQASM 3 assignment
 //! form, for example `c0 = measure q;`. Standalone measurements are assigned to

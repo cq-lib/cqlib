@@ -41,6 +41,8 @@ const DEFAULT_MAX_RECURSION_DEPTH: usize = 100;
 /// Relative includes are resolved from the input file's parent directory.
 /// `stdgates.inc` is handled by `oq3_semantics` and does not require a file
 /// on disk.
+/// Physical qubits such as `$5` retain their numeric identifiers. Programs
+/// that mix declared logical qubits with physical qubits are rejected.
 ///
 /// # Errors
 ///
@@ -134,8 +136,29 @@ fn convert_parse_result(
             "OpenQASM 3 parser reported semantic errors".to_string(),
         ));
     }
-    let mut lowering = LoweringContext::new(&symbols);
+    let hardware_qubits = collect_hardware_qubits(source)?;
+    let mut lowering = LoweringContext::new(&symbols, hardware_qubits);
     lowering.lower_program(&program)
+}
+
+fn collect_hardware_qubits(source: &str) -> Result<Vec<Qubit>, Qasm3ParseError> {
+    let layout = inspect_source(source)?;
+    let mut qubits = HashSet::new();
+    for captures in hardware_qubit_regex().captures_iter(&layout.code_mask) {
+        let identifier = captures
+            .name("identifier")
+            .expect("hardware-qubit regex always captures an identifier")
+            .as_str();
+        let index = identifier.parse::<u32>().map_err(|_| {
+            Qasm3ParseError::InvalidArgument(format!(
+                "physical qubit index '${identifier}' exceeds the supported range"
+            ))
+        })?;
+        qubits.insert(Qubit::new(index));
+    }
+    let mut qubits = qubits.into_iter().collect::<Vec<_>>();
+    qubits.sort_by_key(|qubit| qubit.index());
+    Ok(qubits)
 }
 
 fn frontend_panic_error(payload: Box<dyn std::any::Any + Send>) -> Qasm3ParseError {
@@ -523,6 +546,13 @@ fn scalar_measurement_error_regex() -> &'static Regex {
     })
 }
 
+fn hardware_qubit_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"\$(?P<identifier>[0-9]+)").expect("valid hardware-qubit regex")
+    })
+}
+
 fn gate_definition_regex(name: &str) -> Regex {
     Regex::new(&format!(r"(?m)^\s*gate\s+{}\b", regex::escape(name)))
         .expect("valid gate definition regex")
@@ -697,6 +727,7 @@ enum GateDef {
 struct LoweringContext<'a> {
     symbols: &'a SymbolTable,
     quantum: HashMap<SymbolId, QuantumBinding>,
+    hardware_qubits: Vec<Qubit>,
     classical: HashMap<SymbolId, ClassicalVar>,
     gates: HashMap<SymbolId, GateDef>,
     loop_constants: HashMap<SymbolId, u128>,
@@ -706,10 +737,11 @@ struct LoweringContext<'a> {
 }
 
 impl<'a> LoweringContext<'a> {
-    fn new(symbols: &'a SymbolTable) -> Self {
+    fn new(symbols: &'a SymbolTable, hardware_qubits: Vec<Qubit>) -> Self {
         Self {
             symbols,
             quantum: HashMap::new(),
+            hardware_qubits,
             classical: HashMap::new(),
             gates: HashMap::new(),
             loop_constants: HashMap::new(),
@@ -732,7 +764,17 @@ impl<'a> LoweringContext<'a> {
         let total_qubits = self.discover_quantum(program.stmts())?;
         self.discover_gates(program.stmts())?;
 
-        let mut circuit = Circuit::new(total_qubits);
+        if total_qubits > 0 && !self.hardware_qubits.is_empty() {
+            return Err(Qasm3ParseError::UnsupportedFeature(
+                "mixing logical and physical qubits".to_string(),
+            ));
+        }
+
+        let mut circuit = if self.hardware_qubits.is_empty() {
+            Circuit::new(total_qubits)
+        } else {
+            Circuit::from_qubits(self.hardware_qubits.clone())?
+        };
 
         for stmt in program.stmts() {
             self.lower_stmt(stmt, &mut circuit)?;
@@ -1660,14 +1702,39 @@ impl<'a> LoweringContext<'a> {
             | Expr::IndexedIdentifier(indexed) => {
                 self.resolve_indexed_qubit(indexed).map(|q| vec![q])
             }
-            Expr::GateOperand(GateOperand::HardwareQubit(_)) | Expr::HardwareQubit(_) => Err(
-                Qasm3ParseError::UnsupportedFeature("hardware qubit".to_string()),
-            ),
+            Expr::GateOperand(GateOperand::HardwareQubit(qubit)) | Expr::HardwareQubit(qubit) => {
+                self.lower_hardware_qubit(qubit).map(|q| vec![q])
+            }
             Expr::Cast(cast) => self.expand_qubit_expr(cast.operand()),
             _ => Err(Qasm3ParseError::TypeError(format!(
                 "expected qubit operand, got {:?}",
                 expr.expression()
             ))),
+        }
+    }
+
+    fn lower_hardware_qubit(
+        &self,
+        hardware_qubit: &asg::HardwareQubit,
+    ) -> Result<Qubit, Qasm3ParseError> {
+        let identifier = hardware_qubit
+            .identifier()
+            .strip_prefix('$')
+            .unwrap_or_else(|| hardware_qubit.identifier());
+        let index = identifier.parse::<u32>().map_err(|_| {
+            Qasm3ParseError::InvalidArgument(format!(
+                "invalid physical qubit identifier '{}'",
+                hardware_qubit.identifier()
+            ))
+        })?;
+        let qubit = Qubit::new(index);
+        if self.hardware_qubits.contains(&qubit) {
+            Ok(qubit)
+        } else {
+            Err(Qasm3ParseError::InvalidArgument(format!(
+                "unregistered physical qubit identifier '{}'",
+                hardware_qubit.identifier()
+            )))
         }
     }
 

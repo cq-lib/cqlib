@@ -90,6 +90,79 @@ fn loads_bell_circuit() {
 }
 
 #[test]
+fn loads_physical_qubits_with_sparse_identifiers() {
+    let circuit = loads(
+        r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        bit[2] c;
+        h $1;
+        cx $1, $5;
+        c[0] = measure $1;
+        c[1] = measure $5;
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(circuit.qubits(), vec![Qubit::new(1), Qubit::new(5)]);
+    assert_standard_gate(&circuit, 0, StandardGate::H, &[1]);
+    assert_standard_gate(&circuit, 1, StandardGate::CX, &[1, 5]);
+}
+
+#[test]
+fn loads_physical_qubits_ignores_comments() {
+    let circuit = loads(
+        r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        // $99 is documentation, not a circuit operand.
+        x $5;
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(circuit.qubits(), vec![Qubit::new(5)]);
+}
+
+#[test]
+fn rejects_mixed_logical_and_physical_qubits() {
+    assert_err(
+        r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit q;
+        h q;
+        x $5;
+        "#,
+        |err| {
+            matches!(
+                err,
+                Qasm3ParseError::UnsupportedFeature(feature)
+                    if feature == "mixing logical and physical qubits"
+            )
+        },
+    );
+}
+
+#[test]
+fn rejects_physical_qubit_index_outside_u32_range() {
+    assert_err(
+        r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        x $4294967296;
+        "#,
+        |err| {
+            matches!(
+                err,
+                Qasm3ParseError::InvalidArgument(message)
+                    if message.contains("exceeds the supported range")
+            )
+        },
+    );
+}
+
+#[test]
 fn from_str_alias_matches_loads() {
     let source = r#"
         OPENQASM 3;

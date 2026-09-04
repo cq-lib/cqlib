@@ -316,6 +316,70 @@ reset q[1];
 }
 
 #[test]
+fn dumps_sparse_qubits_as_physical_identifiers() {
+    let q1 = Qubit::new(1);
+    let q5 = Qubit::new(5);
+    let mut circuit = Circuit::from_qubits(vec![q1, q5]).unwrap();
+    circuit.h(q1).unwrap();
+    circuit.cx(q1, q5).unwrap();
+    circuit.barrier(vec![q1, q5]).unwrap();
+    circuit.reset(q5).unwrap();
+    let bits = circuit.var(ClassicalType::bit_vec(2).unwrap());
+    circuit.measure_bits_into([q5, q1], bits).unwrap();
+
+    let qasm = dumps_with_physical_qubits(&circuit, &[7, 2]).unwrap();
+
+    assert_eq!(
+        qasm,
+        r#"OPENQASM 3.0;
+include "stdgates.inc";
+
+bit[2] c0;
+
+h $7;
+cx $7,$2;
+barrier $7,$2;
+reset $2;
+c0[0] = measure $2;
+c0[1] = measure $7;
+"#
+    );
+}
+
+#[test]
+fn dump_with_physical_qubits_writes_file() {
+    let q5 = Qubit::new(5);
+    let mut circuit = Circuit::from_qubits(vec![q5]).unwrap();
+    circuit.h(q5).unwrap();
+    let path = unique_temp_path("physical_qubits");
+
+    dump_with_physical_qubits(&circuit, &path, &[9]).unwrap();
+
+    let qasm = fs::read_to_string(&path).unwrap();
+    fs::remove_file(path).unwrap();
+    assert!(qasm.contains("h $9;"), "got:\n{qasm}");
+    assert!(!qasm.contains("qubit["), "got:\n{qasm}");
+}
+
+#[test]
+fn physical_qubit_mapping_must_match_circuit_width() {
+    let circuit = Circuit::new(2);
+
+    let error = dumps_with_physical_qubits(&circuit, &[5]).unwrap_err();
+
+    assert!(error.to_string().contains("has length 1"));
+}
+
+#[test]
+fn physical_qubit_mapping_rejects_duplicates() {
+    let circuit = Circuit::new(2);
+
+    let error = dumps_with_physical_qubits(&circuit, &[5, 5]).unwrap_err();
+
+    assert!(error.to_string().contains("$5 is duplicated"));
+}
+
+#[test]
 fn dumps_partial_bitvec_measurement_as_indexed_assignments() {
     let q0 = Qubit::new(0);
     let q2 = Qubit::new(2);

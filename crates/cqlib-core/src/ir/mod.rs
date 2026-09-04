@@ -92,7 +92,10 @@ pub mod qcis;
 
 pub use qasm2::dump::{dump as qasm2_dump, dumps as qasm2_dumps};
 pub use qasm2::load::{load as qasm2_load, loads as qasm2_loads};
-pub use qasm3::dump::{dump as qasm3_dump, dumps as qasm3_dumps};
+pub use qasm3::dump::{
+    dump as qasm3_dump, dump_with_physical_qubits as qasm3_dump_with_physical_qubits,
+    dumps as qasm3_dumps, dumps_with_physical_qubits as qasm3_dumps_with_physical_qubits,
+};
 pub use qasm3::load::{load as qasm3_load, loads as qasm3_loads};
 pub use qcis::dump::{dump as qcis_dump, dumps as qcis_dumps};
 pub use qcis::load::{load as qcis_load, loads as qcis_loads};

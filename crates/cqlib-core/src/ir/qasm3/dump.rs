@@ -146,6 +146,21 @@ pub fn dump<P: AsRef<Path>>(circuit: &Circuit, path: P) -> Result<(), Qasm3DumpE
     Ok(())
 }
 
+/// Serialize a circuit using explicit OpenQASM 3 physical-qubit identifiers.
+///
+/// `physical_qubits[i]` is assigned to the circuit's i-th qubit after sorting
+/// circuit qubits by their internal index.
+pub fn dump_with_physical_qubits<P: AsRef<Path>>(
+    circuit: &Circuit,
+    path: P,
+    physical_qubits: &[u32],
+) -> Result<(), Qasm3DumpError> {
+    let qasm = dumps_with_physical_qubits(circuit, physical_qubits)?;
+    let mut file = File::create(path)?;
+    file.write_all(qasm.as_bytes())?;
+    Ok(())
+}
+
 /// Write a circuit to an OpenQASM 3 file.
 ///
 /// Rust-style alias for [`dump`]. The Python-style `dump` name is retained for
@@ -155,6 +170,25 @@ pub fn to_path<P: AsRef<Path>>(circuit: &Circuit, path: P) -> Result<(), Qasm3Du
 }
 
 pub fn dumps(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
+    dumps_impl(circuit, None)
+}
+
+/// Serialize a circuit using explicit OpenQASM 3 physical-qubit identifiers.
+///
+/// For example, `[5, 7]` maps the circuit's first qubit to `$5` and its second
+/// qubit to `$7`. Mapping length must equal the number of circuit qubits and
+/// physical identifiers must be unique.
+pub fn dumps_with_physical_qubits(
+    circuit: &Circuit,
+    physical_qubits: &[u32],
+) -> Result<String, Qasm3DumpError> {
+    dumps_impl(circuit, Some(physical_qubits))
+}
+
+fn dumps_impl(
+    circuit: &Circuit,
+    physical_qubits: Option<&[u32]>,
+) -> Result<String, Qasm3DumpError> {
     let mut output = String::new();
     writeln!(&mut output, "OPENQASM 3.0;")?;
     writeln!(&mut output, "include \"stdgates.inc\";")?;
@@ -187,12 +221,25 @@ pub fn dumps(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
         NameAllocator::new(reserved_top_level_names(&defined_gates, &unitary_gate_defs));
     let param_map = dump_input_parameters(circuit, &mut output, &mut name_allocator)?;
     let skipped_values = skipped_classical_value_declarations(circuit.operations())?;
-    let qubit_register = name_allocator.take("q");
+    let qubit_register = if physical_qubits.is_some() {
+        None
+    } else {
+        Some(name_allocator.take("q"))
+    };
     let auto_measurements =
         AutoMeasurementMap::new(circuit.operations(), name_allocator.take("meas"))?;
-    let qubit_map = logical_qubit_map(circuit, &qubit_register);
-    writeln!(&mut output, "qubit[{}] {qubit_register};", qubit_map.len())?;
-    dump_qubit_mapping_comment(&mut output, &qubit_map)?;
+    let qubit_map = match &qubit_register {
+        Some(register) => {
+            let qubit_map = logical_qubit_map(circuit, register);
+            writeln!(&mut output, "qubit[{}] {register};", qubit_map.len())?;
+            dump_qubit_mapping_comment(&mut output, &qubit_map)?;
+            qubit_map
+        }
+        None => physical_qubit_map(
+            circuit,
+            physical_qubits.expect("physical mapping selected above"),
+        )?,
+    };
     let classical_names =
         ClassicalNameMap::new(circuit, &mut output, &skipped_values, &mut name_allocator)?;
     auto_measurements.dump_declaration(&mut output)?;
@@ -204,7 +251,7 @@ pub fn dumps(circuit: &Circuit) -> Result<String, Qasm3DumpError> {
         circuit.operations(),
         &mut output,
         &qubit_map,
-        &qubit_register,
+        qubit_register.as_deref().unwrap_or(""),
         &param_map,
         &classical_names,
         &auto_measurements,
@@ -278,6 +325,37 @@ fn logical_qubit_map(circuit: &Circuit, register_name: &str) -> HashMap<Qubit, S
         .enumerate()
         .map(|(logical_index, qubit)| (qubit, format!("{register_name}[{logical_index}]")))
         .collect()
+}
+
+fn physical_qubit_map(
+    circuit: &Circuit,
+    physical_qubits: &[u32],
+) -> Result<HashMap<Qubit, String>, Qasm3DumpError> {
+    let mut circuit_qubits = circuit.qubits();
+    circuit_qubits.sort_by_key(|qubit| qubit.index());
+
+    if circuit_qubits.len() != physical_qubits.len() {
+        return Err(Qasm3DumpError::FormatError(format!(
+            "physical_qubits has length {}, but circuit contains {} qubits",
+            physical_qubits.len(),
+            circuit_qubits.len()
+        )));
+    }
+
+    let mut seen = HashSet::new();
+    let mut qubit_map = HashMap::new();
+    for (qubit, physical) in circuit_qubits
+        .into_iter()
+        .zip(physical_qubits.iter().copied())
+    {
+        if !seen.insert(physical) {
+            return Err(Qasm3DumpError::FormatError(format!(
+                "physical qubit identifier ${physical} is duplicated"
+            )));
+        }
+        qubit_map.insert(qubit, format!("${physical}"));
+    }
+    Ok(qubit_map)
 }
 
 fn dump_qubit_mapping_comment(
@@ -1001,7 +1079,9 @@ fn dump_measurement(
         } else {
             writeln!(output, "{target} = measure {source};")?;
         }
-    } else if is_full_register_measurement(&qubits, qubit_register, qubit_map.len()) {
+    } else if !qubit_register.is_empty()
+        && is_full_register_measurement(&qubits, qubit_register, qubit_map.len())
+    {
         if let MeasurementDestination::Discard(value) = destination {
             let target = auto_measurements.target(value).unwrap();
             for (index, qubit) in qubits.iter().enumerate() {
