@@ -1,0 +1,147 @@
+name: Build release artifacts
+on:
+  workflow_call:
+permissions:
+  contents: read
+env:
+  RUSTUP_TOOLCHAIN: '1.97.1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '2'
+jobs:
+  platforms:
+    name: Wheel and C SDK (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64-msvc
+            runner: windows-2022
+          - platform: linux-glibc2.28-x86_64
+            runner: ubuntu-24.04
+            image: quay.io/pypa/manylinux_2_28_x86_64:latest
+          - platform: linux-glibc2.28-aarch64
+            runner: ubuntu-24.04-arm
+            image: quay.io/pypa/manylinux_2_28_aarch64:latest
+          - platform: macos11-x86_64
+            runner: macos-15-intel
+          - platform: macos11-arm64
+            runner: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      CMAKE_OSX_DEPLOYMENT_TARGET: '11.0'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        if: runner.os != 'Linux'
+        with:
+          python-version: '3.10'
+      - name: Set up native build tools
+        if: runner.os != 'Linux'
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+          python -m pip install maturin==1.14.1 packaging==25.0 tomli==2.2.1 cmake==3.31.6
+      - name: Build C SDK and abi3 wheel, run C and installed-wheel tests
+        if: runner.os != 'Linux'
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: python tools/ci.py release --platform "$PLATFORM"
+      - name: Build and test inside native manylinux 2.28
+        if: runner.os == 'Linux'
+        env:
+          IMAGE: ${{ matrix.image }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          docker pull "$IMAGE"
+          docker image inspect "$IMAGE" --format '{{json .RepoDigests}}'
+          docker run --rm -v "$GITHUB_WORKSPACE:/io" -w /io \
+            -e PLATFORM -e RUSTUP_TOOLCHAIN -e CARGO_PROFILE_DEV_DEBUG \
+            -e CARGO_PROFILE_TEST_DEBUG -e CARGO_INCREMENTAL -e CARGO_BUILD_JOBS \
+            "$IMAGE" bash -euo pipefail -c '
+              export PATH="/opt/python/cp310-cp310/bin:$HOME/.cargo/bin:$PATH"
+              export CARGO_TARGET_DIR=/tmp/cqlib-manylinux-target
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh
+              sh /tmp/rustup.sh -y --profile minimal --default-toolchain "$RUSTUP_TOOLCHAIN"
+              python -m pip install maturin==1.14.1 packaging==25.0 tomli==2.2.1 cmake==3.31.6
+              cargo test --locked -p cqlib-core -p binding-c -p cqlib
+              python tools/ci.py release --platform "$PLATFORM"
+              for version in 311 312 313 314; do
+                /opt/python/cp$version-cp$version/bin/python -m pip install packaging==25.0
+                /opt/python/cp$version-cp$version/bin/python tools/ci.py wheel-test
+              done
+            '
+      - uses: actions/setup-python@v6
+        if: runner.os != 'Linux'
+        with:
+          python-version: '3.11'
+      - name: Test the same wheel on Python 3.11
+        if: runner.os != 'Linux'
+        run: |
+          python -m pip install packaging==25.0
+          python tools/ci.py wheel-test
+      - uses: actions/setup-python@v6
+        if: runner.os != 'Linux'
+        with:
+          python-version: '3.12'
+      - name: Test the same wheel on Python 3.12
+        if: runner.os != 'Linux'
+        run: |
+          python -m pip install packaging==25.0
+          python tools/ci.py wheel-test
+      - uses: actions/setup-python@v6
+        if: runner.os != 'Linux'
+        with:
+          python-version: '3.13'
+      - name: Test the same wheel on Python 3.13
+        if: runner.os != 'Linux'
+        run: |
+          python -m pip install packaging==25.0
+          python tools/ci.py wheel-test
+      - uses: actions/setup-python@v6
+        if: runner.os != 'Linux'
+        with:
+          python-version: '3.14'
+      - name: Test the same wheel on Python 3.14
+        if: runner.os != 'Linux'
+        run: |
+          python -m pip install packaging==25.0
+          python tools/ci.py wheel-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.ref_name }}-${{ matrix.platform }}
+          path: target/ci-dist/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+  sources:
+    name: Python sdist and Rust crate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+      - name: Install build tools
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+          python -m pip install maturin==1.14.1 packaging==25.0 tomli==2.2.1
+      - name: Package sdist and independently compile the Rust crate
+        run: python tools/ci.py sources
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ github.ref_name }}-sources
+          path: target/ci-dist/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
