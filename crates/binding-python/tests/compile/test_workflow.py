@@ -11,8 +11,6 @@
 # that they have been altered from the originals.
 
 import copy
-import threading
-import time
 
 import pytest
 
@@ -247,29 +245,12 @@ def test_compile_rejects_conflicting_or_orphaned_target_arguments(
     "run",
     [compile, lambda circuit: CompilerWorkflow().run(circuit)],
 )
-def test_compiler_entry_points_release_gil(run) -> None:
+def test_compiler_entry_points_release_gil(run, assert_releases_gil) -> None:
     circuit = Circuit(1)
     for _ in range(20_000):
         circuit.h(0)
 
-    started = threading.Event()
-    finished = threading.Event()
-    progressed = threading.Event()
-
-    def worker() -> None:
-        started.wait()
-        time.sleep(0.01)
-        if not finished.is_set():
-            progressed.set()
-
-    thread = threading.Thread(target=worker)
-    thread.start()
-    started.set()
-    run(circuit)
-    finished.set()
-    thread.join()
-
-    assert progressed.is_set()
+    assert_releases_gil(lambda: run(circuit))
 
 
 def test_device_compile_returns_layout_metadata() -> None:
