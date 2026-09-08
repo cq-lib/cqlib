@@ -14,6 +14,10 @@
 Pytest fixtures and utilities for cqlib tests.
 """
 
+import sys
+import threading
+import time
+
 import pytest
 import numpy as np
 from cqlib.circuit import Circuit, Parameter
@@ -228,3 +232,55 @@ H Q0
 CNOT Q0 Q1
 CNOT Q1 Q2
 """
+
+
+def _assert_action_releases_gil(action, *, timeout=5.0) -> None:
+    if not getattr(sys, "_is_gil_enabled", lambda: True)():
+        pytest.skip("GIL release is only observable when the GIL is enabled")
+
+    ready = threading.Event()
+    stop = threading.Event()
+    progress = [0]
+
+    def worker() -> None:
+        ready.set()
+        while not stop.is_set():
+            progress[0] += 1
+            # Yield promptly once we acquire the GIL; the main thread disables
+            # automatic bytecode switching during the observation window.
+            time.sleep(0)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    switch_interval = sys.getswitchinterval()
+    try:
+        # Python execution between calls must not count as evidence of release.
+        # Set this before starting the worker so it cannot request a handoff
+        # using the old interval just before the observation window starts.
+        sys.setswitchinterval(max(switch_interval, 60.0, timeout * 10))
+        thread.start()
+        assert ready.wait(timeout=5.0), "GIL probe thread did not become ready"
+        before = progress[0]
+        deadline = time.monotonic() + timeout
+        attempts = 0
+        while time.monotonic() < deadline:
+            action()
+            attempts += 1
+            if progress[0] > before:
+                break
+        else:
+            pytest.fail(
+                f"No Python thread progress during {attempts} calls in "
+                f"{timeout}s; the action may be holding the GIL"
+            )
+    finally:
+        stop.set()
+        sys.setswitchinterval(switch_interval)
+        if thread.ident is not None:
+            thread.join(timeout=5.0)
+    assert not thread.is_alive(), "GIL probe thread did not stop"
+
+
+@pytest.fixture
+def assert_releases_gil():
+    """Observe explicit GIL release without requiring a minimum call duration."""
+    return _assert_action_releases_gil

@@ -655,18 +655,16 @@ impl<'a> NativeOptimizer<'a> {
         if let TransformOutcome::Changed(cleaned) =
             OptimizeNativeLocalGates::with_quality_policy(cleanup_context, self.quality_policy)
                 .transform(&raw_phase_b, None)?
-        {
-            if let NativeStageOutcome::Candidate(candidate) = self.evaluate_stage_candidate(
+            && let NativeStageOutcome::Candidate(candidate) = self.evaluate_stage_candidate(
                 branch_start,
                 Arc::new(cleaned),
                 best.costs,
                 entry_costs,
                 branch_context,
                 session,
-            )? {
-                improved |=
-                    install_best_checkpoint(&candidate, best.circuit, best.costs, best.context);
-            }
+            )?
+        {
+            improved |= install_best_checkpoint(&candidate, best.circuit, best.costs, best.context);
         }
         Ok(improved)
     }

@@ -491,6 +491,7 @@ dependencies = [
  "rustworkx-core",
  "serde",
  "serde_json",
+ "sha2",
  "smallvec",
  "symb_anafis",
  "thiserror 2.0.18",

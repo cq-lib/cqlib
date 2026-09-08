@@ -67,6 +67,10 @@ from .hamiltonian import Hamiltonian as Hamiltonian
 # Evolution module
 from .evolution import TrotterMode as TrotterMode
 
+# Entropy and metrics modules
+from . import entropy as entropy
+from . import metrics as metrics
+
 
 # Expose key state classes at qis level for convenience
 DensityMatrix = state.DensityMatrix
@@ -90,10 +94,6 @@ class Observable(Protocol):
     @property
     def num_qubits(self) -> int: ...
 
-
-# Entropy and metrics modules
-from . import entropy as entropy
-from . import metrics as metrics
 
 __all__ = [
     "Phase",

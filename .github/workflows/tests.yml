@@ -1,0 +1,63 @@
+name: Tests
+on:
+  workflow_call:
+    inputs:
+      runner:
+        type: string
+        required: true
+permissions:
+  contents: read
+env:
+  RUSTUP_TOOLCHAIN: '1.97.1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '2'
+jobs:
+  tests:
+    name: Rust, Python and C (${{ inputs.runner }})
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+      - name: Install Rust
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tests-${{ runner.os }}-${{ runner.arch }}
+      - name: Run development tests (no distribution packages or uploads)
+        run: |
+          python -m venv .ci-venv
+          if [ "$RUNNER_OS" = Windows ]; then
+            source .ci-venv/Scripts/activate
+          else
+            source .ci-venv/bin/activate
+          fi
+          python -m pip install maturin==1.14.1 pytest==8.4.2 resvg-py==0.5.0 packaging==25.0 tomli==2.2.1 'numpy>=2.1.0' cmake==3.31.6
+          export PYO3_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          python tools/ci.py versions
+          cargo test --workspace --locked
+          python tools/ci.py ctest
+          maturin develop --locked --manifest-path crates/binding-python/Cargo.toml
+          cd crates/binding-python
+          python -m pytest tests
+      - name: Upload visualization diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: visualization-diagnostics-${{ inputs.runner }}
+          path: |
+            crates/cqlib-core/src/visualization/**/figure/**/*.png
+            crates/cqlib-core/src/visualization/**/figure/*.svg
+            crates/binding-python/tests/visualization/figure/**/*.png
+            crates/binding-python/tests/visualization/figure/*.svg
+          if-no-files-found: ignore
+          retention-days: 7

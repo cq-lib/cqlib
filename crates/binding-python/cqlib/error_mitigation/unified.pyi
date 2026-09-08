@@ -24,6 +24,7 @@ Estimator = Callable[[Circuit, Hamiltonian | None, int | None], tuple[float, flo
 
 class ErrorMitigationError(CqlibError):
     """Base exception for error-mitigation API failures."""
+
     ...
 
 class MitigationMethod:

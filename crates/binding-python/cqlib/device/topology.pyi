@@ -15,7 +15,6 @@ from .qubit import PhysicalQubit
 
 _PhysicalQubitLike = int | Qubit | PhysicalQubit
 
-
 class Topology:
     """A directed coupling graph representing quantum hardware connectivity.
 
