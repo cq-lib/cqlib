@@ -11,9 +11,79 @@
 // that they have been altered from the originals.
 
 use super::VisualizationError;
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
+
+const FONT_SHA256: &str = "f8ace1f892b2bd9dc1792ba7f097fa7588f84fed48321480e04de5390828221f";
+const FONT_URL: &str =
+    "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/standard_fonts/LiberationSans-Regular.ttf";
+
+fn visual_font() -> &'static [u8] {
+    // Share successful downloads and failures across parallel tests alike.
+    static FONT: OnceLock<Result<Vec<u8>, String>> = OnceLock::new();
+    FONT.get_or_init(prepare_visual_font)
+        .as_ref()
+        .unwrap_or_else(|error| panic!("visual-test font: {error}"))
+}
+
+fn prepare_visual_font() -> Result<Vec<u8>, String> {
+    let target = env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+        PathBuf::from,
+    );
+    let override_path = env::var_os("CQLIB_VISUAL_FONT");
+    let path = override_path.as_ref().map_or_else(
+        || target.join("visual-fonts/LiberationSans-Regular.ttf"),
+        PathBuf::from,
+    );
+    let valid = |data: &[u8]| format!("{:x}", Sha256::digest(data)) == FONT_SHA256;
+    if let Ok(data) = fs::read(&path)
+        && valid(&data)
+    {
+        return Ok(data);
+    }
+    if override_path.is_some() {
+        return Err(format!(
+            "{} is missing or has the wrong SHA-256",
+            path.display()
+        ));
+    }
+    let output = Command::new("curl")
+        .args([
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--max-time",
+            "45",
+            "--retry",
+            "1",
+            FONT_URL,
+        ])
+        .output()
+        .map_err(|error| {
+            format!("cannot run curl: {error}; set CQLIB_VISUAL_FONT for offline tests")
+        })?;
+    if !output.status.success() || !valid(&output.stdout) {
+        return Err(format!(
+            "download failed or SHA-256 mismatch ({FONT_URL}): {}; \
+             set CQLIB_VISUAL_FONT to a verified font for offline tests",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    fs::create_dir_all(path.parent().expect("font cache directory"))
+        .map_err(|error| error.to_string())?;
+    fs::write(&path, &output.stdout).map_err(|error| error.to_string())?;
+    Ok(output.stdout)
+}
 
 #[derive(Debug, Clone)]
 struct RgbImage {
@@ -26,6 +96,7 @@ struct RgbImage {
 struct VisualCasePaths {
     actual_svg: PathBuf,
     actual_png: PathBuf,
+    exported_png: PathBuf,
     reference_png: PathBuf,
     diff_png: PathBuf,
 }
@@ -58,6 +129,7 @@ fn visual_case_paths(output_dir: &[&str], filename: &str) -> VisualCasePaths {
     VisualCasePaths {
         actual_svg: visual_root.join(filename.replace(".png", ".svg")),
         actual_png: visual_root.join(filename),
+        exported_png: visual_root.join(filename.replace(".png", "_export.png")),
         reference_png: references_dir.join(filename),
         diff_png: diffs_dir.join(format!("diff_{filename}")),
     }
@@ -94,6 +166,34 @@ fn load_png_rgb(path: &Path) -> RgbImage {
         height,
         data,
     }
+}
+
+/// Render the production SVG at its intrinsic size with only our pinned font.
+/// This module is test-only; production PNG export still uses system fonts.
+fn rasterize_visual_reference(svg_path: &Path, png_path: &Path) {
+    let mut options = resvg::usvg::Options {
+        font_family: "Liberation Sans".to_string(),
+        ..Default::default()
+    };
+    let fonts = options.fontdb_mut();
+    fonts.load_font_data(visual_font().to_vec());
+    fonts.set_sans_serif_family("Liberation Sans");
+    fonts.set_serif_family("Liberation Sans");
+    fonts.set_monospace_family("Liberation Sans");
+    let svg = fs::read(svg_path).expect("failed to read generated SVG");
+    let tree = resvg::usvg::Tree::from_data(&svg, &options)
+        .expect("failed to parse generated SVG with pinned font");
+    let size = tree.size().to_int_size();
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(size.width(), size.height())
+        .expect("failed to allocate visual-test pixmap");
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
+    pixmap
+        .save_png(png_path)
+        .expect("failed to save visual-test PNG");
 }
 
 fn pad_rgb_to_canvas(img: &RgbImage, width: u32, height: u32) -> Vec<u8> {
@@ -158,17 +258,6 @@ fn save_diff_png(
 
 fn save_diff_and_similarity(actual_png: &Path, reference_png: &Path, diff_png: &Path) -> f64 {
     let actual = load_png_rgb(actual_png);
-    if !reference_png.exists() {
-        fs::copy(actual_png, reference_png).unwrap_or_else(|e| {
-            panic!(
-                "failed to bootstrap reference `{}` from `{}`: {e}",
-                reference_png.display(),
-                actual_png.display()
-            )
-        });
-        return 1.0;
-    }
-
     let reference = load_png_rgb(reference_png);
     let width = actual.width.max(reference.width);
     let height = actual.height.max(reference.height);
@@ -177,6 +266,14 @@ fn save_diff_and_similarity(actual_png: &Path, reference_png: &Path, diff_png: &
     let ratio = similarity_ratio(&actual_padded, &reference_padded);
     save_diff_png(&actual_padded, &reference_padded, width, height, diff_png)
         .expect("failed to write diff png");
+    assert_eq!(
+        (actual.width, actual.height),
+        (reference.width, reference.height),
+        "image dimensions changed: actual `{}`, reference `{}`, diff `{}`",
+        actual_png.display(),
+        reference_png.display(),
+        diff_png.display()
+    );
     ratio
 }
 
@@ -187,12 +284,38 @@ where
     let paths = visual_case_paths(output_dir, filename);
 
     render(&paths.actual_svg).expect("failed to render svg");
-    render(&paths.actual_png).expect("failed to render png");
+    // Exercise the real PNG exporter as a smoke check, but compare the SVG
+    // through a hermetic rasterizer so OS font discovery cannot change goldens.
+    render(&paths.exported_png).expect("failed to render png");
+    let exported = load_png_rgb(&paths.exported_png);
+    assert!(exported.width > 0 && exported.height > 0);
+    rasterize_visual_reference(&paths.actual_svg, &paths.actual_png);
 
+    if env::var("CQLIB_UPDATE_VISUAL_REFERENCES").as_deref() == Ok("1") {
+        assert!(
+            env::var_os("CI").is_none(),
+            "visual references must be reviewed and updated locally, not in CI"
+        );
+        fs::copy(&paths.actual_png, &paths.reference_png)
+            .expect("failed to update visual reference");
+        return;
+    }
+    assert!(
+        paths.reference_png.is_file(),
+        "missing visual reference `{}`; actual image: `{}`. To explicitly regenerate \
+         references locally, run CQLIB_UPDATE_VISUAL_REFERENCES=1 cargo test -p cqlib-core visualization::",
+        paths.reference_png.display(),
+        paths.actual_png.display()
+    );
     let ratio = save_diff_and_similarity(&paths.actual_png, &paths.reference_png, &paths.diff_png);
     let threshold = visual_threshold();
     assert!(
         ratio >= threshold,
-        "Similarity ratio {ratio:.4} < {threshold:.4} for {filename}"
+        "Similarity ratio {ratio:.6} < {threshold:.6} for {filename}; \
+         actual: {}; reference: {}; diff: {}; SVG: {}; font: prepared Liberation Sans",
+        paths.actual_png.display(),
+        paths.reference_png.display(),
+        paths.diff_png.display(),
+        paths.actual_svg.display()
     );
 }

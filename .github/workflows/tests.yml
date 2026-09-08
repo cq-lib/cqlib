@@ -41,7 +41,7 @@ jobs:
           else
             source .ci-venv/bin/activate
           fi
-          python -m pip install maturin==1.14.1 pytest==8.4.2 packaging==25.0 tomli==2.2.1 'numpy>=2.1.0' cmake==3.31.6
+          python -m pip install maturin==1.14.1 pytest==8.4.2 resvg-py==0.5.0 packaging==25.0 tomli==2.2.1 'numpy>=2.1.0' cmake==3.31.6
           export PYO3_PYTHON="$(python -c 'import sys; print(sys.executable)')"
           python tools/ci.py versions
           cargo test --workspace --locked
@@ -49,3 +49,15 @@ jobs:
           maturin develop --locked --manifest-path crates/binding-python/Cargo.toml
           cd crates/binding-python
           python -m pytest tests
+      - name: Upload visualization diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: visualization-diagnostics-${{ inputs.runner }}
+          path: |
+            crates/cqlib-core/src/visualization/**/figure/**/*.png
+            crates/cqlib-core/src/visualization/**/figure/*.svg
+            crates/binding-python/tests/visualization/figure/**/*.png
+            crates/binding-python/tests/visualization/figure/*.svg
+          if-no-files-found: ignore
+          retention-days: 7

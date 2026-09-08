@@ -188,6 +188,7 @@ def verify_wheel(directory=DIST):
             "--only-binary=:all:",
             wheel,
             "pytest==8.4.2",
+            "resvg-py==0.5.0",
         )
         run(python, "-m", "pip", "check")
         run(
