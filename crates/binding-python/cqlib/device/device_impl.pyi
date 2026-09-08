@@ -11,7 +11,7 @@
 # that they have been altered from the originals.
 
 from datetime import datetime
-from cqlib.circuit import Circuit, Instruction, Qubit, StandardGate, ValueOperation
+from cqlib.circuit import Circuit, Instruction, Qubit, ValueOperation
 from .qubit import PhysicalQubit
 from .topology import Topology
 
@@ -97,7 +97,6 @@ class InstructionProp:
 
     def __copy__(self) -> "InstructionProp": ...
     def __deepcopy__(self, memo: dict) -> "InstructionProp": ...
-
 
 class QubitProp:
     """Physical properties of an individual qubit.
@@ -234,7 +233,6 @@ class QubitProp:
     def __copy__(self) -> "QubitProp": ...
     def __deepcopy__(self, memo: dict) -> "QubitProp": ...
 
-
 class EdgeProp:
     """Properties of a coupling edge between two qubits.
 
@@ -274,7 +272,6 @@ class EdgeProp:
 
     def __copy__(self) -> "EdgeProp": ...
     def __deepcopy__(self, memo: dict) -> "EdgeProp": ...
-
 
 class Device:
     """Complete hardware description of a quantum device.
@@ -567,9 +564,7 @@ class Device:
 
     # ---- Per-qubit / per-edge property management ----
 
-    def add_qubit_properties(
-        self, qubit: _PhysicalQubitLike, props: QubitProp
-    ) -> None:
+    def add_qubit_properties(self, qubit: _PhysicalQubitLike, props: QubitProp) -> None:
         """Add or update properties for a specific qubit.
 
         Args:

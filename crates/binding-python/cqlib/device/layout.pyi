@@ -16,7 +16,6 @@ from .qubit import LogicalQubit, PhysicalQubit
 _LogicalQubitLike = int | Qubit | LogicalQubit
 _PhysicalQubitLike = int | Qubit | PhysicalQubit
 
-
 class Layout:
     """Maps circuit logical qubits to physical qubits on a quantum device.
 
@@ -89,9 +88,7 @@ class Layout:
         """
 
     @staticmethod
-    def from_pairs(
-        pairs: list[tuple[int, int]], physical_count: int
-    ) -> "Layout":
+    def from_pairs(pairs: list[tuple[int, int]], physical_count: int) -> "Layout":
         """Create a layout from ``(logical_id, physical_id)`` pairs.
 
         Logical qubits are the logical IDs in ``pairs``. Physical
@@ -185,7 +182,9 @@ class Layout:
 
     # ---- Mutation (routing operations) ----
 
-    def bind(self, logical_id: _LogicalQubitLike, physical_id: _PhysicalQubitLike) -> None:
+    def bind(
+        self, logical_id: _LogicalQubitLike, physical_id: _PhysicalQubitLike
+    ) -> None:
         """Bind an unmapped logical qubit to a vacant physical qubit.
 
         May introduce a new logical qubit to the layout. The caller must

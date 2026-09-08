@@ -310,7 +310,9 @@ class Hamiltonian:
         """
         ...
 
-    def to_evolution_circuit(self, time: float, steps: int, mode: TrotterMode) -> Circuit:
+    def to_evolution_circuit(
+        self, time: float, steps: int, mode: TrotterMode
+    ) -> Circuit:
         """Converts the Hamiltonian evolution e^(-iHt) into a quantum circuit.
 
         Commuting terms use an exact single-pass decomposition. Non-commuting

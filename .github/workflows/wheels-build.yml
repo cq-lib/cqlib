@@ -114,7 +114,7 @@ jobs:
         run: |
           python -m pip install packaging==25.0
           python tools/ci.py wheel-test
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ github.ref_name }}-${{ matrix.platform }}
           path: target/ci-dist/*
@@ -138,7 +138,7 @@ jobs:
           python -m pip install maturin==1.14.1 packaging==25.0 tomli==2.2.1
       - name: Package sdist and independently compile the Rust crate
         run: python tools/ci.py sources
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-${{ github.ref_name }}-sources
           path: target/ci-dist/*
