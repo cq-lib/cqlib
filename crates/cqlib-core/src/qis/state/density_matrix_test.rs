@@ -176,6 +176,63 @@ fn test_apply_circuit_reset_directive() {
 }
 
 #[test]
+fn reset_bell_state_preserves_the_other_qubits_mixed_state() {
+    for (qubit, expected_probs) in [(0, [0.5, 0.0, 0.5, 0.0]), (1, [0.5, 0.5, 0.0, 0.0])] {
+        let mut dm = DensityMatrix::new(2);
+        dm.apply_h(0).unwrap();
+        dm.apply_cx(0, 1).unwrap();
+        dm.reset(qubit).unwrap();
+        for row in 0..4 {
+            for col in 0..4 {
+                let expected = if row == col { expected_probs[row] } else { 0.0 };
+                assert_relative_eq!(dm.data()[row * 4 + col].re, expected, epsilon = 1e-12);
+                assert_relative_eq!(dm.data()[row * 4 + col].im, 0.0, epsilon = 1e-12);
+            }
+        }
+        assert_relative_eq!(purity_mixed(&dm).unwrap(), 0.5, epsilon = 1e-12);
+    }
+}
+
+#[test]
+fn reset_matches_kraus_channel_for_complex_mixed_states_on_every_qubit() {
+    let mut pure = DensityMatrix::new(3);
+    pure.apply_h(0).unwrap();
+    pure.apply_ry(1, 0.7).unwrap();
+    pure.apply_rx(2, 0.4).unwrap();
+    pure.apply_cx(0, 1).unwrap();
+    pure.apply_cx(1, 2).unwrap();
+    pure.apply_s(1).unwrap();
+    let mixed = DensityMatrix::maximally_mixed(3);
+    let data = pure
+        .data()
+        .iter()
+        .zip(mixed.data())
+        .map(|(a, b)| 0.7 * a + 0.3 * b)
+        .collect();
+    let initial = DensityMatrix::from_density_matrix_state(3, data).unwrap();
+    let zero = Complex64::new(0.0, 0.0);
+    let one = Complex64::new(1.0, 0.0);
+    let kraus = [vec![one, zero, zero, zero], vec![zero, one, zero, zero]];
+
+    for qubit in 0..3 {
+        let mut actual = initial.clone();
+        let mut expected = initial.clone();
+        actual.reset(qubit).unwrap();
+        expected.apply_kraus(&kraus, &[qubit]).unwrap();
+        for (a, b) in actual.data().iter().zip(expected.data()) {
+            assert_relative_eq!(a.re, b.re, epsilon = 1e-12);
+            assert_relative_eq!(a.im, b.im, epsilon = 1e-12);
+        }
+        assert_relative_eq!(actual.trace().re, 1.0, epsilon = 1e-12);
+        let before = actual.data().to_vec();
+        actual.reset(qubit).unwrap();
+        assert_eq!(actual.data(), before);
+        assert!(actual.reset(3).is_err());
+        assert_eq!(actual.data(), before);
+    }
+}
+
+#[test]
 fn test_apply_circuit_classical_control_flow_error() {
     use crate::circuit::ClassicalExpr;
 

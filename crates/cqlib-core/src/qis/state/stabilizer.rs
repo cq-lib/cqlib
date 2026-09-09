@@ -9,6 +9,8 @@
 // Any modifications or derivative works of this code must retain this
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
+//
+// Modified to validate terminal measurements and correct density matrix reset.
 
 //! Stabilizer state simulator using the Aaronson-Gottesman tableau algorithm.
 //!
@@ -1413,13 +1415,13 @@ impl StabilizerState {
     /// Constructs a `StabilizerState` by simulating a Clifford circuit.
     ///
     /// This state-level entry point only performs quantum state evolution.
-    /// Measurement and store operations produced by `Circuit::measure*` are
+    /// Terminal measurement and store operations produced by `Circuit::measure*` are
     /// treated as output declarations and ignored here: they do not collapse
     /// the state and do not populate runtime classical data.
     ///
     /// Use [`sample`](Self::sample) or [`probs`](Self::probs) with the returned
     /// [`Measurement`] to query measurement distributions from the final state.
-    /// Use [`apply_circuit`](Self::apply_circuit) when you need execution
+    /// Use [`run_circuit`](Self::run_circuit) when you need execution
     /// semantics where measurements collapse the state and write classical data.
     ///
     /// # Supported instructions
@@ -1427,7 +1429,7 @@ impl StabilizerState {
     /// - Classical data: `MeasureBit`, `MeasureBits`, `Store` are ignored
     /// - Directives: `Reset` (returns qubit to |0⟩), `Barrier`/`Delay` (no-op)
     ///
-    /// [`apply_circuit`]: StabilizerState::apply_circuit
+    /// [`run_circuit`]: StabilizerState::run_circuit
     ///
     /// # Example
     /// ```rust
@@ -1455,6 +1457,10 @@ impl StabilizerState {
 
     /// Applies a Clifford circuit to this stabilizer state in-place.
     ///
+    /// As in `from_circuit`, terminal measurements are ignored. A measured qubit
+    /// used by a later gate or Reset is rejected before the state is changed.
+    /// Independent gates, repeated measurements, Barrier, Delay, and Store are allowed.
+    ///
     /// This state-level entry point ignores terminal measurement declarations,
     /// matching [`from_circuit`](Self::from_circuit). Use
     /// [`run_circuit`](Self::run_circuit) when runtime classical measurement
@@ -1474,6 +1480,7 @@ impl StabilizerState {
         }
 
         let circuit = input_circuit.decompose()?;
+        super::validate_terminal_measurements(&circuit)?;
         let qubits = circuit.qubits();
         let qubit_map: std::collections::HashMap<_, _> = qubits
             .iter()

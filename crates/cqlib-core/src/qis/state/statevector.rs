@@ -9,6 +9,8 @@
 // Any modifications or derivative works of this code must retain this
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
+//
+// Modified to validate terminal measurements and correct density matrix reset.
 
 //! Statevector quantum simulation.
 //!
@@ -438,6 +440,10 @@ impl Statevector {
 
     /// Applies a quantum circuit to this statevector in-place.
     ///
+    /// As in `from_circuit`, terminal measurements are ignored. A measured qubit
+    /// used by a later gate or Reset is rejected before the state is changed.
+    /// Independent gates, repeated measurements, Barrier, Delay, and Store are allowed.
+    ///
     /// The circuit is first decomposed into basic gates via [`Circuit::decompose`],
     /// then each operation is applied sequentially to the current state.
     ///
@@ -478,6 +484,7 @@ impl Statevector {
         }
         // Decompose circuit to basic gates
         let circuit = circuit.decompose()?;
+        super::validate_terminal_measurements(&circuit)?;
         let sv = self;
 
         // Build qubit index mapping: Qubit -> physical index

@@ -9,14 +9,92 @@
 // Any modifications or derivative works of this code must retain this
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
+//
+// Modified to validate terminal measurements and clarify or correct reset behavior.
 
 //! Simulation consistency tests between Statevector and DensityMatrix
 
 use crate::circuit::{Circuit, Qubit};
 use crate::qis::pauli::{Pauli, PauliString};
-use crate::qis::{DensityMatrix, StabilizerState, Statevector};
+use crate::qis::{DensityMatrix, DensityMatrixNoise, QisError, StabilizerState, Statevector};
 use std::f64::consts::PI;
 const EPSILON: f64 = 1e-10;
+
+#[test]
+fn mid_circuit_measurement_is_rejected_before_mutating_any_state() {
+    let mut circuit = Circuit::new(1);
+    circuit.h(Qubit::new(0)).unwrap();
+    circuit.measure(Qubit::new(0)).unwrap();
+    circuit.h(Qubit::new(0)).unwrap();
+
+    let constructors = [
+        Statevector::from_circuit(&circuit).map(|_| ()),
+        DensityMatrix::from_circuit(&circuit).map(|_| ()),
+        DensityMatrixNoise::from_circuit(&circuit, None).map(|_| ()),
+        StabilizerState::from_circuit(&circuit).map(|_| ()),
+    ];
+    for result in constructors {
+        let Err(QisError::UnsupportedOperation(message)) = result else {
+            panic!("expected unsupported mid-circuit measurement");
+        };
+        assert!(message.contains("mid-circuit measurement on qubit 0 at operation 1"));
+        assert!(message.contains("later 'H' at operation 2"));
+    }
+
+    let mut sv = Statevector::new(1);
+    let mut dm = DensityMatrix::new(1);
+    let mut noisy = DensityMatrixNoise::new(1, None);
+    let mut stab = StabilizerState::new(1);
+    let sv_before = sv.data().to_vec();
+    let dm_before = dm.data().to_vec();
+    let noisy_before = noisy.state.data().to_vec();
+    let stab_before = stab.to_stim_format();
+    for result in [
+        sv.apply_circuit(&circuit),
+        dm.apply_circuit(&circuit),
+        noisy.apply_circuit(&circuit),
+        stab.apply_circuit(&circuit),
+    ] {
+        assert!(matches!(result, Err(QisError::UnsupportedOperation(_))));
+    }
+    assert_eq!(sv.data(), sv_before);
+    assert_eq!(dm.data(), dm_before);
+    assert_eq!(noisy.state.data(), noisy_before);
+    assert_eq!(stab.to_stim_format(), stab_before);
+}
+
+#[test]
+fn terminal_measurements_allow_independent_gates_and_ignored_operations() {
+    use crate::circuit::ClassicalType;
+
+    let mut circuit = Circuit::new(2);
+    circuit.h(Qubit::new(0)).unwrap();
+    let bit = circuit.var(ClassicalType::Bit);
+    circuit.measure_into(Qubit::new(0), bit).unwrap();
+    circuit.barrier(vec![Qubit::new(0), Qubit::new(1)]).unwrap();
+    circuit.delay(Qubit::new(0), 1.0.into()).unwrap();
+    circuit.h(Qubit::new(1)).unwrap();
+    circuit
+        .measure_bits([Qubit::new(1), Qubit::new(0)])
+        .unwrap();
+
+    let probabilities = [
+        Statevector::from_circuit(&circuit).unwrap().probabilities(),
+        DensityMatrix::from_circuit(&circuit)
+            .unwrap()
+            .probabilities(),
+        DensityMatrixNoise::from_circuit(&circuit, None)
+            .unwrap()
+            .probabilities(),
+        StabilizerState::from_circuit(&circuit)
+            .unwrap()
+            .probabilities()
+            .unwrap(),
+    ];
+    for probs in probabilities {
+        compare_probs(&probs, &[0.25; 4], "terminal measurements");
+    }
+}
 
 /// Compare probabilities from statevector and density matrix
 fn compare_probs(sv_probs: &[f64], dm_probs: &[f64], desc: &str) {

@@ -946,7 +946,7 @@ impl PyDensityMatrix {
             .map_err(qis_error_to_py_err)
     }
 
-    /// Resets the specified qubit to the |0⟩ state by measuring and flipping if 1.
+    /// Resets the specified qubit to |0⟩ using a deterministic quantum channel.
     ///
     /// Args:
     ///     qubit: Target qubit index

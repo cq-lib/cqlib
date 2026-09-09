@@ -653,7 +653,7 @@ class DensityMatrix:
         ...
 
     def reset(self, qubit: int) -> None:
-        """Resets the specified qubit to the |0⟩ state by measuring and flipping if 1.
+        """Resets the specified qubit to |0⟩ using a deterministic quantum channel.
 
         Raises:
             IndexError: If qubit index is out of bounds.

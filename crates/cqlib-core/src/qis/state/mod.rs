@@ -77,11 +77,14 @@
 //! ```
 
 mod aligned_buffer;
+mod circuit_validation;
 pub mod classical;
 pub mod density_matrix;
 pub mod density_matrix_noise;
 pub mod stabilizer;
 pub mod statevector;
+
+use circuit_validation::validate_terminal_measurements;
 
 pub use classical::{ClassicalState, RuntimeValue};
 pub use density_matrix::DensityMatrix;

@@ -327,6 +327,10 @@ impl DensityMatrix {
 
     /// Applies a quantum circuit to this density matrix in-place.
     ///
+    /// As in `from_circuit`, terminal measurements are ignored. A measured qubit
+    /// used by a later gate or Reset is rejected before the state is changed.
+    /// Independent gates, repeated measurements, Barrier, Delay, and Store are allowed.
+    ///
     /// The circuit is first decomposed into basic gates via [`Circuit::decompose`],
     /// then each operation is applied sequentially to the current density matrix.
     ///
@@ -366,6 +370,7 @@ impl DensityMatrix {
             ));
         }
         let circuit = circuit.decompose()?;
+        super::validate_terminal_measurements(&circuit)?;
         let dm = self;
 
         let qubits = circuit.qubits();
@@ -1481,12 +1486,25 @@ impl DensityMatrix {
 
     /// Resets `qubit` to the |0⟩ state.
     ///
-    /// Reset is modeled as a Z-basis measurement followed by an X correction
-    /// when the measured outcome is |1⟩. This is destructive, matching circuit
-    /// reset semantics.
+    /// Applies the deterministic reset channel with Kraus operators |0⟩⟨0|
+    /// and |0⟩⟨1|. The outcome is discarded, preserving the reduced density
+    /// matrix of the other qubits, which may be mixed for an entangled input.
     pub fn reset(&mut self, qubit: usize) -> Result<(), QisError> {
-        if self.measure(qubit)? {
-            self.apply_x(qubit)?;
+        self.validate_qubit(qubit)?;
+        let dim = 1usize << self.num_qubits;
+        let mask = 1usize << qubit;
+        for row in (0..dim).filter(|row| row & mask == 0) {
+            for col in (0..dim).filter(|col| col & mask == 0) {
+                let i00 = row * dim + col;
+                let i01 = row * dim + (col | mask);
+                let i10 = (row | mask) * dim + col;
+                let i11 = (row | mask) * dim + (col | mask);
+                let sum = self.data[i00] + self.data[i11];
+                self.data[i00] = sum;
+                self.data[i01] = Complex64::new(0.0, 0.0);
+                self.data[i10] = Complex64::new(0.0, 0.0);
+                self.data[i11] = Complex64::new(0.0, 0.0);
+            }
         }
         Ok(())
     }

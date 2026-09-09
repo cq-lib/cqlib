@@ -148,6 +148,10 @@ impl DensityMatrixNoise {
 
     /// Applies a quantum circuit to this noisy density matrix in-place.
     ///
+    /// As in `from_circuit`, terminal measurements are ignored. A measured qubit
+    /// used by a later gate or Reset is rejected before the state is changed.
+    /// Independent gates, repeated measurements, Barrier, Delay, and Store are allowed.
+    ///
     /// The circuit is first decomposed into basis gates via [`Circuit::decompose`],
     /// then each operation is applied sequentially. Noise is applied according to
     /// the noise model immediately following each gate.
@@ -180,6 +184,7 @@ impl DensityMatrixNoise {
             ));
         }
         let circuit = circuit.decompose()?;
+        super::validate_terminal_measurements(&circuit)?;
         let sim = self;
 
         let qubits = circuit.qubits();
