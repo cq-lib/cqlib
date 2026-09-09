@@ -21,6 +21,43 @@ use std::f64::consts::PI;
 const EPSILON: f64 = 1e-10;
 
 #[test]
+fn circuit_qubit_positions_are_used_for_measurement_queries() {
+    use crate::device::Outcome;
+    use std::collections::HashMap;
+
+    for ids in [[0, 1], [1, 0], [5, 9], [9, 5]] {
+        let qubits = ids.map(Qubit::new);
+        let mut circuit = Circuit::from_qubits(qubits.to_vec()).unwrap();
+        circuit.x(qubits[0]).unwrap();
+        let measurements = [
+            (circuit.measure_bits(qubits).unwrap(), "01"),
+            (circuit.measure_bits([qubits[1], qubits[0]]).unwrap(), "10"),
+            (circuit.measure(qubits[0]).unwrap(), "1"),
+            (circuit.measure(qubits[1]).unwrap(), "0"),
+        ];
+        let sv = Statevector::from_circuit(&circuit).unwrap();
+        let dm = DensityMatrix::from_circuit(&circuit).unwrap();
+        let stab = StabilizerState::from_circuit(&circuit).unwrap();
+        let noisy = DensityMatrixNoise::from_circuit(&circuit, None).unwrap();
+
+        for (measurement, bits) in measurements {
+            let outcome = Outcome::from_bitstring(bits).unwrap();
+            for (sample, probs) in [
+                (sv.sample(&measurement, 4), sv.probs(&measurement)),
+                (dm.sample(&measurement, 4), dm.probs(&measurement)),
+                (stab.sample(&measurement, 4), stab.probs(&measurement)),
+                (noisy.sample(&measurement, 4), noisy.probs(&measurement)),
+            ] {
+                let result = sample.unwrap();
+                assert_eq!(result.qubits(), measurement.qubits());
+                assert_eq!(result.counts(), &HashMap::from([(outcome.clone(), 4)]));
+                assert_eq!(probs.unwrap(), HashMap::from([(outcome.clone(), 1.0)]));
+            }
+        }
+    }
+}
+
+#[test]
 fn mid_circuit_measurement_is_rejected_before_mutating_any_state() {
     let mut circuit = Circuit::new(1);
     circuit.h(Qubit::new(0)).unwrap();

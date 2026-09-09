@@ -103,6 +103,8 @@ fn interleave_bits(keep: &[usize], k_val: usize, trace: &[usize], t_val: usize) 
 pub struct DensityMatrix {
     /// Flattened matrix elements. Length is $4^N$.
     data: Vec<Complex64>,
+    /// Circuit qubit identifiers mapped to storage positions.
+    pub(super) qubit_map: super::QubitMap,
     /// Number of qubits in the system ($N$).
     pub num_qubits: usize,
 }
@@ -199,7 +201,11 @@ impl DensityMatrix {
         if size > 0 {
             data[0] = Complex64::new(1.0, 0.0);
         }
-        Self { data, num_qubits }
+        Self {
+            data,
+            num_qubits,
+            qubit_map: None,
+        }
     }
 
     /// Creates the maximally mixed state $I / 2^N$.
@@ -217,7 +223,11 @@ impl DensityMatrix {
         for index in 0..dim {
             data[index * dim + index] = probability;
         }
-        Self { data, num_qubits }
+        Self {
+            data,
+            num_qubits,
+            qubit_map: None,
+        }
     }
 
     /// Creates a density matrix from an initial statevector (pure state).
@@ -257,7 +267,11 @@ impl DensityMatrix {
             data.par_chunks_exact_mut(dim).enumerate().for_each(kernel);
         }
 
-        Ok(Self { data, num_qubits })
+        Ok(Self {
+            data,
+            num_qubits,
+            qubit_map: None,
+        })
     }
 
     /// Creates a density matrix directly from a flattened $2^N \times 2^N$ matrix.
@@ -285,6 +299,7 @@ impl DensityMatrix {
         let dm = Self {
             data: dm_state,
             num_qubits,
+            qubit_map: None,
         };
         dm.validate_physical(1e-10)?;
         Ok(dm)
@@ -326,6 +341,10 @@ impl DensityMatrix {
     }
 
     /// Applies a quantum circuit to this density matrix in-place.
+    ///
+    /// Once bound to circuit qubit IDs, subsequent circuits must have the same
+    /// IDs in the same order. The mapping is committed only on success; gates
+    /// completed before an error are not rolled back.
     ///
     /// As in `from_circuit`, terminal measurements are ignored. A measured qubit
     /// used by a later gate or Reset is rejected before the state is changed.
@@ -373,12 +392,7 @@ impl DensityMatrix {
         super::validate_terminal_measurements(&circuit)?;
         let dm = self;
 
-        let qubits = circuit.qubits();
-        let qubit_map: std::collections::HashMap<_, _> = qubits
-            .iter()
-            .enumerate()
-            .map(|(idx, q)| (*q, idx))
-            .collect();
+        let qubit_map = super::prepare_qubit_map(&circuit.qubits(), &dm.qubit_map)?;
 
         let parameter_values: Vec<Option<f64>> = circuit
             .parameters()
@@ -479,6 +493,7 @@ impl DensityMatrix {
                 Instruction::ClassicalData(_) => {}
             }
         }
+        dm.qubit_map = Some(qubit_map);
         Ok(())
     }
 
@@ -561,6 +576,7 @@ impl DensityMatrix {
         Self {
             data: vec![Complex64::new(0.0, 0.0); size],
             num_qubits,
+            qubit_map: None,
         }
     }
 
@@ -1371,6 +1387,19 @@ impl DensityMatrix {
         let (n_k, n_t) = (s_keep.len(), trace.len());
         let (dim, r_dim) = (1 << self.num_qubits, 1 << n_k);
         let mut res = Self::zeros(n_k);
+        res.qubit_map = self.qubit_map.as_ref().map(|qubit_map| {
+            std::sync::Arc::new(
+                qubit_map
+                    .iter()
+                    .filter_map(|(&qubit, position)| {
+                        s_keep
+                            .binary_search(position)
+                            .ok()
+                            .map(|index| (qubit, index))
+                    })
+                    .collect(),
+            )
+        });
         res.data.par_iter_mut().enumerate().for_each(|(idx, val)| {
             let (i, j) = (idx / r_dim, idx % r_dim);
             let mut sum = Complex64::default();
@@ -1395,6 +1424,7 @@ impl DensityMatrix {
         }
 
         let mut res = Self::zeros(n);
+        res.qubit_map.clone_from(&self.qubit_map);
         res.data.par_iter_mut().enumerate().for_each(|(idx, val)| {
             let lower_swap_bits = idx & swap_mask;
             let upper_swap_bits = (idx >> n) & swap_mask;
@@ -1434,6 +1464,7 @@ impl DensityMatrix {
     /// [`sample_shots`](Self::sample_shots) to reuse each thread's working copy.
     pub(crate) fn reset_from(&mut self, source: &DensityMatrix) {
         debug_assert_eq!(self.num_qubits, source.num_qubits);
+        self.qubit_map.clone_from(&source.qubit_map);
         self.data.copy_from_slice(&source.data);
     }
 
@@ -1563,11 +1594,11 @@ impl DensityMatrix {
         measurement: &Measurement,
         shots: usize,
     ) -> Result<ExecutionResult, QisError> {
-        measurement.check_qubits(self.num_qubits)?;
+        let projection = super::resolve_measurement(measurement, &self.qubit_map, self.num_qubits)?;
 
         let mut counts = HashMap::new();
         for full in self.sample_shots(shots) {
-            *counts.entry(measurement.project(&full)).or_insert(0usize) += 1;
+            *counts.entry(projection.project(&full)).or_insert(0usize) += 1;
         }
 
         Ok(ExecutionResult::from_counts(
@@ -1586,7 +1617,7 @@ impl DensityMatrix {
     /// a self-contained output contract and aggregates computational-basis
     /// probabilities over unmeasured qubits.
     pub fn probs(&self, measurement: &Measurement) -> Result<HashMap<Outcome, f64>, QisError> {
-        measurement.check_qubits(self.num_qubits)?;
+        let projection = super::resolve_measurement(measurement, &self.qubit_map, self.num_qubits)?;
 
         let mut marginal = HashMap::new();
         for (basis, prob) in self.probabilities().into_iter().enumerate() {
@@ -1594,7 +1625,7 @@ impl DensityMatrix {
                 continue;
             }
             *marginal
-                .entry(measurement.project_basis(basis))
+                .entry(projection.project_basis(basis))
                 .or_insert(0.0) += prob;
         }
         Ok(marginal)

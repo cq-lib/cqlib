@@ -599,6 +599,7 @@ fn test_is_hermitian_invalid() {
     state[3] = Complex64::new(1.0, 0.0); // |1><1| to make trace 2
 
     let dm = DensityMatrix {
+        qubit_map: None,
         data: state,
         num_qubits: 1,
     };
@@ -616,6 +617,7 @@ fn test_is_hermitian_complex_off_diagonal() {
     state[3] = Complex64::new(0.5, 0.0);
 
     let dm = DensityMatrix {
+        qubit_map: None,
         data: state,
         num_qubits: 1,
     };
@@ -631,6 +633,7 @@ fn test_is_hermitian_requires_real_diagonal() {
     state[3] = Complex64::new(0.5, -0.1); // Conjugate won't help
 
     let dm = DensityMatrix {
+        qubit_map: None,
         data: state,
         num_qubits: 1,
     };
@@ -646,6 +649,7 @@ fn test_is_positive_semidefinite_valid() {
     state[3] = Complex64::new(0.5, 0.0);
 
     let dm = DensityMatrix {
+        qubit_map: None,
         data: state,
         num_qubits: 1,
     };
@@ -661,6 +665,7 @@ fn test_is_positive_semidefinite_negative_diagonal() {
     state[3] = Complex64::new(1.5, 0.0);
 
     let dm = DensityMatrix {
+        qubit_map: None,
         data: state,
         num_qubits: 1,
     };
@@ -676,6 +681,7 @@ fn test_validate_physical_valid_mixed_state() {
     state[3] = Complex64::new(0.5, 0.0);
 
     let dm = DensityMatrix {
+        qubit_map: None,
         data: state,
         num_qubits: 1,
     };
@@ -692,6 +698,7 @@ fn test_validate_physical_non_hermitian() {
     state[3] = Complex64::new(0.5, 0.0);
 
     let dm = DensityMatrix {
+        qubit_map: None,
         data: state,
         num_qubits: 1,
     };
@@ -713,6 +720,7 @@ fn test_validate_physical_not_normalized() {
     state[3] = Complex64::new(1.0, 0.0); // Trace = 2
 
     let dm = DensityMatrix {
+        qubit_map: None,
         data: state,
         num_qubits: 1,
     };
@@ -786,6 +794,7 @@ fn test_tolerance_handling() {
     state[3] = Complex64::new(0.5, 0.0);
 
     let dm = DensityMatrix {
+        qubit_map: None,
         data: state,
         num_qubits: 1,
     };
@@ -999,6 +1008,7 @@ fn test_psd_gershgorin_false_negative_equal_superposition() {
         *item = val;
     }
     let dm = DensityMatrix {
+        qubit_map: None,
         data,
         num_qubits: n,
     };
@@ -1032,6 +1042,7 @@ fn test_psd_valid_pure_non_diagonally_dominant() {
     data[3 * dim] = Complex64::new(sqrt_06 * sqrt_04, 0.0);
     data[3 * dim + 3] = Complex64::new(0.4, 0.0);
     let dm = DensityMatrix {
+        qubit_map: None,
         data,
         num_qubits: n,
     };
@@ -1061,6 +1072,7 @@ fn test_psd_valid_mixed_state_non_diagonally_dominant() {
         }
     }
     let dm = DensityMatrix {
+        qubit_map: None,
         data,
         num_qubits: n,
     };
@@ -1082,6 +1094,7 @@ fn test_psd_zero_eigenvalue_boundary() {
     let mut data = vec![Complex64::new(0.0, 0.0); size];
     data[0] = Complex64::new(1.0, 0.0);
     let dm = DensityMatrix {
+        qubit_map: None,
         data,
         num_qubits: n,
     };
@@ -1101,6 +1114,7 @@ fn test_psd_negative_eigenvalue_rejected() {
     data[0] = Complex64::new(-0.1, 0.0);
     data[dim + 1] = Complex64::new(1.1, 0.0);
     let dm = DensityMatrix {
+        qubit_map: None,
         data,
         num_qubits: n,
     };
@@ -1124,6 +1138,7 @@ fn test_psd_tiny_negative_eigenvalue_accepted_with_tolerance() {
     data[0] = Complex64::new(1.0 + eps, 0.0);
     data[dim + 1] = Complex64::new(-eps, 0.0);
     let dm = DensityMatrix {
+        qubit_map: None,
         data,
         num_qubits: n,
     };
@@ -1150,6 +1165,7 @@ fn test_psd_non_hermitian_rejected() {
     data[3] = Complex64::new(0.5, 0.0);
     data[1] = Complex64::new(0.0, 0.2); // non-Hermitian off-diagonal
     let dm = DensityMatrix {
+        qubit_map: None,
         data,
         num_qubits: n,
     };
@@ -1168,6 +1184,7 @@ fn test_psd_trace_not_one() {
     data[0] = Complex64::new(1.0, 0.0);
     data[3] = Complex64::new(1.0, 0.0);
     let dm = DensityMatrix {
+        qubit_map: None,
         data,
         num_qubits: n,
     };
@@ -1186,6 +1203,7 @@ fn test_psd_nan_rejected() {
     data[0] = Complex64::new(f64::NAN, 0.0);
     data[3] = Complex64::new(f64::NAN, 0.0);
     let dm = DensityMatrix {
+        qubit_map: None,
         data,
         num_qubits: n,
     };
@@ -1202,6 +1220,7 @@ fn test_psd_inf_rejected() {
     data[0] = Complex64::new(f64::INFINITY, 0.0);
     data[3] = Complex64::new(0.0, 0.0);
     let dm = DensityMatrix {
+        qubit_map: None,
         data,
         num_qubits: n,
     };

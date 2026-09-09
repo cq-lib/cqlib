@@ -298,6 +298,8 @@ pub struct Statevector {
     /// Complex amplitudes for each basis state. Length is 2^N where N = num_qubits.
     /// 64-byte aligned for SIMD compatibility (see [`AlignedBuffer`]).
     data: AlignedBuffer<Complex64>,
+    /// Circuit qubit identifiers mapped to storage positions.
+    qubit_map: super::QubitMap,
     /// Number of qubits in the system.
     pub num_qubits: usize,
 }
@@ -353,7 +355,11 @@ impl Statevector {
         // 64-byte aligned allocation — zero-initialised (all amplitudes = 0+0i).
         let mut data = AlignedBuffer::<Complex64>::new_zeroed(size);
         data[0] = Complex64::new(1.0, 0.0); // |0...0⟩
-        Statevector { data, num_qubits }
+        Statevector {
+            data,
+            num_qubits,
+            qubit_map: None,
+        }
     }
 
     /// Creates a statevector from initial amplitudes with normalization check.
@@ -397,7 +403,11 @@ impl Statevector {
         // Copy caller-provided Vec into 64-byte aligned buffer.
         let mut data = AlignedBuffer::<Complex64>::new_zeroed(size);
         data.as_mut_slice().copy_from_slice(&initial_state);
-        Ok(Statevector { data, num_qubits })
+        Ok(Statevector {
+            data,
+            num_qubits,
+            qubit_map: None,
+        })
     }
 
     /// Constructs a statevector by simulating a quantum circuit.
@@ -439,6 +449,10 @@ impl Statevector {
     }
 
     /// Applies a quantum circuit to this statevector in-place.
+    ///
+    /// Once bound to circuit qubit IDs, subsequent circuits must have the same
+    /// IDs in the same order. The mapping is committed only on success; gates
+    /// completed before an error are not rolled back.
     ///
     /// As in `from_circuit`, terminal measurements are ignored. A measured qubit
     /// used by a later gate or Reset is rejected before the state is changed.
@@ -487,13 +501,7 @@ impl Statevector {
         super::validate_terminal_measurements(&circuit)?;
         let sv = self;
 
-        // Build qubit index mapping: Qubit -> physical index
-        let qubits = circuit.qubits();
-        let qubit_map: std::collections::HashMap<_, _> = qubits
-            .iter()
-            .enumerate()
-            .map(|(idx, q)| (*q, idx))
-            .collect();
+        let qubit_map = super::prepare_qubit_map(&circuit.qubits(), &sv.qubit_map)?;
 
         // Precompute all parameter values
         let parameter_values: Vec<Option<f64>> = circuit
@@ -517,7 +525,7 @@ impl Statevector {
                 })
                 .collect::<Result<Vec<_>, QisError>>()?;
 
-            // Get physical qubit indices
+            // Get storage positions
             let qubit_indices: Result<Vec<usize>, QisError> =
                 op.qubits
                     .iter()
@@ -615,6 +623,7 @@ impl Statevector {
             }
         }
 
+        sv.qubit_map = Some(qubit_map);
         Ok(())
     }
 
@@ -2776,6 +2785,7 @@ impl Statevector {
     /// [`sample_shots`](Self::sample_shots) to reuse each thread's working copy.
     fn reset_from(&mut self, source: &Statevector) {
         debug_assert_eq!(self.num_qubits, source.num_qubits);
+        self.qubit_map.clone_from(&source.qubit_map);
         self.data
             .as_mut_slice()
             .copy_from_slice(source.data.as_slice());
@@ -2835,11 +2845,11 @@ impl Statevector {
         measurement: &Measurement,
         shots: usize,
     ) -> Result<ExecutionResult, QisError> {
-        measurement.check_qubits(self.num_qubits)?;
+        let projection = super::resolve_measurement(measurement, &self.qubit_map, self.num_qubits)?;
 
         let mut counts = HashMap::new();
         for full in self.sample_shots(shots) {
-            *counts.entry(measurement.project(&full)).or_insert(0usize) += 1;
+            *counts.entry(projection.project(&full)).or_insert(0usize) += 1;
         }
 
         Ok(ExecutionResult::from_counts(
@@ -2858,7 +2868,7 @@ impl Statevector {
     /// a self-contained output contract and aggregates the full statevector
     /// computational-basis probabilities over unmeasured qubits.
     pub fn probs(&self, measurement: &Measurement) -> Result<HashMap<Outcome, f64>, QisError> {
-        measurement.check_qubits(self.num_qubits)?;
+        let projection = super::resolve_measurement(measurement, &self.qubit_map, self.num_qubits)?;
 
         let mut marginal = HashMap::new();
         for (basis, prob) in self.probabilities().into_iter().enumerate() {
@@ -2866,7 +2876,7 @@ impl Statevector {
                 continue;
             }
             *marginal
-                .entry(measurement.project_basis(basis))
+                .entry(projection.project_basis(basis))
                 .or_insert(0.0) += prob;
         }
         Ok(marginal)
