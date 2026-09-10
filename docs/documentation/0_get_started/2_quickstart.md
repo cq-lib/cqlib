@@ -40,7 +40,39 @@ print(len(circuit))         # 2
 print(circuit.operations)   # 查看底层 Operation 列表
 ```
 
-## 2. 使用文本图查看线路
+## 2. 运行线路并获取计数
+
+使用 `sample()` 直接运行线路 1000 次，获取测量计数：
+
+```python
+from cqlib import sample
+
+result = sample(circuit, shots=1000, seed=42)
+print(result.counts)
+```
+
+输出结果类似：
+
+```text
+{'00': 506, '11': 494}
+```
+
+默认使用本地理想状态向量模拟器，从全零态开始，在 Z 基测量全部线路比特。若线路已经声明末端测量，则默认只返回这些比特的结果。`result` 是 `ExecutionResult`，可以直接读取 `counts`、`probabilities`、`shots` 和 `qubits`。
+
+`seed=42` 使同一版本、相同线路和模拟器的采样计数可复现；省略 `seed` 时随机采样。Bell 态只会得到 `00` 和 `11`，计数通常大致相近。
+
+也可以显式选择模拟器和输出比特顺序：
+
+```python
+result = sample(circuit, shots=1000, seed=42, simulator="density_matrix", qubits=[1, 0])
+print(result.counts)
+```
+
+`qubits` 中第一个比特对应结果字符串最右侧。支持的模拟器包括 `statevector`、`density_matrix` 和 `stabilizer`；稳定子模拟器只支持其实现的 Clifford 门。线路参数须已绑定，中途测量和经典控制流会报错；含 `reset` 的线路请选择 `density_matrix`。完整规则见 [直接采样线路](../1_cqlib/3_qis/0_overview.md#直接采样线路)。
+
+以下步骤用于进一步查看线路、分析状态和导出程序。
+
+## 3. 使用文本图查看线路
 
 将量子线路渲染为文本图以查看线路结构：
 
@@ -50,7 +82,7 @@ from cqlib.visualization import draw_text
 print(draw_text(circuit))
 ```
 
-## 3. 转为矩阵验证
+## 4. 转为矩阵验证
 
 对于小规模纯量子门线路，可以将整条线路转换为完整酉矩阵，用于验证线路的数学行为：
 
@@ -59,7 +91,7 @@ matrix = circuit.to_matrix()
 print(matrix)
 ```
 
-## 4. 导出 OpenQASM 2.0 / 3.0
+## 5. 导出 OpenQASM 2.0 / 3.0
 
 此外，Cqlib 还提供了 OpenQASM 2.0 和 OpenQASM 3.0 的导出接口：
 
@@ -70,7 +102,7 @@ print(qasm2.dumps(circuit))
 print(qasm3.dumps(circuit))
 ```
 
-## 5. 状态向量模拟
+## 6. 状态向量模拟
 
 使用状态向量模拟来查看线路作用后的量子态分布：
 
@@ -89,28 +121,6 @@ print(sv.probabilities())
 ```
 
 这表示测量时只会得到 `00` 和 `11` 两种结果，并且二者概率相同；而 `01` 和 `10` 的概率接近 `0`，这体现了 Bell 态中两个量子比特之间的纠缠关联。
-
-## 6. 采样测量
-
-得到状态向量后，可以进一步进行多次采样，模拟实际测量过程中的统计结果：
-
-```python
-shots = sv.sample_shots(1000)
-counts = {}
-for outcome in shots:
-    bitstring = outcome.to_bitstring(2)
-    counts[bitstring] = counts.get(bitstring, 0) + 1
-
-print(counts)
-```
-
-输出结果类似：
-
-```text
-{'00': 506, '11': 494}
-```
-
-由于采样过程具有随机性，每次运行得到的计数结果不会完全相同。但对于理想 Bell 态，大量采样后，`00` 和 `11` 的出现次数应大致相近，而 `01` 和 `10` 通常不会出现或概率接近于零。
 
 ---
 

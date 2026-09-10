@@ -182,9 +182,9 @@ fn reset_bell_state_preserves_the_other_qubits_mixed_state() {
         dm.apply_h(0).unwrap();
         dm.apply_cx(0, 1).unwrap();
         dm.reset(qubit).unwrap();
-        for row in 0..4 {
+        for (row, &probability) in expected_probs.iter().enumerate() {
             for col in 0..4 {
-                let expected = if row == col { expected_probs[row] } else { 0.0 };
+                let expected = if row == col { probability } else { 0.0 };
                 assert_relative_eq!(dm.data()[row * 4 + col].re, expected, epsilon = 1e-12);
                 assert_relative_eq!(dm.data()[row * 4 + col].im, 0.0, epsilon = 1e-12);
             }

@@ -100,7 +100,7 @@ pub mod statevector;
 
 use crate::circuit::{Measurement, Qubit};
 use crate::qis::QisError;
-use circuit_validation::validate_terminal_measurements;
+pub(crate) use circuit_validation::validate_terminal_measurements;
 use std::collections::HashMap;
 use std::sync::Arc;
 

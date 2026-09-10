@@ -1341,6 +1341,11 @@ impl StabilizerState {
             .collect()
     }
 
+    /// Seeds the internal RNG for direct circuit sampling.
+    pub(crate) fn seed_rng(&mut self, seed: u64) {
+        self.rng = SmallRng::seed_from_u64(seed);
+    }
+
     /// Samples the state using a circuit [`Measurement`] as the output contract.
     ///
     /// Unlike [`apply_circuit`](Self::apply_circuit), this method does not read

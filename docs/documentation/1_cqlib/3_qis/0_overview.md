@@ -18,6 +18,7 @@ QIS 的 Python 入口集中在 `cqlib.qis`，状态模拟器也可以从 `cqlib.
 
 ```python
 from cqlib.qis import (
+    sample,
     Statevector,
     DensityMatrix,
     DensityMatrixNoise,
@@ -37,6 +38,7 @@ from cqlib.qis import (
 
 | 对象 | 主要用途 | 常见场景 |
 |---|---|---|
+| `sample` | 直接采样线路并返回 `ExecutionResult` | 获取测量计数、选择输出比特、固定随机种子 |
 | `Statevector` | 纯态模拟，保存 `2^n` 个复振幅 | 理想线路验证、VQE/QAOA 小规模能量计算、状态采样 |
 | `DensityMatrix` | 密度矩阵模拟，保存 `2^n × 2^n` 复矩阵 | 混态、Kraus 噪声、部分迹、物理性检查 |
 | `DensityMatrixNoise` | 带 `NoiseModel` 的密度矩阵模拟器 | 门噪声、读出误差、含噪线路对比 |
@@ -47,6 +49,46 @@ from cqlib.qis import (
 | `metrics` / `entropy` | 量子态距离、纯度、熵和纠缠指标 | 态相似度、混合度、纠缠分析 |
 
 这些对象通常不是替代 `Circuit`，而是用来执行和解释 `Circuit`。线路负责表达程序结构，QIS 负责把线路变成可分析的状态、可观测量和数值指标。
+
+---
+
+## 直接采样线路
+
+只需要运行线路、获取计数时，使用 `cqlib.sample`，也可以从 `cqlib.qis` 导入同一个函数：
+
+```python
+from cqlib import Circuit, sample
+
+circuit = Circuit(2)
+circuit.h(0)
+circuit.cx(0, 1)
+
+result = sample(circuit, shots=1000, seed=42)
+print(result.counts)
+print(result.probabilities)
+```
+
+调用形式为 `sample(circuit, *, shots=1000, seed=None, simulator="statevector", qubits=None)`，返回已完成的 `ExecutionResult`。`probabilities` 是 counts 归一化后的采样频率；精确理论概率仍使用状态对象的 `probabilities()` 或 `probs()`。
+
+| 参数 | 规则 |
+|---|---|
+| `circuit` | 从全零态开始模拟，不修改输入线路 |
+| `shots` | 正整数，默认 1000 |
+| `seed` | 可选的 64 位无符号整数；相同种子、线路和选项在同一版本及模拟器下产生相同 counts |
+| `simulator` | 默认 `statevector`，可选 `density_matrix` 或 `stabilizer`，均为理想模拟 |
+| `qubits` | 可选的非空比特 ID 列表或 `Qubit` 列表，不能重复，必须属于线路；列表顺序决定输出位序 |
+
+未指定 `qubits` 时，默认规则如下：
+
+- 没有测量声明：按 `circuit.qubits` 顺序测量所有比特，包括空闲比特。
+- 有末端测量声明：按声明顺序和声明内的比特顺序合并，重复比特只保留首次出现的位置。
+- `result.qubits[i]` 对应结果的第 `i` 位，字符串将第 0 位显示在最右侧。例如，输出比特为 `[5, 9]` 时，`"01"` 表示比特 5 为 1、比特 9 为 0。
+
+显式 `qubits` 选择最终 Z 基测量的输出，不会跳过对线路中其他操作的检查。返回值描述量子比特的测量结果，不包含 `Store` 计算后的经典变量值。
+
+线路参数必须已经绑定。支持末端测量：一个比特测量后不能再参与量子门或重置，其他独立比特仍可继续演化。中途测量和经典控制流会明确报错。Barrier、Delay 作为无操作处理。`statevector` 和 `density_matrix` 支持现有模拟器能处理的数值量子门；`stabilizer` 仅支持现有稳定子实现的 Clifford 门。
+
+含 `reset` 的线路须显式选择 `simulator="density_matrix"`，以正确保留重置后的混态统计。需要噪声模型或直接操作状态时，继续使用下面的状态对象 API。
 
 ---
 
@@ -154,6 +196,6 @@ QIS 数值结果不能替代线路可视化和单元测试。推荐在关键算�
 
 ## 下一步
 
-·[Statevector 纯态模拟](1_statevector.md):先用理想纯态检查门序列、概率分布、采样和可观测量期望值。  
-·[DensityMatrix 混态模拟](2_density_matrix.md):学习密度矩阵、Kraus 噪声、部分迹和物理性验证。  
+·[Statevector 纯态模拟](1_statevector.md):先用理想纯态检查门序列、概率分布、采样和可观测量期望值。
+·[DensityMatrix 混态模拟](2_density_matrix.md):学习密度矩阵、Kraus 噪声、部分迹和物理性验证。
 ·[Pauli、PauliString 与 Hamiltonian](5_pauli_and_hamiltonian.md):掌握 Pauli 表示、哈密顿量建模、期望值计算和 Trotter 演化。

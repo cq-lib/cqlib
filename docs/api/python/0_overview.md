@@ -30,9 +30,9 @@
 
 - xxxxxxx
 
-### 量子信息（xxx）
+### 量子信息（`cqlib.qis`）
 
-- xxxxxxx
+- [`sample(circuit, *, shots=1000, seed=None, simulator="statevector", qubits=None)`](../../documentation/1_cqlib/3_qis/0_overview.md#直接采样线路)：直接运行本地线路并返回 `ExecutionResult`，也可从 `cqlib` 顶层导入。
 
 ### 编译优化（xxx）
 

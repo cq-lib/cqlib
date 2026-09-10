@@ -18,7 +18,7 @@ use std::collections::HashMap;
 // Validate a decomposed circuit before state evolution starts. State-level APIs
 // treat measurements as output declarations, so a measured qubit cannot be used
 // by a later quantum operation. Independent qubits may still evolve.
-pub(super) fn validate_terminal_measurements(circuit: &Circuit) -> Result<(), QisError> {
+pub(crate) fn validate_terminal_measurements(circuit: &Circuit) -> Result<(), QisError> {
     let mut measured = HashMap::new();
     for (index, op) in circuit.operations().iter().enumerate() {
         match &op.instruction {
