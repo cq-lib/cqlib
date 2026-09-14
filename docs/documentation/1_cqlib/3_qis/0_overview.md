@@ -199,3 +199,31 @@ QIS 数值结果不能替代线路可视化和单元测试。推荐在关键算�
 ·[Statevector 纯态模拟](1_statevector.md):先用理想纯态检查门序列、概率分布、采样和可观测量期望值。
 ·[DensityMatrix 混态模拟](2_density_matrix.md):学习密度矩阵、Kraus 噪声、部分迹和物理性验证。
 ·[Pauli、PauliString 与 Hamiltonian](5_pauli_and_hamiltonian.md):掌握 Pauli 表示、哈密顿量建模、期望值计算和 Trotter 演化。
+
+## 固定状态采样的随机种子
+
+四类状态对象都支持关键字参数 `seed`：
+
+```python
+from cqlib import Circuit
+from cqlib.qis import Statevector
+
+circuit = Circuit(2)
+circuit.h(0)
+circuit.cx(0, 1)
+measurement = circuit.measure_bits([0, 1])
+state = Statevector.from_circuit(circuit)
+
+shots = state.sample_shots(1000, seed=42)
+counts = state.sample(measurement, 1000, seed=42).counts
+assert counts == state.sample(measurement, 1000, seed=42).counts
+```
+
+`Statevector`、`DensityMatrix`、`DensityMatrixNoise`、`StabilizerState` 的签名一致：
+`sample_shots(shots, *, seed=None)` 和 `sample(measurement, shots, *, seed=None)`。
+seed 接受 `0..2**64-1` 的整数；省略或传入 `None` 保持无显式种子的调用方式。
+采样不修改输入状态。`DensityMatrixNoise` 的这两个方法采样已经准备好的密度矩阵，不额外施加读出误差。
+
+可复现保证限定在相同版本、模拟后端和数值运行环境下的相同输入状态：固定 seed、shots 和测量顺序，得到相同 shot 序列或 counts。改变 Rayon 采样线程数、进程或并发调度顺序不影响显式 seed 的结果。增加 shots 时原序列是新序列的前缀；`sample()` 的 counts 与同 seed 的全量 shots 按测量顺序投影后相同。
+
+这个保证针对采样步骤。状态准备中的随机测量或硬件实验仍需单独控制或保存结果。编译 seed 与采样 seed 分别设置；批量实验应为每个任务保存其 seed。不同版本、CPU 架构和模拟后端之间不承诺逐 shot 一致；顶层 `cqlib.sample()` 与状态对象也不承诺使用相同随机序列。

@@ -1,4 +1,5 @@
 // This code is part of Cqlib.
+// Modified to support reproducible state sampling.
 //
 // (C) Copyright China Telecom Quantum Group 2026
 //
@@ -36,6 +37,7 @@ use crate::device::{ExecutionResult, Outcome};
 use crate::qis::Observable;
 use crate::qis::error::QisError;
 use num_complex::Complex64;
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
 use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, HashSet};
@@ -1474,6 +1476,11 @@ impl DensityMatrix {
     /// The density matrix is projected into the subspace consistent with the
     /// outcome and renormalized: `ρ' = Π_b ρ Π_b / Tr(Π_b ρ)`.
     pub fn measure(&mut self, qubit: usize) -> Result<bool, QisError> {
+        self.measure_with_rng(qubit, &mut rand::rng())
+    }
+
+    /// Measures one qubit using the supplied random stream.
+    pub fn measure_with_rng(&mut self, qubit: usize, rng: &mut impl Rng) -> Result<bool, QisError> {
         self.validate_qubit(qubit)?;
         let dim = 1 << self.num_qubits;
         let mask = 1usize << qubit;
@@ -1484,11 +1491,7 @@ impl DensityMatrix {
             .map(|i| self.data[i * dim + i].re)
             .sum();
 
-        let outcome = {
-            use rand::Rng;
-            let mut rng = rand::rng();
-            rng.random::<f64>() < p1
-        };
+        let outcome = rng.random::<f64>() < p1;
 
         // Project and renormalise: zero rows/cols inconsistent with outcome.
         let norm = if outcome { p1 } else { 1.0 - p1 };
@@ -1546,10 +1549,15 @@ impl DensityMatrix {
     /// The density matrix is fully collapsed after this call.
     /// Use [`Outcome::is_one(q)`](crate::device::Outcome::is_one) to read qubit `q`'s result.
     pub fn measure_all(&mut self) -> Outcome {
+        self.measure_all_with_rng(&mut rand::rng())
+    }
+
+    /// Measures all qubits in storage order using the supplied random stream.
+    pub fn measure_all_with_rng(&mut self, rng: &mut impl Rng) -> Outcome {
         let num_chunks = self.num_qubits.div_ceil(64);
         let mut chunks = SmallVec::from_elem(0u64, num_chunks);
         for q in 0..self.num_qubits {
-            if self.measure(q).unwrap() {
+            if self.measure_with_rng(q, rng).unwrap() {
                 chunks[q / 64] |= 1u64 << (q % 64);
             }
         }
@@ -1575,6 +1583,23 @@ impl DensityMatrix {
     /// assert!(shots.iter().all(|v| v.is_one(0) == v.is_one(1)));
     /// ```
     pub fn sample_shots(&self, shots: usize) -> Vec<Outcome> {
+        self.sample_shots_with_seed(shots, None)
+    }
+
+    /// Samples without changing this state. An explicit seed assigns a random
+    /// stream to each shot before parallel execution, independent of scheduling.
+    pub fn sample_shots_with_seed(&self, shots: usize, seed: Option<u64>) -> Vec<Outcome> {
+        if let Some(seed) = seed {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            let seeds: Vec<u64> = (0..shots).map(|_| rng.random()).collect();
+            return seeds
+                .into_par_iter()
+                .map_with(self.clone(), |work, seed| {
+                    work.reset_from(self);
+                    work.measure_all_with_rng(&mut SmallRng::seed_from_u64(seed))
+                })
+                .collect();
+        }
         (0..shots)
             .into_par_iter()
             .map_with(self.clone(), |work, _| {
@@ -1594,10 +1619,20 @@ impl DensityMatrix {
         measurement: &Measurement,
         shots: usize,
     ) -> Result<ExecutionResult, QisError> {
+        self.sample_with_seed(measurement, shots, None)
+    }
+
+    /// Projects seeded full-state samples onto the requested measurement.
+    pub fn sample_with_seed(
+        &self,
+        measurement: &Measurement,
+        shots: usize,
+        seed: Option<u64>,
+    ) -> Result<ExecutionResult, QisError> {
         let projection = super::resolve_measurement(measurement, &self.qubit_map, self.num_qubits)?;
 
         let mut counts = HashMap::new();
-        for full in self.sample_shots(shots) {
+        for full in self.sample_shots_with_seed(shots, seed) {
             *counts.entry(projection.project(&full)).or_insert(0usize) += 1;
         }
 

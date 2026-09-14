@@ -1,4 +1,5 @@
 // This code is part of Cqlib.
+// Modified to allow repeated post-processing of collected estimates.
 //
 // (C) Copyright China Telecom Quantum Group 2026
 //
@@ -747,7 +748,7 @@ impl PyErrorMitigation {
     }
 
     fn get_mitigated(
-        &mut self,
+        &self,
         py: Python<'_>,
         process_args: PyProcessArgs,
     ) -> PyResult<PyMitigatedResult> {

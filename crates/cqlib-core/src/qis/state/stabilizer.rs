@@ -1,4 +1,5 @@
 // This code is part of Cqlib.
+// Modified to support reproducible state sampling.
 //
 // (C) Copyright China Telecom Quantum Group 2026
 //
@@ -1325,10 +1326,18 @@ impl StabilizerState {
     /// for shot in &results { assert_eq!(shot.is_one(0), shot.is_one(1)); }
     /// ```
     pub fn sample_shots(&self, shots: usize) -> Vec<Outcome> {
+        self.sample_shots_with_seed(shots, None)
+    }
+
+    /// Samples using per-shot random streams independent of Rayon scheduling.
+    /// With no seed, preserves the state's existing random stream.
+    pub fn sample_shots_with_seed(&self, shots: usize, seed: Option<u64>) -> Vec<Outcome> {
         // Derive independent seeds sequentially so the overall sequence is
         // deterministic and reproducible from the same initial RNG state.
         let seeds: Vec<u64> = {
-            let mut rng = self.rng.clone();
+            let mut rng = seed
+                .map(SmallRng::seed_from_u64)
+                .unwrap_or_else(|| self.rng.clone());
             (0..shots).map(|_| rng.random()).collect()
         };
         seeds
@@ -1381,10 +1390,20 @@ impl StabilizerState {
         measurement: &Measurement,
         shots: usize,
     ) -> Result<ExecutionResult, QisError> {
+        self.sample_with_seed(measurement, shots, None)
+    }
+
+    /// Projects seeded full-state samples onto the requested measurement.
+    pub fn sample_with_seed(
+        &self,
+        measurement: &Measurement,
+        shots: usize,
+        seed: Option<u64>,
+    ) -> Result<ExecutionResult, QisError> {
         let projection = super::resolve_measurement(measurement, &self.qubit_map, self.num_qubits)?;
 
         let mut counts = HashMap::new();
-        for full in self.sample_shots(shots) {
+        for full in self.sample_shots_with_seed(shots, seed) {
             *counts.entry(projection.project(&full)).or_insert(0usize) += 1;
         }
 

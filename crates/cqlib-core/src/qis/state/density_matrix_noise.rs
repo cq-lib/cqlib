@@ -1,4 +1,5 @@
 // This code is part of Cqlib.
+// Modified to support reproducible state sampling.
 //
 // (C) Copyright China Telecom Quantum Group 2026
 //
@@ -18,7 +19,6 @@ use crate::qis::error::QisError;
 use crate::qis::state::density_matrix::DensityMatrix;
 use ndarray::Array2;
 use num_complex::Complex64;
-use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// A density matrix quantum simulator with noise modeling capabilities.
@@ -1148,13 +1148,13 @@ impl DensityMatrixNoise {
     /// assert!(shots.iter().all(|v| v.is_one(0) == v.is_one(1)));
     /// ```
     pub fn sample_shots(&self, shots: usize) -> Vec<Outcome> {
-        (0..shots)
-            .into_par_iter()
-            .map_with(self.clone(), |work, _| {
-                work.state.reset_from(&self.state);
-                work.state.measure_all()
-            })
-            .collect()
+        self.sample_shots_with_seed(shots, None)
+    }
+
+    /// Samples the prepared density matrix with an optional seed. Like
+    /// `sample_shots`, this does not apply readout noise.
+    pub fn sample_shots_with_seed(&self, shots: usize, seed: Option<u64>) -> Vec<Outcome> {
+        self.state.sample_shots_with_seed(shots, seed)
     }
 
     /// Samples the noisy quantum state using a circuit [`Measurement`] as the output contract.
@@ -1166,11 +1166,21 @@ impl DensityMatrixNoise {
         measurement: &Measurement,
         shots: usize,
     ) -> Result<ExecutionResult, QisError> {
+        self.sample_with_seed(measurement, shots, None)
+    }
+
+    /// Projects seeded full-state samples onto the requested measurement.
+    pub fn sample_with_seed(
+        &self,
+        measurement: &Measurement,
+        shots: usize,
+        seed: Option<u64>,
+    ) -> Result<ExecutionResult, QisError> {
         let projection =
             super::resolve_measurement(measurement, &self.state.qubit_map, self.state.num_qubits)?;
 
         let mut counts = HashMap::new();
-        for full in self.sample_shots(shots) {
+        for full in self.sample_shots_with_seed(shots, seed) {
             *counts.entry(projection.project(&full)).or_insert(0usize) += 1;
         }
 

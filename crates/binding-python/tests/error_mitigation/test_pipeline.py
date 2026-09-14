@@ -1,4 +1,5 @@
 # This code is part of Cqlib.
+# Modified to verify repeated post-processing of collected estimates.
 #
 # (C) Copyright China Telecom Quantum Group 2026
 #
@@ -186,10 +187,12 @@ def test_unified_error_mitigation_zne_pipeline_and_state_errors() -> None:
     assert result.variance is None
     assert result == copy.copy(result)
 
-    with pytest.raises(em.ErrorMitigationError, match="already been completed"):
+    assert (
         mitigation.get_mitigated(
             em.ProcessArgs.zne(em.ExtrapolateMethod.polynomial(), degree=1)
         )
+        == result
+    )
 
 
 def test_unified_error_mitigation_virtual_distillation_pipeline() -> None:
@@ -217,6 +220,48 @@ def test_unified_error_mitigation_virtual_distillation_pipeline() -> None:
 
     assert result.expectation == pytest.approx(0.75)
     assert result.variance == pytest.approx(0.203125)
+    assert mitigation.get_mitigated(em.ProcessArgs.virtual_distillation()) == result
+
+
+@pytest.mark.parametrize("variance", [0.04, float("nan"), -1e-16])
+def test_unified_zne_reprocesses_without_rerunning_estimator(variance):
+    mitigation = em.ErrorMitigation(
+        single_x_circuit(), em.MitigationMethod.zne(em.ZneConfig([0, 1, 2]))
+    )
+    calls = []
+
+    def estimator(circuit, observable, shots):
+        factor = len(circuit.operations)
+        calls.append(factor)
+        assert observable is not None and shots == 128
+        # Exact quadratic data: linear intercept = 41/300; quadratic = .2.
+        # ZNE keeps its existing behavior of ignoring estimator variance.
+        return 0.2 + 0.05 * factor + 0.01 * factor**2, variance
+
+    args = em.RunArgs.zne(shots=128)
+    hamiltonian = single_qubit_z_hamiltonian()
+    mitigation.run(hamiltonian, args, estimator)
+    linear = em.ProcessArgs.zne(em.ExtrapolateMethod.polynomial(), 1)
+    quadratic = em.ProcessArgs.zne(em.ExtrapolateMethod.polynomial(), 2)
+
+    assert mitigation.get_mitigated(linear).expectation == pytest.approx(41 / 300)
+    assert mitigation.get_mitigated(quadratic).expectation == pytest.approx(0.2)
+    with pytest.raises(em.ErrorMitigationError):
+        mitigation.get_mitigated(
+            em.ProcessArgs.zne(em.ExtrapolateMethod.polynomial(), 3)
+        )
+    with pytest.raises(em.ErrorMitigationError):
+        mitigation.get_mitigated(em.ProcessArgs.virtual_distillation())
+    assert mitigation.get_mitigated(linear).expectation == pytest.approx(41 / 300)
+    assert mitigation.get_mitigated(quadratic).expectation == pytest.approx(0.2)
+
+    exponential = em.ProcessArgs.zne(em.ExtrapolateMethod.exponential())
+    assert mitigation.get_mitigated(exponential) == mitigation.get_mitigated(
+        exponential
+    )
+    with pytest.raises(em.ErrorMitigationError, match="already been completed"):
+        mitigation.run(hamiltonian, args, estimator)
+    assert calls == [1, 3, 5]
 
 
 def test_error_mitigation_rejects_invalid_inputs_and_propagates_estimator_errors() -> (

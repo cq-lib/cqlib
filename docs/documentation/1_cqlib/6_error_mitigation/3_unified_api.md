@@ -19,14 +19,30 @@ from cqlib.qis import Hamiltonian, PauliString
 每个 `ErrorMitigation` 实例遵循固定生命周期：
 
 ```text
-创建 → run() → get_mitigated() → 结束
+创建 → run() → get_mitigated()（可重复）
 ```
 
 | 规则 | 说明 |
 |------|------|
 | `run()` 只能调用一次 | 重复调用抛出 `ErrorMitigationError` |
 | 必须先 `run()` 再 `get_mitigated()` | 否则抛出 `ErrorMitigationError` |
-| `get_mitigated()` 只能调用一次 | 重复调用抛出 `ErrorMitigationError` |
+| `get_mitigated()` 可重复调用 | 每次使用同一批估计值，不再次调用 estimator |
+
+可以在同一个实例上比较不同的外推设置：
+
+```python
+# 接续下方 ZNE 示例，成功执行 mitigation.run(...) 后：
+linear = mitigation.get_mitigated(
+    em.ProcessArgs.zne(em.ExtrapolateMethod.polynomial(), degree=1)
+)
+quadratic = mitigation.get_mitigated(
+    em.ProcessArgs.zne(em.ExtrapolateMethod.polynomial(), degree=2)
+)
+```
+
+后处理参数错误不会消耗已经采集的估计值，修正参数后可以重试。
+成功后也可以再次处理；`run()` 仍然拒绝重复采集。
+内部只保留后处理需要的统计量，生成的折叠线路和副本线路不会长期保留。
 
 ---
 

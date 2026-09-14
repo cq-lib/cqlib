@@ -1,4 +1,5 @@
 # This code is part of Cqlib.
+# Modified to document repeated post-processing of collected estimates.
 #
 # (C) Copyright China Telecom Quantum Group 2026
 #
@@ -110,8 +111,8 @@ class ErrorMitigation:
     """Unified sequential mitigation pipeline.
 
     The workflow is ``run(...)`` followed by ``get_mitigated(...)``. Each
-    instance can be run and post-processed once, matching the core state
-    machine.
+    instance can be run once and post-processed repeatedly with different
+    processing arguments, without rerunning the estimator.
     """
 
     def __init__(self, circuit: Circuit, method: MitigationMethod) -> None:
@@ -126,7 +127,7 @@ class ErrorMitigation:
         """Execute the method-specific circuits with ``estimator``."""
         ...
     def get_mitigated(self, process_args: ProcessArgs) -> MitigatedResult:
-        """Post-process stored run outputs and return the final estimate."""
+        """Read stored run outputs without consuming them and return an estimate."""
         ...
     def __repr__(self) -> str: ...
     def __copy__(self) -> ErrorMitigation: ...

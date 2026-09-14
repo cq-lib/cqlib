@@ -1,4 +1,5 @@
 // This code is part of Cqlib.
+// Modified to support reproducible state sampling.
 //
 // (C) Copyright China Telecom Quantum Group 2026
 //
@@ -838,5 +839,39 @@ fn test_clifford_circuits_match_stabilizer_state() {
                 "{name}: statevector/stabilizer expectation mismatch for {obs}: {sv_exp} vs {stab_exp}"
             );
         }
+    }
+}
+
+#[test]
+fn full_measurement_uses_the_supplied_random_stream() {
+    // Extreme deterministic draws force opposite outcomes of an unbiased qubit.
+    // This detects accidentally falling back to thread-local randomness.
+    struct ConstantRng(u64);
+    impl rand::RngCore for ConstantRng {
+        fn next_u32(&mut self) -> u32 {
+            self.0 as u32
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0
+        }
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            for chunk in dest.chunks_mut(8) {
+                chunk.copy_from_slice(&self.0.to_le_bytes()[..chunk.len()]);
+            }
+        }
+    }
+    for (draw, expected) in [(0, true), (u64::MAX, false)] {
+        let mut sv = Statevector::new(1);
+        sv.apply_h(0).unwrap();
+        assert_eq!(
+            sv.measure_all_with_rng(&mut ConstantRng(draw)).is_one(0),
+            expected
+        );
+        let mut dm = DensityMatrix::new(1);
+        dm.apply_h(0).unwrap();
+        assert_eq!(
+            dm.measure_all_with_rng(&mut ConstantRng(draw)).is_one(0),
+            expected
+        );
     }
 }

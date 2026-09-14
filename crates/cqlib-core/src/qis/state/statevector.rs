@@ -1,4 +1,5 @@
 // This code is part of Cqlib.
+// Modified to support reproducible state sampling.
 //
 // (C) Copyright China Telecom Quantum Group 2026
 //
@@ -55,7 +56,7 @@ use crate::qis::error::QisError;
 use crate::qis::observable::Observable;
 use crate::qis::pauli::{PauliString, Phase};
 use num_complex::Complex64;
-use rand::Rng;
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -2797,10 +2798,15 @@ impl Statevector {
     /// The statevector is fully collapsed after this call.
     /// Use [`Outcome::is_one(q)`](crate::device::Outcome::is_one) to read qubit `q`'s result.
     pub fn measure_all(&mut self) -> Outcome {
+        self.measure_all_with_rng(&mut rand::rng())
+    }
+
+    /// Measures all qubits in storage order using the supplied random stream.
+    pub fn measure_all_with_rng(&mut self, rng: &mut impl Rng) -> Outcome {
         let num_chunks = self.num_qubits.div_ceil(64);
         let mut chunks = SmallVec::from_elem(0u64, num_chunks);
         for q in 0..self.num_qubits {
-            if self.measure(q).unwrap() {
+            if self.measure_with_rng(q, rng).unwrap() {
                 chunks[q / 64] |= 1u64 << (q % 64);
             }
         }
@@ -2826,6 +2832,23 @@ impl Statevector {
     /// assert!(shots.iter().all(|v| v.is_one(0) == v.is_one(1)));
     /// ```
     pub fn sample_shots(&self, shots: usize) -> Vec<Outcome> {
+        self.sample_shots_with_seed(shots, None)
+    }
+
+    /// Samples without changing this state. An explicit seed assigns a random
+    /// stream to each shot before parallel execution, independent of scheduling.
+    pub fn sample_shots_with_seed(&self, shots: usize, seed: Option<u64>) -> Vec<Outcome> {
+        if let Some(seed) = seed {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            let seeds: Vec<u64> = (0..shots).map(|_| rng.random()).collect();
+            return seeds
+                .into_par_iter()
+                .map_with(self.clone(), |work, seed| {
+                    work.reset_from(self);
+                    work.measure_all_with_rng(&mut SmallRng::seed_from_u64(seed))
+                })
+                .collect();
+        }
         (0..shots)
             .into_par_iter()
             .map_with(self.clone(), |work, _| {
@@ -2845,10 +2868,20 @@ impl Statevector {
         measurement: &Measurement,
         shots: usize,
     ) -> Result<ExecutionResult, QisError> {
+        self.sample_with_seed(measurement, shots, None)
+    }
+
+    /// Projects seeded full-state samples onto the requested measurement.
+    pub fn sample_with_seed(
+        &self,
+        measurement: &Measurement,
+        shots: usize,
+        seed: Option<u64>,
+    ) -> Result<ExecutionResult, QisError> {
         let projection = super::resolve_measurement(measurement, &self.qubit_map, self.num_qubits)?;
 
         let mut counts = HashMap::new();
-        for full in self.sample_shots(shots) {
+        for full in self.sample_shots_with_seed(shots, seed) {
             *counts.entry(projection.project(&full)).or_insert(0usize) += 1;
         }
 

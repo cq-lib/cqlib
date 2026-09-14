@@ -127,7 +127,7 @@ MitigatedResult(expectation, variance?)
 
 - 本模块聚焦 **ZNE** 与 **Virtual Distillation**；
 - **读出误差矫正** 不在此模块，见 Tianyan 章节 [`5_readout_mitigation.md`](../7_tianyan/5_readout_mitigation.md)；
-- 每个 `ErrorMitigation` 实例只能 `run()` 一次、`get_mitigated()` 一次。
+- 每个 `ErrorMitigation` 实例只能 `run()` 一次；`get_mitigated()` 可对同一批估计值重复执行，比较不同后处理参数。
 
 ---
 
