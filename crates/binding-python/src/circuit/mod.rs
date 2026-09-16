@@ -22,6 +22,7 @@ pub mod circuit_impl;
 pub mod circuit_to_matrix;
 pub mod classical;
 pub mod classical_expr;
+mod compat;
 pub mod control_flow;
 pub mod dag;
 pub mod error;

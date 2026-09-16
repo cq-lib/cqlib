@@ -60,6 +60,7 @@ requires a Rust toolchain.
 
 ## Documentation and support
 
+- [Legacy cqlib 1.x compatibility and migration](docs/legacy-compatibility.md)
 - [Documentation](https://qc.zdxlz.com/learn/#/resource/informationSpace?lang=zh&cId=/mkdocs/zh/cqlib/01-overview.html)
 - [Source repository](https://gitee.com/cq-lib/cqlib)
 - [Issue tracker](https://gitee.com/cq-lib/cqlib/issues)

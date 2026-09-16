@@ -10,6 +10,10 @@
 # copyright notice, and modified files need to carry a notice indicating
 # that they have been altered from the originals.
 
+from ._compat.deprecation import CqlibDeprecationWarning as CqlibDeprecationWarning
+from ._compat.operations import InstructionData as InstructionData
+from .circuits import gates as gates
+
 from .circuit import (
     Circuit as Circuit,
     CircuitDag as CircuitDag,

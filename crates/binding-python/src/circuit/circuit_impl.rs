@@ -17,6 +17,7 @@
 //! construction boundary for custom instructions and structured control flow.
 
 use crate::circuit::bit::{PyIntListOrQubitList, PyIntOrQubit, PyIntQubitList, PyQubit};
+use crate::circuit::compat;
 use crate::circuit::error::{
     CircuitError as PyCircuitError, ParameterError as PyParameterError, circuit_error_to_py_err,
 };
@@ -34,8 +35,9 @@ use cqlib_core::circuit::{
 };
 use num_complex::Complex64;
 use numpy::{PyArray2, ToPyArray};
-use pyo3::exceptions::PyIndexError;
+use pyo3::exceptions::{PyIndexError, PyTypeError};
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyTuple};
 use std::collections::HashMap;
 
 /// Python gate parameter accepted as either a finite number or a Parameter.
@@ -66,11 +68,16 @@ impl PyParamLike {
 #[derive(Debug, Clone)]
 pub struct PyCircuit {
     pub(crate) inner: Circuit,
+    /// Optional order explicitly declared by legacy construction calls.
+    pub(crate) legacy_parameter_order: Option<Vec<String>>,
 }
 
 impl From<Circuit> for PyCircuit {
     fn from(inner: Circuit) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            legacy_parameter_order: None,
+        }
     }
 }
 
@@ -78,10 +85,22 @@ impl From<Circuit> for PyCircuit {
 impl PyCircuit {
     /// Creates a circuit from a qubit count, integer IDs, or Qubit objects.
     #[new]
-    fn new(qubits: PyIntQubitList) -> PyResult<Self> {
-        Circuit::from_qubits(qubits.into())
-            .map(Self::from)
-            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    #[pyo3(signature = (qubits, parameters=None))]
+    fn compat_new(
+        qubits: PyIntQubitList,
+        parameters: Option<Vec<PyParameter>>,
+        py: Python<'_>,
+    ) -> PyResult<Self> {
+        let mut circuit = Self::new(qubits)?;
+        if let Some(parameters) = parameters {
+            compat::warn(
+                py,
+                "Circuit(..., parameters=[...])",
+                "Circuit(...) and name-based assign_parameters(bindings)",
+            )?;
+            circuit.declare_legacy_parameters(parameters)?;
+        }
+        Ok(circuit)
     }
 
     /// Builds a circuit from self-contained construction-IR operations.
@@ -199,10 +218,38 @@ impl PyCircuit {
     }
 
     /// Appends any self-contained construction-IR operation.
-    fn append(&mut self, operation: PyValueOperation) -> PyResult<()> {
-        self.inner
-            .append_value_operation(operation.inner)
-            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    #[pyo3(name = "append", signature = (operation=None, qubits=None, *, instruction=None))]
+    fn compat_append(
+        &mut self,
+        py: Python<'_>,
+        operation: Option<&Bound<'_, PyAny>>,
+        qubits: Option<&Bound<'_, PyAny>>,
+        instruction: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let operation = match (operation, instruction) {
+            (Some(_), Some(_)) => {
+                return Err(PyTypeError::new_err(
+                    "specify operation or instruction, not both",
+                ));
+            }
+            (Some(operation), None) => operation,
+            (None, Some(instruction)) => instruction,
+            (None, None) => return Err(PyTypeError::new_err("append requires an operation")),
+        };
+        if let Some(qubits) = qubits {
+            let converted = py
+                .import("cqlib._compat.operations")?
+                .getattr("operation_from_gate")?
+                .call1((operation, qubits))?
+                .extract()?;
+            compat::warn(
+                py,
+                "Circuit.append(gate, qubits)",
+                "Circuit.append_gate(gate, qubits) or append(ValueOperation(...))",
+            )?;
+            return self.append(converted);
+        }
+        self.append(operation.extract()?)
     }
 
     /// Appends a self-contained classical control-flow operation.
@@ -633,10 +680,18 @@ impl PyCircuit {
     }
 
     /// Appends an identity gate.
-    fn i(&mut self, qubit: PyIntOrQubit) -> PyResult<()> {
-        self.inner
-            .i(qubit.into())
-            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    #[pyo3(name = "i", signature = (qubit, t=None))]
+    fn compat_i(
+        &mut self,
+        py: Python<'_>,
+        qubit: PyIntOrQubit,
+        t: Option<PyParamLike>,
+    ) -> PyResult<()> {
+        if let Some(t) = t {
+            compat::warn(py, "Circuit.i(qubit, t)", "Circuit.delay(qubit, t)")?;
+            return self.delay(qubit, t);
+        }
+        self.i(qubit)
     }
 
     /// Appends a Hadamard gate.
@@ -888,10 +943,28 @@ impl PyCircuit {
     /// A non-empty list constrains optimization and reordering on exactly those qubits. An empty
     /// list creates a global barrier over every qubit in this circuit. Barriers have no physical
     /// effect on the quantum state.
-    fn barrier(&mut self, qubits: PyIntListOrQubitList) -> PyResult<()> {
-        self.inner
-            .barrier(qubits.into())
-            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    #[pyo3(name = "barrier", signature = (qubits=None, *more))]
+    fn compat_barrier(
+        &mut self,
+        py: Python<'_>,
+        qubits: Option<&Bound<'_, PyAny>>,
+        more: &Bound<'_, PyTuple>,
+    ) -> PyResult<()> {
+        if more.is_empty()
+            && let Some(qubits) = qubits
+            && let Ok(qubits) = qubits.extract::<PyIntListOrQubitList>()
+        {
+            return self.barrier(qubits);
+        }
+        let mut normalized = Vec::new();
+        if let Some(qubit) = qubits {
+            normalized.push(PyQubit::from(qubit.extract::<PyIntOrQubit>()?));
+        }
+        for qubit in more.iter() {
+            normalized.push(PyQubit::from(qubit.extract::<PyIntOrQubit>()?));
+        }
+        compat::warn(py, "Circuit.barrier(*qubits)", "Circuit.barrier([qubits])")?;
+        self.barrier(PyIntListOrQubitList::QubitList(normalized))
     }
 
     fn reset(&mut self, qubit: PyIntOrQubit) -> PyResult<()> {
@@ -918,11 +991,28 @@ impl PyCircuit {
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
 
-    fn measure(&mut self, qubit: PyIntOrQubit) -> PyResult<PyMeasurement> {
-        self.inner
-            .measure(qubit.into())
-            .map(|inner| PyMeasurement { inner })
-            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    #[pyo3(name = "measure")]
+    fn compat_measure(
+        &mut self,
+        py: Python<'_>,
+        qubit: compat::MeasureInput,
+    ) -> PyResult<Option<PyMeasurement>> {
+        match qubit {
+            compat::MeasureInput::Single(qubit) => self.measure(qubit).map(Some),
+            compat::MeasureInput::Many(qubits) => {
+                let qubits = qubits.into_iter().map(Qubit::from).collect::<Vec<_>>();
+                self.validate_legacy_measurements(&qubits)?;
+                compat::warn(
+                    py,
+                    "Circuit.measure([qubits])",
+                    "Circuit.measure(q) for each qubit, or measure_bits(qubits)",
+                )?;
+                for qubit in qubits {
+                    self.measure(PyIntOrQubit::Qubit(qubit.into()))?;
+                }
+                Ok(None)
+            }
+        }
     }
 
     fn measure_bits(&mut self, qubits: PyIntListOrQubitList) -> PyResult<PyMeasurement> {
@@ -955,17 +1045,19 @@ impl PyCircuit {
     }
 
     /// Returns an inverse circuit when every operation is reversible.
-    fn inverse(&self, py: Python<'_>) -> PyResult<Self> {
-        py.detach(|| self.inner.inverse())
-            .map(Self::from)
-            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    #[pyo3(name = "inverse")]
+    fn compat_inverse(&self, py: Python<'_>) -> PyResult<Self> {
+        let mut result = self.inverse(py)?;
+        result.legacy_parameter_order = self.legacy_parameter_order.clone();
+        Ok(result)
     }
 
     /// Recursively expands circuit-defined gates.
-    fn decompose(&self, py: Python<'_>) -> PyResult<Self> {
-        py.detach(|| self.inner.decompose())
-            .map(Self::from)
-            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    #[pyo3(name = "decompose")]
+    fn compat_decompose(&self, py: Python<'_>) -> PyResult<Self> {
+        let mut result = self.decompose(py)?;
+        result.legacy_parameter_order = self.legacy_parameter_order.clone();
+        Ok(result)
     }
 
     /// Returns a reusable circuit-defined gate.
@@ -982,38 +1074,72 @@ impl PyCircuit {
     }
 
     /// Returns a new circuit with supplied symbols numerically bound.
-    #[pyo3(signature = (bindings=None))]
-    fn assign_parameters(&self, bindings: Option<HashMap<String, f64>>) -> PyResult<Self> {
-        if let Some(value) = bindings
-            .as_ref()
-            .and_then(|bindings| bindings.values().find(|value| !value.is_finite()))
-        {
-            return Err(PyParameterError::new_err(
-                ParameterError::DomainError(format!(
-                    "parameter binding must be finite, got {value}"
-                ))
-                .to_string(),
+    #[pyo3(name = "assign_parameters", signature = (bindings=None, inplace=false, cache_params=false, *, values=None, **kwargs))]
+    fn compat_assign_parameters(
+        slf: &Bound<'_, Self>,
+        bindings: Option<&Bound<'_, PyAny>>,
+        inplace: bool,
+        cache_params: bool,
+        values: Option<&Bound<'_, PyAny>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        if cache_params {
+            return Err(PyTypeError::new_err(
+                "cache_params=True is unsupported; keep the circuit returned by assign_parameters()",
             ));
         }
-        let bindings = bindings.as_ref().map(|bindings| {
-            bindings
-                .iter()
-                .map(|(name, value)| (name.as_str(), *value))
-                .collect::<HashMap<_, _>>()
-        });
-        self.inner
-            .assign_parameters(&bindings)
-            .map(Self::from)
-            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+        let circuit = slf.try_borrow()?;
+        let native_bindings = bindings
+            .map(|bindings| bindings.extract::<HashMap<String, f64>>())
+            .transpose();
+        let legacy = inplace
+            || values.is_some()
+            || kwargs.is_some_and(|kwargs| !kwargs.is_empty())
+            || native_bindings.is_err();
+        let bindings = if legacy {
+            let normalized = py
+                .import("cqlib._compat.parameters")?
+                .getattr("normalize")?
+                .call1((
+                    bindings,
+                    values,
+                    kwargs,
+                    circuit.legacy_parameter_order.clone(),
+                    circuit.used_symbols(),
+                ))?
+                .extract::<HashMap<String, f64>>()?;
+            compat::warn(
+                py,
+                "legacy Circuit.assign_parameters arguments",
+                "assign_parameters({symbol_name: value})",
+            )?;
+            Some(normalized)
+        } else {
+            native_bindings?
+        };
+        let mut result = circuit.assign_parameters(bindings)?;
+        result.legacy_parameter_order = circuit.legacy_parameter_order.clone();
+        drop(circuit);
+        if inplace {
+            *slf.try_borrow_mut()? = result;
+            Ok(slf.clone().unbind())
+        } else {
+            Py::new(py, result)
+        }
     }
 
     /// Appends another circuit, optionally remapping its qubits.
-    #[pyo3(signature = (other, qubits=None))]
-    fn compose(&mut self, other: &PyCircuit, qubits: Option<PyIntListOrQubitList>) -> PyResult<()> {
-        let qubits = qubits.map(Vec::from);
-        self.inner
-            .compose(&other.inner, qubits.as_deref())
-            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    #[pyo3(name = "compose", signature = (other, qubits=None))]
+    fn compat_compose(
+        &mut self,
+        other: &PyCircuit,
+        qubits: Option<PyIntListOrQubitList>,
+    ) -> PyResult<()> {
+        let order = self.merged_legacy_order(other);
+        self.compose(other, qubits)?;
+        self.legacy_parameter_order = order;
+        Ok(())
     }
 
     /// Computes the dense numeric unitary matrix.
@@ -1096,6 +1222,215 @@ impl PyCircuit {
             self.inner.num_qubits(),
             self.inner.operations().len()
         )
+    }
+    /// Adds one qubit through the existing bulk builder.
+    fn add_qubit(&mut self, qubit: PyIntOrQubit) -> PyResult<()> {
+        self.add_qubits(PyIntListOrQubitList::QubitList(vec![qubit.into()]))
+    }
+
+    /// Declares a symbol for deprecated positional parameter binding.
+    fn add_parameter(&mut self, py: Python<'_>, parameter: PyParameter) -> PyResult<()> {
+        compat::warn(
+            py,
+            "Circuit.add_parameter(parameter)",
+            "symbolic gate parameters and name-based assign_parameters(bindings)",
+        )?;
+        self.declare_legacy_parameters(vec![parameter])
+    }
+
+    /// Deprecated alias for sdg.
+    fn sd(&mut self, py: Python<'_>, qubit: PyIntOrQubit) -> PyResult<()> {
+        compat::warn(py, "Circuit.sd(qubit)", "Circuit.sdg(qubit)")?;
+        self.sdg(qubit)
+    }
+
+    /// Deprecated alias for tdg.
+    fn td(&mut self, py: Python<'_>, qubit: PyIntOrQubit) -> PyResult<()> {
+        compat::warn(py, "Circuit.td(qubit)", "Circuit.tdg(qubit)")?;
+        self.tdg(qubit)
+    }
+
+    /// Inserts a barrier over all current qubits.
+    fn barrier_all(&mut self) -> PyResult<()> {
+        self.barrier(PyIntListOrQubitList::QubitList(self.qubits()))
+    }
+
+    /// Measures unmeasured qubits of a static circuit with terminal measurements.
+    fn measure_all(&mut self) -> PyResult<()> {
+        let measured = self.legacy_terminal_measurements()?;
+        let qubits = self
+            .inner
+            .qubits()
+            .into_iter()
+            .filter(|q| !measured.contains(q))
+            .collect::<Vec<_>>();
+        self.validate_legacy_measurements(&qubits)?;
+        for qubit in qubits {
+            self.measure(PyIntOrQubit::Qubit(qubit.into()))?;
+        }
+        Ok(())
+    }
+
+    /// Deprecated alias accepting the native operation returned by InstructionData.
+    fn append_instruction_data(
+        &mut self,
+        py: Python<'_>,
+        instruction_data: PyValueOperation,
+    ) -> PyResult<()> {
+        compat::warn(
+            py,
+            "Circuit.append_instruction_data(operation)",
+            "Circuit.append(operation)",
+        )?;
+        self.append(instruction_data)
+    }
+
+    /// Returns an independent circuit, like copy.copy(circuit).
+    fn copy(&self) -> Self {
+        self.clone()
+    }
+
+    fn __add__(&self, other: &PyCircuit) -> PyResult<Self> {
+        let mut result = self.clone();
+        result.compat_compose(other, None)?;
+        Ok(result)
+    }
+
+    fn __iadd__(slf: &Bound<'_, Self>, other: &Bound<'_, Self>) -> PyResult<()> {
+        // Read before borrowing self mutably, including for circuit += circuit.
+        let other = other.try_borrow()?.clone();
+        // Validate on a disposable copy, preserving self and its classical ID on failure.
+        let mut probe = slf.try_borrow()?.clone();
+        probe.compose(&other, None)?;
+        slf.try_borrow_mut()?.compat_compose(&other, None)
+    }
+
+    /// Deprecated QCIS string loader (not a filename loader).
+    #[staticmethod]
+    fn load(py: Python<'_>, text: &str) -> PyResult<Self> {
+        compat::warn(py, "Circuit.load(text)", "cqlib.ir.qcis.loads(text)")?;
+        crate::ir::qcis::py_qcis_loads(text)
+    }
+
+    /// Deprecated view using the native QCIS serializer.
+    #[getter]
+    fn qcis(&self, py: Python<'_>) -> PyResult<String> {
+        compat::warn(py, "Circuit.qcis", "cqlib.ir.qcis.dumps(circuit)")?;
+        crate::ir::qcis::py_qcis_dumps(self)
+    }
+
+    /// Deprecated QCIS string export. Historical lowering modes are unsupported.
+    fn as_str(&self, py: Python<'_>) -> PyResult<String> {
+        compat::warn(py, "Circuit.as_str()", "cqlib.ir.qcis.dumps(circuit)")?;
+        crate::ir::qcis::py_qcis_dumps(self)
+    }
+
+    /// Deprecated QASM2 string export.
+    fn to_qasm2(&self, py: Python<'_>) -> PyResult<String> {
+        compat::warn(py, "Circuit.to_qasm2()", "cqlib.ir.qasm2.dumps(circuit)")?;
+        crate::ir::qasm2::py_qasm2_dumps(self)
+    }
+
+    /// Deprecated convenience for the native text drawer.
+    #[pyo3(signature = (category="text", **kwargs))]
+    fn draw(
+        slf: &Bound<'_, Self>,
+        category: &str,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        if category != "text" {
+            return Err(PyTypeError::new_err(
+                "legacy draw supports category='text' only; use cqlib.visualization.draw_figure for SVG",
+            ));
+        }
+        compat::warn(
+            slf.py(),
+            "Circuit.draw()",
+            "cqlib.visualization.draw_text(circuit)",
+        )?;
+        Ok(slf
+            .py()
+            .import("cqlib.visualization")?
+            .getattr("draw_text")?
+            .call((slf,), kwargs)?
+            .unbind())
+    }
+}
+
+// Existing implementation paths, called unchanged by compatibility entry points.
+impl PyCircuit {
+    fn new(qubits: PyIntQubitList) -> PyResult<Self> {
+        Circuit::from_qubits(qubits.into())
+            .map(Self::from)
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    fn append(&mut self, operation: PyValueOperation) -> PyResult<()> {
+        self.inner
+            .append_value_operation(operation.inner)
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    fn i(&mut self, qubit: PyIntOrQubit) -> PyResult<()> {
+        self.inner
+            .i(qubit.into())
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    fn barrier(&mut self, qubits: PyIntListOrQubitList) -> PyResult<()> {
+        self.inner
+            .barrier(qubits.into())
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    fn measure(&mut self, qubit: PyIntOrQubit) -> PyResult<PyMeasurement> {
+        self.inner
+            .measure(qubit.into())
+            .map(|inner| PyMeasurement { inner })
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    fn inverse(&self, py: Python<'_>) -> PyResult<Self> {
+        py.detach(|| self.inner.inverse())
+            .map(Self::from)
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    fn decompose(&self, py: Python<'_>) -> PyResult<Self> {
+        py.detach(|| self.inner.decompose())
+            .map(Self::from)
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    fn assign_parameters(&self, bindings: Option<HashMap<String, f64>>) -> PyResult<Self> {
+        if let Some(value) = bindings
+            .as_ref()
+            .and_then(|bindings| bindings.values().find(|value| !value.is_finite()))
+        {
+            return Err(PyParameterError::new_err(
+                ParameterError::DomainError(format!(
+                    "parameter binding must be finite, got {value}"
+                ))
+                .to_string(),
+            ));
+        }
+        let bindings = bindings.as_ref().map(|bindings| {
+            bindings
+                .iter()
+                .map(|(name, value)| (name.as_str(), *value))
+                .collect::<HashMap<_, _>>()
+        });
+        self.inner
+            .assign_parameters(&bindings)
+            .map(Self::from)
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    fn compose(&mut self, other: &PyCircuit, qubits: Option<PyIntListOrQubitList>) -> PyResult<()> {
+        let qubits = qubits.map(Vec::from);
+        self.inner
+            .compose(&other.inner, qubits.as_deref())
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
 }
 

@@ -13,6 +13,8 @@
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _distribution_version
 
+from ._compat.deprecation import CqlibDeprecationWarning
+
 from .circuit import (
     Circuit,
     CircuitDag,
@@ -74,6 +76,7 @@ except PackageNotFoundError:
     __version__ = "0+unknown"
 
 __all__ = [
+    "CqlibDeprecationWarning",
     "sample",
     "__version__",
     "Circuit",
@@ -122,3 +125,16 @@ __all__ = [
     "Statevector",
     "TrotterMode",
 ]
+
+
+def __getattr__(name):
+    """Resolve selected legacy exports without changing native type identities."""
+    if name == "gates":
+        from importlib import import_module
+
+        return import_module("cqlib.circuits.gates")
+    if name == "InstructionData":
+        from ._compat.operations import InstructionData
+
+        return InstructionData
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

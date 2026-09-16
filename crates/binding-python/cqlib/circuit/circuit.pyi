@@ -40,7 +40,9 @@ Type aliases for gate arguments
 """
 
 import numpy as np
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
+from typing import Literal, overload
+from typing_extensions import deprecated
 from numpy.typing import NDArray
 from .bit import Qubit
 from .classical import CircuitId, ClassicalType, ClassicalVar, Measurement
@@ -48,7 +50,7 @@ from .classical_expr import ClassicalExpr
 from .control_flow import ClassicalControlOp
 from .dag import CircuitDag
 from .gates import CircuitGate, MCGate, StandardGate, UnitaryGate
-from .operation import ValueOperation
+from .operation import Instruction, ValueOperation
 from .parameter import Parameter
 from .symbolic_matrix import SymbolicMatrix
 
@@ -56,6 +58,8 @@ QubitLike = int | Qubit
 QubitInput = int | list[int] | list[Qubit]
 QubitList = list[int] | list[Qubit]
 ParamLike = float | Parameter
+LegacyBindings = Mapping[str | Parameter, float] | Sequence[float]
+LegacyQubits = QubitLike | Sequence[QubitLike]
 
 class _SwitchBuilder:
     """Temporary case collector passed only to :meth:`Circuit.switch` callbacks.
@@ -120,7 +124,13 @@ class Circuit:
     ``Circuit`` objects.
     """
 
-    def __init__(self, qubits: QubitInput) -> None:
+    @overload
+    @deprecated(
+        "Use symbolic gate parameters and name-based assign_parameters(bindings)"
+    )
+    def __init__(self, qubits: QubitInput, parameters: Sequence[Parameter]) -> None: ...
+    @overload
+    def __init__(self, qubits: QubitInput, parameters: None = ...) -> None:
         """Create a circuit.
 
         Args:
@@ -234,6 +244,17 @@ class Circuit:
     def add_qubits(self, qubits: QubitList) -> None:
         """Add qubits while preserving existing circuit data."""
         ...
+    @overload
+    @deprecated("Use append_gate(gate, qubits) or append(ValueOperation(...))")
+    def append(
+        self, operation: StandardGate | MCGate | Instruction, qubits: LegacyQubits
+    ) -> None: ...
+    @overload
+    @deprecated("Use append_gate(gate, qubits) or append(ValueOperation(...))")
+    def append(
+        self, *, instruction: StandardGate | MCGate | Instruction, qubits: LegacyQubits
+    ) -> None: ...
+    @overload
     def append(self, operation: ValueOperation) -> None:
         """Append any self-contained construction-IR operation."""
         ...
@@ -365,7 +386,11 @@ class Circuit:
             params: Parameter bindings for the sub-circuit's free symbols.
         """
         ...
-    def i(self, qubit: QubitLike) -> None:
+    @overload
+    @deprecated("Use delay(qubit, t)")
+    def i(self, qubit: QubitLike, t: ParamLike) -> None: ...
+    @overload
+    def i(self, qubit: QubitLike, t: None = ...) -> None:
         """Append an identity (no-op) gate."""
         ...
     def h(self, qubit: QubitLike) -> None:
@@ -571,6 +596,13 @@ class Circuit:
             phi: Rotation-axis angle in the XY plane (float or :class:`Parameter`).
         """
         ...
+    @overload
+    @deprecated("Use barrier([qubits])")
+    def barrier(self, qubits: QubitLike, *more: QubitLike) -> None: ...
+    @overload
+    @deprecated("Use barrier_all() or barrier([])")
+    def barrier(self) -> None: ...
+    @overload
     def barrier(self, qubits: QubitList) -> None:
         """Insert a barrier preventing gate reordering across the listed qubits.
 
@@ -599,6 +631,10 @@ class Circuit:
     def store(self, target: ClassicalVar, value: ClassicalExpr) -> None:
         """Store a classical expression into a variable."""
         ...
+    @overload
+    @deprecated("Use measure(q) for each qubit, or measure_bits(qubits)")
+    def measure(self, qubit: Sequence[QubitLike]) -> None: ...
+    @overload
     def measure(self, qubit: QubitLike) -> Measurement:
         """Measure a single qubit and return a :class:`Measurement` receipt."""
         ...
@@ -624,6 +660,7 @@ class Circuit:
     def to_gate(self, name: str) -> CircuitGate:
         """Convert this circuit into a reusable :class:`CircuitGate`."""
         ...
+    @overload
     def assign_parameters(self, bindings: dict[str, float] | None = ...) -> Circuit:
         """Return a new circuit with symbolic parameters numerically bound.
 
@@ -637,6 +674,17 @@ class Circuit:
             ParameterError: If any binding value is non-finite (NaN, Inf).
         """
         ...
+    @overload
+    @deprecated("Use assign_parameters({symbol_name: value})")
+    def assign_parameters(
+        self,
+        bindings: LegacyBindings | None = ...,
+        inplace: bool = ...,
+        cache_params: Literal[False] = ...,
+        *,
+        values: LegacyBindings | None = ...,
+        **kwargs: float,
+    ) -> Circuit: ...
     def compose(self, other: Circuit, qubits: QubitList | None = ...) -> None:
         """Append another circuit, optionally remapping its qubits."""
         ...
@@ -683,3 +731,42 @@ class Circuit:
     def __copy__(self) -> Circuit: ...
     def __deepcopy__(self, memo: dict) -> Circuit: ...
     def __repr__(self) -> str: ...
+    def add_qubit(self, qubit: QubitLike) -> None: ...
+    @deprecated(
+        "Use symbolic gate parameters and name-based assign_parameters(bindings)"
+    )
+    def add_parameter(self, parameter: Parameter) -> None: ...
+    @deprecated("Use sdg(qubit)")
+    def sd(self, qubit: QubitLike) -> None: ...
+    @deprecated("Use tdg(qubit)")
+    def td(self, qubit: QubitLike) -> None: ...
+    def barrier_all(self) -> None: ...
+    def measure_all(self) -> None:
+        """Measure unmeasured qubits of a static circuit with terminal measurements."""
+        ...
+    @deprecated("Use append(operation)")
+    def append_instruction_data(self, instruction_data: ValueOperation) -> None: ...
+    def copy(self) -> Circuit: ...
+    def __add__(self, other: Circuit) -> Circuit: ...
+    def __iadd__(self, other: Circuit) -> Circuit: ...
+    @staticmethod
+    @deprecated("Use cqlib.ir.qcis.loads(text)")
+    def load(text: str) -> Circuit: ...
+    @property
+    @deprecated("Use cqlib.ir.qcis.dumps(circuit)")
+    def qcis(self) -> str: ...
+    @deprecated("Use cqlib.ir.qcis.dumps(circuit)")
+    def as_str(self) -> str: ...
+    @deprecated("Use cqlib.ir.qasm2.dumps(circuit)")
+    def to_qasm2(self) -> str: ...
+    @deprecated("Use cqlib.visualization.draw_text(circuit)")
+    def draw(
+        self,
+        category: Literal["text"] = ...,
+        *,
+        line_width: int | None = ...,
+        initial_state: bool = ...,
+        reverse_bits: bool = ...,
+        show_params: bool = ...,
+        decompose_circuit_gates: bool = ...,
+    ) -> str: ...

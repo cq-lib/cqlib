@@ -489,7 +489,7 @@ impl PyPauliEvolutionAnsatz {
     fn build_circuit(&self, prefix: &str) -> PyResult<PyCircuit> {
         self.inner
             .build_circuit(prefix)
-            .map(|c| PyCircuit { inner: c })
+            .map(PyCircuit::from)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 

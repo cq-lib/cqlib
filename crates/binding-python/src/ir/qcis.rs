@@ -86,7 +86,7 @@ use pyo3::prelude::*;
 #[pyfunction(name = "loads")]
 pub fn py_qcis_loads(qcis: &str) -> PyResult<PyCircuit> {
     match qcis_loads(qcis) {
-        Ok(c) => Ok(PyCircuit { inner: c }),
+        Ok(c) => Ok(PyCircuit::from(c)),
         Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "QCIS parse error: {}",
             e
@@ -114,7 +114,7 @@ pub fn py_qcis_loads(qcis: &str) -> PyResult<PyCircuit> {
 #[pyfunction(name = "load")]
 pub fn py_qcis_load(path: &str) -> PyResult<PyCircuit> {
     match qcis_load(path) {
-        Ok(c) => Ok(PyCircuit { inner: c }),
+        Ok(c) => Ok(PyCircuit::from(c)),
         Err(QcisParseError::IoError(e)) => Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(
             format!("QCIS load error: {}", e),
         )),

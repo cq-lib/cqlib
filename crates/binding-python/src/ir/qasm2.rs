@@ -73,7 +73,7 @@ use pyo3::prelude::*;
 #[pyfunction(name = "loads")]
 pub fn py_qasm2_loads(qasm: &str) -> PyResult<PyCircuit> {
     match qasm2_loads(qasm) {
-        Ok(circuit) => Ok(PyCircuit { inner: circuit }),
+        Ok(circuit) => Ok(PyCircuit::from(circuit)),
         Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "QASM parse error: {}",
             e
@@ -101,7 +101,7 @@ pub fn py_qasm2_loads(qasm: &str) -> PyResult<PyCircuit> {
 #[pyfunction(name = "load")]
 pub fn py_qasm2_load(path: &str) -> PyResult<PyCircuit> {
     match qasm2_load(path) {
-        Ok(circuit) => Ok(PyCircuit { inner: circuit }),
+        Ok(circuit) => Ok(PyCircuit::from(circuit)),
         Err(QasmParseError::IoError(e)) => Err(PyErr::new::<pyo3::exceptions::PyIOError, _>(
             format!("QASM load error: {}", e),
         )),

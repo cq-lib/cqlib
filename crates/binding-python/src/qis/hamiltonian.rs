@@ -434,7 +434,7 @@ impl PyHamiltonian {
             .to_trotter_circuit(time, steps, mode.inner)
             .map_err(qis_error_to_py_err)?;
 
-        Ok(PyCircuit { inner: circuit })
+        Ok(PyCircuit::from(circuit))
     }
 
     /// Converts the Hamiltonian to a time evolution circuit.
@@ -452,7 +452,7 @@ impl PyHamiltonian {
             .to_evolution_circuit(time, steps, mode.inner)
             .map_err(qis_error_to_py_err)?;
 
-        Ok(PyCircuit { inner: circuit })
+        Ok(PyCircuit::from(circuit))
     }
 
     /// Returns a copy of this Hamiltonian.
