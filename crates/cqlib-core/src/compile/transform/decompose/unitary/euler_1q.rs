@@ -13,7 +13,7 @@
 //! Parameter-aware numeric one-qubit Euler synthesis.
 //!
 //! Given one numeric `U(theta, phi, lambda)` decomposition, this module emits
-//! candidate gate sequences for the half-rotation target families. Every
+//! candidate gate sequences for continuous-axis and half-rotation families. Every
 //! template below is derived from Cqlib's own gate matrices:
 //!
 //! ```text
@@ -34,14 +34,14 @@ use smallvec::SmallVec;
 use crate::circuit::StandardGate;
 use crate::compile::{CompilerError, PARAMETER_EQ_TOLERANCE};
 
-use super::unitary_1q::OneQubitUnitaryDecomposition;
+use super::unitary_1q::{OneQubitUnitaryDecomposition, synthesize_numeric_1q_unitary};
 
 const TWO_PI: f64 = 2.0 * PI;
 
-/// Tolerance for the degenerate-angle branches and near-zero RZ elision.
+/// Tolerance for the degenerate-angle branches and near-zero rotation elision.
 const EULER_ANGLE_EPS: f64 = PARAMETER_EQ_TOLERANCE;
 
-/// Half-rotation gate families a target basis can support.
+/// Euler gate families a target basis can support.
 ///
 /// Declaration order is the deterministic tie-break order between equally
 /// costly candidates.
@@ -55,10 +55,12 @@ pub(crate) enum Euler1qFamily {
     Zxpm,
     /// `{RZ, X2P, X2M, X}`: `Zxpm` plus a native Pauli X.
     Zxpmx,
+    /// `{RX, RY}`: continuous rotations about the X and Y axes.
+    Xyx,
 }
 
-/// One synthesized gate: `RZ(param)` when `param` is set, otherwise a fixed
-/// half rotation or Pauli gate.
+/// One synthesized gate: an axis rotation when `param` is set, otherwise a
+/// fixed half rotation or Pauli gate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Euler1qGate {
     pub gate: StandardGate,
@@ -101,6 +103,7 @@ impl Euler1qFamily {
                 StandardGate::X2M,
                 StandardGate::X,
             ],
+            Self::Xyx => &[StandardGate::RX, StandardGate::RY],
         }
     }
 
@@ -129,19 +132,34 @@ fn push_normalized_rz(
     gates: &mut SmallVec<[Euler1qGate; 5]>,
     phase: &mut f64,
 ) -> Result<(), CompilerError> {
+    push_normalized_rotation(StandardGate::RZ, angle, gates, phase)
+}
+
+/// All axis rotations obey `R(a + 2*pi*k) = (-1)^k * R(a)`.
+fn normalize_rotation_angle(angle: f64, phase: &mut f64) -> Result<f64, CompilerError> {
     if !angle.is_finite() {
         return Err(CompilerError::InvalidInput(format!(
-            "euler 1q synthesis received a non-finite RZ angle: {angle}"
+            "euler 1q synthesis received a non-finite rotation angle: {angle}"
         )));
     }
     let k = ((angle - PI) / TWO_PI).ceil();
     let normalized = angle - TWO_PI * k;
     *phase += k * PI;
+    Ok(normalized)
+}
+
+fn push_normalized_rotation(
+    gate: StandardGate,
+    angle: f64,
+    gates: &mut SmallVec<[Euler1qGate; 5]>,
+    phase: &mut f64,
+) -> Result<(), CompilerError> {
+    let normalized = normalize_rotation_angle(angle, phase)?;
     if normalized.abs() <= EULER_ANGLE_EPS {
         return Ok(());
     }
     gates.push(Euler1qGate {
-        gate: StandardGate::RZ,
+        gate,
         param: Some(normalized),
     });
     Ok(())
@@ -149,6 +167,66 @@ fn push_normalized_rz(
 
 fn push_fixed(gates: &mut SmallVec<[Euler1qGate; 5]>, gate: StandardGate) {
     gates.push(Euler1qGate { gate, param: None });
+}
+
+/// Change coordinates with H, synthesize ZYZ, and change back using
+/// H*RZ(a)*H = RX(a) and H*RY(a)*H = RY(-a). H is only used to compute
+/// angles; the emitted sequence contains RX/RY alone.
+fn synthesize_xyx(
+    decomposition: OneQubitUnitaryDecomposition,
+) -> Result<Euler1qCandidate, CompilerError> {
+    let matrix = StandardGate::U
+        .matrix(&[decomposition.theta, decomposition.phi, decomposition.lambda])
+        .map_err(CompilerError::Circuit)?;
+    let h = StandardGate::H
+        .matrix(&[])
+        .map_err(CompilerError::Circuit)?;
+    let rotated = h.dot(matrix.as_ref()).dot(h.as_ref());
+    let zyz = synthesize_numeric_1q_unitary(&rotated)?;
+    // The U convention contributes exp(i*(phi+lambda)/2) in addition to
+    // both the input decomposition's phase and the rotated matrix's phase.
+    let mut phase = decomposition.global_phase + zyz.global_phase + (zyz.phi + zyz.lambda) / 2.0;
+    let mut gates = SmallVec::new();
+
+    if zyz.theta.abs() <= EULER_ANGLE_EPS {
+        // RX(phi) * RX(lambda), including scalar identities such as -I.
+        push_normalized_rotation(
+            StandardGate::RX,
+            zyz.lambda + zyz.phi,
+            &mut gates,
+            &mut phase,
+        )?;
+    } else if (zyz.theta - PI).abs() <= EULER_ANGLE_EPS {
+        // RX(phi) * RY(-pi) = RY(-pi) * RX(-phi).
+        push_normalized_rotation(
+            StandardGate::RX,
+            zyz.lambda - zyz.phi,
+            &mut gates,
+            &mut phase,
+        )?;
+        push_normalized_rotation(StandardGate::RY, -zyz.theta, &mut gates, &mut phase)?;
+    } else {
+        let mut first = normalize_rotation_angle(zyz.lambda, &mut phase)?;
+        let mut last = normalize_rotation_angle(zyz.phi, &mut phase)?;
+        let mut middle = -zyz.theta;
+        if (first.abs() - PI).abs() <= EULER_ANGLE_EPS || (last.abs() - PI).abs() <= EULER_ANGLE_EPS
+        {
+            // Shifting both X angles by pi and reversing the Y angle changes
+            // the sequence's sign. Compensate it and eliminate the pi endpoint.
+            first += PI;
+            last += PI;
+            middle = -middle;
+            phase += PI;
+        }
+        push_normalized_rotation(StandardGate::RX, first, &mut gates, &mut phase)?;
+        push_normalized_rotation(StandardGate::RY, middle, &mut gates, &mut phase)?;
+        push_normalized_rotation(StandardGate::RX, last, &mut gates, &mut phase)?;
+    }
+    Ok(Euler1qCandidate {
+        gates,
+        global_phase: phase,
+        family: Euler1qFamily::Xyx,
+    })
 }
 
 /// Enumerates one synthesis candidate per family supported by the available
@@ -162,7 +240,7 @@ fn push_fixed(gates: &mut SmallVec<[Euler1qGate; 5]>, gate: StandardGate) {
 /// # Errors
 ///
 /// Returns [`CompilerError::InvalidInput`] when any decomposition angle or
-/// derived RZ angle is not finite.
+/// derived rotation angle is not finite.
 pub(crate) fn synthesize_euler_1q_candidates(
     decomposition: OneQubitUnitaryDecomposition,
     is_available: &dyn Fn(StandardGate) -> bool,
@@ -192,8 +270,13 @@ pub(crate) fn synthesize_euler_1q_candidates(
         Euler1qFamily::Zsxx,
         Euler1qFamily::Zxpm,
         Euler1qFamily::Zxpmx,
+        Euler1qFamily::Xyx,
     ] {
         if !family.is_supported_by(is_available) {
+            continue;
+        }
+        if family == Euler1qFamily::Xyx {
+            candidates.push(synthesize_xyx(decomposition)?);
             continue;
         }
         let mut gates = SmallVec::new();

@@ -20,9 +20,9 @@
 //!
 //! One parameter-aware specialization sits on top of the static rule graph:
 //! fixed-parameter `U` gates are re-synthesized numerically by the `euler_1q`
-//! module so degenerate angles collapse to the shortest half-rotation
-//! sequence. The dynamic candidate is used only when its physical output cost
-//! is strictly below the static plan's; ties keep the static path.
+//! module using continuous-axis or half-rotation candidates with degenerate
+//! angles simplified. The dynamic candidate is used only when its physical
+//! output cost is strictly below the static plan's; ties keep the static path.
 
 use crate::circuit::{
     Circuit, ClassicalControlOp, Instruction, Operation, Parameter, ParameterValue, Qubit,

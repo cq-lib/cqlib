@@ -21,7 +21,10 @@ use super::{
     synthesize_euler_1q_candidates,
 };
 use crate::circuit::StandardGate;
-use crate::compile::transform::decompose::unitary::unitary_1q::OneQubitUnitaryDecomposition;
+use crate::circuit::test_utils::assert_matrix_approx_eq;
+use crate::compile::transform::decompose::unitary::unitary_1q::{
+    OneQubitUnitaryDecomposition, synthesize_numeric_1q_unitary,
+};
 
 const MATRIX_EQ_EPS: f64 = 1e-12;
 
@@ -354,6 +357,12 @@ fn family_selection_follows_available_gates() {
         families_of(&[StandardGate::RZ, StandardGate::X2M]).is_empty(),
         "no complete family means an empty candidate list"
     );
+    assert_eq!(
+        families_of(&[StandardGate::RX, StandardGate::RY]),
+        vec![Euler1qFamily::Xyx]
+    );
+    assert!(families_of(&[StandardGate::RX]).is_empty());
+    assert!(families_of(&[StandardGate::RY]).is_empty());
 }
 
 #[test]
@@ -364,6 +373,8 @@ fn synthesis_is_deterministic() {
         StandardGate::X2P,
         StandardGate::X2M,
         StandardGate::X,
+        StandardGate::RX,
+        StandardGate::RY,
     ]);
     let first = synthesize_euler_1q_candidates(decomposition, &gates).unwrap();
     let second = synthesize_euler_1q_candidates(decomposition, &gates).unwrap();
@@ -393,6 +404,8 @@ fn random_unitaries_match_source_matrix_including_global_phase() {
         StandardGate::X2P,
         StandardGate::X2M,
         StandardGate::X,
+        StandardGate::RX,
+        StandardGate::RY,
     ]);
     for sample in 0..200 {
         let decomposition = OneQubitUnitaryDecomposition {
@@ -402,9 +415,93 @@ fn random_unitaries_match_source_matrix_including_global_phase() {
             global_phase: rng.range(-PI, PI),
         };
         let candidates = synthesize_euler_1q_candidates(decomposition, &gates).unwrap();
-        assert_eq!(candidates.len(), 4, "sample {sample}");
+        assert_eq!(candidates.len(), 5, "sample {sample}");
         for candidate in &candidates {
             assert_candidate_equivalent(candidate, &decomposition);
+        }
+    }
+}
+
+#[test]
+fn generic_u_has_three_gate_xyx_candidate() {
+    let source = decomposition(0.37, 0.23, 0.29);
+    let candidates =
+        synthesize_euler_1q_candidates(source, &available(&[StandardGate::RX, StandardGate::RY]))
+            .unwrap();
+    let candidate = &candidates[0];
+    assert_eq!(candidate.physical_cost(), (3, 3));
+    assert_eq!(
+        candidate
+            .gates
+            .iter()
+            .map(|gate| gate.gate)
+            .collect::<Vec<_>>(),
+        [StandardGate::RX, StandardGate::RY, StandardGate::RX]
+    );
+    assert_candidate_equivalent(candidate, &source);
+}
+
+fn assert_xyx_synthesis(first: f64, middle: f64, last: f64, expected_ops: usize) {
+    let source = StandardGate::RX
+        .matrix(&[last])
+        .unwrap()
+        .dot(StandardGate::RY.matrix(&[middle]).unwrap().as_ref())
+        .dot(StandardGate::RX.matrix(&[first]).unwrap().as_ref())
+        * Complex64::new(0.0, 0.37).exp();
+    let candidates = synthesize_euler_1q_candidates(
+        synthesize_numeric_1q_unitary(&source).unwrap(),
+        &available(&[StandardGate::RX, StandardGate::RY]),
+    )
+    .unwrap();
+    let candidate = &candidates[0];
+    assert_eq!(
+        candidate.gates.len(),
+        expected_ops,
+        "XYX({first}, {middle}, {last}): {candidate:?}"
+    );
+    assert_matrix_approx_eq(&candidate_matrix(candidate), &source, MATRIX_EQ_EPS);
+    for gate in &candidate.gates {
+        let angle = gate.param.unwrap();
+        assert!(angle > -PI && angle <= PI);
+        assert!(angle.abs() > EULER_ANGLE_EPS);
+    }
+}
+
+#[test]
+fn xyx_simplifies_degenerate_angles_including_scalar_phases() {
+    for (first, middle, last, count) in [
+        (0.0, 0.0, 0.0, 0),
+        (0.0, 0.0, 2.0 * PI, 0),
+        (0.0, 0.0, -2.0 * PI, 0),
+        (0.23, 0.0, 0.29, 1),
+        (0.23, 2.0 * PI, -0.23, 0),
+        (0.0, 0.37, 0.0, 1),
+        (0.0, -0.37, 0.0, 1),
+        (0.23, PI, 0.23, 1),
+        (0.23, -PI, 0.29, 2),
+        (0.23, 0.37, 0.0, 2),
+        (0.0, 0.37, 0.29, 2),
+        (PI, 0.37, PI, 1),
+        (PI, 0.37, 0.29, 2),
+        (0.23, 0.37, -PI, 2),
+    ] {
+        assert_xyx_synthesis(first, middle, last, count);
+    }
+}
+
+#[test]
+fn xyx_preserves_angles_near_degenerate_values() {
+    for delta in [-5e-9, 5e-9] {
+        for (first, middle, last) in [
+            (0.23, delta, 0.29),
+            (0.23, PI + delta, 0.29),
+            (0.23, -PI + delta, 0.29),
+            (delta, 0.37, 0.29),
+            (0.23, 0.37, delta),
+            (PI + delta, 0.37, 0.29),
+            (0.23, 0.37, -PI + delta),
+        ] {
+            assert_xyx_synthesis(first, middle, last, 3);
         }
     }
 }

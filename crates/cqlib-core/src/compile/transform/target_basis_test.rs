@@ -12,7 +12,9 @@
 // that they have been altered from the originals.
 
 use super::{TargetBasisCostModel, TargetBasisLowerer};
+use crate::circuit::circuit_to_matrix;
 use crate::circuit::gate::FrozenCircuit;
+use crate::circuit::test_utils::assert_matrix_approx_eq;
 use crate::circuit::{
     Circuit, CircuitGate, ClassicalControlOp, ClassicalExpr, ClassicalType, Instruction, MCGate,
     Operation, Parameter, ParameterValue, Qubit, StandardGate, UnitaryGate, ValueOperation,
@@ -469,6 +471,65 @@ fn cost_model_sees_degenerate_u_as_one_gate() {
     assert_eq!(cost.two_qubit_ops, 0);
     assert_eq!(cost.parameterized_ops, 1);
     assert_eq!(cost.depth, 1);
+}
+
+#[test]
+fn xy_basis_lowering_and_cost_use_three_gate_numeric_u() {
+    let q0 = Qubit::new(0);
+    for entangler in [StandardGate::CX, StandardGate::CZ, StandardGate::RXX] {
+        let basis = [StandardGate::RX, StandardGate::RY, entangler];
+        let mut circuit = u_circuit(0.37, 0.23, 0.29);
+        circuit.set_global_phase(Parameter::from(-0.41));
+        let result = run_target_lowering(&circuit, &basis);
+        assert_only_target_standard_gates(&result, &basis);
+        assert_eq!(
+            standard_ops(&result),
+            [StandardGate::RX, StandardGate::RY, StandardGate::RX]
+        );
+        assert_matrix_approx_eq(
+            &circuit_to_matrix(&result, None).unwrap(),
+            &circuit_to_matrix(&circuit, None).unwrap(),
+            1e-12,
+        );
+
+        let cost = TargetBasisCostModel::new(target_basis(&basis))
+            .unwrap()
+            .cost_of_fixed_operations(
+                vec![q0],
+                vec![ValueOperation::from_standard(
+                    StandardGate::U,
+                    [q0],
+                    [0.37.into(), 0.23.into(), 0.29.into()],
+                )],
+            )
+            .unwrap();
+        assert_eq!(cost.total_ops, 3);
+        assert_eq!(cost.depth, 3);
+        assert_eq!(cost.parameterized_ops, 3);
+        assert_eq!(cost.two_qubit_ops, 0);
+    }
+}
+
+#[test]
+fn xy_basis_symbolic_u_retains_exact_five_gate_fallback() {
+    let basis = [StandardGate::RX, StandardGate::RY];
+    let mut circuit = Circuit::new(1);
+    circuit
+        .u(Qubit::new(0), Parameter::symbol("theta"), 0.23, 0.29)
+        .unwrap();
+    let result = run_target_lowering(&circuit, &basis);
+    assert_only_target_standard_gates(&result, &basis);
+    assert_eq!(non_gphase_ops(&result).len(), 5);
+    for theta in [0.0, 0.37, std::f64::consts::PI, -std::f64::consts::PI] {
+        let bindings = Some(std::collections::HashMap::from([("theta", theta)]));
+        let source = circuit.assign_parameters(&bindings).unwrap();
+        let lowered = result.assign_parameters(&bindings).unwrap();
+        assert_matrix_approx_eq(
+            &circuit_to_matrix(&lowered, None).unwrap(),
+            &circuit_to_matrix(&source, None).unwrap(),
+            1e-12,
+        );
+    }
 }
 
 #[test]
