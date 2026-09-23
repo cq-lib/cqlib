@@ -159,7 +159,8 @@ fn apply_pauli_string_to_statevector(
         .into_par_iter()
         .map(|j| {
             let source_j = j ^ x_mask;
-            let z_parity = (j & z_mask).count_ones();
+            // P = phase * i^num_y * X^x * Z^z: Z acts on the source.
+            let z_parity = (source_j & z_mask).count_ones();
             let sign = if z_parity % 2 == 1 { -1.0 } else { 1.0 };
             sv_data[source_j] * base_factor * sign
         })
@@ -209,18 +210,18 @@ impl Observable for Hamiltonian {
                 .par_iter()
                 .enumerate()
                 .map(|(j, amp)| {
-                    // X operator: flip bits where x_mask is 1
-                    let target_j = j ^ x_mask;
-                    let target_amp = sv_data[target_j];
+                    // Output j receives the amplitude from source_j.
+                    let source_j = j ^ x_mask;
+                    let source_amp = sv_data[source_j];
 
-                    // Z operator: add phase (-1)^(number of overlapping Z bits)
-                    let z_parity = (j & z_mask).count_ones();
+                    // Z acts before X, so its phase depends on the source.
+                    let z_parity = (source_j & z_mask).count_ones();
                     let sign = if z_parity % 2 == 1 { -1.0 } else { 1.0 };
 
                     let phase_factor = base_factor * sign;
 
                     // Contribution: conj(amp_j) * (P * psi)_j
-                    amp.conj() * target_amp * phase_factor
+                    amp.conj() * source_amp * phase_factor
                 })
                 .sum();
 
@@ -411,12 +412,13 @@ impl Observable for PauliString {
             .par_iter()
             .enumerate()
             .map(|(j, amp)| {
-                let target_j = j ^ x_mask;
-                let target_amp = sv_data[target_j];
-                let z_parity = (j & z_mask).count_ones();
+                let source_j = j ^ x_mask;
+                let source_amp = sv_data[source_j];
+                // Z acts on the source before X moves it to output j.
+                let z_parity = (source_j & z_mask).count_ones();
                 let sign = if z_parity % 2 == 1 { -1.0 } else { 1.0 };
                 let phase_factor = base_factor * sign;
-                amp.conj() * target_amp * phase_factor
+                amp.conj() * source_amp * phase_factor
             })
             .sum();
 

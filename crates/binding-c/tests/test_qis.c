@@ -78,6 +78,110 @@ static void test_statevector_expectation(void) {
     statevector_free(sv);
 }
 
+static void test_statevector_y_expectation_from_circuit(void) {
+    for (int sign = -1; sign <= 1; sign += 2) {
+        CCircuit* circuit = circuit_new(1);
+        assert(circuit != NULL);
+        assert(circuit_h(circuit, 0) == 0);
+        assert(circuit_rz(circuit, 0, sign * acos(-1.0) / 2.0) == 0);
+        CStatevector* sv = statevector_from_circuit(circuit);
+        assert(sv != NULL);
+        CPauliString* pauli = pauli_string_parse("Y");
+        assert(pauli != NULL);
+        /* from_pauli consumes the Pauli handle. */
+        CHamiltonian* ham = hamiltonian_from_pauli(pauli);
+        assert(ham != NULL);
+
+        double expectation = NAN;
+        assert(statevector_expectation(sv, ham, &expectation) == 0);
+        assert(fabs(expectation - sign) < 1e-10);
+
+        hamiltonian_free(ham);
+        statevector_free(sv);
+        circuit_free(circuit);
+    }
+}
+
+static void test_statevector_pauli_phases_and_y_parity(void) {
+    const char* prefixes[] = {"", "-", "i", "-i"};
+    /* Each coefficient absorbs its Pauli phase, leaving -0.37 * P. */
+    const double coeff_re[] = {-0.37, 0.37, 0.0, 0.0};
+    const double coeff_im[] = {0.0, 0.0, 0.37, -0.37};
+    for (uintptr_t n = 1; n <= 3; ++n) {
+        CStatevector* sv = statevector_new(n);
+        assert(sv != NULL);
+        double single[3][4];
+        for (uintptr_t q = 0; q < n; ++q) {
+            double theta = 0.7 + 0.2 * q;
+            double phi = -0.3 + 0.4 * q;
+            assert(statevector_apply_ry(sv, (uint32_t)q, theta) == 0);
+            assert(statevector_apply_rz(sv, (uint32_t)q, phi) == 0);
+            /* RZ(phi) RY(theta)|0>: independently known Bloch components. */
+            single[q][0] = 1.0;
+            single[q][1] = sin(theta) * cos(phi);
+            single[q][2] = sin(theta) * sin(phi);
+            single[q][3] = cos(theta);
+        }
+        for (uintptr_t encoded = 0; encoded < ((uintptr_t)1 << (2 * n)); ++encoded) {
+            char label[4] = {0};
+            double expected = -0.37;
+            for (uintptr_t q = 0; q < n; ++q) {
+                uintptr_t op = (encoded >> (2 * q)) & 3;
+                label[n - 1 - q] = "IXYZ"[op];
+                expected *= single[q][op];
+            }
+            assert(fabs(expected) > 1e-10);
+            for (uintptr_t phase = 0; phase < 4; ++phase) {
+                char phased_label[6];
+                snprintf(phased_label, sizeof(phased_label), "%s%s", prefixes[phase], label);
+                CPauliString* pauli = pauli_string_parse(phased_label);
+                assert(pauli != NULL);
+                CHamiltonian* ham = hamiltonian_new(n);
+                assert(ham != NULL);
+                assert(hamiltonian_add_term(ham, pauli, coeff_re[phase], coeff_im[phase]) == 0);
+                /* add_term clones the Pauli handle. */
+                pauli_string_free(pauli);
+                double expectation = NAN;
+                assert(statevector_expectation(sv, ham, &expectation) == 0);
+                assert(fabs(expectation - expected) < 1e-10);
+                assert(hamiltonian_simplify(ham) == 0);
+                assert(statevector_expectation(sv, ham, &expectation) == 0);
+                assert(fabs(expectation - expected) < 1e-10);
+                hamiltonian_free(ham);
+            }
+        }
+        statevector_free(sv);
+    }
+}
+
+static void test_statevector_mixed_hamiltonian_expectation(void) {
+    CStatevector* sv = statevector_new(1);
+    assert(sv != NULL);
+    assert(statevector_apply_h(sv, 0) == 0);
+    assert(statevector_apply_rz(sv, 0, acos(-1.0) / 4.0) == 0);
+    CHamiltonian* ham = hamiltonian_new(1);
+    assert(ham != NULL);
+    const char* labels[] = {"I", "X", "-iY", "Y"};
+    const double coeff_re[] = {0.3, 0.5, 0.0, -0.25};
+    const double coeff_im[] = {0.0, 0.0, 0.75, 0.0};
+    for (uintptr_t i = 0; i < 4; ++i) {
+        CPauliString* pauli = pauli_string_parse(labels[i]);
+        assert(pauli != NULL);
+        assert(hamiltonian_add_term(ham, pauli, coeff_re[i], coeff_im[i]) == 0);
+        pauli_string_free(pauli);
+    }
+    /* H = 0.3 I + 0.5 X + 0.5 Y, with <X> = <Y> = 1/sqrt(2). */
+    double expectation = NAN;
+    double expected = 0.3 + 1.0 / sqrt(2.0);
+    assert(statevector_expectation(sv, ham, &expectation) == 0);
+    assert(fabs(expectation - expected) < 1e-10);
+    assert(hamiltonian_simplify(ham) == 0);
+    assert(statevector_expectation(sv, ham, &expectation) == 0);
+    assert(fabs(expectation - expected) < 1e-10);
+    hamiltonian_free(ham);
+    statevector_free(sv);
+}
+
 static void test_statevector_from_circuit(void) {
     CCircuit* circuit = circuit_new(1);
     assert(circuit_h(circuit, 0) == 0);
@@ -201,6 +305,9 @@ static void test_hamiltonian(void) {
 int main(void) {
     test_statevector_bell_state();
     test_statevector_expectation();
+    test_statevector_y_expectation_from_circuit();
+    test_statevector_pauli_phases_and_y_parity();
+    test_statevector_mixed_hamiltonian_expectation();
     test_statevector_from_circuit();
     test_density_matrix();
     test_stabilizer();
