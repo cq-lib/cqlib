@@ -1,8 +1,10 @@
 # C Binding for Cqlib
 
-This crate exposes a small C ABI for building `cqlib-core` quantum circuits.
-The current surface is intentionally limited to circuit construction and
-symbolic gate parameters.
+This crate exposes a C ABI for `cqlib-core`. The surface now covers circuit
+construction, symbolic parameters, IR conversion (QCIS / QASM2 / QASM3),
+device / topology / layout / noise models, quantum simulators (statevector,
+density matrix, stabilizer), compilation, visualization, and error mitigation
+(ZNE, virtual distillation) — roughly 190 free functions.
 
 ## Build
 
@@ -12,65 +14,111 @@ cargo build -p binding-c --release
 
 The C header is generated at `crates/binding-c/include/cqlib_c.h`.
 
-## Example
+### Linking with MinGW gcc
+
+Build the gnu variant first, then compile. The source file must come
+**before** the `-l` libraries — GNU ld resolves symbols left to right:
 
 ```bash
-gcc crates/binding-c/examples/main.c \
-    -I crates/binding-c/include \
-    -L target/release \
-    -lbinding_c \
-    -lm \
-    -o target/release/cqlib_c_example
+cargo build -p binding-c --release --target x86_64-pc-windows-gnu
 
-./target/release/cqlib_c_example
+gcc -I crates/binding-c/include \
+    crates/binding-c/examples/main.c \
+    -L target/x86_64-pc-windows-gnu/release \
+    -lbinding_c -lntdll -lws2_32 -lbcrypt -luserenv -ladvapi32 \
+    -o demo
 ```
 
-## API
+At runtime the executable must find `binding_c.dll`: either add
+`target/x86_64-pc-windows-gnu/release` (as an **absolute** path) to `PATH`
+or copy the DLL next to the executable. Relative `PATH` entries are
+resolved against the process working directory and can silently fail.
 
-### Circuit
+### Linking on macOS / Linux
 
-| Function | Description |
-| --- | --- |
-| `circuit_new(size_t num_qubits)` | Create a circuit. |
-| `circuit_free(CircuitWrapper*)` | Free a circuit. |
-| `circuit_num_qubits(const CircuitWrapper*)` | Return qubit count. |
-| `circuit_num_operations(const CircuitWrapper*)` | Return operation count. |
-| `circuit_num_parameters(const CircuitWrapper*)` | Return interned symbolic parameter count. |
-| `circuit_validate(const CircuitWrapper*)` | Validate circuit consistency. |
+No toolchain-matching is needed — the platform has a single ABI. Just
+build with the default host target and link directly against the cdylib:
 
-### Gates
+```bash
+cargo build -p binding-c --release
 
-| Function | Description |
-| --- | --- |
-| `circuit_h/x/y/z(CircuitWrapper*, uint32_t qubit)` | Single-qubit fixed gates. |
-| `circuit_rx/ry/rz(CircuitWrapper*, uint32_t qubit, double theta)` | Numeric rotations. |
-| `circuit_cx/cz(CircuitWrapper*, uint32_t control, uint32_t target)` | Two-qubit gates. |
-| `circuit_measure(CircuitWrapper*, uint32_t qubit)` | Measure a qubit. |
-| `circuit_reset(CircuitWrapper*, uint32_t qubit)` | Reset a qubit. |
+gcc -I crates/binding-c/include \
+    crates/binding-c/examples/main.c \
+    -L target/release -lbinding_c \
+    -o demo
+```
 
-### Parameters
+At runtime the dynamic linker must find `libbinding_c.dylib` (macOS) or
+`libbinding_c.so` (Linux). Either set `DYLD_LIBRARY_PATH` / `LD_LIBRARY_PATH`
+to `target/release`, or copy the shared library next to the executable.
 
-Bindings use `name:value,name2:value2` format.
+## Usage
 
-| Function | Description |
-| --- | --- |
-| `param_parse(const char*)` | Parse a symbolic parameter expression. |
-| `param_free(ParameterWrapper*)` | Free a parameter. |
-| `param_evaluate(const ParameterWrapper*, const char* bindings)` | Evaluate a parameter. |
-| `circuit_rx_param/ry_param/rz_param(CircuitWrapper*, uint32_t qubit, const ParameterWrapper*)` | Symbolic rotations. |
-| `circuit_assign_params(const CircuitWrapper*, const char* bindings)` | Return a new circuit with assigned parameters. |
+```c
+#include <cqlib_c.h>
+#include <stdio.h>
+
+int main(void) {
+    /* Bell state circuit */
+    CCircuit *qc = circuit_new(2);
+    circuit_h(qc, 0);
+    circuit_cx(qc, 0, 1);
+
+    /* Exact simulation */
+    CStatevector *sv = statevector_from_circuit(qc);
+    double probs[4];
+    statevector_probabilities(sv, probs, 4);   /* 0.5, 0, 0, 0.5 */
+
+    statevector_free(sv);
+    circuit_free(qc);
+    return 0;
+}
+```
+
+## Documentation
+
+The full API manual lives in [`docs/api/c/`](../../docs/api/c/0_overview.md)
+and mirrors the Python manual's structure: per-function signatures,
+parameters, return values, error codes, and examples for every module
+(circuit, IR, device, QIS, compile, visualization, error mitigation).
 
 ## Return Values
 
-- `int32_t`: `0` on success, negative on error.
-- `-1`: null pointer or invalid C string.
-- `-2`: qubit index out of bounds.
-- `-3`: core circuit or parameter error.
-- Pointer return values use `NULL` for errors.
-- `param_evaluate` returns `0.0` on error.
+Integer-returning functions use `0` for success and negative error codes on
+failure:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `-1` | Null pointer or invalid C string |
+| `-2` | Qubit index out of bounds |
+| `-3` | Circuit / structural error |
+| `-4` | Parse error (unknown gate name, malformed IR, ...) |
+| `-5` | IO error |
+| `-6` | Compiler error |
+| `-7` | Simulation error (non-Clifford gate, not run, ...) |
+| `-8` | Invalid parameter (bad probability, buffer too small, ...) |
+
+Pointer-returning functions use `NULL` for errors. `param_evaluate` returns
+`NaN` when the bindings string is invalid or a symbol is unbound.
 
 ## Tests
 
 ```bash
 cargo test -p binding-c
+```
+
+Rust FFI tests live in `crates/binding-c/tests/*.rs`. C-side smoke tests live
+in `crates/binding-c/tests/test_*.c`, one per module (circuit, ir, device,
+qis, compile, visualization, error_mitigation). Compile and run each
+individually (build the gnu variant first, see Toolchain matching above):
+
+```bash
+gcc -I crates/binding-c/include \
+    crates/binding-c/tests/test_circuit.c \
+    -L target/x86_64-pc-windows-gnu/release \
+    -lbinding_c -lntdll -lws2_32 -lbcrypt -luserenv -ladvapi32 -lm \
+    -o test_circuit
+
+./test_circuit        # prints "binding-c circuit tests passed"
 ```

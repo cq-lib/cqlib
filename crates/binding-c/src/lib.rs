@@ -10,9 +10,17 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-//! Minimal C binding for Cqlib quantum circuits.
+//! C binding for Cqlib quantum computing library.
 
-// Allow clippy warnings for FFI functions that dereference raw pointers
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 pub mod circuit;
+pub mod compile;
+pub mod device;
+pub mod error;
+pub mod error_mitigation;
+pub mod ir;
+pub mod qis;
+pub mod visualization;
+
+pub use error::cqlib_string_free;
