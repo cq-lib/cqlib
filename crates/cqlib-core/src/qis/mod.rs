@@ -83,6 +83,7 @@ pub mod hamiltonian;
 pub mod metrics;
 pub mod observable;
 pub mod pauli;
+pub mod sampling;
 pub mod state;
 
 pub use error::{PauliStringParseError, QisError};
@@ -90,6 +91,7 @@ pub use evolution::{PauliEvolution, TrotterMode};
 pub use hamiltonian::Hamiltonian;
 pub use observable::Observable;
 pub use pauli::{Pauli, PauliIter, PauliString, Phase};
+pub use sampling::{Simulator, sample};
 pub use state::density_matrix::DensityMatrix;
 pub use state::density_matrix_noise::DensityMatrixNoise;
 pub use state::stabilizer::StabilizerState;

@@ -54,6 +54,7 @@ from .device import (
     TwoQubitNoise as TwoQubitNoise,
 )
 from .qis import (
+    sample as sample,
     DensityMatrix as DensityMatrix,
     DensityMatrixNoise as DensityMatrixNoise,
     Hamiltonian as Hamiltonian,
@@ -67,6 +68,7 @@ from .qis import (
 __version__: str
 
 __all__ = [
+    "sample",
     "__version__",
     "Circuit",
     "CircuitDag",

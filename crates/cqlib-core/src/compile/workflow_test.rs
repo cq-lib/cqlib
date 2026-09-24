@@ -54,6 +54,36 @@ fn compile_config(mode: CompileMode) -> CompileConfig {
     }
 }
 
+#[test]
+fn xy_basis_compiles_generic_u_to_three_rotations_in_both_modes() {
+    let mut circuit = Circuit::new(1);
+    circuit.u(Qubit::new(0), 0.37, 0.23, 0.29).unwrap();
+    circuit.set_global_phase(Parameter::from(-0.41));
+    for mode in [CompileMode::Normal, CompileMode::Enhanced] {
+        for entangler in [StandardGate::CX, StandardGate::CZ, StandardGate::RXX] {
+            let config = CompileConfig {
+                target: CompileTarget::Basis(
+                    [StandardGate::RX, StandardGate::RY, entangler]
+                        .into_iter()
+                        .map(Instruction::Standard)
+                        .collect(),
+                ),
+                ..compile_config(mode)
+            };
+            let result = compile(&circuit, config).unwrap();
+            assert_eq!(
+                standard_ops(&result.circuit),
+                [StandardGate::RX, StandardGate::RY, StandardGate::RX]
+            );
+            crate::circuit::test_utils::assert_matrix_approx_eq(
+                &crate::circuit::circuit_to_matrix(&result.circuit, None).unwrap(),
+                &crate::circuit::circuit_to_matrix(&circuit, None).unwrap(),
+                1e-12,
+            );
+        }
+    }
+}
+
 fn workflow_analysis(circuit: &Circuit) -> Option<WorkflowCircuitAnalysis> {
     Some(WorkflowCircuitAnalysis::analyze(circuit))
 }

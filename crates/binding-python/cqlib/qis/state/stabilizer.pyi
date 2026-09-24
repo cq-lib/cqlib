@@ -1,4 +1,5 @@
 # This code is part of Cqlib.
+# Modified to support reproducible state sampling.
 #
 # (C) Copyright China Telecom Quantum Group 2026
 #
@@ -138,11 +139,13 @@ class StabilizerState:
         """Returns the full computational-basis probability distribution."""
         ...
 
-    def sample_shots(self, shots: int) -> List[Outcome]:
-        """Samples measurement outcomes without mutating this state."""
+    def sample_shots(self, shots: int, *, seed: int | None = None) -> List[Outcome]:
+        """Sample without mutation; an explicit seed is independent of sampling thread count."""
         ...
 
-    def sample(self, measurement: Measurement, shots: int) -> ExecutionResult:
+    def sample(
+        self, measurement: Measurement, shots: int, *, seed: int | None = None
+    ) -> ExecutionResult:
         """Samples measurement outcomes according to a circuit measurement receipt."""
         ...
 

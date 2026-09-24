@@ -20,7 +20,10 @@ This module provides quantum information tools including:
 - Quantum metrics and entanglement measures
 """
 
-from typing import Protocol, List, Tuple, Dict
+from typing import Protocol, List, Tuple, Dict, Literal, Sequence
+
+from ..circuit import Circuit, Qubit
+from ..device import ExecutionResult
 
 # Pauli module
 from .pauli import Phase as Phase
@@ -47,6 +50,22 @@ from . import entropy as entropy
 from . import metrics as metrics
 from . import state as state
 
+def sample(
+    circuit: Circuit,
+    *,
+    shots: int = 1000,
+    seed: int | None = None,
+    simulator: Literal["statevector", "density_matrix", "stabilizer"] = "statevector",
+    qubits: Sequence[int] | Sequence[Qubit] | None = None,
+) -> ExecutionResult:
+    """Sample final Z-basis outputs; default to terminal declarations or all qubits.
+
+    The first selected qubit is the rightmost counts bit. Parameters must be
+    bound, classical control flow and mid-circuit measurements are rejected,
+    and reset requires density_matrix. The input circuit is not modified.
+    """
+    ...
+
 class Observable(Protocol):
     """Protocol for quantum observables."""
     def expectation_statevector(self, sv: Statevector) -> float: ...
@@ -59,6 +78,7 @@ class Observable(Protocol):
     def num_qubits(self) -> int: ...
 
 __all__ = [
+    "sample",
     "Phase",
     "Pauli",
     "PauliString",

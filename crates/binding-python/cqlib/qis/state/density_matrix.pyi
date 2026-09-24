@@ -1,4 +1,5 @@
 # This code is part of Cqlib.
+# Modified to support reproducible state sampling.
 #
 # (C) Copyright China Telecom Quantum Group 2026
 #
@@ -653,7 +654,7 @@ class DensityMatrix:
         ...
 
     def reset(self, qubit: int) -> None:
-        """Resets the specified qubit to the |0⟩ state by measuring and flipping if 1.
+        """Resets the specified qubit to |0⟩ using a deterministic quantum channel.
 
         Raises:
             IndexError: If qubit index is out of bounds.
@@ -668,11 +669,13 @@ class DensityMatrix:
         """Measures all qubits and collapses the state."""
         ...
 
-    def sample_shots(self, shots: int) -> List[Outcome]:
-        """Samples measurement outcomes without mutating this state."""
+    def sample_shots(self, shots: int, *, seed: int | None = None) -> List[Outcome]:
+        """Sample without mutation; an explicit seed is independent of sampling thread count."""
         ...
 
-    def sample(self, measurement: Measurement, shots: int) -> ExecutionResult:
+    def sample(
+        self, measurement: Measurement, shots: int, *, seed: int | None = None
+    ) -> ExecutionResult:
         """Samples measurement outcomes according to a circuit measurement receipt."""
         ...
 

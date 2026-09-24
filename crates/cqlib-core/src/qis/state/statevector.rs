@@ -1,4 +1,5 @@
 // This code is part of Cqlib.
+// Modified to support reproducible state sampling.
 //
 // (C) Copyright China Telecom Quantum Group 2026
 //
@@ -9,6 +10,8 @@
 // Any modifications or derivative works of this code must retain this
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
+//
+// Modified to validate terminal measurements and correct density matrix reset.
 
 //! Statevector quantum simulation.
 //!
@@ -53,7 +56,7 @@ use crate::qis::error::QisError;
 use crate::qis::observable::Observable;
 use crate::qis::pauli::{PauliString, Phase};
 use num_complex::Complex64;
-use rand::Rng;
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -296,6 +299,8 @@ pub struct Statevector {
     /// Complex amplitudes for each basis state. Length is 2^N where N = num_qubits.
     /// 64-byte aligned for SIMD compatibility (see [`AlignedBuffer`]).
     data: AlignedBuffer<Complex64>,
+    /// Circuit qubit identifiers mapped to storage positions.
+    qubit_map: super::QubitMap,
     /// Number of qubits in the system.
     pub num_qubits: usize,
 }
@@ -351,7 +356,11 @@ impl Statevector {
         // 64-byte aligned allocation — zero-initialised (all amplitudes = 0+0i).
         let mut data = AlignedBuffer::<Complex64>::new_zeroed(size);
         data[0] = Complex64::new(1.0, 0.0); // |0...0⟩
-        Statevector { data, num_qubits }
+        Statevector {
+            data,
+            num_qubits,
+            qubit_map: None,
+        }
     }
 
     /// Creates a statevector from initial amplitudes with normalization check.
@@ -395,7 +404,11 @@ impl Statevector {
         // Copy caller-provided Vec into 64-byte aligned buffer.
         let mut data = AlignedBuffer::<Complex64>::new_zeroed(size);
         data.as_mut_slice().copy_from_slice(&initial_state);
-        Ok(Statevector { data, num_qubits })
+        Ok(Statevector {
+            data,
+            num_qubits,
+            qubit_map: None,
+        })
     }
 
     /// Constructs a statevector by simulating a quantum circuit.
@@ -438,6 +451,14 @@ impl Statevector {
 
     /// Applies a quantum circuit to this statevector in-place.
     ///
+    /// Once bound to circuit qubit IDs, subsequent circuits must have the same
+    /// IDs in the same order. The mapping is committed only on success; gates
+    /// completed before an error are not rolled back.
+    ///
+    /// As in `from_circuit`, terminal measurements are ignored. A measured qubit
+    /// used by a later gate or Reset is rejected before the state is changed.
+    /// Independent gates, repeated measurements, Barrier, Delay, and Store are allowed.
+    ///
     /// The circuit is first decomposed into basic gates via [`Circuit::decompose`],
     /// then each operation is applied sequentially to the current state.
     ///
@@ -478,15 +499,10 @@ impl Statevector {
         }
         // Decompose circuit to basic gates
         let circuit = circuit.decompose()?;
+        super::validate_terminal_measurements(&circuit)?;
         let sv = self;
 
-        // Build qubit index mapping: Qubit -> physical index
-        let qubits = circuit.qubits();
-        let qubit_map: std::collections::HashMap<_, _> = qubits
-            .iter()
-            .enumerate()
-            .map(|(idx, q)| (*q, idx))
-            .collect();
+        let qubit_map = super::prepare_qubit_map(&circuit.qubits(), &sv.qubit_map)?;
 
         // Precompute all parameter values
         let parameter_values: Vec<Option<f64>> = circuit
@@ -510,7 +526,7 @@ impl Statevector {
                 })
                 .collect::<Result<Vec<_>, QisError>>()?;
 
-            // Get physical qubit indices
+            // Get storage positions
             let qubit_indices: Result<Vec<usize>, QisError> =
                 op.qubits
                     .iter()
@@ -608,6 +624,7 @@ impl Statevector {
             }
         }
 
+        sv.qubit_map = Some(qubit_map);
         Ok(())
     }
 
@@ -2769,6 +2786,7 @@ impl Statevector {
     /// [`sample_shots`](Self::sample_shots) to reuse each thread's working copy.
     fn reset_from(&mut self, source: &Statevector) {
         debug_assert_eq!(self.num_qubits, source.num_qubits);
+        self.qubit_map.clone_from(&source.qubit_map);
         self.data
             .as_mut_slice()
             .copy_from_slice(source.data.as_slice());
@@ -2780,10 +2798,15 @@ impl Statevector {
     /// The statevector is fully collapsed after this call.
     /// Use [`Outcome::is_one(q)`](crate::device::Outcome::is_one) to read qubit `q`'s result.
     pub fn measure_all(&mut self) -> Outcome {
+        self.measure_all_with_rng(&mut rand::rng())
+    }
+
+    /// Measures all qubits in storage order using the supplied random stream.
+    pub fn measure_all_with_rng(&mut self, rng: &mut impl Rng) -> Outcome {
         let num_chunks = self.num_qubits.div_ceil(64);
         let mut chunks = SmallVec::from_elem(0u64, num_chunks);
         for q in 0..self.num_qubits {
-            if self.measure(q).unwrap() {
+            if self.measure_with_rng(q, rng).unwrap() {
                 chunks[q / 64] |= 1u64 << (q % 64);
             }
         }
@@ -2809,6 +2832,23 @@ impl Statevector {
     /// assert!(shots.iter().all(|v| v.is_one(0) == v.is_one(1)));
     /// ```
     pub fn sample_shots(&self, shots: usize) -> Vec<Outcome> {
+        self.sample_shots_with_seed(shots, None)
+    }
+
+    /// Samples without changing this state. An explicit seed assigns a random
+    /// stream to each shot before parallel execution, independent of scheduling.
+    pub fn sample_shots_with_seed(&self, shots: usize, seed: Option<u64>) -> Vec<Outcome> {
+        if let Some(seed) = seed {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            let seeds: Vec<u64> = (0..shots).map(|_| rng.random()).collect();
+            return seeds
+                .into_par_iter()
+                .map_with(self.clone(), |work, seed| {
+                    work.reset_from(self);
+                    work.measure_all_with_rng(&mut SmallRng::seed_from_u64(seed))
+                })
+                .collect();
+        }
         (0..shots)
             .into_par_iter()
             .map_with(self.clone(), |work, _| {
@@ -2828,11 +2868,21 @@ impl Statevector {
         measurement: &Measurement,
         shots: usize,
     ) -> Result<ExecutionResult, QisError> {
-        measurement.check_qubits(self.num_qubits)?;
+        self.sample_with_seed(measurement, shots, None)
+    }
+
+    /// Projects seeded full-state samples onto the requested measurement.
+    pub fn sample_with_seed(
+        &self,
+        measurement: &Measurement,
+        shots: usize,
+        seed: Option<u64>,
+    ) -> Result<ExecutionResult, QisError> {
+        let projection = super::resolve_measurement(measurement, &self.qubit_map, self.num_qubits)?;
 
         let mut counts = HashMap::new();
-        for full in self.sample_shots(shots) {
-            *counts.entry(measurement.project(&full)).or_insert(0usize) += 1;
+        for full in self.sample_shots_with_seed(shots, seed) {
+            *counts.entry(projection.project(&full)).or_insert(0usize) += 1;
         }
 
         Ok(ExecutionResult::from_counts(
@@ -2851,7 +2901,7 @@ impl Statevector {
     /// a self-contained output contract and aggregates the full statevector
     /// computational-basis probabilities over unmeasured qubits.
     pub fn probs(&self, measurement: &Measurement) -> Result<HashMap<Outcome, f64>, QisError> {
-        measurement.check_qubits(self.num_qubits)?;
+        let projection = super::resolve_measurement(measurement, &self.qubit_map, self.num_qubits)?;
 
         let mut marginal = HashMap::new();
         for (basis, prob) in self.probabilities().into_iter().enumerate() {
@@ -2859,7 +2909,7 @@ impl Statevector {
                 continue;
             }
             *marginal
-                .entry(measurement.project_basis(basis))
+                .entry(projection.project_basis(basis))
                 .or_insert(0.0) += prob;
         }
         Ok(marginal)

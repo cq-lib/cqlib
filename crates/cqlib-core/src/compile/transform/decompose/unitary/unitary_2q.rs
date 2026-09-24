@@ -242,7 +242,8 @@ pub struct TwoQubitSynthesisRequest<'a> {
 /// minimize final two-qubit count, final depth, final operation count,
 /// remaining parameterized operations, and finally a deterministic backend
 /// tie-breaker. When a target basis is configured these values are measured
-/// after applying the same lowering rules used by final translation.
+/// after target lowering and one canonicalization/one-qubit cleanup round.
+/// This local estimate does not predict full compiler output quality.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TargetAwareSynthesisCost {
     /// Two-qubit operations after target-basis lowering.
@@ -1167,6 +1168,8 @@ fn push_scored_candidate(
 }
 
 /// Computes target-aware cost for value operations emitted by synthesis.
+/// Explicit bases include one existing local cleanup round. The same function
+/// scores source blocks, primary candidates and numerical fallbacks.
 pub fn target_aware_cost_of_value_operations(
     operations: &[ValueOperation],
     target: &TwoQubitSynthesisTarget,
@@ -1179,7 +1182,7 @@ pub fn target_aware_cost_of_value_operations(
             depth,
             total_ops,
             parameterized_ops,
-        } = model.cost_of_fixed_operations(qubits, operations.to_vec())?;
+        } = model.cost_after_local_cleanup(qubits, operations.to_vec())?;
         return Ok(TargetAwareSynthesisCost {
             lowered_two_qubit_ops: two_qubit_ops,
             lowered_depth: depth,

@@ -12,7 +12,9 @@
 // that they have been altered from the originals.
 
 use super::{TargetBasisCostModel, TargetBasisLowerer};
+use crate::circuit::circuit_to_matrix;
 use crate::circuit::gate::FrozenCircuit;
+use crate::circuit::test_utils::assert_matrix_approx_eq;
 use crate::circuit::{
     Circuit, CircuitGate, ClassicalControlOp, ClassicalExpr, ClassicalType, Instruction, MCGate,
     Operation, Parameter, ParameterValue, Qubit, StandardGate, UnitaryGate, ValueOperation,
@@ -472,6 +474,65 @@ fn cost_model_sees_degenerate_u_as_one_gate() {
 }
 
 #[test]
+fn xy_basis_lowering_and_cost_use_three_gate_numeric_u() {
+    let q0 = Qubit::new(0);
+    for entangler in [StandardGate::CX, StandardGate::CZ, StandardGate::RXX] {
+        let basis = [StandardGate::RX, StandardGate::RY, entangler];
+        let mut circuit = u_circuit(0.37, 0.23, 0.29);
+        circuit.set_global_phase(Parameter::from(-0.41));
+        let result = run_target_lowering(&circuit, &basis);
+        assert_only_target_standard_gates(&result, &basis);
+        assert_eq!(
+            standard_ops(&result),
+            [StandardGate::RX, StandardGate::RY, StandardGate::RX]
+        );
+        assert_matrix_approx_eq(
+            &circuit_to_matrix(&result, None).unwrap(),
+            &circuit_to_matrix(&circuit, None).unwrap(),
+            1e-12,
+        );
+
+        let cost = TargetBasisCostModel::new(target_basis(&basis))
+            .unwrap()
+            .cost_of_fixed_operations(
+                vec![q0],
+                vec![ValueOperation::from_standard(
+                    StandardGate::U,
+                    [q0],
+                    [0.37.into(), 0.23.into(), 0.29.into()],
+                )],
+            )
+            .unwrap();
+        assert_eq!(cost.total_ops, 3);
+        assert_eq!(cost.depth, 3);
+        assert_eq!(cost.parameterized_ops, 3);
+        assert_eq!(cost.two_qubit_ops, 0);
+    }
+}
+
+#[test]
+fn xy_basis_symbolic_u_retains_exact_five_gate_fallback() {
+    let basis = [StandardGate::RX, StandardGate::RY];
+    let mut circuit = Circuit::new(1);
+    circuit
+        .u(Qubit::new(0), Parameter::symbol("theta"), 0.23, 0.29)
+        .unwrap();
+    let result = run_target_lowering(&circuit, &basis);
+    assert_only_target_standard_gates(&result, &basis);
+    assert_eq!(non_gphase_ops(&result).len(), 5);
+    for theta in [0.0, 0.37, std::f64::consts::PI, -std::f64::consts::PI] {
+        let bindings = Some(std::collections::HashMap::from([("theta", theta)]));
+        let source = circuit.assign_parameters(&bindings).unwrap();
+        let lowered = result.assign_parameters(&bindings).unwrap();
+        assert_matrix_approx_eq(
+            &circuit_to_matrix(&lowered, None).unwrap(),
+            &circuit_to_matrix(&source, None).unwrap(),
+            1e-12,
+        );
+    }
+}
+
+#[test]
 fn stored_plan_cost_matches_static_lowering_output() {
     let basis = [StandardGate::RZ, StandardGate::X2P, StandardGate::X2M];
     let lowerer = TargetBasisLowerer::new(target_basis(&basis)).unwrap();
@@ -775,4 +836,97 @@ fn swap_fails_for_rz_cz_basis_without_half_rotation() {
         &[StandardGate::RZ, StandardGate::CZ],
         &["cannot lower", "SWAP", "RZ", "CZ"],
     );
+}
+
+#[test]
+fn controlled_pauli_rzz_lowering_preserves_scalar_phase() {
+    for basis in [
+        vec![StandardGate::RZ, StandardGate::RX, StandardGate::RZZ],
+        vec![StandardGate::RX, StandardGate::RY, StandardGate::RZZ],
+        vec![StandardGate::H, StandardGate::RZ, StandardGate::RZZ],
+    ] {
+        for gate in [StandardGate::CX, StandardGate::CY, StandardGate::CZ] {
+            for reversed in [false, true] {
+                let qubits = if reversed {
+                    [Qubit::new(1), Qubit::new(0)]
+                } else {
+                    [Qubit::new(0), Qubit::new(1)]
+                };
+                let mut source = Circuit::from_operations(
+                    vec![Qubit::new(0), Qubit::new(1)],
+                    vec![ValueOperation::from_standard(gate, qubits, [])],
+                    None,
+                    None,
+                )
+                .unwrap();
+                source.set_global_phase(0.371.into());
+                let actual = run_target_lowering(&source, &basis);
+                let expected = circuit_to_matrix(&source, None).unwrap();
+                let actual = circuit_to_matrix(&actual, None).unwrap();
+                assert!(
+                    expected
+                        .iter()
+                        .zip(actual.iter())
+                        .all(|(a, b)| (*a - *b).norm() <= 1e-8),
+                    "gate={gate:?}, basis={basis:?}, reversed={reversed}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn local_cleanup_preserves_matrix_phase_and_target_basis() {
+    use std::f64::consts::{PI, TAU};
+    for basis in [
+        vec![StandardGate::RZ, StandardGate::X2P, StandardGate::CZ],
+        vec![StandardGate::RX, StandardGate::RY, StandardGate::CZ],
+        vec![StandardGate::RX, StandardGate::RZ, StandardGate::CX],
+        vec![StandardGate::RX, StandardGate::RY, StandardGate::RXX],
+        vec![StandardGate::RX, StandardGate::RY, StandardGate::RZZ],
+        vec![StandardGate::H, StandardGate::RZ, StandardGate::RZZ],
+    ] {
+        let model = TargetBasisCostModel::new(target_basis(&basis)).unwrap();
+        for reversed in [false, true] {
+            let q = if reversed {
+                [Qubit::new(1), Qubit::new(0)]
+            } else {
+                [Qubit::new(0), Qubit::new(1)]
+            };
+            for angle in [0.0, PI, -PI, TAU, -TAU, 0.37] {
+                let operations = vec![
+                    ValueOperation::from_standard(StandardGate::CX, q, []),
+                    ValueOperation::from_standard(StandardGate::H, [q[1]], []),
+                    ValueOperation::from_standard(StandardGate::H, [q[0]], []),
+                    ValueOperation::from_standard(StandardGate::RX, [q[0]], [PI.into()]),
+                    ValueOperation::from_standard(StandardGate::RZZ, q, [angle.into()]),
+                    ValueOperation::from_standard(StandardGate::RX, [q[0]], [(-PI).into()]),
+                ];
+                let mut source =
+                    Circuit::from_operations(q.to_vec(), operations.clone(), None, None).unwrap();
+                source.set_global_phase(0.371.into());
+                let mut lowered = model
+                    .lower_fixed_operations(q.to_vec(), operations.clone())
+                    .unwrap();
+                lowered.set_global_phase(lowered.global_phase() + 0.371);
+                let actual = model.cleanup_lowered(lowered).unwrap();
+                assert_only_target_standard_gates(&actual, &basis);
+                let expected_matrix = circuit_to_matrix(&source, None).unwrap();
+                let actual_matrix = circuit_to_matrix(&actual, None).unwrap();
+                assert!(
+                    expected_matrix
+                        .iter()
+                        .zip(actual_matrix.iter())
+                        .all(|(a, b)| (*a - *b).norm() <= 1e-8),
+                    "basis={basis:?}, reversed={reversed}, angle={angle}"
+                );
+                assert_eq!(
+                    model
+                        .cost_after_local_cleanup(q.to_vec(), operations)
+                        .unwrap(),
+                    TargetBasisCostModel::count_lowered(&actual).unwrap(),
+                );
+            }
+        }
+    }
 }

@@ -99,6 +99,19 @@ pub(super) fn estimate_block_priority_bound(
             .collect::<Vec<_>>();
         native_two_qubit_gates.sort_by_key(|gate| *gate as u8);
         minimum_constructive_entanglers(&decomp, &native_two_qubit_gates, true)
+    } else if config.two_qubit_target.lowering_cost_model().is_some()
+        && config.two_qubit_target.native_2q().iter().any(|gate| {
+            !matches!(
+                gate,
+                crate::circuit::StandardGate::CX
+                    | crate::circuit::StandardGate::CY
+                    | crate::circuit::StandardGate::CZ
+            )
+        })
+    {
+        // Cleanup leaves CX/CY/CZ gates in place, but may remove a zero-angle
+        // native interaction. A template count is not a lower bound then.
+        Some(0)
     } else {
         minimum_constructive_entanglers(
             &decomp,

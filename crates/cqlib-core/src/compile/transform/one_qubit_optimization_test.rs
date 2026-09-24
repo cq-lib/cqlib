@@ -11,9 +11,13 @@
 // that they have been altered from the originals.
 
 use super::*;
+use crate::circuit::test_utils::assert_matrix_approx_eq;
 use crate::circuit::{ClassicalControlOp, ClassicalExpr, Instruction, Qubit, StandardGate};
+use crate::circuit::{Parameter, circuit_to_matrix};
 use crate::compile::test_utils::assert_compiled_circuit_equivalent;
+use crate::compile::transform::TargetBasisLowerer;
 use crate::compile::transform::{OperationReplacement, RewriteEdits, TransformerTestExt};
+use std::f64::consts::{FRAC_PI_2, PI};
 use std::sync::Arc;
 
 #[test]
@@ -152,6 +156,118 @@ fn basis_uses_lowered_cost_and_keeps_exact_semantics() {
     assert!(result.changed);
     assert!(result.circuit.operations().is_empty());
     assert_compiled_circuit_equivalent(&result.circuit, &circuit);
+}
+
+fn xy_basis() -> Vec<Instruction> {
+    [StandardGate::RX, StandardGate::RY, StandardGate::CZ]
+        .into_iter()
+        .map(Instruction::Standard)
+        .collect()
+}
+
+fn lower_xy_and_assert_exact(source: &Circuit, optimized: &Circuit) -> Circuit {
+    let lowered = TargetBasisLowerer::new(xy_basis())
+        .unwrap()
+        .transform_resolved(optimized, None)
+        .unwrap()
+        .circuit;
+    assert_matrix_approx_eq(
+        &circuit_to_matrix(&lowered, None).unwrap(),
+        &circuit_to_matrix(source, None).unwrap(),
+        1e-12,
+    );
+    lowered
+}
+
+#[test]
+fn xy_basis_fuses_four_and_five_gate_runs_but_keeps_short_sequences() {
+    let optimizer = OptimizeOneQubitRuns::basis(xy_basis()).unwrap();
+    let q0 = Qubit::new(0);
+    for count in 1..=6 {
+        let mut circuit = Circuit::new(1);
+        for index in 0..count {
+            let angle = 0.13 + 0.17 * index as f64;
+            if index % 2 == 0 {
+                circuit.rx(q0, angle).unwrap();
+            } else {
+                circuit.ry(q0, angle).unwrap();
+            }
+        }
+        let result = optimizer.transform_resolved(&circuit, None).unwrap();
+        assert_eq!(result.changed, count > 3, "source length {count}");
+        if count <= 3 {
+            assert_eq!(result.circuit, circuit);
+        }
+        let lowered = lower_xy_and_assert_exact(&circuit, &result.circuit);
+        assert_eq!(lowered.operations().len(), count.min(3));
+        assert!(
+            !optimizer
+                .transform_resolved(&lowered, None)
+                .unwrap()
+                .changed
+        );
+    }
+}
+
+#[test]
+fn xy_basis_collapses_four_gate_runs_to_rotation_or_scalar_phase() {
+    let optimizer = OptimizeOneQubitRuns::basis(xy_basis()).unwrap();
+    let q0 = Qubit::new(0);
+    for (last, count) in [(PI, 0), (7.0 * PI / 8.0, 1)] {
+        let mut circuit = Circuit::new(1);
+        circuit.set_global_phase(Parameter::from(0.2));
+        circuit.ry(q0, FRAC_PI_2).unwrap();
+        circuit.rx(q0, PI).unwrap();
+        circuit.ry(q0, FRAC_PI_2).unwrap();
+        circuit.rx(q0, last).unwrap();
+        let result = optimizer.transform_resolved(&circuit, None).unwrap();
+        assert!(result.changed);
+        let lowered = lower_xy_and_assert_exact(&circuit, &result.circuit);
+        assert_eq!(lowered.operations().len(), count);
+    }
+}
+
+#[test]
+fn xy_basis_cleanup_preserves_entanglers_and_crosses_disjoint_operations() {
+    let optimizer = OptimizeOneQubitRuns::basis(xy_basis()).unwrap();
+    let mut circuit = Circuit::new(2);
+    for round in 0..3 {
+        for index in 0..5 {
+            for qubit in 0..2 {
+                let angle = 0.13 + 0.17 * index as f64 + 0.23 * (qubit + round) as f64;
+                if index % 2 == 0 {
+                    circuit.rx(Qubit::new(qubit), angle).unwrap();
+                } else {
+                    circuit.ry(Qubit::new(qubit), angle).unwrap();
+                }
+            }
+        }
+        if round < 2 {
+            circuit
+                .cz(Qubit::new(round), Qubit::new(1 - round))
+                .unwrap();
+        }
+    }
+    let result = optimizer.transform_resolved(&circuit, None).unwrap();
+    assert!(result.changed);
+    let lowered = lower_xy_and_assert_exact(&circuit, &result.circuit);
+    let entanglers = |circuit: &Circuit| {
+        circuit
+            .operations()
+            .iter()
+            .filter(|op| op.qubits.len() == 2)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(entanglers(&lowered), entanglers(&circuit));
+    assert_eq!(
+        lowered
+            .operations()
+            .iter()
+            .filter(|op| op.qubits.len() == 1)
+            .count(),
+        18
+    );
 }
 
 #[test]

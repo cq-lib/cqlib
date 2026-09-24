@@ -1,4 +1,5 @@
 # This code is part of Cqlib.
+# Modified to support reproducible state sampling.
 #
 # (C) Copyright China Telecom Quantum Group 2026
 #
@@ -323,11 +324,13 @@ class DensityMatrixNoise:
         """Measures all qubits and collapses the state."""
         ...
 
-    def sample_shots(self, shots: int) -> List[Outcome]:
-        """Samples measurement outcomes with readout noise, without mutating this state."""
+    def sample_shots(self, shots: int, *, seed: int | None = None) -> List[Outcome]:
+        """Samples the prepared state without mutation or additional readout noise."""
         ...
 
-    def sample(self, measurement: Measurement, shots: int) -> ExecutionResult:
+    def sample(
+        self, measurement: Measurement, shots: int, *, seed: int | None = None
+    ) -> ExecutionResult:
         """Samples measurement outcomes according to a circuit measurement receipt."""
         ...
 

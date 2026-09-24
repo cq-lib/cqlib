@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use binding_c::circuit::{circuit_cx, circuit_free, circuit_h, circuit_new};
+use binding_c::circuit::{circuit_cx, circuit_free, circuit_h, circuit_new, circuit_rz};
 use binding_c::cqlib_string_free;
 use binding_c::qis::*;
 use std::ffi::{CStr, CString};
@@ -312,6 +312,118 @@ fn test_statevector_expectation() {
     assert_eq!(ret, 0);
     assert!((value - 1.0).abs() < 1e-10);
 
+    hamiltonian_free(h);
+    statevector_free(sv);
+}
+
+#[test]
+fn test_statevector_y_expectation_from_circuit() {
+    for sign in [-1.0, 1.0] {
+        let circuit = circuit_new(1);
+        assert!(!circuit.is_null());
+        assert_eq!(circuit_h(circuit, 0), 0);
+        assert_eq!(
+            circuit_rz(circuit, 0, sign * std::f64::consts::FRAC_PI_2),
+            0
+        );
+        let sv = statevector_from_circuit(circuit);
+        assert!(!sv.is_null());
+        let pauli = pauli_string_parse(c"Y".as_ptr());
+        assert!(!pauli.is_null());
+        let h = hamiltonian_from_pauli(pauli); // Consumes the Pauli handle.
+        assert!(!h.is_null());
+        let mut value = f64::NAN;
+        assert_eq!(statevector_expectation(sv, h, &mut value), 0);
+        assert!((value - sign).abs() < 1e-10);
+        hamiltonian_free(h);
+        statevector_free(sv);
+        circuit_free(circuit);
+    }
+}
+
+#[test]
+fn test_statevector_pauli_phases_and_y_parity() {
+    for n in 1..=3 {
+        let sv = statevector_new(n);
+        assert!(!sv.is_null());
+        let mut single = Vec::new();
+        for q in 0..n {
+            let theta = 0.7 + 0.2 * q as f64;
+            let phi = -0.3 + 0.4 * q as f64;
+            assert_eq!(statevector_apply_ry(sv, q as u32, theta), 0);
+            assert_eq!(statevector_apply_rz(sv, q as u32, phi), 0);
+            // Independent Bloch components of RZ(phi) RY(theta)|0>.
+            single.push([
+                1.0,
+                theta.sin() * phi.cos(),
+                theta.sin() * phi.sin(),
+                theta.cos(),
+            ]);
+        }
+        for encoded in 0..4usize.pow(n as u32) {
+            let mut label = vec![b'I'; n];
+            let mut expected = -0.37;
+            for q in 0..n {
+                let op = (encoded >> (2 * q)) & 3;
+                label[n - 1 - q] = b"IXYZ"[op];
+                expected *= single[q][op];
+            }
+            assert!(expected.abs() > 1e-10);
+            let label = String::from_utf8(label).unwrap();
+            // Absorb each Pauli phase into the coefficient: H = -0.37 P.
+            for (prefix, re, im) in [
+                ("", -0.37, 0.0),
+                ("-", 0.37, 0.0),
+                ("i", 0.0, 0.37),
+                ("-i", 0.0, -0.37),
+            ] {
+                let source = CString::new(format!("{prefix}{label}")).unwrap();
+                let pauli = pauli_string_parse(source.as_ptr());
+                assert!(!pauli.is_null());
+                let h = hamiltonian_new(n);
+                assert!(!h.is_null());
+                assert_eq!(hamiltonian_add_term(h, pauli, re, im), 0);
+                pauli_string_free(pauli); // add_term clones the Pauli handle.
+                let mut value = f64::NAN;
+                assert_eq!(statevector_expectation(sv, h, &mut value), 0);
+                assert!((value - expected).abs() < 1e-10, "{prefix}{label}");
+                assert_eq!(hamiltonian_simplify(h), 0);
+                assert_eq!(statevector_expectation(sv, h, &mut value), 0);
+                assert!((value - expected).abs() < 1e-10, "{prefix}{label}");
+                hamiltonian_free(h);
+            }
+        }
+        statevector_free(sv);
+    }
+}
+
+#[test]
+fn test_statevector_mixed_hamiltonian_expectation() {
+    let sv = statevector_new(1);
+    assert!(!sv.is_null());
+    assert_eq!(statevector_apply_h(sv, 0), 0);
+    assert_eq!(statevector_apply_rz(sv, 0, std::f64::consts::FRAC_PI_4), 0);
+    let h = hamiltonian_new(1);
+    assert!(!h.is_null());
+    for (label, re, im) in [
+        (c"I", 0.3, 0.0),
+        (c"X", 0.5, 0.0),
+        (c"-iY", 0.0, 0.75),
+        (c"Y", -0.25, 0.0),
+    ] {
+        let pauli = pauli_string_parse(label.as_ptr());
+        assert!(!pauli.is_null());
+        assert_eq!(hamiltonian_add_term(h, pauli, re, im), 0);
+        pauli_string_free(pauli);
+    }
+    // H = 0.3 I + 0.5 X + 0.5 Y; <X> = <Y> = 1/sqrt(2).
+    let expected = 0.3 + std::f64::consts::FRAC_1_SQRT_2;
+    let mut value = f64::NAN;
+    assert_eq!(statevector_expectation(sv, h, &mut value), 0);
+    assert!((value - expected).abs() < 1e-10);
+    assert_eq!(hamiltonian_simplify(h), 0);
+    assert_eq!(statevector_expectation(sv, h, &mut value), 0);
+    assert!((value - expected).abs() < 1e-10);
     hamiltonian_free(h);
     statevector_free(sv);
 }

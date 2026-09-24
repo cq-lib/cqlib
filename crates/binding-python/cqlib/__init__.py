@@ -57,6 +57,7 @@ from .device import (
     TwoQubitNoise,
 )
 from .qis import (
+    sample,
     DensityMatrix,
     DensityMatrixNoise,
     Hamiltonian,
@@ -73,6 +74,7 @@ except PackageNotFoundError:
     __version__ = "0+unknown"
 
 __all__ = [
+    "sample",
     "__version__",
     "Circuit",
     "CircuitDag",

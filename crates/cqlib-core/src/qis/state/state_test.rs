@@ -1,4 +1,5 @@
 // This code is part of Cqlib.
+// Modified to support reproducible state sampling.
 //
 // (C) Copyright China Telecom Quantum Group 2026
 //
@@ -9,14 +10,129 @@
 // Any modifications or derivative works of this code must retain this
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
+//
+// Modified to validate terminal measurements and clarify or correct reset behavior.
 
 //! Simulation consistency tests between Statevector and DensityMatrix
 
 use crate::circuit::{Circuit, Qubit};
 use crate::qis::pauli::{Pauli, PauliString};
-use crate::qis::{DensityMatrix, StabilizerState, Statevector};
+use crate::qis::{DensityMatrix, DensityMatrixNoise, QisError, StabilizerState, Statevector};
 use std::f64::consts::PI;
 const EPSILON: f64 = 1e-10;
+
+#[test]
+fn circuit_qubit_positions_are_used_for_measurement_queries() {
+    use crate::device::Outcome;
+    use std::collections::HashMap;
+
+    for ids in [[0, 1], [1, 0], [5, 9], [9, 5]] {
+        let qubits = ids.map(Qubit::new);
+        let mut circuit = Circuit::from_qubits(qubits.to_vec()).unwrap();
+        circuit.x(qubits[0]).unwrap();
+        let measurements = [
+            (circuit.measure_bits(qubits).unwrap(), "01"),
+            (circuit.measure_bits([qubits[1], qubits[0]]).unwrap(), "10"),
+            (circuit.measure(qubits[0]).unwrap(), "1"),
+            (circuit.measure(qubits[1]).unwrap(), "0"),
+        ];
+        let sv = Statevector::from_circuit(&circuit).unwrap();
+        let dm = DensityMatrix::from_circuit(&circuit).unwrap();
+        let stab = StabilizerState::from_circuit(&circuit).unwrap();
+        let noisy = DensityMatrixNoise::from_circuit(&circuit, None).unwrap();
+
+        for (measurement, bits) in measurements {
+            let outcome = Outcome::from_bitstring(bits).unwrap();
+            for (sample, probs) in [
+                (sv.sample(&measurement, 4), sv.probs(&measurement)),
+                (dm.sample(&measurement, 4), dm.probs(&measurement)),
+                (stab.sample(&measurement, 4), stab.probs(&measurement)),
+                (noisy.sample(&measurement, 4), noisy.probs(&measurement)),
+            ] {
+                let result = sample.unwrap();
+                assert_eq!(result.qubits(), measurement.qubits());
+                assert_eq!(result.counts(), &HashMap::from([(outcome.clone(), 4)]));
+                assert_eq!(probs.unwrap(), HashMap::from([(outcome.clone(), 1.0)]));
+            }
+        }
+    }
+}
+
+#[test]
+fn mid_circuit_measurement_is_rejected_before_mutating_any_state() {
+    let mut circuit = Circuit::new(1);
+    circuit.h(Qubit::new(0)).unwrap();
+    circuit.measure(Qubit::new(0)).unwrap();
+    circuit.h(Qubit::new(0)).unwrap();
+
+    let constructors = [
+        Statevector::from_circuit(&circuit).map(|_| ()),
+        DensityMatrix::from_circuit(&circuit).map(|_| ()),
+        DensityMatrixNoise::from_circuit(&circuit, None).map(|_| ()),
+        StabilizerState::from_circuit(&circuit).map(|_| ()),
+    ];
+    for result in constructors {
+        let Err(QisError::UnsupportedOperation(message)) = result else {
+            panic!("expected unsupported mid-circuit measurement");
+        };
+        assert!(message.contains("mid-circuit measurement on qubit 0 at operation 1"));
+        assert!(message.contains("later 'H' at operation 2"));
+    }
+
+    let mut sv = Statevector::new(1);
+    let mut dm = DensityMatrix::new(1);
+    let mut noisy = DensityMatrixNoise::new(1, None);
+    let mut stab = StabilizerState::new(1);
+    let sv_before = sv.data().to_vec();
+    let dm_before = dm.data().to_vec();
+    let noisy_before = noisy.state.data().to_vec();
+    let stab_before = stab.to_stim_format();
+    for result in [
+        sv.apply_circuit(&circuit),
+        dm.apply_circuit(&circuit),
+        noisy.apply_circuit(&circuit),
+        stab.apply_circuit(&circuit),
+    ] {
+        assert!(matches!(result, Err(QisError::UnsupportedOperation(_))));
+    }
+    assert_eq!(sv.data(), sv_before);
+    assert_eq!(dm.data(), dm_before);
+    assert_eq!(noisy.state.data(), noisy_before);
+    assert_eq!(stab.to_stim_format(), stab_before);
+}
+
+#[test]
+fn terminal_measurements_allow_independent_gates_and_ignored_operations() {
+    use crate::circuit::ClassicalType;
+
+    let mut circuit = Circuit::new(2);
+    circuit.h(Qubit::new(0)).unwrap();
+    let bit = circuit.var(ClassicalType::Bit);
+    circuit.measure_into(Qubit::new(0), bit).unwrap();
+    circuit.barrier(vec![Qubit::new(0), Qubit::new(1)]).unwrap();
+    circuit.delay(Qubit::new(0), 1.0.into()).unwrap();
+    circuit.h(Qubit::new(1)).unwrap();
+    circuit
+        .measure_bits([Qubit::new(1), Qubit::new(0)])
+        .unwrap();
+
+    let probabilities = [
+        Statevector::from_circuit(&circuit).unwrap().probabilities(),
+        DensityMatrix::from_circuit(&circuit)
+            .unwrap()
+            .probabilities(),
+        DensityMatrixNoise::from_circuit(&circuit, None)
+            .unwrap()
+            .probabilities(),
+        StabilizerState::from_circuit(&circuit)
+            .unwrap()
+            .probabilities()
+            .unwrap(),
+    ];
+    for probs in probabilities {
+        compare_probs(&probs, &[0.25; 4], "terminal measurements");
+    }
+}
 
 /// Compare probabilities from statevector and density matrix
 fn compare_probs(sv_probs: &[f64], dm_probs: &[f64], desc: &str) {
@@ -723,5 +839,39 @@ fn test_clifford_circuits_match_stabilizer_state() {
                 "{name}: statevector/stabilizer expectation mismatch for {obs}: {sv_exp} vs {stab_exp}"
             );
         }
+    }
+}
+
+#[test]
+fn full_measurement_uses_the_supplied_random_stream() {
+    // Extreme deterministic draws force opposite outcomes of an unbiased qubit.
+    // This detects accidentally falling back to thread-local randomness.
+    struct ConstantRng(u64);
+    impl rand::RngCore for ConstantRng {
+        fn next_u32(&mut self) -> u32 {
+            self.0 as u32
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.0
+        }
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            for chunk in dest.chunks_mut(8) {
+                chunk.copy_from_slice(&self.0.to_le_bytes()[..chunk.len()]);
+            }
+        }
+    }
+    for (draw, expected) in [(0, true), (u64::MAX, false)] {
+        let mut sv = Statevector::new(1);
+        sv.apply_h(0).unwrap();
+        assert_eq!(
+            sv.measure_all_with_rng(&mut ConstantRng(draw)).is_one(0),
+            expected
+        );
+        let mut dm = DensityMatrix::new(1);
+        dm.apply_h(0).unwrap();
+        assert_eq!(
+            dm.measure_all_with_rng(&mut ConstantRng(draw)).is_one(0),
+            expected
+        );
     }
 }

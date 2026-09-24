@@ -1,4 +1,5 @@
 // This code is part of Cqlib.
+// Modified to support reproducible state sampling.
 //
 // (C) Copyright China Telecom Quantum Group 2026
 //
@@ -18,7 +19,6 @@ use crate::qis::error::QisError;
 use crate::qis::state::density_matrix::DensityMatrix;
 use ndarray::Array2;
 use num_complex::Complex64;
-use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// A density matrix quantum simulator with noise modeling capabilities.
@@ -148,6 +148,14 @@ impl DensityMatrixNoise {
 
     /// Applies a quantum circuit to this noisy density matrix in-place.
     ///
+    /// Once bound to circuit qubit IDs, subsequent circuits must have the same
+    /// IDs in the same order. The mapping is committed only on success; gates
+    /// completed before an error are not rolled back.
+    ///
+    /// As in `from_circuit`, terminal measurements are ignored. A measured qubit
+    /// used by a later gate or Reset is rejected before the state is changed.
+    /// Independent gates, repeated measurements, Barrier, Delay, and Store are allowed.
+    ///
     /// The circuit is first decomposed into basis gates via [`Circuit::decompose`],
     /// then each operation is applied sequentially. Noise is applied according to
     /// the noise model immediately following each gate.
@@ -180,14 +188,10 @@ impl DensityMatrixNoise {
             ));
         }
         let circuit = circuit.decompose()?;
+        super::validate_terminal_measurements(&circuit)?;
         let sim = self;
 
-        let qubits = circuit.qubits();
-        let qubit_map: std::collections::HashMap<_, _> = qubits
-            .iter()
-            .enumerate()
-            .map(|(idx, q)| (*q, idx))
-            .collect();
+        let qubit_map = super::prepare_qubit_map(&circuit.qubits(), &sim.state.qubit_map)?;
 
         let parameter_values: Vec<Option<f64>> = circuit
             .parameters()
@@ -301,6 +305,7 @@ impl DensityMatrixNoise {
                 Instruction::ClassicalData(_) => {}
             }
         }
+        sim.state.qubit_map = Some(qubit_map);
         Ok(())
     }
 
@@ -937,22 +942,25 @@ impl DensityMatrixNoise {
     /// # Arguments
     ///
     /// * `probs` - Mutable reference to the probability vector to modify.
-    /// * `qubits` - Indices of qubits to apply readout noise for.
-    fn apply_readout_noise(&self, probs: &mut Vec<f64>, qubits: &[usize]) -> Result<(), QisError> {
+    /// * `qubits` - Noise-model qubit IDs paired with probability-array bit positions.
+    fn apply_readout_noise(
+        &self,
+        probs: &mut Vec<f64>,
+        qubits: impl IntoIterator<Item = (Qubit, usize)>,
+    ) -> Result<(), QisError> {
         let Some(noise_model) = &self.noise_model else {
             return Ok(());
         };
 
         let mut next_probs = vec![0.0; probs.len()];
-        for &q in qubits {
-            if q >= self.state.num_qubits {
+        for (qubit, position) in qubits {
+            if position >= self.state.num_qubits {
                 return Err(QisError::IndexOutOfBounds {
-                    index: q,
+                    index: position,
                     max: self.state.num_qubits.saturating_sub(1),
                 });
             }
-            let q_obj = Qubit::new(q as u32);
-            let Some(err) = noise_model.get_readout_error(&q_obj) else {
+            let Some(err) = noise_model.get_readout_error(&qubit) else {
                 continue;
             };
 
@@ -963,13 +971,13 @@ impl DensityMatrixNoise {
 
             next_probs.fill(0.0);
             for (state, &p) in probs.iter().enumerate() {
-                let bit = (state >> q) & 1;
+                let bit = (state >> position) & 1;
                 if bit == 0 {
                     next_probs[state] += p * p_0_given_0;
-                    next_probs[state | (1 << q)] += p * p_1_given_0;
+                    next_probs[state | (1 << position)] += p * p_1_given_0;
                 } else {
                     next_probs[state] += p * p_1_given_1;
-                    next_probs[state & !(1 << q)] += p * p_0_given_1;
+                    next_probs[state & !(1 << position)] += p * p_0_given_1;
                 }
             }
             std::mem::swap(probs, &mut next_probs);
@@ -1007,7 +1015,10 @@ impl DensityMatrixNoise {
     /// ```
     pub fn probabilities_with_readout(&self, qubits: &[usize]) -> Result<Vec<f64>, QisError> {
         let mut probs = self.probabilities();
-        self.apply_readout_noise(&mut probs, qubits)?;
+        self.apply_readout_noise(
+            &mut probs,
+            qubits.iter().map(|&q| (Qubit::new(q as u32), q)),
+        )?;
         Ok(probs)
     }
 
@@ -1025,25 +1036,31 @@ impl DensityMatrixNoise {
     /// This preserves the existing simulator convention: [`probabilities`](Self::probabilities)
     /// and [`probs`](Self::probs) describe the noisy quantum state before readout
     /// error, while this method additionally applies readout errors configured
-    /// for `measurement.qubits()`.
+    /// for `measurement.qubits()`. These IDs select the noise entries, while
+    /// the state's qubit mapping determines the affected probability-array bits.
     pub fn probs_with_readout(
         &self,
         measurement: &Measurement,
     ) -> Result<HashMap<Outcome, f64>, QisError> {
-        measurement.check_qubits(self.state.num_qubits)?;
+        let projection =
+            super::resolve_measurement(measurement, &self.state.qubit_map, self.state.num_qubits)?;
 
-        let qubits: Vec<usize> = measurement.qubits().iter().map(Qubit::index).collect();
+        let mut probs = self.probabilities();
+        self.apply_readout_noise(
+            &mut probs,
+            measurement
+                .qubits()
+                .iter()
+                .copied()
+                .zip(projection.qubits().iter().map(Qubit::index)),
+        )?;
         let mut marginal = HashMap::new();
-        for (basis, prob) in self
-            .probabilities_with_readout(&qubits)?
-            .into_iter()
-            .enumerate()
-        {
+        for (basis, prob) in probs.into_iter().enumerate() {
             if prob == 0.0 {
                 continue;
             }
             *marginal
-                .entry(measurement.project_basis(basis))
+                .entry(projection.project_basis(basis))
                 .or_insert(0.0) += prob;
         }
         Ok(marginal)
@@ -1131,13 +1148,13 @@ impl DensityMatrixNoise {
     /// assert!(shots.iter().all(|v| v.is_one(0) == v.is_one(1)));
     /// ```
     pub fn sample_shots(&self, shots: usize) -> Vec<Outcome> {
-        (0..shots)
-            .into_par_iter()
-            .map_with(self.clone(), |work, _| {
-                work.state.reset_from(&self.state);
-                work.state.measure_all()
-            })
-            .collect()
+        self.sample_shots_with_seed(shots, None)
+    }
+
+    /// Samples the prepared density matrix with an optional seed. Like
+    /// `sample_shots`, this does not apply readout noise.
+    pub fn sample_shots_with_seed(&self, shots: usize, seed: Option<u64>) -> Vec<Outcome> {
+        self.state.sample_shots_with_seed(shots, seed)
     }
 
     /// Samples the noisy quantum state using a circuit [`Measurement`] as the output contract.
@@ -1149,11 +1166,22 @@ impl DensityMatrixNoise {
         measurement: &Measurement,
         shots: usize,
     ) -> Result<ExecutionResult, QisError> {
-        measurement.check_qubits(self.state.num_qubits)?;
+        self.sample_with_seed(measurement, shots, None)
+    }
+
+    /// Projects seeded full-state samples onto the requested measurement.
+    pub fn sample_with_seed(
+        &self,
+        measurement: &Measurement,
+        shots: usize,
+        seed: Option<u64>,
+    ) -> Result<ExecutionResult, QisError> {
+        let projection =
+            super::resolve_measurement(measurement, &self.state.qubit_map, self.state.num_qubits)?;
 
         let mut counts = HashMap::new();
-        for full in self.sample_shots(shots) {
-            *counts.entry(measurement.project(&full)).or_insert(0usize) += 1;
+        for full in self.sample_shots_with_seed(shots, seed) {
+            *counts.entry(projection.project(&full)).or_insert(0usize) += 1;
         }
 
         Ok(ExecutionResult::from_counts(
