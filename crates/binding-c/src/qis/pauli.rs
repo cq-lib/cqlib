@@ -13,8 +13,9 @@
 //! C ABI for `PauliString` and single-qubit Pauli operators.
 
 use crate::error::CqlibError;
-use crate::qis::CPauliString;
+use crate::qis::{CPauliString, qis_err_code};
 use cqlib_core::qis::{Pauli, PauliString};
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::str::FromStr;
@@ -50,6 +51,39 @@ fn to_c_pauli(pauli: Pauli) -> u8 {
         Pauli::Y => PAULI_Y,
         Pauli::Z => PAULI_Z,
     }
+}
+
+/// Multiply two single-qubit Pauli operators as `left * right` and return
+/// the result together with the Pauli-group phase factor (e.g. X * Z = -iY).
+///
+/// On success, writes the resulting Pauli tag (one of `PAULI_I/X/Y/Z`) to
+/// `out_pauli` and the complex phase (one of 1, i, -1, -i) to `out_phase`,
+/// then returns 0. Returns -1 when an output pointer is NULL and -8 when an
+/// input tag is not one of `PAULI_I/X/Y/Z`.
+#[unsafe(no_mangle)]
+pub extern "C" fn pauli_mul_with_phase(
+    left: u8,
+    right: u8,
+    out_pauli: *mut u8,
+    out_phase: *mut num_complex::Complex64,
+) -> i32 {
+    if out_pauli.is_null() || out_phase.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    let left = match from_c_pauli(left) {
+        Some(p) => p,
+        None => return CqlibError::InvalidParam as i32,
+    };
+    let right = match from_c_pauli(right) {
+        Some(p) => p,
+        None => return CqlibError::InvalidParam as i32,
+    };
+    let (result, phase) = left.mul_with_phase(right);
+    unsafe {
+        *out_pauli = to_c_pauli(result);
+        *out_phase = phase.to_complex();
+    }
+    0
 }
 
 /// Create a new identity Pauli string on `num_qubits` qubits.
@@ -186,4 +220,179 @@ pub extern "C" fn pauli_string_matrix(
         std::ptr::copy_nonoverlapping(flat.as_ptr(), buffer, len);
     }
     0
+}
+
+/// Return 1 if this Pauli string commutes with `other`, 0 otherwise.
+/// Returns -1 for NULL handles and -8 when the qubit counts differ.
+#[unsafe(no_mangle)]
+pub extern "C" fn pauli_string_commutes_with(
+    ptr: *const CPauliString,
+    other: *const CPauliString,
+) -> i32 {
+    if ptr.is_null() || other.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    let a = unsafe { &(*ptr).inner };
+    let b = unsafe { &(*other).inner };
+    if a.num_qubits != b.num_qubits {
+        return CqlibError::InvalidParam as i32;
+    }
+    if a.commutes_with(b) { 1 } else { 0 }
+}
+
+/// Return the X-component bitmask: bit i is set when qubit i carries an
+/// X or Y operator. Returns 0 for NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn pauli_string_x_mask(ptr: *const CPauliString) -> usize {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).inner.x_mask() }
+}
+
+/// Return the Z-component bitmask: bit i is set when qubit i carries a
+/// Z or Y operator. Returns 0 for NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn pauli_string_z_mask(ptr: *const CPauliString) -> usize {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).inner.z_mask() }
+}
+
+/// Compute the phase factor `i^n` contributed by the n Y operators of
+/// the string. Writes the complex value to `out` and returns 0 on
+/// success.
+#[unsafe(no_mangle)]
+pub extern "C" fn pauli_string_y_phase(
+    ptr: *const CPauliString,
+    out: *mut num_complex::Complex64,
+) -> i32 {
+    if ptr.is_null() || out.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    let wrapper = unsafe { &*ptr };
+    unsafe { *out = wrapper.inner.y_phase() };
+    0
+}
+
+/// Return the number of non-identity qubits (support size), or 0 for NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn pauli_string_support_len(ptr: *const CPauliString) -> usize {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).inner.support().len() }
+}
+
+/// Copy the support (indices of non-identity operators, ascending) into
+/// `buffer` as `uint32_t` values. `len` must equal
+/// `pauli_string_support_len(ptr)`. Returns 0 on success, or a negative
+/// error code.
+#[unsafe(no_mangle)]
+pub extern "C" fn pauli_string_support(
+    ptr: *const CPauliString,
+    buffer: *mut u32,
+    len: usize,
+) -> i32 {
+    if ptr.is_null() || buffer.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    let wrapper = unsafe { &*ptr };
+    let support = wrapper.inner.support();
+    if support.len() != len {
+        return CqlibError::InvalidParam as i32;
+    }
+    for (i, &q) in support.iter().enumerate() {
+        unsafe {
+            *buffer.add(i) = q as u32;
+        }
+    }
+    0
+}
+
+/// Get the Pauli operator at qubit index `idx` without panicking.
+/// Writes one of `PAULI_I/X/Y/Z` to `out` and returns 0 on success, or
+/// a negative error code (`-2` out of bounds).
+#[unsafe(no_mangle)]
+pub extern "C" fn pauli_string_try_get_pauli(
+    ptr: *const CPauliString,
+    idx: usize,
+    out: *mut u8,
+) -> i32 {
+    if ptr.is_null() || out.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    let wrapper = unsafe { &*ptr };
+    match wrapper.inner.try_get_pauli(idx) {
+        Ok(pauli) => {
+            unsafe { *out = to_c_pauli(pauli) };
+            0
+        }
+        Err(err) => qis_err_code(&err),
+    }
+}
+
+/// Set the Pauli operator at qubit index `idx` without panicking.
+/// `pauli` must be one of `PAULI_I/X/Y/Z`. Returns 0 on success, or a
+/// negative error code (`-2` out of bounds, `-8` invalid tag).
+#[unsafe(no_mangle)]
+pub extern "C" fn pauli_string_try_set_pauli(ptr: *mut CPauliString, idx: usize, pauli: u8) -> i32 {
+    if ptr.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    let wrapper = unsafe { &mut *ptr };
+    let p = match from_c_pauli(pauli) {
+        Some(p) => p,
+        None => return CqlibError::InvalidParam as i32,
+    };
+    match wrapper.inner.try_set_pauli(idx, p) {
+        Ok(()) => 0,
+        Err(err) => qis_err_code(&err),
+    }
+}
+
+/// Compute the expectation value `<P>` given a probability distribution
+/// over computational basis states. `bitstrings[i]` pairs with `probs[i]`;
+/// each bitstring uses the little-endian convention (the rightmost
+/// character is qubit 0) and must be exactly `num_qubits` characters of
+/// '0'/'1'. Strings containing X or Y operators yield 0.0. Writes the
+/// value to `out` and returns 0 on success, or a negative error code
+/// (`-1` NULL handle, buffer or output; `-4` non-UTF-8 bitstring; `-8`
+/// NULL bitstring entry; `-7` for core rejections such as a wrong-length
+/// or invalid-character bitstring).
+#[unsafe(no_mangle)]
+pub extern "C" fn pauli_string_expectation(
+    ptr: *const CPauliString,
+    bitstrings: *const *const c_char,
+    probs: *const f64,
+    len: usize,
+    out: *mut f64,
+) -> i32 {
+    if ptr.is_null() || out.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    if len > 0 && (bitstrings.is_null() || probs.is_null()) {
+        return CqlibError::NullPtr as i32;
+    }
+    let wrapper = unsafe { &*ptr };
+    let mut distribution: HashMap<String, f64> = HashMap::with_capacity(len);
+    for i in 0..len {
+        let raw = unsafe { *bitstrings.add(i) };
+        if raw.is_null() {
+            return CqlibError::InvalidParam as i32;
+        }
+        let state = match unsafe { CStr::from_ptr(raw) }.to_str() {
+            Ok(state) => state.to_string(),
+            Err(_) => return CqlibError::ParseError as i32,
+        };
+        distribution.insert(state, unsafe { *probs.add(i) });
+    }
+    match wrapper.inner.expectation(&distribution) {
+        Ok(value) => {
+            unsafe { *out = value };
+            0
+        }
+        Err(err) => qis_err_code(&err),
+    }
 }

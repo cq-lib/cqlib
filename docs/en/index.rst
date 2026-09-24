@@ -238,26 +238,59 @@ Cqlib Documentation
    ../api/en/c/0_overview
    ../api/en/c/0_circuit/0_overview
    ../api/en/c/0_circuit/1_circuit
-   ../api/en/c/0_circuit/2_parameter
-   ../api/en/c/0_circuit/3_circuit_to_matrix
+   ../api/en/c/0_circuit/2_qubit
+   ../api/en/c/0_circuit/3_parameter
+   ../api/en/c/0_circuit/4_operation_instruction
+   ../api/en/c/0_circuit/5_gate_standard
+   ../api/en/c/0_circuit/6_gate_unitary
+   ../api/en/c/0_circuit/7_gate_mc_gate
+   ../api/en/c/0_circuit/8_gate_circuit_gate
+   ../api/en/c/0_circuit/9_classical_control_flow
+   ../api/en/c/0_circuit/10_symbolic_matrix
+   ../api/en/c/0_circuit/11_ansatz
+   ../api/en/c/0_circuit/12_cfg
+   ../api/en/c/0_circuit/13_circuit_to_matrix
+   ../api/en/c/0_circuit/14_circuit_dag
+   ../api/en/c/1_ir/0_overview
    ../api/en/c/1_ir/1_qcis
    ../api/en/c/1_ir/2_qasm2
    ../api/en/c/1_ir/3_qasm3
+   ../api/en/c/2_device/0_overview
    ../api/en/c/2_device/1_topology
    ../api/en/c/2_device/2_properties_device
    ../api/en/c/2_device/3_layout
    ../api/en/c/2_device/4_noise
    ../api/en/c/2_device/5_result
+   ../api/en/c/2_device/6_qubits
    ../api/en/c/3_qis/0_overview
    ../api/en/c/3_qis/1_statevector
    ../api/en/c/3_qis/2_density_matrix
-   ../api/en/c/3_qis/3_stabilizer_state
-   ../api/en/c/3_qis/4_pauli_string
-   ../api/en/c/3_qis/5_hamiltonian
-   ../api/en/c/4_compile/1_compile
-   ../api/en/c/5_visualization/1_text_drawer
-   ../api/en/c/5_visualization/2_figure_drawer
-   ../api/en/c/6_error_mitigation/1_error_mitigation
-   ../api/en/c/6_error_mitigation/2_zne_mitigation
-   ../api/en/c/6_error_mitigation/3_virtual_distillation
+   ../api/en/c/3_qis/3_density_matrix_noise
+   ../api/en/c/3_qis/4_stabilizer
+   ../api/en/c/3_qis/5_classical_state
+   ../api/en/c/3_qis/6_pauli
+   ../api/en/c/3_qis/7_hamiltonian
+   ../api/en/c/3_qis/8_evolution
+   ../api/en/c/3_qis/9_metrics_entropy
+   ../api/en/c/4_compile/0_overview
+   ../api/en/c/4_compile/1_compiler
+   ../api/en/c/4_compile/2_transform
+   ../api/en/c/4_compile/3_layout
+   ../api/en/c/4_compile/4_routing
+   ../api/en/c/4_compile/5_sabre
+   ../api/en/c/4_compile/6_decompose_resynthesis
+   ../api/en/c/4_compile/7_knowledge
+   ../api/en/c/4_compile/8_resource
+   ../api/en/c/4_compile/9_commutation
+   ../api/en/c/5_visualization/0_overview
+   ../api/en/c/5_visualization/1_draw_text
+   ../api/en/c/5_visualization/2_draw_figure
+   ../api/en/c/5_visualization/3_state_plots
+   ../api/en/c/5_visualization/4_result_plots
+   ../api/en/c/5_visualization/5_render_to_file
+   ../api/en/c/5_visualization/6_visual_ir
+   ../api/en/c/6_error_mitigation/0_overview
+   ../api/en/c/6_error_mitigation/1_zne
+   ../api/en/c/6_error_mitigation/2_virtual_distillation
+   ../api/en/c/6_error_mitigation/3_unified
 

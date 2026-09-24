@@ -15,12 +15,19 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 pub mod density_matrix;
+pub mod density_matrix_noise;
+pub mod entropy;
 pub mod hamiltonian;
+pub mod measurement;
+pub mod metrics;
 pub mod pauli;
 pub mod stabilizer;
 pub mod statevector;
 
-use cqlib_core::qis::{DensityMatrix, Hamiltonian, PauliString, StabilizerState, Statevector};
+use cqlib_core::circuit::{ClassicalValue, Measurement};
+use cqlib_core::qis::{
+    DensityMatrix, DensityMatrixNoise, Hamiltonian, PauliString, StabilizerState, Statevector,
+};
 
 /// Opaque handle around [`Statevector`] for C ABI.
 pub struct CStatevector {
@@ -45,6 +52,21 @@ pub struct CHamiltonian {
 /// Opaque handle around [`PauliString`] for C ABI.
 pub struct CPauliString {
     pub inner: PauliString,
+}
+
+/// Opaque handle around [`DensityMatrixNoise`] for C ABI.
+pub struct CDensityMatrixNoise {
+    pub inner: DensityMatrixNoise,
+}
+
+/// Opaque handle around [`Measurement`] for C ABI.
+pub struct CMeasurement {
+    pub inner: Measurement,
+}
+
+/// Opaque handle around [`ClassicalValue`] for C ABI.
+pub struct CClassicalValue {
+    pub inner: ClassicalValue,
 }
 
 /// Owned list of measurement outcome bitstrings returned by `*_sample_shots`.
@@ -79,7 +101,11 @@ pub(crate) fn qis_err_code(err: &cqlib_core::qis::QisError) -> i32 {
 }
 
 pub use density_matrix::*;
+pub use density_matrix_noise::*;
+pub use entropy::*;
 pub use hamiltonian::*;
+pub use measurement::*;
+pub use metrics::*;
 pub use pauli::*;
 pub use stabilizer::*;
 pub use statevector::*;

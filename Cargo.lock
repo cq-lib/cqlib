@@ -170,7 +170,9 @@ dependencies = [
  "cbindgen",
  "cqlib-core",
  "libc",
+ "ndarray 0.17.2",
  "num-complex",
+ "rustworkx-core",
 ]
 
 [[package]]

@@ -1,56 +1,71 @@
-# Quantum circuit
+# Quantum Circuit (circuit)
 
-The circuit module is the core entry point of the Cqlib C API, used to build, represent and transform quantum circuits. All circuit state is kept in the opaque handle `CCircuit`, and C code operates on circuits through free functions.
+The quantum circuit module of the C API centers on the opaque handle `CCircuit*` and provides circuit construction and inspection, symbolic parameters, gate operations, classical data and control flow, symbolic matrices, parameterized templates (ansatz), control flow graphs and circuit DAGs.
 
-The circuit module mainly provides the following capabilities:
-
-- **Basic circuit construction**: create a set of logical qubits, and append quantum gates, measurement, reset, barrier and other operations in order.
-- **Gate system**: the complete set of free functions for single-qubit gates without parameters, parameterized single-qubit gates, two-qubit gates and three-qubit gates; parameterized gates provide both a numeric variant and a symbolic parameter variant.
-- **Symbolic parameters**: represent adjustable parameters such as gate angles with `CParameter`, with support for expression parsing, evaluation and whole-circuit parameter binding.
-- **Circuit properties and structure**: query the qubit count, operation count and depth, with support for inverse circuits, composite gate decomposition, circuit composition and appending qubits.
-- **Matrix conversion**: export small purely quantum gate circuits as a dense unitary matrix (two-step API).
+See [Overview](../0_overview.md) for the global conventions on error codes, memory ownership and the two-step array output pattern.
 
 ---
 
-## Core conventions
+## Module navigation
+
+| Category | Page | Main objects | Description |
+| --- | --- | --- | --- |
+| Circuit container | [Circuit](1_circuit.md) | `CCircuit*` | Circuit construction, property queries, composition, inversion, decomposition, global phase and parameter binding. |
+| Qubit | [Qubit](2_qubit.md) | `CQubit` | Logical qubit identifier: creation, ID access, checked conversions, comparison and string representation. |
+| Parameters | [Parameters](3_parameter.md) | `CParameter*`, `CCircuitParam`, `CParameterValue` | Expression parsing, evaluation and interning into the circuit parameter table. |
+| Operation IR | [Operations / Instructions](4_operation_instruction.md) | `COperation*`, `CValueOperation*` | Storage-layer operations, circuit operation snapshots and delay instructions. |
+| Standard gates | [Standard Gates](5_gate_standard.md) | `circuit_h` and friends | Built-in standard gates with numeric-angle and symbolic-angle (`*_param`) variants. |
+| Unitary gates | [Unitary Gates](6_gate_unitary.md) | `circuit_unitary` and friends | Numeric matrix gates and symbolic matrix gates. |
+| Multi-controlled gates | [Multi-Controlled Gates](7_gate_mc_gate.md) | `circuit_multi_control` | Add control qubits in front of a standard gate. |
+| Circuit gates | [Circuit Gates](8_gate_circuit_gate.md) | `CCircuitGate*`, `circuit_to_gate` | Freeze a circuit into a reusable composite gate. |
+| Classical data and control flow | [Classical / Control Flow](9_classical_control_flow.md) | `CClassicalVar*`, `CClassicalExpr*`, `circuit_if`, ... | Measurement, classical expressions and structured control flow. |
+| Symbolic matrix | [Symbolic Matrix](10_symbolic_matrix.md) | `CSymbolicMatrix*` | Dense symbolic matrices that retain parameters, and equivalence checking. |
+| Ansatz | [Ansatz](11_ansatz.md) | `CTwoLocal`, `CQAOAAnsatz`, ... | Parameterized circuit templates. |
+| Control flow graph | [CFG](12_cfg.md) | `CCircuitCFG*` | Circuit control flow graph view, queries and reconstruction. |
+| Matrix conversion | [Circuit to Matrix](13_circuit_to_matrix.md) | `circuit_to_matrix` and friends | Numeric matrices of purely unitary circuits and global phase. |
+| Circuit DAG | [Circuit DAG](14_circuit_dag.md) | `CCircuitDag*` | Dependency DAG view and circuit reconstruction. |
+
+---
+
+## Core concepts
 
 | Concept | Description |
 | --- | --- |
-| **Opaque handle** | Handle types such as `CCircuit` have only a forward declaration in the header and are managed internally by Rust; they can only be created and destroyed through the API. |
-| **Qubit index** | `Circuit` uses consecutive logical indices `0..num_qubits-1`; an index out of range returns status code `-2`. |
-| **Status code** | Gate and structural operations return `int32_t`, with `0` for success; see [Overview](../0_overview.md#status-codes) for details. |
-| **Returns a new object** | `circuit_inverse` / `circuit_decompose` / `circuit_assign_params` and the like return a new, independently owned circuit, which must be released with `circuit_free`. |
+| **Opaque handle** | Types such as `struct CCircuit` are only forward-declared in the header with no exported fields; all access goes through functions, and handles are released with the matching `*_free`. |
+| **Qubit numbering** | Logical qubits are `uint32_t` ids. `circuit_new(n)` creates consecutive ids `0..n-1`; `circuit_from_qubits` accepts an explicit (including sparse) id list. |
+| **Gate function prefix** | Gate operations all start with `circuit_`: fixed gates such as `circuit_h`, `circuit_cx`; angle-carrying gates provide a numeric variant (`circuit_rx`) and a symbolic variant (`circuit_rx_param`, taking a `CParameter*`). |
+| **Symbolic parameters** | `param_parse` parses an expression from a string; once interned into the circuit's parameter table, a parameter is represented as a `CCircuitParam` (fixed value or table index). |
+| **Measurement and control flow** | Measurement produces immutable classical values owned by the circuit; classical expressions and `circuit_if`/`circuit_while`/`circuit_for_uint`/`circuit_switch` describe runtime control flow. |
+
+Controlled gates follow the order "control qubits first, target qubit last"; for example, in `circuit_cx(qc, control, target)` the `control` argument is the control qubit.
 
 ---
 
-## Quick examples
-
-### Bell state preparation
+## Minimal example
 
 ```c
-CCircuit *qc = circuit_new(2);
-circuit_h(qc, 0);
-circuit_cx(qc, 0, 1);
-circuit_free(qc);
+#include <cqlib_c.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    CCircuit *qc = circuit_new(2);
+    circuit_h(qc, 0);       /* 0 on success, negative on error */
+    circuit_cx(qc, 0, 1);
+
+    printf("qubits    = %zu\n", circuit_num_qubits(qc));
+    printf("depth     = %zd\n", circuit_depth(qc, true));
+    printf("operations= %zu\n", circuit_num_operations(qc));
+
+    /* Two-step read of the qubit list */
+    uintptr_t n = circuit_qubits_len(qc);
+    uint32_t *ids = malloc(n * sizeof(uint32_t));
+    circuit_qubits(qc, ids, n);   /* ids = {0, 1} */
+
+    free(ids);
+    circuit_free(qc);
+    return 0;
+}
 ```
 
-### Parameterized rotation
-
-```c
-CParameter *theta = param_parse("theta/2");
-circuit_rx_param(qc, 1, theta);
-param_free(theta);
-
-CCircuit *bound = circuit_assign_params(qc, "theta:3.1415926");
-circuit_free(bound);
-```
-
----
-
-## API overview
-
-| Object | Page | Description |
-| --- | --- | --- |
-| `CCircuit` | [Circuit](1_circuit.md) | The main circuit container: construction and release, gate operations, circuit properties and structural operations. |
-| `CParameter` | [Parameter](2_parameter.md) | Symbolic parameter expressions: parsing, evaluation and whole-circuit parameter binding. |
-| Unitary matrix export | [Circuit To Matrix](3_circuit_to_matrix.md) | Two-step export of a circuit's dense unitary matrix. |
+After construction, a circuit is usually executed by the [Statevector](../3_qis/1_statevector.md) or [DensityMatrix](../3_qis/2_density_matrix.md) simulators; a circuit containing measurement or control flow no longer has a single fixed unitary matrix representation, and the matrix conversion interfaces apply only to purely quantum sub-circuits (see [Circuit to Matrix](13_circuit_to_matrix.md)).

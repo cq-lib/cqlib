@@ -1,280 +1,429 @@
 # Circuit
 
-`CCircuit` is the core circuit container in the C API. It holds the qubit set, the sequence of operations arranged in order, symbolic parameters and the global phase. All state is kept in the opaque handle, and C code operates on circuits through free functions.
-
-```c
-#include <cqlib_c.h>
-```
+The `CCircuit*` handle is the main container for a quantum circuit, holding the set of logical qubits, the operation sequence, the parameter table, classical variables and values, control-flow scopes, and the global phase. This page covers circuit construction and release, property queries, structural transformations, checkpoint transactions, the global phase, and parameter binding; gate functions are covered in [Standard Gates](5_gate_standard.md) and symbolic parameter details in [Symbolic Parameters](3_parameter.md). Error codes and memory conventions are described in [Overview](../0_overview.md).
 
 ---
 
-## Construction and release
+## Construction and Release
 
 ### circuit_new(num_qubits)
 
-Create an empty circuit containing `num_qubits` logical qubits (indices `0..num_qubits-1`).
-
-Parameters:
+Creates an empty circuit with contiguous logical qubits whose ids run from `0` to `num_qubits - 1`.
 
 - `num_qubits` (`uintptr_t`): the number of qubits.
 
-Returns:
+Returns: a newly allocated `CCircuit*`; free it with `circuit_free`.
 
-- `CCircuit *`: a heap-allocated circuit object, to be released with `circuit_free`; returns NULL on failure.
+### circuit_from_qubits(qubits, len)
+
+Creates a circuit from an explicit list of qubit ids, allowing sparse numbering (e.g. `{2, 5}`). When `len` is 0 an empty circuit is created and `qubits` may be NULL.
+
+- `qubits` (`const uint32_t*`): array of qubit ids.
+- `len` (`uintptr_t`): array length.
+
+Returns: a newly allocated `CCircuit*`; when `len > 0`, returns `NULL` if `qubits` is NULL or an id is duplicated.
+
+### circuit_from_operations(qubits, qubits_len, operations, operations_len)
+
+Creates a circuit from qubits plus a batch of resolved value-level operations (as produced by `circuit_index`, see [Operation / Instruction](4_operation_instruction.md)). Operations are appended in order through value-level lowering, so qubit membership is validated and symbolic parameters are interned into the new circuit's parameter table.
+
+- `qubits` (`const uint32_t*`): array of qubit ids.
+- `qubits_len` (`uintptr_t`): array length; when 0 an empty qubit set is created and `qubits` may be NULL.
+- `operations` (`const CValueOperation* const*`): array of resolved operation snapshots.
+- `operations_len` (`uintptr_t`): number of operations.
+
+Returns: a newly allocated `CCircuit*`, freed with `circuit_free`; `NULL` on NULL input (including NULL entries inside `operations`), duplicate qubits, or any operation-level failure.
+
+### circuit_append_value_operation(ptr, op)
+
+Appends one resolved value-level operation (as produced by `circuit_index`) to the circuit.
+
+- `ptr` (`CCircuit*`): circuit handle.
+- `op` (`const CValueOperation*`): resolved operation snapshot.
+
+Returns: `0` on success; `-1` for NULL; `-3` on application failure (e.g. the operation references a qubit outside the circuit).
 
 ### circuit_free(ptr)
 
-Release the circuit object. NULL is allowed.
+Frees a circuit handle. Passing NULL is allowed.
+
+- `ptr` (`CCircuit*`): circuit handle.
 
 ```c
-CCircuit *qc = circuit_new(3);
-// ... 构建与使用 ...
-circuit_free(qc);
+/* Sparse numbering: qubit ids 2 and 5 */
+uint32_t ids[2] = {2, 5};
+CCircuit *qc = circuit_from_qubits(ids, 2);
+if (qc != NULL) {
+    /* circuit_width(qc) == 2 */
+    circuit_free(qc);
+}
 ```
 
 ---
 
-## Gate operations
+## Property Queries
 
-All gate functions return an `int32_t` status code:
+### circuit_num_qubits(ptr)
 
-| Return value | Meaning |
-| --- | --- |
-| `0` | Success |
-| `-1` | The circuit handle is NULL |
-| `-2` | The qubit index is out of range |
-| `-3` | Other circuit errors |
+Returns the number of qubits.
 
-Parameterized gates provide both a numeric variant and a symbolic parameter variant (`*_param`): a `_param` variant replaces the corresponding `double` parameters with one or more `const CParameter *`, and parameter objects are created by [param_parse](2_parameter.md).
+- `ptr` (`const CCircuit*`): circuit handle.
 
-### 1. Single-qubit gates without parameters
+Returns: the qubit count; 0 for NULL.
 
-| Function | Gate | Description |
-| --- | --- | --- |
-| `circuit_i(qc, qubit)` | `I` | Identity gate |
-| `circuit_h(qc, qubit)` | `H` | Hadamard gate |
-| `circuit_x(qc, qubit)` | `X` | Pauli-X gate |
-| `circuit_y(qc, qubit)` | `Y` | Pauli-Y gate |
-| `circuit_z(qc, qubit)` | `Z` | Pauli-Z gate |
-| `circuit_s(qc, qubit)` | `S` | S gate (√Z) |
-| `circuit_sdg(qc, qubit)` | `S†` | S dagger gate |
-| `circuit_t(qc, qubit)` | `T` | T gate (√S) |
-| `circuit_tdg(qc, qubit)` | `T†` | T dagger gate |
-| `circuit_x2p(qc, qubit)` | `X2P` | Rotation around the X axis by +π/2 (√X) |
-| `circuit_x2m(qc, qubit)` | `X2M` | Rotation around the X axis by −π/2 |
-| `circuit_y2p(qc, qubit)` | `Y2P` | Rotation around the Y axis by +π/2 (√Y) |
-| `circuit_y2m(qc, qubit)` | `Y2M` | Rotation around the Y axis by −π/2 |
+### circuit_width(ptr)
 
-### 2. Parameterized single-qubit gates
+Returns the circuit width, i.e. the number of qubits; identical in semantics to `circuit_num_qubits`.
 
-| Function | Gate | Parameter | Description |
-| --- | --- | --- | --- |
-| `circuit_rx(qc, qubit, theta)` | `RX` | θ | Rotation around the X axis |
-| `circuit_ry(qc, qubit, theta)` | `RY` | θ | Rotation around the Y axis |
-| `circuit_rz(qc, qubit, theta)` | `RZ` | θ | Rotation around the Z axis |
-| `circuit_phase(qc, qubit, lambda)` | `P` | λ | Phase gate |
-| `circuit_u(qc, qubit, theta, phi, lambda)` | `U` | θ, φ, λ | Generic single-qubit gate |
-| `circuit_xy(qc, qubit, theta)` | `XY` | θ | XY interaction gate |
-| `circuit_xy2p(qc, qubit, theta)` | `XY2P` | θ | Positive half-angle XY gate |
-| `circuit_xy2m(qc, qubit, theta)` | `XY2M` | θ | Negative half-angle XY gate |
-| `circuit_rxy(qc, qubit, theta, phi)` | `RXY` | θ, φ | Rotation around an arbitrary axis in the XY plane |
+- `ptr` (`const CCircuit*`): circuit handle.
 
-Each gate has a corresponding `_param` variant: `circuit_rx_param`, `circuit_ry_param`, `circuit_rz_param`, `circuit_phase_param`, `circuit_xy_param`, `circuit_xy2p_param` and `circuit_xy2m_param` each take one `CParameter *`; `circuit_u_param` takes three parameter objects, θ, φ and λ; `circuit_rxy_param` takes two parameter objects, θ and φ.
+Returns: the qubit count; 0 for NULL.
 
-### 3. Two-qubit gates
+### circuit_num_operations(ptr)
 
-| Function | Gate | Description |
-| --- | --- | --- |
-| `circuit_cx(qc, control, target)` | `CX` | CNOT gate |
-| `circuit_cy(qc, control, target)` | `CY` | controlled-Y gate |
-| `circuit_cz(qc, control, target)` | `CZ` | controlled-Z gate |
-| `circuit_swap(qc, a, b)` | `SWAP` | Exchange the states of two qubits |
-| `circuit_rxx(qc, a, b, theta)` | `RXX` | `exp(-i θ XX / 2)` |
-| `circuit_ryy(qc, a, b, theta)` | `RYY` | `exp(-i θ YY / 2)` |
-| `circuit_rzz(qc, a, b, theta)` | `RZZ` | `exp(-i θ ZZ / 2)` |
-| `circuit_rzx(qc, a, b, theta)` | `RZX` | `exp(-i θ ZX / 2)` |
-| `circuit_crx(qc, control, target, theta)` | `CRX` | controlled-RX gate |
-| `circuit_cry(qc, control, target, theta)` | `CRY` | controlled-RY gate |
-| `circuit_crz(qc, control, target, theta)` | `CRZ` | controlled-RZ gate |
-| `circuit_fsim(qc, a, b, theta, phi)` | `fSim` | fSim(theta, phi) gate |
+Returns the number of top-level operations.
 
-Corresponding `*_param` variants are also provided: the single-parameter gates (`rxx/ryy/rzz/rzx/crx/cry/crz`) take one parameter object, and `circuit_fsim_param` takes two parameter objects, θ and φ.
+- `ptr` (`const CCircuit*`): circuit handle.
 
-### 4. Three-qubit gates
+Returns: the operation count; 0 for NULL.
 
-| Function | Gate | Description |
-| --- | --- | --- |
-| `circuit_ccx(qc, control1, control2, target)` | `CCX` | Toffoli gate |
+### circuit_num_parameters(ptr)
 
-### 5. Non-unitary instructions
+Returns the number of symbolic parameters interned in the circuit's parameter table; identical to `circuit_parameters_len`.
 
-| Function | Instruction | Description |
-| --- | --- | --- |
-| `circuit_measure(qc, qubit)` | `measure` | Measure a single qubit in the Z basis; the result is recorded as a circuit classical value |
-| `circuit_reset(qc, qubit)` | `reset` | Reset the qubit to `\|0⟩` |
-| `circuit_barrier(qc, qubits, count)` | `barrier` | Insert a barrier on the specified qubits |
+- `ptr` (`const CCircuit*`): circuit handle.
 
-The behavior of `circuit_barrier`:
+Returns: the parameter count; 0 for NULL.
 
-- `qubits` is NULL or `count` is 0: create a global barrier covering **all** qubits;
-- Otherwise: create a barrier only on the qubits specified by the `qubits` array.
+### circuit_qubits_len(ptr)
 
-A barrier is used to prevent the compiler from reordering operations on the affected qubits across that boundary; it does not change the quantum state itself.
+Returns the qubit count, used to size the buffer for `circuit_qubits`.
 
-### Example
+- `ptr` (`const CCircuit*`): circuit handle.
 
-```c
-CCircuit *qc = circuit_new(3);
-circuit_h(qc, 0);                 // H(0)
-circuit_cx(qc, 0, 1);             // CX(0, 1)
-circuit_rzz(qc, 1, 2, 0.25);      // RZZ(1, 2, 0.25)
+Returns: the qubit count; 0 for NULL.
 
-/* 符号参数版本 */
-CParameter *theta = param_parse("theta/2");
-circuit_rx_param(qc, 2, theta);   // RX(2, theta/2)
-param_free(theta);
+### circuit_qubits(ptr, out, len)
 
-/* 非酉指令 */
-uint32_t target[2] = {0, 1};
-circuit_barrier(qc, target, 2);   // 局部 barrier
-circuit_measure(qc, 0);
-circuit_reset(qc, 2);
+Copies the qubit ids into `out` in insertion order. When `out` is NULL or `len` is too small, it only returns the count without copying.
 
-circuit_free(qc);
-```
+- `ptr` (`const CCircuit*`): circuit handle.
+- `out` (`uint32_t*`): output buffer; may be NULL (count query only).
+- `len` (`uintptr_t`): buffer length.
 
----
+Returns: the total number of qubits.
 
-## Circuit properties
+### circuit_depth(ptr, recurse)
 
-```c
-uintptr_t circuit_num_qubits(const struct CCircuit *ptr);
-uintptr_t circuit_num_operations(const struct CCircuit *ptr);
-uintptr_t circuit_num_parameters(const struct CCircuit *ptr);
-int32_t   circuit_validate(const struct CCircuit *ptr);
-intptr_t  circuit_depth(const struct CCircuit *ptr, bool recurse);
-uintptr_t circuit_width(const struct CCircuit *ptr);
-uintptr_t circuit_qubits_len(const struct CCircuit *ptr);
-uintptr_t circuit_qubits(const struct CCircuit *ptr, uint32_t *out, uintptr_t len);
-```
+Computes the circuit depth. With `recurse = true`, operations inside control-flow bodies are expanded recursively.
 
-| Function | Returns | Description |
-| --- | --- | --- |
-| `circuit_num_qubits` | Qubit count | A NULL handle returns `0` |
-| `circuit_width` | Qubit count | An alias for `num_qubits` |
-| `circuit_num_operations` | Operation count | The total number of operations, counted in append order |
-| `circuit_num_parameters` | Symbolic parameter count | The number of symbolic parameters recorded in the circuit; `0` after all of them are bound |
-| `circuit_validate` | Status code | Validate circuit consistency; `0` on success, `-3` on failure |
-| `circuit_depth(recurse)` | Depth | Returns a negative value on error (NULL) |
-| `circuit_qubits_len` | Qubit count | Used to allocate the `circuit_qubits` buffer |
+- `ptr` (`const CCircuit*`): circuit handle.
+- `recurse` (`bool`): whether to recursively count operations inside control flow.
 
-`circuit_depth(ptr, recurse)` estimates the circuit depth. The depth is the number of operation layers on the longest qubit path after the operations are arranged by as-soon-as-possible (ASAP) scheduling: ordinary gates and non-unitary instructions usually contribute one layer, and a `barrier` constrains reordering on the qubits it covers. When `recurse` is `true`, composite sub-circuits are recursively expanded in the count.
+Returns: the circuit depth; `-1` for a NULL handle, `-3` on failure (e.g. the circuit contains control flow but was not traversed recursively).
 
-`circuit_qubits` copies the qubit indices into `out` and returns the total number of qubits in the circuit. When `out` is NULL or `len` is smaller than the total qubit count, no copy is performed and only the total is returned — it can be called first to probe the required capacity:
+### circuit_validate(ptr)
 
-```c
-CCircuit *qc = circuit_new(3);
-circuit_h(qc, 0);
-circuit_cx(qc, 0, 1);
+Validates circuit consistency: classical handle ownership, control-flow scopes, data dependencies, and structural invariants. Circuits imported from external sources or generated automatically should be validated before further processing.
 
-printf("qubits=%zu ops=%zu depth=%zu\n",
-       (size_t)circuit_num_qubits(qc),
-       (size_t)circuit_num_operations(qc),
-       (size_t)circuit_depth(qc, false));
+- `ptr` (`const CCircuit*`): circuit handle.
 
-uint32_t ids[3];
-circuit_qubits(qc, ids, 3);   // ids = {0, 1, 2}
-
-circuit_free(qc);
-```
-
----
-
-## Structural operations
-
-### circuit_remove_operation(ptr, index)
-
-Delete the operation at the specified position; subsequent operations shift forward.
-
-Parameters:
-
-- `index` (`uintptr_t`): the operation index, counted from 0 in append order.
-
-Returns:
-
-- `int32_t`; `0` on success, and a negative status code for errors such as an index out of range.
-
-### circuit_inverse(ptr)
-
-Return the inverse circuit: the operation order is reversed, and each invertible operation is inverted.
-
-Returns:
-
-- `CCircuit *`: a new, **independently owned** circuit, to be released with `circuit_free`; returns NULL on failure.
-
-### circuit_decompose(ptr)
-
-Return a copy with composite gates recursively expanded.
-
-Circuits that carry composite gates from QASM/QCIS parsing or from compilation results are recursively expanded.
-
-Returns:
-
-- `CCircuit *`: the new circuit; returns NULL on failure.
-
-### circuit_compose(ptr, other, qubits_map, map_len)
-
-Append the operations of `other` to the current circuit in order; the behavior is determined by `qubits_map`:
-
-- `qubits_map` is NULL (`map_len` passed as 0): merge aligned by qubit index, and qubits are added automatically when `other` uses indices that do not exist in the current circuit;
-- `qubits_map` is not NULL: map the `i`-th qubit of `other` onto `qubits_map[i]` of the current circuit.
-
-Returns:
-
-- `int32_t`; `0` on success, and `-2` when a mapping target is out of range.
-
-Combining it with an inverse circuit is a typical usage:
+Returns: `0` on success; `-1` for NULL; `-3` when validation fails.
 
 ```c
 CCircuit *qc = circuit_new(2);
 circuit_h(qc, 0);
 circuit_cx(qc, 0, 1);
 
-CCircuit *inv = circuit_inverse(qc);
-circuit_compose(qc, inv, NULL, 0);     // qc 现在等价于恒等操作
-
-circuit_free(inv);
+if (circuit_validate(qc) == 0) {
+    /* num_qubits=2, num_operations=2, depth=2 */
+    uintptr_t n = circuit_qubits_len(qc);
+    uint32_t *ids = malloc(n * sizeof(uint32_t));
+    circuit_qubits(qc, ids, n);      /* ids == {0, 1} */
+    free(ids);
+}
 circuit_free(qc);
 ```
 
+### circuit_contains_qubit(ptr, qubit)
+
+Returns whether `qubit` belongs to the circuit.
+
+- `ptr` (`const CCircuit*`): circuit handle.
+- `qubit` (`uint32_t`): qubit id.
+
+Returns: `1` when yes; `0` when no; `-1` for NULL.
+
+### circuit_has_same_qubits(a, b)
+
+Returns whether both circuits share the same ordered qubit domain.
+
+- `a` (`const CCircuit*`): first circuit handle.
+- `b` (`const CCircuit*`): second circuit handle.
+
+Returns: `1` when yes; `0` when no; `-1` for NULL.
+
+### circuit_operations_structurally_equal(a, b)
+
+Returns whether two circuits are structurally equal: same ordered qubits, parameter tables, and operations (with parameter indices remapped across the two tables, and circuit-local classical handles compared by structure).
+
+- `a` (`const CCircuit*`): first circuit handle.
+- `b` (`const CCircuit*`): second circuit handle.
+
+Returns: `1` when yes; `0` when no; `-1` for NULL.
+
+---
+
+## Qubit Management
+
 ### circuit_add_qubits(ptr, qubits, count)
 
-Append new qubits to the circuit.
+Appends new logical qubits to the circuit.
 
-Parameters:
+- `ptr` (`CCircuit*`): circuit handle.
+- `qubits` (`const uint32_t*`): array of new qubit ids.
+- `count` (`uintptr_t`): number of qubits to append.
 
-- `qubits` (`const uint32_t *`): the array of indices of the new qubits;
-- `count` (`uintptr_t`): the length of the array.
+Returns: `0` on success; `-1` for NULL; `-3` on failure (e.g. an id duplicates an existing qubit).
 
-Returns:
+---
 
-- `int32_t`; `0` on success, and a negative status code for a duplicate or invalid index.
+## Structural Transformations
 
-### circuit_set_global_phase(ptr, phase) / circuit_set_global_phase_param(ptr, param)
+### circuit_compose(ptr, other, qubits_map, map_len)
 
-Set the circuit global phase, as a numeric variant and a symbolic parameter variant respectively.
+Appends `other` to the end of the current circuit. `qubits_map` maps `other`'s qubits, in `other`'s qubit order, onto the current circuit's qubits; passing a NULL map (`map_len` 0) merges by identity of ids, and qubits of `other` that do not exist in the current circuit are absorbed into it.
 
-Returns:
+- `ptr` (`CCircuit*`): target circuit (modified).
+- `other` (`const CCircuit*`): circuit being composed in (not modified).
+- `qubits_map` (`const uint32_t*`): qubit mapping array; may be NULL.
+- `map_len` (`uintptr_t`): mapping length.
 
-- `int32_t`; `0` on success, and a negative status code for a NULL handle or an invalid parameter.
+Returns: `0` on success; `-1` for NULL; `-3` on failure (invalid mapping or structure check failure).
+
+```c
+CCircuit *lhs = circuit_new(3);
+CCircuit *rhs = circuit_new(2);
+circuit_cx(rhs, 0, 1);
+
+/* rhs qubits 0 and 1 map onto lhs qubits 1 and 2, in order */
+uint32_t map[2] = {1, 2};
+int32_t rc = circuit_compose(lhs, rhs, map, 2);   /* rc == 0 */
+
+circuit_free(rhs);
+circuit_free(lhs);
+```
+
+### circuit_inverse(ptr)
+
+Returns the inverse of the current circuit: operations in reverse order with each one inverted, and the global phase negated. The original circuit is unchanged.
+
+- `ptr` (`const CCircuit*`): circuit handle.
+
+Returns: a newly allocated `CCircuit*`, freed with `circuit_free`; returns `NULL` when the circuit contains non-invertible operations (measure, reset, ...) or on failure.
+
+### circuit_decompose(ptr)
+
+Returns a copy of the circuit with composite gates expanded: circuit-defined gates (composite gates appended via `circuit_circuit_gate`) are expanded into their underlying operations. The original circuit is unchanged.
+
+- `ptr` (`const CCircuit*`): circuit handle.
+
+Returns: a newly allocated `CCircuit*`; `NULL` on failure.
+
+### circuit_remove_operation(ptr, index)
+
+Deletes the top-level operation at `index`.
+
+- `ptr` (`CCircuit*`): circuit handle.
+- `index` (`uintptr_t`): operation index.
+
+Returns: `0` on success; `-1` for NULL; `-3` when the index is out of bounds or a post-deletion structure check fails.
+
+### circuit_remove_operations(ptr, indices, len)
+
+Deletes top-level operations by index in one batch. `indices` are interpreted against the operation list before deletion; duplicate indices are ignored; any failure rolls the whole batch back (atomic).
+
+- `ptr` (`CCircuit*`): circuit handle.
+- `indices` (`const uintptr_t*`): array of operation indices.
+- `len` (`uintptr_t`): number of indices (may be 0).
+
+Returns: `0` on success (including an empty index list); `-1` for NULL; `-3` when any index is out of bounds or a classical value is still referenced.
 
 ```c
 CCircuit *qc = circuit_new(1);
-circuit_x(qc, 0);
-circuit_set_global_phase(qc, 3.141592653589793 / 4.0);
+circuit_rx(qc, 0, 0.7);
+
+CCircuit *inv = circuit_inverse(qc);   /* inverse circuit: RX(-0.7) */
+if (inv != NULL && circuit_validate(inv) == 0) {
+    /* use inv ... */
+}
+circuit_free(inv);
 circuit_free(qc);
 ```
 
 ---
 
-For parsing, evaluation and whole-circuit binding of symbolic parameters, see [Parameter](2_parameter.md); for unitary matrix export, see [Circuit To Matrix](3_circuit_to_matrix.md).
+## Checkpoint Transactions
+
+The checkpoint family captures and restores circuit state (operation list, parameter and symbol tables, classical tables, control scopes) through an opaque `CCheckpoint*` token. A token is produced by `circuit_checkpoint` / `circuit_begin` and consumed exactly once by `circuit_commit`, `circuit_rollback_to`, or `circuit_rollback_control_body_transaction`; free an unconsumed token with `checkpoint_free`.
+
+```c
+CCircuit *qc = circuit_new(1);
+CCheckpoint *cp = circuit_checkpoint(qc);
+circuit_h(qc, 0);                        /* tentative operations */
+
+if (circuit_validate(qc) != 0) {
+    circuit_rollback_to(qc, cp);         /* undo everything since the checkpoint */
+} else {
+    circuit_commit(qc, cp);              /* keep the operations */
+}
+
+circuit_free(qc);
+```
+
+### circuit_checkpoint(ptr)
+
+Captures a checkpoint of the circuit state. The returned token is consumed exactly once by `circuit_commit`, `circuit_rollback_to`, or `circuit_rollback_control_body_transaction`.
+
+- `ptr` (`const CCircuit*`): circuit handle.
+
+Returns: a newly allocated `CCheckpoint*`; `NULL` on NULL input.
+
+### circuit_begin(ptr)
+
+Starts an externally driven construction transaction; equivalent to `circuit_checkpoint`.
+
+- `ptr` (`const CCircuit*`): circuit handle.
+
+Returns: a newly allocated `CCheckpoint*`; `NULL` on NULL input.
+
+### circuit_commit(ptr, checkpoint)
+
+Commits the state allocated since the token was captured and consumes the token.
+
+- `ptr` (`CCircuit*`): circuit handle.
+- `checkpoint` (`CCheckpoint*`): token produced by `circuit_checkpoint` / `circuit_begin`.
+
+Returns: `0` on success; `-1` for NULL.
+
+### circuit_rollback_to(ptr, checkpoint)
+
+Rolls back every state allocated since the token was captured and consumes the token.
+
+- `ptr` (`CCircuit*`): circuit handle.
+- `checkpoint` (`CCheckpoint*`): token produced by `circuit_checkpoint` / `circuit_begin`.
+
+Returns: `0` on success; `-1` for NULL.
+
+### circuit_rollback_control_body_transaction(ptr, checkpoint)
+
+Rolls back every state allocated since the token was captured and consumes the token; same behavior as `circuit_rollback_to`, kept under the core transaction name.
+
+- `ptr` (`CCircuit*`): circuit handle.
+- `checkpoint` (`CCheckpoint*`): token produced by `circuit_checkpoint` / `circuit_begin`.
+
+Returns: `0` on success; `-1` for NULL.
+
+### checkpoint_free(ptr)
+
+Frees an unconsumed checkpoint token. Passing NULL is allowed.
+
+- `ptr` (`CCheckpoint*`): token to free.
+
+---
+
+## Global Phase
+
+### circuit_global_phase(ptr, out)
+
+Reads the circuit's global phase. The result is written into a `CParameterValue`: a fixed number, or — in the symbolic case — a newly allocated `CParameter*` (free it with `param_free`; see [Symbolic Parameters](3_parameter.md)).
+
+- `ptr` (`const CCircuit*`): circuit handle.
+- `out` (`CParameterValue*`): output struct.
+
+Returns: `0` on success; `-1` for NULL.
+
+### circuit_set_global_phase(ptr, phase)
+
+Sets the global phase to a numeric value.
+
+- `ptr` (`CCircuit*`): circuit handle.
+- `phase` (`double`): global phase (radians).
+
+Returns: `0` on success; `-1` for NULL; `-3` when the phase is not finite.
+
+### circuit_set_global_phase_param(ptr, param)
+
+Sets the global phase to a symbolic parameter (the parameter is cloned).
+
+- `ptr` (`CCircuit*`): circuit handle.
+- `param` (`const CParameter*`): symbolic parameter handle.
+
+Returns: `0` on success; `-1` for NULL.
+
+---
+
+## Parameter Binding
+
+### circuit_assign_params(circuit, bindings)
+
+Returns a new circuit in which every interned parameter that can be evaluated from the binding string is replaced by its fixed numeric value, while the remaining parameters stay symbolic; the original circuit is unchanged and can be reused as a template.
+
+- `circuit` (`const CCircuit*`): circuit handle.
+- `bindings` (`const char*`): binding string of the form `"name:value,name2:value2"` (same as `param_evaluate`); NULL or a malformed string is treated as no bindings.
+
+Returns: a newly allocated `CCircuit*`, freed with `circuit_free`; `NULL` when the circuit contains classical control flow or a substitution/evaluation failure occurs.
+
+```c
+CCircuit *tpl = circuit_new(1);
+CParameter *theta = param_parse("theta");
+circuit_rx_param(tpl, 0, theta);
+param_free(theta);
+
+CCircuit *bound = circuit_assign_params(tpl, "theta:0.5");
+/* bound no longer references the symbol theta */
+
+circuit_free(bound);
+circuit_free(tpl);
+```
+
+---
+
+## Non-Unitary Instructions and the Identity Gate
+
+### circuit_measure(ptr, qubit)
+
+Appends a computational-basis measurement on `qubit`, producing an immutable classical `Bit` value owned by the circuit. Variants that read measurement results or write into existing classical variables are covered in [Classical Data and Control Flow](9_classical_control_flow.md).
+
+- `ptr` (`CCircuit*`): circuit handle.
+- `qubit` (`uint32_t`): the qubit being measured.
+
+Returns: `0` on success; `-1` for NULL; `-2` when the qubit is out of bounds; `-3` on failure.
+
+### circuit_reset(ptr, qubit)
+
+Appends a reset on `qubit`, returning the qubit to `|0>`.
+
+- `ptr` (`CCircuit*`): circuit handle.
+- `qubit` (`uint32_t`): qubit id.
+
+Returns: `0` on success; `-1` for NULL; `-2` when the qubit is out of bounds; `-3` on failure.
+
+### circuit_barrier(ptr, qubits, count)
+
+Inserts a barrier over the given qubits, preventing related operations from being reordered across the boundary. Passing NULL `qubits` or `count` 0 inserts a global barrier over all circuit qubits.
+
+- `ptr` (`CCircuit*`): circuit handle.
+- `qubits` (`const uint32_t*`): array of qubit ids; may be NULL.
+- `count` (`uintptr_t`): number of qubits.
+
+Returns: `0` on success; `-1` for NULL; `-3` when a qubit does not exist or on failure.
+
+### circuit_id(ptr, qubit)
+
+Appends the identity gate on `qubit`; an alias of `circuit_i` kept for frontend naming compatibility.
+
+- `ptr` (`CCircuit*`): circuit handle.
+- `qubit` (`uint32_t`): qubit id.
+
+Returns: `0` on success; `-1` for NULL; `-2` when the qubit is out of bounds; `-3` on failure.

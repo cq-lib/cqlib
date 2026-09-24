@@ -238,27 +238,60 @@ Cqlib 文档
    ../api/cn/c/0_overview
    ../api/cn/c/0_circuit/0_overview
    ../api/cn/c/0_circuit/1_circuit
-   ../api/cn/c/0_circuit/2_parameter
-   ../api/cn/c/0_circuit/3_circuit_to_matrix
+   ../api/cn/c/0_circuit/2_qubit
+   ../api/cn/c/0_circuit/3_parameter
+   ../api/cn/c/0_circuit/4_operation_instruction
+   ../api/cn/c/0_circuit/5_gate_standard
+   ../api/cn/c/0_circuit/6_gate_unitary
+   ../api/cn/c/0_circuit/7_gate_mc_gate
+   ../api/cn/c/0_circuit/8_gate_circuit_gate
+   ../api/cn/c/0_circuit/9_classical_control_flow
+   ../api/cn/c/0_circuit/10_symbolic_matrix
+   ../api/cn/c/0_circuit/11_ansatz
+   ../api/cn/c/0_circuit/12_cfg
+   ../api/cn/c/0_circuit/13_circuit_to_matrix
+   ../api/cn/c/0_circuit/14_circuit_dag
+   ../api/cn/c/1_ir/0_overview
    ../api/cn/c/1_ir/1_qcis
    ../api/cn/c/1_ir/2_qasm2
    ../api/cn/c/1_ir/3_qasm3
+   ../api/cn/c/2_device/0_overview
    ../api/cn/c/2_device/1_topology
    ../api/cn/c/2_device/2_properties_device
    ../api/cn/c/2_device/3_layout
    ../api/cn/c/2_device/4_noise
    ../api/cn/c/2_device/5_result
+   ../api/cn/c/2_device/6_qubits
    ../api/cn/c/3_qis/0_overview
    ../api/cn/c/3_qis/1_statevector
    ../api/cn/c/3_qis/2_density_matrix
-   ../api/cn/c/3_qis/3_stabilizer_state
-   ../api/cn/c/3_qis/4_pauli_string
-   ../api/cn/c/3_qis/5_hamiltonian
-   ../api/cn/c/4_compile/1_compile
-   ../api/cn/c/5_visualization/1_text_drawer
-   ../api/cn/c/5_visualization/2_figure_drawer
-   ../api/cn/c/6_error_mitigation/1_error_mitigation
-   ../api/cn/c/6_error_mitigation/2_zne_mitigation
-   ../api/cn/c/6_error_mitigation/3_virtual_distillation
+   ../api/cn/c/3_qis/3_density_matrix_noise
+   ../api/cn/c/3_qis/4_stabilizer
+   ../api/cn/c/3_qis/5_classical_state
+   ../api/cn/c/3_qis/6_pauli
+   ../api/cn/c/3_qis/7_hamiltonian
+   ../api/cn/c/3_qis/8_evolution
+   ../api/cn/c/3_qis/9_metrics_entropy
+   ../api/cn/c/4_compile/0_overview
+   ../api/cn/c/4_compile/1_compiler
+   ../api/cn/c/4_compile/2_transform
+   ../api/cn/c/4_compile/3_layout
+   ../api/cn/c/4_compile/4_routing
+   ../api/cn/c/4_compile/5_sabre
+   ../api/cn/c/4_compile/6_decompose_resynthesis
+   ../api/cn/c/4_compile/7_knowledge
+   ../api/cn/c/4_compile/8_resource
+   ../api/cn/c/4_compile/9_commutation
+   ../api/cn/c/5_visualization/0_overview
+   ../api/cn/c/5_visualization/1_draw_text
+   ../api/cn/c/5_visualization/2_draw_figure
+   ../api/cn/c/5_visualization/3_state_plots
+   ../api/cn/c/5_visualization/4_result_plots
+   ../api/cn/c/5_visualization/5_render_to_file
+   ../api/cn/c/5_visualization/6_visual_ir
+   ../api/cn/c/6_error_mitigation/0_overview
+   ../api/cn/c/6_error_mitigation/1_zne
+   ../api/cn/c/6_error_mitigation/2_virtual_distillation
+   ../api/cn/c/6_error_mitigation/3_unified
 
 

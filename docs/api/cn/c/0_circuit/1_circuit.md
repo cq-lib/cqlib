@@ -1,10 +1,6 @@
-# Circuit
+# Circuit（线路）
 
-`CCircuit` 是 C API 中最核心的线路容器。它负责保存量子比特集合、按顺序排列的操作序列、符号参数与全局相位。所有状态保存在不透明句柄中，C 代码通过自由函数操作线路。
-
-```c
-#include <cqlib_c.h>
-```
+`CCircuit*` 是量子线路的主容器句柄，保存逻辑量子比特集合、操作序列、参数表、经典变量与经典值、控制流作用域以及全局相位。本页覆盖线路的构造释放、属性查询、结构变换、检查点事务、全局相位与参数绑定；门函数见 [标准门](5_gate_standard.md)，符号参数细节见 [符号参数](3_parameter.md)。错误码与内存约定见 [Overview](../0_overview.md)。
 
 ---
 
@@ -12,269 +8,422 @@
 
 ### circuit_new(num_qubits)
 
-创建包含 `num_qubits` 个逻辑量子比特（编号 `0..num_qubits-1`）的空线路。
-
-参数：
+创建一条包含连续逻辑量子比特的空线路，比特 id 从 `0` 到 `num_qubits - 1`。
 
 - `num_qubits` (`uintptr_t`)：量子比特数量。
 
-返回：
+返回：新分配的 `CCircuit*`，用 `circuit_free` 释放。
 
-- `CCircuit *`：堆分配线路对象，需用 `circuit_free` 释放；失败返回 NULL。
+### circuit_from_qubits(qubits, len)
+
+用显式给出的比特 id 列表创建线路，允许稀疏编号（例如 `{2, 5}`）。`len` 为 0 时创建空线路，此时 `qubits` 可以为 NULL。
+
+- `qubits` (`const uint32_t*`)：比特 id 数组。
+- `len` (`uintptr_t`)：数组长度。
+
+返回：新分配的 `CCircuit*`；`len > 0` 时 `qubits` 为 NULL 或 id 重复返回 `NULL`。
+
+### circuit_from_operations(qubits, qubits_len, operations, operations_len)
+
+用一组比特加上一批已解析的值级操作（由 `circuit_index` 产生，见 [操作与指令](4_operation_instruction.md)）创建线路。操作按顺序经值级降序逐个追加，因此会校验比特归属，符号参数也会驻留进新线路的参数表。
+
+- `qubits` (`const uint32_t*`)：比特 id 数组。
+- `qubits_len` (`uintptr_t`)：数组长度；为 0 时创建空比特集合，`qubits` 可为 NULL。
+- `operations` (`const CValueOperation* const*`)：已解析操作快照数组。
+- `operations_len` (`uintptr_t`)：操作数量。
+
+返回：新分配的 `CCircuit*`，用 `circuit_free` 释放；输入为 NULL（含 `operations` 中出现 NULL 元素）、比特重复或任一操作追加失败时返回 `NULL`。
+
+### circuit_append_value_operation(ptr, op)
+
+向线路追加一条已解析的值级操作（由 `circuit_index` 产生）。
+
+- `ptr` (`CCircuit*`)：线路句柄。
+- `op` (`const CValueOperation*`)：已解析操作快照。
+
+返回：`0` 成功；`-1` NULL；`-3` 应用失败（例如操作引用了线路之外的比特）。
 
 ### circuit_free(ptr)
 
-释放线路对象。允许传 NULL。
+释放线路句柄。允许传 `NULL`。
+
+- `ptr` (`CCircuit*`)：线路句柄。
 
 ```c
-CCircuit *qc = circuit_new(3);
-// ... 构建与使用 ...
-circuit_free(qc);
+/* 稀疏编号线路：比特 id 为 2 和 5 */
+uint32_t ids[2] = {2, 5};
+CCircuit *qc = circuit_from_qubits(ids, 2);
+if (qc != NULL) {
+    /* circuit_width(qc) == 2 */
+    circuit_free(qc);
+}
 ```
 
 ---
 
-## 门操作
+## 属性查询
 
-所有门函数返回 `int32_t` 错误码：
+### circuit_num_qubits(ptr)
 
-| 返回值 | 含义 |
-| --- | --- |
-| `0` | 成功 |
-| `-1` | 线路句柄为 NULL |
-| `-2` | 量子比特编号越界 |
-| `-3` | 其他线路错误 |
+返回量子比特数量。
 
-参数化门同时提供数值版本与符号参数版本（`*_param`）：`_param` 变体把对应 `double` 参数替换为一个或多个 `const CParameter *`，参数对象由 [param_parse](2_parameter.md) 创建。
+- `ptr` (`const CCircuit*`)：线路句柄。
 
-### 1. 无参数单比特门
+返回：比特数量；`NULL` 时返回 0。
 
-| 函数 | 门 | 说明 |
-| --- | --- | --- |
-| `circuit_i(qc, qubit)` | `I` | 恒等门 |
-| `circuit_h(qc, qubit)` | `H` | Hadamard 门 |
-| `circuit_x(qc, qubit)` | `X` | Pauli-X 门 |
-| `circuit_y(qc, qubit)` | `Y` | Pauli-Y 门 |
-| `circuit_z(qc, qubit)` | `Z` | Pauli-Z 门 |
-| `circuit_s(qc, qubit)` | `S` | S 门（√Z） |
-| `circuit_sdg(qc, qubit)` | `S†` | S 伴随门 |
-| `circuit_t(qc, qubit)` | `T` | T 门（√S） |
-| `circuit_tdg(qc, qubit)` | `T†` | T 伴随门 |
-| `circuit_x2p(qc, qubit)` | `X2P` | 绕 X 轴 +π/2 旋转（√X） |
-| `circuit_x2m(qc, qubit)` | `X2M` | 绕 X 轴 −π/2 旋转 |
-| `circuit_y2p(qc, qubit)` | `Y2P` | 绕 Y 轴 +π/2 旋转（√Y） |
-| `circuit_y2m(qc, qubit)` | `Y2M` | 绕 Y 轴 −π/2 旋转 |
+### circuit_width(ptr)
 
-### 2. 参数化单比特门
+返回线路宽度，即量子比特数量，语义与 `circuit_num_qubits` 一致。
 
-| 函数 | 门 | 参数 | 说明 |
-| --- | --- | --- | --- |
-| `circuit_rx(qc, qubit, theta)` | `RX` | θ | 绕 X 轴旋转 |
-| `circuit_ry(qc, qubit, theta)` | `RY` | θ | 绕 Y 轴旋转 |
-| `circuit_rz(qc, qubit, theta)` | `RZ` | θ | 绕 Z 轴旋转 |
-| `circuit_phase(qc, qubit, lambda)` | `P` | λ | 相位门 |
-| `circuit_u(qc, qubit, theta, phi, lambda)` | `U` | θ, φ, λ | 通用单比特门 |
-| `circuit_xy(qc, qubit, theta)` | `XY` | θ | XY 交互门 |
-| `circuit_xy2p(qc, qubit, theta)` | `XY2P` | θ | 正半角 XY 门 |
-| `circuit_xy2m(qc, qubit, theta)` | `XY2M` | θ | 负半角 XY 门 |
-| `circuit_rxy(qc, qubit, theta, phi)` | `RXY` | θ, φ | XY 平面任意轴旋转 |
+- `ptr` (`const CCircuit*`)：线路句柄。
 
-每个门都有对应的 `_param` 变体：`circuit_rx_param`、`circuit_ry_param`、`circuit_rz_param`、`circuit_phase_param`、`circuit_xy_param`、`circuit_xy2p_param`、`circuit_xy2m_param` 各接受一个 `CParameter *`；`circuit_u_param` 接受 θ、φ、λ 三个参数对象；`circuit_rxy_param` 接受 θ、φ 两个参数对象。
+返回：比特数量；`NULL` 时返回 0。
 
-### 3. 双比特门
+### circuit_num_operations(ptr)
 
-| 函数 | 门 | 说明 |
-| --- | --- | --- |
-| `circuit_cx(qc, control, target)` | `CX` | CNOT 门 |
-| `circuit_cy(qc, control, target)` | `CY` | controlled-Y 门 |
-| `circuit_cz(qc, control, target)` | `CZ` | controlled-Z 门 |
-| `circuit_swap(qc, a, b)` | `SWAP` | 交换两个量子比特的状态 |
-| `circuit_rxx(qc, a, b, theta)` | `RXX` | `exp(-i θ XX / 2)` |
-| `circuit_ryy(qc, a, b, theta)` | `RYY` | `exp(-i θ YY / 2)` |
-| `circuit_rzz(qc, a, b, theta)` | `RZZ` | `exp(-i θ ZZ / 2)` |
-| `circuit_rzx(qc, a, b, theta)` | `RZX` | `exp(-i θ ZX / 2)` |
-| `circuit_crx(qc, control, target, theta)` | `CRX` | controlled-RX 门 |
-| `circuit_cry(qc, control, target, theta)` | `CRY` | controlled-RY 门 |
-| `circuit_crz(qc, control, target, theta)` | `CRZ` | controlled-RZ 门 |
-| `circuit_fsim(qc, a, b, theta, phi)` | `fSim` | fSim(theta, phi) 门 |
+返回顶层操作数量。
 
-同样各提供 `*_param` 变体：单参数门（`rxx/ryy/rzz/rzx/crx/cry/crz`）接受一个参数对象，`circuit_fsim_param` 接受 θ、φ 两个参数对象。
+- `ptr` (`const CCircuit*`)：线路句柄。
 
-### 4. 三比特门
+返回：操作数量；`NULL` 时返回 0。
 
-| 函数 | 门 | 说明 |
-| --- | --- | --- |
-| `circuit_ccx(qc, control1, control2, target)` | `CCX` | Toffoli 门 |
+### circuit_num_parameters(ptr)
 
-### 5. 非酉指令
+返回线路参数表中驻留的符号参数数量，与 `circuit_parameters_len` 相同。
 
-| 函数 | 指令 | 说明 |
-| --- | --- | --- |
-| `circuit_measure(qc, qubit)` | `measure` | 在 Z 基测量单个量子比特，结果记录为线路经典值 |
-| `circuit_reset(qc, qubit)` | `reset` | 将量子比特复位到 `\|0⟩` |
-| `circuit_barrier(qc, qubits, count)` | `barrier` | 在指定量子比特上插入屏障 |
+- `ptr` (`const CCircuit*`)：线路句柄。
 
-`circuit_barrier` 的行为：
+返回：参数数量；`NULL` 时返回 0。
 
-- `qubits` 为 NULL 或 `count` 为 0：创建覆盖**全部**量子比特的全局屏障；
-- 否则：仅在 `qubits` 数组指定的比特上创建屏障。
+### circuit_qubits_len(ptr)
 
-barrier 用于阻止编译器跨该边界重排相关量子比特上的操作；它本身不改变量子态。
+返回比特数量，用于为 `circuit_qubits` 分配缓冲。
 
-### 示例
+- `ptr` (`const CCircuit*`)：线路句柄。
 
-```c
-CCircuit *qc = circuit_new(3);
-circuit_h(qc, 0);                 // H(0)
-circuit_cx(qc, 0, 1);             // CX(0, 1)
-circuit_rzz(qc, 1, 2, 0.25);      // RZZ(1, 2, 0.25)
+返回：比特数量；`NULL` 时返回 0。
 
-/* 符号参数版本 */
-CParameter *theta = param_parse("theta/2");
-circuit_rx_param(qc, 2, theta);   // RX(2, theta/2)
-param_free(theta);
+### circuit_qubits(ptr, out, len)
 
-/* 非酉指令 */
-uint32_t target[2] = {0, 1};
-circuit_barrier(qc, target, 2);   // 局部 barrier
-circuit_measure(qc, 0);
-circuit_reset(qc, 2);
+按插入顺序把比特 id 拷贝进 `out`。`out` 为 NULL 或 `len` 不足时只返回数量、不拷贝。
 
-circuit_free(qc);
-```
+- `ptr` (`const CCircuit*`)：线路句柄。
+- `out` (`uint32_t*`)：输出缓冲，可为 NULL（仅查询数量）。
+- `len` (`uintptr_t`)：缓冲长度。
 
----
+返回：比特总数。
 
-## 线路属性
+### circuit_depth(ptr, recurse)
 
-```c
-uintptr_t circuit_num_qubits(const struct CCircuit *ptr);
-uintptr_t circuit_num_operations(const struct CCircuit *ptr);
-uintptr_t circuit_num_parameters(const struct CCircuit *ptr);
-int32_t   circuit_validate(const struct CCircuit *ptr);
-intptr_t  circuit_depth(const struct CCircuit *ptr, bool recurse);
-uintptr_t circuit_width(const struct CCircuit *ptr);
-uintptr_t circuit_qubits_len(const struct CCircuit *ptr);
-uintptr_t circuit_qubits(const struct CCircuit *ptr, uint32_t *out, uintptr_t len);
-```
+计算线路深度。`recurse = true` 时递归展开控制流体中的操作。
 
-| 函数 | 返回 | 说明 |
-| --- | --- | --- |
-| `circuit_num_qubits` | 比特数 | NULL 句柄返回 `0` |
-| `circuit_width` | 比特数 | `num_qubits` 的别名 |
-| `circuit_num_operations` | 操作数 | 按追加顺序计数的操作总数 |
-| `circuit_num_parameters` | 符号参数数 | 线路中记录的符号参数数量，全部绑定后为 `0` |
-| `circuit_validate` | 错误码 | 校验线路一致性；成功 `0`，失败 `-3` |
-| `circuit_depth(recurse)` | 深度 | 错误（NULL）返回负值 |
-| `circuit_qubits_len` | 比特数 | 用于分配 `circuit_qubits` 缓冲区 |
+- `ptr` (`const CCircuit*`)：线路句柄。
+- `recurse` (`bool`)：是否递归统计控制流内部操作。
 
-`circuit_depth(ptr, recurse)` 用于估算线路深度。深度表示按尽早调度（ASAP）方式排列后，最长量子比特路径上的操作层数：普通门和非酉指令通常贡献一层，`barrier` 会约束其覆盖量子比特上的重排。`recurse` 为 `true` 时递归展开复合子线路统计。
+返回：线路深度；`-1` 表示 NULL 句柄，`-3` 表示失败（例如线路含控制流而未递归）。
 
-`circuit_qubits` 将量子比特编号拷入 `out`，返回线路总比特数。当 `out` 为 NULL 或 `len` 小于总比特数时不执行拷贝，仅返回总数——可以先调用它探查所需容量：
+### circuit_validate(ptr)
 
-```c
-CCircuit *qc = circuit_new(3);
-circuit_h(qc, 0);
-circuit_cx(qc, 0, 1);
+验证线路一致性：经典句柄归属、控制流作用域、数据依赖与结构不变量。外部导入或自动生成的线路建议先验证再进入后续流程。
 
-printf("qubits=%zu ops=%zu depth=%zu\n",
-       (size_t)circuit_num_qubits(qc),
-       (size_t)circuit_num_operations(qc),
-       (size_t)circuit_depth(qc, false));
+- `ptr` (`const CCircuit*`)：线路句柄。
 
-uint32_t ids[3];
-circuit_qubits(qc, ids, 3);   // ids = {0, 1, 2}
-
-circuit_free(qc);
-```
-
----
-
-## 结构操作
-
-### circuit_remove_operation(ptr, index)
-
-删除指定位置的操作，后续操作前移。
-
-参数：
-
-- `index` (`uintptr_t`)：操作下标，按追加顺序从 0 计。
-
-返回：
-
-- `int32_t`；成功 `0`，越界等错误返回负错误码。
-
-### circuit_inverse(ptr)
-
-返回逆线路：操作顺序反转，并对每个可逆操作取逆。
-
-返回：
-
-- `CCircuit *`：**独立拥有**的新线路，需 `circuit_free` 释放；失败返回 NULL。
-
-### circuit_decompose(ptr)
-
-返回递归展开复合门后的副本。
-
-对从 QASM/QCIS 解析或编译结果中携带复合门的线路递归展开。
-
-返回：
-
-- `CCircuit *`：新线路；失败返回 NULL。
-
-### circuit_compose(ptr, other, qubits_map, map_len)
-
-将 `other` 的操作按顺序追加到当前线路，行为由 `qubits_map` 决定：
-
-- `qubits_map` 为 NULL（`map_len` 传 0）：按量子比特编号对齐合并，`other` 使用了当前线路不存在的编号时自动补齐比特；
-- `qubits_map` 非空：将 `other` 的第 `i` 个量子比特映射到当前线路的 `qubits_map[i]` 上。
-
-返回：
-
-- `int32_t`；成功 `0`，映射目标越界返回 `-2`。
-
-与逆线路组合是典型用法：
+返回：`0` 成功；`-1` NULL；`-3` 验证失败。
 
 ```c
 CCircuit *qc = circuit_new(2);
 circuit_h(qc, 0);
 circuit_cx(qc, 0, 1);
 
-CCircuit *inv = circuit_inverse(qc);
-circuit_compose(qc, inv, NULL, 0);     // qc 现在等价于恒等操作
-
-circuit_free(inv);
+if (circuit_validate(qc) == 0) {
+    /* num_qubits=2, num_operations=2, depth=2 */
+    uintptr_t n = circuit_qubits_len(qc);
+    uint32_t *ids = malloc(n * sizeof(uint32_t));
+    circuit_qubits(qc, ids, n);      /* ids == {0, 1} */
+    free(ids);
+}
 circuit_free(qc);
 ```
 
+### circuit_contains_qubit(ptr, qubit)
+
+判断 `qubit` 是否属于该线路。
+
+- `ptr` (`const CCircuit*`)：线路句柄。
+- `qubit` (`uint32_t`)：比特 id。
+
+返回：`1` 属于；`0` 不属于；`-1` NULL。
+
+### circuit_has_same_qubits(a, b)
+
+判断两条线路是否拥有相同的有序比特域。
+
+- `a` (`const CCircuit*`)：第一条线路句柄。
+- `b` (`const CCircuit*`)：第二条线路句柄。
+
+返回：`1` 相同；`0` 不同；`-1` NULL。
+
+### circuit_operations_structurally_equal(a, b)
+
+判断两条线路是否结构相等：有序比特、参数表与操作序列全部一致（参数下标跨两张参数表重映射后比较，线路内的经典句柄按结构比较）。
+
+- `a` (`const CCircuit*`)：第一条线路句柄。
+- `b` (`const CCircuit*`)：第二条线路句柄。
+
+返回：`1` 相等；`0` 不相等；`-1` NULL。
+
+---
+
+## 量子比特管理
+
 ### circuit_add_qubits(ptr, qubits, count)
 
-向线路追加新的量子比特。
+向线路追加新的逻辑量子比特。
 
-参数：
+- `ptr` (`CCircuit*`)：线路句柄。
+- `qubits` (`const uint32_t*`)：新比特 id 数组。
+- `count` (`uintptr_t`)：追加数量。
 
-- `qubits` (`const uint32_t *`)：新比特的编号数组；
-- `count` (`uintptr_t`)：数组长度。
+返回：`0` 成功；`-1` NULL；`-3` 失败（例如与已有比特重复）。
 
-返回：
+---
 
-- `int32_t`；成功 `0`，编号重复或非法返回负错误码。
+## 结构变换
 
-### circuit_set_global_phase(ptr, phase) / circuit_set_global_phase_param(ptr, param)
+### circuit_compose(ptr, other, qubits_map, map_len)
 
-设置线路全局相位，分别为数值版本与符号参数版本。
+把 `other` 追加到当前线路末尾。`qubits_map` 按 `other` 的比特顺序将其比特映射到当前线路的比特；传 NULL 映射（`map_len` 为 0）时按 id 恒等合并，`other` 中不存在于当前线路的比特会被并入。
 
-返回：
+- `ptr` (`CCircuit*`)：目标线路（被修改）。
+- `other` (`const CCircuit*`)：被组合线路（不修改）。
+- `qubits_map` (`const uint32_t*`)：比特映射数组，可为 NULL。
+- `map_len` (`uintptr_t`)：映射长度。
 
-- `int32_t`；成功 `0`，NULL 句柄或非法参数返回负错误码。
+返回：`0` 成功；`-1` NULL；`-3` 失败（映射不合法或结构校验失败）。
+
+```c
+CCircuit *lhs = circuit_new(3);
+CCircuit *rhs = circuit_new(2);
+circuit_cx(rhs, 0, 1);
+
+/* rhs 的比特 0、1 依次映射到 lhs 的比特 1、2 */
+uint32_t map[2] = {1, 2};
+int32_t rc = circuit_compose(lhs, rhs, map, 2);   /* rc == 0 */
+
+circuit_free(rhs);
+circuit_free(lhs);
+```
+
+### circuit_inverse(ptr)
+
+返回当前线路的反线路：操作逆序并逐个取逆，全局相位取反。原线路不变。
+
+- `ptr` (`const CCircuit*`)：线路句柄。
+
+返回：新分配的 `CCircuit*`，用 `circuit_free` 释放；包含不可逆操作（测量、reset 等）或失败时返回 `NULL`。
+
+### circuit_decompose(ptr)
+
+返回展开复合门后的线路副本：由线路定义的门（`circuit_circuit_gate` 追加的复合门）被展开为基础操作。原线路不变。
+
+- `ptr` (`const CCircuit*`)：线路句柄。
+
+返回：新分配的 `CCircuit*`；失败返回 `NULL`。
+
+### circuit_remove_operation(ptr, index)
+
+删除下标为 `index` 的顶层操作。
+
+- `ptr` (`CCircuit*`)：线路句柄。
+- `index` (`uintptr_t`)：操作下标。
+
+返回：`0` 成功；`-1` NULL；`-3` 下标越界或删除后结构校验失败。
+
+### circuit_remove_operations(ptr, indices, len)
+
+按下标批量删除顶层操作。`indices` 按删除前的操作列表解释；重复下标被忽略；任一失败时整体回滚（原子操作）。
+
+- `ptr` (`CCircuit*`)：线路句柄。
+- `indices` (`const uintptr_t*`)：操作下标数组。
+- `len` (`uintptr_t`)：下标数量（可为 0）。
+
+返回：`0` 成功（含空下标列表）；`-1` NULL；`-3` 任一下标越界或有经典值仍被引用。
 
 ```c
 CCircuit *qc = circuit_new(1);
-circuit_x(qc, 0);
-circuit_set_global_phase(qc, 3.141592653589793 / 4.0);
+circuit_rx(qc, 0, 0.7);
+
+CCircuit *inv = circuit_inverse(qc);   /* 反线路：RX(-0.7) */
+if (inv != NULL && circuit_validate(inv) == 0) {
+    /* 使用 inv ... */
+}
+circuit_free(inv);
 circuit_free(qc);
 ```
 
 ---
 
-符号参数的解析、求值与整线路绑定见 [Parameter](2_parameter.md)；酉矩阵导出见 [Circuit To Matrix](3_circuit_to_matrix.md)。
+## 检查点事务
+
+检查点函数族通过不透明的 `CCheckpoint*` 令牌捕获与恢复线路状态（操作列表、参数与符号表、经典表、控制流作用域）。令牌由 `circuit_checkpoint` / `circuit_begin` 产生，且只能被 `circuit_commit`、`circuit_rollback_to` 或 `circuit_rollback_control_body_transaction` 消费一次；未消费的令牌用 `checkpoint_free` 释放。
+
+```c
+CCircuit *qc = circuit_new(1);
+CCheckpoint *cp = circuit_checkpoint(qc);
+circuit_h(qc, 0);                        /* 试验性操作 */
+
+if (circuit_validate(qc) != 0) {
+    circuit_rollback_to(qc, cp);         /* 撤销检查点之后的全部变更 */
+} else {
+    circuit_commit(qc, cp);              /* 保留这些操作 */
+}
+
+circuit_free(qc);
+```
+
+### circuit_checkpoint(ptr)
+
+捕获线路状态检查点。返回的令牌只能被 `circuit_commit`、`circuit_rollback_to` 或 `circuit_rollback_control_body_transaction` 消费一次。
+
+- `ptr` (`const CCircuit*`)：线路句柄。
+
+返回：新分配的 `CCheckpoint*`；NULL 输入时返回 `NULL`。
+
+### circuit_begin(ptr)
+
+开启一个外部驱动的构造事务；等价于 `circuit_checkpoint`。
+
+- `ptr` (`const CCircuit*`)：线路句柄。
+
+返回：新分配的 `CCheckpoint*`；NULL 输入时返回 `NULL`。
+
+### circuit_commit(ptr, checkpoint)
+
+提交自令牌捕获以来新增的状态，并消费该令牌。
+
+- `ptr` (`CCircuit*`)：线路句柄。
+- `checkpoint` (`CCheckpoint*`)：`circuit_checkpoint` / `circuit_begin` 产生的令牌。
+
+返回：`0` 成功；`-1` NULL。
+
+### circuit_rollback_to(ptr, checkpoint)
+
+回滚自令牌捕获以来新增的全部状态，并消费该令牌。
+
+- `ptr` (`CCircuit*`)：线路句柄。
+- `checkpoint` (`CCheckpoint*`)：`circuit_checkpoint` / `circuit_begin` 产生的令牌。
+
+返回：`0` 成功；`-1` NULL。
+
+### circuit_rollback_control_body_transaction(ptr, checkpoint)
+
+回滚自令牌捕获以来新增的全部状态，并消费该令牌；行为与 `circuit_rollback_to` 相同，按核心事务名保留。
+
+- `ptr` (`CCircuit*`)：线路句柄。
+- `checkpoint` (`CCheckpoint*`)：`circuit_checkpoint` / `circuit_begin` 产生的令牌。
+
+返回：`0` 成功；`-1` NULL。
+
+### checkpoint_free(ptr)
+
+释放未消费的检查点令牌。允许传 `NULL`。
+
+- `ptr` (`CCheckpoint*`)：待释放令牌。
+
+---
+
+## 全局相位
+
+### circuit_global_phase(ptr, out)
+
+读取线路全局相位。结果写入 `CParameterValue`：固定数值，或符号情形下新分配的 `CParameter*`（用 `param_free` 释放，见 [符号参数](3_parameter.md)）。
+
+- `ptr` (`const CCircuit*`)：线路句柄。
+- `out` (`CParameterValue*`)：写出结构。
+
+返回：`0` 成功；`-1` NULL。
+
+### circuit_set_global_phase(ptr, phase)
+
+把全局相位设置为数值。
+
+- `ptr` (`CCircuit*`)：线路句柄。
+- `phase` (`double`)：全局相位（弧度）。
+
+返回：`0` 成功；`-1` NULL；`-3` 相位为非有限值。
+
+### circuit_set_global_phase_param(ptr, param)
+
+把全局相位设置为符号参数（参数被克隆）。
+
+- `ptr` (`CCircuit*`)：线路句柄。
+- `param` (`const CParameter*`)：符号参数句柄。
+
+返回：`0` 成功；`-1` NULL。
+
+---
+
+## 参数绑定
+
+### circuit_assign_params(circuit, bindings)
+
+返回一条新线路：能由绑定串求值的驻留参数替换为固定数值，其余保持符号形式；原线路不变，可作为模板复用。
+
+- `circuit` (`const CCircuit*`)：线路句柄。
+- `bindings` (`const char*`)：绑定串，格式为 `"name:value,name2:value2"`（与 `param_evaluate` 相同）；传 NULL 或格式非法时按不提供绑定处理。
+
+返回：新分配的 `CCircuit*`，用 `circuit_free` 释放；线路含经典控制流或替换求值失败时返回 `NULL`。
+
+```c
+CCircuit *tpl = circuit_new(1);
+CParameter *theta = param_parse("theta");
+circuit_rx_param(tpl, 0, theta);
+param_free(theta);
+
+CCircuit *bound = circuit_assign_params(tpl, "theta:0.5");
+/* bound 中不再引用符号 theta */
+
+circuit_free(bound);
+circuit_free(tpl);
+```
+
+---
+
+## 非酉指令与恒等门
+
+### circuit_measure(ptr, qubit)
+
+在 `qubit` 上追加计算基测量指令，产生线路所有的不可变经典 `Bit` 值。读取测量结果、写入已有经典变量等变体见 [经典数据与控制流](9_classical_control_flow.md)。
+
+- `ptr` (`CCircuit*`)：线路句柄。
+- `qubit` (`uint32_t`)：被测比特 id。
+
+返回：`0` 成功；`-1` NULL；`-2` 比特越界；`-3` 失败。
+
+### circuit_reset(ptr, qubit)
+
+在 `qubit` 上追加复位指令，将比特复位到 `|0>`。
+
+- `ptr` (`CCircuit*`)：线路句柄。
+- `qubit` (`uint32_t`)：比特 id。
+
+返回：`0` 成功；`-1` NULL；`-2` 比特越界；`-3` 失败。
+
+### circuit_barrier(ptr, qubits, count)
+
+在给定比特上插入 barrier，阻止相关操作跨越该边界重排。`qubits` 传 NULL 或 `count` 为 0 时对所有线路比特插入全局 barrier。
+
+- `ptr` (`CCircuit*`)：线路句柄。
+- `qubits` (`const uint32_t*`)：比特 id 数组，可为 NULL。
+- `count` (`uintptr_t`)：比特数量。
+
+返回：`0` 成功；`-1` NULL；`-3` 比特不存在或失败。
+
+### circuit_id(ptr, qubit)
+
+在 `qubit` 上追加恒等门，是 `circuit_i` 的别名，为前端命名兼容保留。
+
+- `ptr` (`CCircuit*`)：线路句柄。
+- `qubit` (`uint32_t`)：比特 id。
+
+返回：`0` 成功；`-1` NULL；`-2` 比特越界；`-3` 失败。

@@ -101,6 +101,23 @@ pub extern "C" fn density_matrix_new(num_qubits: usize) -> *mut CDensityMatrix {
     }))
 }
 
+/// Create a density matrix filled entirely with zeros. This is not a valid
+/// physical state (trace = 0); it is useful as an accumulator during
+/// operations like Kraus channel application. Returns NULL when the matrix
+/// size overflows the addressable range.
+#[unsafe(no_mangle)]
+pub extern "C" fn density_matrix_zeros(num_qubits: usize) -> *mut CDensityMatrix {
+    let Some(bits) = num_qubits.checked_mul(2) else {
+        return std::ptr::null_mut();
+    };
+    if bits >= usize::BITS as usize {
+        return std::ptr::null_mut();
+    }
+    Box::into_raw(Box::new(CDensityMatrix {
+        inner: DensityMatrix::zeros(num_qubits),
+    }))
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn density_matrix_free(ptr: *mut CDensityMatrix) {
     if !ptr.is_null() {
@@ -626,4 +643,222 @@ pub extern "C" fn density_matrix_partial_trace(
         Ok(dm) => Box::into_raw(Box::new(CDensityMatrix { inner: dm })),
         Err(_) => std::ptr::null_mut(),
     }
+}
+
+// =====  Simulator supplement (checklist 2.5)  =====
+
+use std::ffi::CStr;
+
+use crate::device::standard_gate_from_name;
+
+/// Resolves a NUL-terminated standard-gate name (e.g. "H", "CX", "RZZ").
+/// Returns -1 for NULL input and -8 for an unknown name or invalid UTF-8.
+fn parse_standard_gate(name: *const c_char) -> Result<cqlib_core::circuit::StandardGate, i32> {
+    if name.is_null() {
+        return Err(CqlibError::NullPtr as i32);
+    }
+    let name = unsafe { CStr::from_ptr(name) };
+    let name = match name.to_str() {
+        Ok(s) => s,
+        Err(_) => return Err(CqlibError::InvalidParam as i32),
+    };
+    standard_gate_from_name(name).ok_or(CqlibError::InvalidParam as i32)
+}
+
+/// Collects and bounds-checks a qubit-index array for this simulator.
+fn resolve_qubits(num_qubits: usize, qubits: *const u32, len: usize) -> Result<Vec<usize>, i32> {
+    let slice = unsafe { std::slice::from_raw_parts(qubits, len) };
+    slice.iter().map(|&q| check_qubit(num_qubits, q)).collect()
+}
+
+/// Builds the gate-parameter slice, validating that every value is finite.
+/// A NULL pointer is allowed when `num_params` is zero.
+fn resolve_params(params: *const f64, num_params: usize) -> Result<Vec<f64>, i32> {
+    if num_params == 0 {
+        return Ok(Vec::new());
+    }
+    if params.is_null() {
+        return Err(CqlibError::NullPtr as i32);
+    }
+    let slice = unsafe { std::slice::from_raw_parts(params, num_params) };
+    if slice.iter().any(|v| !v.is_finite()) {
+        return Err(CqlibError::InvalidParam as i32);
+    }
+    Ok(slice.to_vec())
+}
+
+/// Return the number of matrix elements (4^N), or 0 for NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn density_matrix_data_len(ptr: *const CDensityMatrix) -> usize {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).inner.data().len() }
+}
+
+/// Copy the flattened row-major matrix elements into `buffer` (4^N Complex64
+/// values). Returns 0 on success, -1 on NULL pointers, -8 when `len` does not
+/// equal `density_matrix_data_len`.
+#[unsafe(no_mangle)]
+pub extern "C" fn density_matrix_data(
+    ptr: *const CDensityMatrix,
+    buffer: *mut Complex64,
+    len: usize,
+) -> i32 {
+    if ptr.is_null() || buffer.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    let data = unsafe { (*ptr).inner.data() };
+    if data.len() != len {
+        return CqlibError::InvalidParam as i32;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(data.as_ptr(), buffer, len);
+    }
+    0
+}
+
+/// Create a density matrix from a normalized pure-state amplitude array of
+/// 2^N Complex64 values, computing the outer product rho = |psi><psi|.
+/// Returns NULL on error (NULL input, wrong dimension, or a state that is
+/// not normalized).
+#[unsafe(no_mangle)]
+pub extern "C" fn density_matrix_from_state(
+    num_qubits: usize,
+    initial_state: *const Complex64,
+    len: usize,
+) -> *mut CDensityMatrix {
+    if initial_state.is_null() {
+        return std::ptr::null_mut();
+    }
+    let amplitudes = unsafe { std::slice::from_raw_parts(initial_state, len) }.to_vec();
+    match DensityMatrix::from_state(num_qubits, amplitudes) {
+        Ok(dm) => Box::into_raw(Box::new(CDensityMatrix { inner: dm })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Compute the trace of the density matrix. Writes the real and imaginary
+/// parts to `out_re` / `out_im` and returns 0 on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn density_matrix_trace(
+    ptr: *const CDensityMatrix,
+    out_re: *mut f64,
+    out_im: *mut f64,
+) -> i32 {
+    if ptr.is_null() || out_re.is_null() || out_im.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    let trace = unsafe { (*ptr).inner.trace() };
+    unsafe {
+        *out_re = trace.re;
+        *out_im = trace.im;
+    }
+    0
+}
+
+/// Check whether the density matrix is Hermitian within tolerance `tol`.
+/// Writes the result to `out` and returns 0 on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn density_matrix_is_hermitian(
+    ptr: *const CDensityMatrix,
+    tol: f64,
+    out: *mut bool,
+) -> i32 {
+    if ptr.is_null() || out.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    if !tol.is_finite() {
+        return CqlibError::InvalidParam as i32;
+    }
+    let hermitian = unsafe { (*ptr).inner.is_hermitian(tol) };
+    unsafe { *out = hermitian };
+    0
+}
+
+/// Check whether the density matrix is positive semidefinite within
+/// tolerance `tol` (all eigenvalues satisfy lambda >= -tol). Writes 1/0 to
+/// `out` and returns 0 on success. Returns -1 for a NULL handle or output
+/// pointer and -8 for a non-finite `tol`.
+#[unsafe(no_mangle)]
+pub extern "C" fn density_matrix_is_positive_semidefinite(
+    ptr: *const CDensityMatrix,
+    tol: f64,
+    out: *mut bool,
+) -> i32 {
+    if ptr.is_null() || out.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    if !tol.is_finite() {
+        return CqlibError::InvalidParam as i32;
+    }
+    let positive = unsafe { (*ptr).inner.is_positive_semidefinite_approx(tol) };
+    unsafe { *out = positive };
+    0
+}
+
+/// Validate the physicality constraints of the density matrix within
+/// tolerance `tol`: Hermiticity, positive semidefiniteness, and unit
+/// trace. The matrix is only read. Returns 0 when the state is physical,
+/// or a negative error code (`-1` NULL handle or non-finite `tol`; `-7`
+/// not Hermitian or not positive semidefinite; `-8` trace not equal to 1).
+#[unsafe(no_mangle)]
+pub extern "C" fn density_matrix_validate_physical(ptr: *const CDensityMatrix, tol: f64) -> i32 {
+    if ptr.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    if !tol.is_finite() {
+        return CqlibError::InvalidParam as i32;
+    }
+    let wrapper = unsafe { &*ptr };
+    match wrapper.inner.validate_physical(tol) {
+        Ok(()) => 0,
+        Err(err) => map_err(err),
+    }
+}
+
+/// Create the maximally mixed state I / 2^N of `num_qubits` qubits.
+#[unsafe(no_mangle)]
+pub extern "C" fn density_matrix_maximally_mixed(num_qubits: usize) -> *mut CDensityMatrix {
+    Box::into_raw(Box::new(CDensityMatrix {
+        inner: DensityMatrix::maximally_mixed(num_qubits),
+    }))
+}
+
+/// Apply a standard gate identified by name (e.g. "H", "CX", "RZZ", "FSIM").
+///
+/// `qubits` holds `num_target_qubits` target indices and `params` holds
+/// `num_params` gate parameters (NULL is allowed when `num_params` is 0).
+/// Returns 0 on success, -1 for NULL pointers, -2 for an out-of-bounds qubit,
+/// -8 for an unknown gate name or invalid argument counts.
+#[unsafe(no_mangle)]
+pub extern "C" fn density_matrix_apply_standard_gate(
+    ptr: *mut CDensityMatrix,
+    gate_name: *const c_char,
+    qubits: *const u32,
+    num_target_qubits: usize,
+    params: *const f64,
+    num_params: usize,
+) -> i32 {
+    if ptr.is_null() || qubits.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    let gate = match parse_standard_gate(gate_name) {
+        Ok(gate) => gate,
+        Err(code) => return code,
+    };
+    let wrapper = unsafe { &mut *ptr };
+    let targets = match resolve_qubits(wrapper.inner.num_qubits, qubits, num_target_qubits) {
+        Ok(targets) => targets,
+        Err(code) => return code,
+    };
+    let params = match resolve_params(params, num_params) {
+        Ok(params) => params,
+        Err(code) => return code,
+    };
+    wrapper
+        .inner
+        .apply_standard_gate(gate, &targets, &params)
+        .map_err(map_err)
+        .map_or_else(|e| e, |_| 0)
 }
