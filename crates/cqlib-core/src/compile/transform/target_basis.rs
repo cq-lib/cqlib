@@ -39,7 +39,9 @@ use crate::compile::transform::decompose::unitary::euler_1q::{
     Euler1qCandidate, synthesize_euler_1q_candidates,
 };
 use crate::compile::transform::decompose::unitary::synthesize_numeric_1q_unitary;
-use crate::compile::transform::lowering_support::{LoweringTarget, OperationSequenceLowerer};
+use crate::compile::transform::lowering_support::{
+    LowerableOperation, LoweringTarget, OperationSequenceLowerer,
+};
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::transformer::{PassApplicability, WorkflowPass};
 use crate::compile::transform::{
@@ -120,14 +122,6 @@ struct PlanCost {
     two_qubit_ops: usize,
     parameterized_ops: usize,
     rule_id: usize,
-}
-
-#[derive(Debug, Clone)]
-struct LowerableOperation {
-    instruction: Instruction,
-    qubits: SmallVec<[Qubit; 3]>,
-    params: SmallVec<[ParameterValue; 1]>,
-    label: Option<Box<str>>,
 }
 
 struct CircuitLowerer<'a> {
@@ -637,7 +631,7 @@ impl<'a> CircuitLowerer<'a> {
             })?;
         if key.is_implicit() {
             self.changed = true;
-            target.accumulate_phase(gphase_param(&operation)?);
+            target.accumulate_phase(operation.gphase_param()?);
             return Ok(());
         }
         if self.plans.is_physical(&key) {
@@ -1096,13 +1090,6 @@ fn instantiate_rule_param(
         }
     };
     Ok(ParameterValue::from(parameter))
-}
-
-fn gphase_param(operation: &LowerableOperation) -> Result<Parameter, CompilerError> {
-    let phase = operation.params.first().ok_or_else(|| {
-        CompilerError::InvariantViolation("GPhase operation must contain one parameter".to_string())
-    })?;
-    Ok(Parameter::from(phase))
 }
 
 fn key_rule_sort_value(key: &KnowledgeInstructionKey) -> usize {

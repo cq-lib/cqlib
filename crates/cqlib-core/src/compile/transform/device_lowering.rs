@@ -45,7 +45,9 @@ use crate::compile::knowledge::{
 };
 use crate::compile::numeric_matrix::one_qubit_run_matrix;
 use crate::compile::transform::decompose::unitary::synthesize_numeric_1q_unitary;
-use crate::compile::transform::lowering_support::{LoweringTarget, OperationSequenceLowerer};
+use crate::compile::transform::lowering_support::{
+    LowerableOperation, LoweringTarget, OperationSequenceLowerer,
+};
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use crate::device::{Device, PhysicalQubit};
@@ -55,14 +57,6 @@ use std::f64::consts::{FRAC_PI_2, PI};
 use std::sync::Arc;
 
 const PHASE_EPS: f64 = 1e-12;
-
-#[derive(Debug, Clone)]
-pub(super) struct LowerableOperation {
-    pub(super) instruction: Instruction,
-    pub(super) qubits: SmallVec<[Qubit; 3]>,
-    pub(super) params: SmallVec<[ParameterValue; 1]>,
-    pub(super) label: Option<Box<str>>,
-}
 
 /// Lowers a routed physical circuit to one device's exact native instruction
 /// capabilities, including ordered qargs and local capability overrides.
@@ -281,7 +275,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
             Instruction::Standard(StandardGate::GPhase)
         ) {
             self.changed = true;
-            target.accumulate_phase(gphase_param(&operation)?);
+            target.accumulate_phase(operation.gphase_param()?);
             return Ok(());
         }
 
@@ -1155,18 +1149,6 @@ fn instantiate_direction_template(
         }
         DirectionTemplate::Symmetric(_) => vec![reversed()],
     }
-}
-
-fn gphase_param(operation: &LowerableOperation) -> Result<Parameter, CompilerError> {
-    operation
-        .params
-        .first()
-        .map(Parameter::from)
-        .ok_or_else(|| {
-            CompilerError::InvariantViolation(
-                "GPhase operation must contain one parameter".to_string(),
-            )
-        })
 }
 
 #[cfg(test)]
