@@ -102,7 +102,7 @@ fn depth_estimate_keeps_disjoint_single_qubit_ops_parallel() {
 }
 
 #[test]
-fn depth_estimate_serializes_ops_on_shared_qubit() {
+fn local_cleanup_fuses_ops_on_shared_qubit() {
     let q0 = Qubit::new(0);
     let ops = [
         ValueOperation::from_standard(StandardGate::H, [q0], []),
@@ -111,6 +111,119 @@ fn depth_estimate_serializes_ops_on_shared_qubit() {
 
     let cost = replacement_cost(&ops);
 
-    assert_eq!(cost.lowered_total_ops, 2);
-    assert_eq!(cost.lowered_depth, 2);
+    assert_eq!(cost.lowered_total_ops, 1);
+    assert_eq!(cost.lowered_depth, 1);
+}
+
+#[test]
+fn explicit_basis_scoring_reuses_xyx_and_removes_zero_rotation() {
+    let target = TwoQubitSynthesisTarget::from_standard_gates(
+        vec![StandardGate::RX, StandardGate::RY],
+        vec![StandardGate::CZ],
+        true,
+    )
+    .unwrap();
+    let q = [Qubit::new(0), Qubit::new(1)];
+    let operations = [
+        ValueOperation::from_standard(
+            StandardGate::U,
+            [q[0]],
+            [0.37.into(), 0.23.into(), (-0.41).into()],
+        ),
+        ValueOperation::from_standard(StandardGate::CZ, q, []),
+        ValueOperation::from_standard(StandardGate::RX, [q[1]], [0.0.into()]),
+    ];
+    let candidate = target_aware_cost_of_value_operations(
+        &operations,
+        &target,
+        TwoQubitUnitaryDecomposeBasis::Cz,
+    )
+    .unwrap();
+    // Generic U uses the completed three-rotation XYX candidate. The one
+    // cleanup round removes the trailing native zero rotation.
+    assert_eq!(candidate.lowered_two_qubit_ops, 1);
+    assert_eq!(candidate.lowered_depth, 4);
+    assert_eq!(candidate.lowered_total_ops, 4);
+    assert_eq!(candidate.parameterized_ops, 3);
+    let source = cost_of_source_value_operations(&operations, &target).unwrap();
+    assert_eq!(
+        source,
+        ResynthesisCost {
+            backend_order: 0,
+            ..candidate
+        }
+    );
+}
+
+#[test]
+fn local_cleanup_corrects_original_cost_reversal() {
+    use crate::circuit::{Circuit, circuit_to_matrix};
+    use crate::compile::transform::decompose::unitary::{
+        TwoQubitSynthesisRequest, plan_numeric_2q_unitary,
+    };
+
+    let q = [Qubit::new(0), Qubit::new(1)];
+    let operations = vec![
+        ValueOperation::from_standard(StandardGate::CX, q, []),
+        ValueOperation::from_standard(StandardGate::H, [q[1]], []),
+        ValueOperation::from_standard(StandardGate::H, [q[0]], []),
+    ];
+    let target = TwoQubitSynthesisTarget::from_standard_gates(
+        vec![StandardGate::RZ, StandardGate::X2P],
+        vec![StandardGate::CZ],
+        true,
+    )
+    .unwrap();
+    let model = target.lowering_cost_model().unwrap();
+    let raw_source = model
+        .cost_of_fixed_operations(q.to_vec(), operations.clone())
+        .unwrap();
+    let source_cost = cost_of_source_value_operations(&operations, &target).unwrap();
+    assert_eq!(
+        (
+            raw_source.two_qubit_ops,
+            raw_source.depth,
+            raw_source.total_ops,
+            raw_source.parameterized_ops
+        ),
+        (1, 10, 13, 8),
+    );
+    assert_eq!(
+        source_cost,
+        ResynthesisCost {
+            lowered_two_qubit_ops: 1,
+            lowered_depth: 6,
+            lowered_total_ops: 7,
+            parameterized_ops: 4,
+            backend_order: 0,
+        }
+    );
+    let circuit = Circuit::from_operations(q.to_vec(), operations, None, None).unwrap();
+    let matrix = circuit_to_matrix(&circuit, None).unwrap();
+    let candidates = plan_numeric_2q_unitary(TwoQubitSynthesisRequest {
+        matrix: &matrix,
+        qubits: q,
+        target: target.clone(),
+    })
+    .unwrap();
+    assert!(!candidates.is_empty());
+    for candidate in candidates {
+        let raw_candidate = model
+            .cost_of_fixed_operations(q.to_vec(), candidate.operations.clone())
+            .unwrap();
+        // Lowering alone favors the candidate; local cleanup reverses that
+        // ordering because lowering exposes two adjacent H gates that cancel.
+        assert_eq!(
+            (
+                raw_candidate.two_qubit_ops,
+                raw_candidate.depth,
+                raw_candidate.total_ops,
+                raw_candidate.parameterized_ops
+            ),
+            (1, 7, 11, 6),
+        );
+        assert_eq!(candidate.cost.lowered_total_ops, 9);
+        assert_eq!(candidate.cost.lowered_depth, 6);
+        assert!(candidate.cost >= source_cost);
+    }
 }

@@ -51,7 +51,7 @@ rule decompose_cy_to_cry {
 
 rule decompose_cy_to_rx_ry_rzz {
     match { CY 0 1 }
-    rewrite { RX(-π/2) 1, RY(-π/2) 1, RX(π/2) 1, RY(π/2) 1, RX(π) 1, RX(-π/2) 0, RY(π/2) 0, RX(π/2) 0, RX(-π/2) 1, RY(π/2) 1, RX(π/2) 1, RZZ(-π/2) 0 1, RY(π/2) 1, RX(π) 1, RX(-π/2) 1, RY(π/2) 1, RX(π/2) 1, GPhase(π) }
+    rewrite { RX(-π/2) 1, RY(-π/2) 1, RX(π/2) 1, RY(π/2) 1, RX(π) 1, RX(-π/2) 0, RY(π/2) 0, RX(π/2) 0, RX(-π/2) 1, RY(π/2) 1, RX(π/2) 1, RZZ(-π/2) 0 1, RY(π/2) 1, RX(π) 1, RX(-π/2) 1, RY(π/2) 1, RX(π/2) 1, GPhase(5π/4) }
 }
 
 rule decompose_cy_direction_flip {

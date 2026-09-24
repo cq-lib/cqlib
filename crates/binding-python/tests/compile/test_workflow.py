@@ -12,6 +12,7 @@
 
 import copy
 
+import numpy as np
 import pytest
 
 import cqlib.compile as compile_module
@@ -315,3 +316,24 @@ def test_workflow_rejects_non_standard_target_instruction_when_run() -> None:
         CompilerConfigError, match="unsupported workflow target instruction"
     ):
         CompilerWorkflow(config).run(Circuit(1))
+
+
+@pytest.mark.parametrize("mode", ["normal", "enhanced"])
+@pytest.mark.parametrize("phase", [0.0, 0.371])
+@pytest.mark.parametrize("qubits", [(0, 1), (1, 0)])
+def test_two_qubit_local_cleanup_cost_reversal(mode, phase, qubits) -> None:
+    source = Circuit(2)
+    control, target = qubits
+    source.cx(control, target)
+    source.h(target)
+    source.h(control)
+    source.set_global_phase(phase)
+
+    output = compile(source, target_basis=["RZ", "X2P", "CZ"], mode=mode).circuit
+
+    assert sum(len(op.qubits) == 2 for op in output.operations) == 1
+    assert len(output.operations) <= 7
+    assert output.depth() <= 6
+    np.testing.assert_allclose(
+        output.to_matrix(), source.to_matrix(), atol=1e-8, rtol=0
+    )

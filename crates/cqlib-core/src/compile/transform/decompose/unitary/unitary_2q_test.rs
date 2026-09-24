@@ -76,3 +76,53 @@ fn selected_boundary_inexact_candidate_falls_back_to_higher_cx_template() {
     assert_eq!(count_cx(&selected), 3);
     validate_numeric_2q_candidate(&matrix, qubits, &selected).unwrap();
 }
+
+#[test]
+fn local_cleanup_scoring_agrees_for_primary_cx_and_pauli_fallbacks() {
+    use super::unitary_2q::{
+        plan_cx_family_fallbacks_from_kak, plan_pauli_fallback_from_kak,
+        target_aware_cost_of_value_operations,
+    };
+    let matrix = StandardGate::RXX.matrix(&[0.23]).unwrap().into_owned();
+    let qubits = [Qubit::new(1), Qubit::new(0)];
+    let target = TwoQubitSynthesisTarget::from_standard_gates(
+        vec![StandardGate::RZ, StandardGate::X2P],
+        vec![StandardGate::CX],
+        true,
+    )
+    .unwrap();
+    let decomp = kak_decompose(&matrix).unwrap();
+    let request = || TwoQubitSynthesisRequest {
+        matrix: &matrix,
+        qubits,
+        target: target.clone(),
+    };
+    for candidates in [
+        plan_numeric_2q_unitary_from_kak(request(), &decomp).unwrap(),
+        plan_cx_family_fallbacks_from_kak(request(), &decomp, TwoQubitUnitaryDecomposeBasis::Cx)
+            .unwrap(),
+        plan_pauli_fallback_from_kak(request(), &decomp).unwrap(),
+    ] {
+        assert!(!candidates.is_empty());
+        for candidate in candidates {
+            validate_numeric_2q_candidate(&matrix, qubits, &candidate).unwrap();
+            let model = target.lowering_cost_model().unwrap();
+            let cost = model
+                .cost_after_local_cleanup(qubits.to_vec(), candidate.operations.clone())
+                .unwrap();
+            assert_eq!(candidate.cost.lowered_two_qubit_ops, cost.two_qubit_ops);
+            assert_eq!(candidate.cost.lowered_depth, cost.depth);
+            assert_eq!(candidate.cost.lowered_total_ops, cost.total_ops);
+            assert_eq!(candidate.cost.parameterized_ops, cost.parameterized_ops);
+            assert_eq!(
+                candidate.cost,
+                target_aware_cost_of_value_operations(
+                    &candidate.operations,
+                    &target,
+                    candidate.backend,
+                )
+                .unwrap()
+            );
+        }
+    }
+}

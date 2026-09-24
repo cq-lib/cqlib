@@ -837,3 +837,96 @@ fn swap_fails_for_rz_cz_basis_without_half_rotation() {
         &["cannot lower", "SWAP", "RZ", "CZ"],
     );
 }
+
+#[test]
+fn controlled_pauli_rzz_lowering_preserves_scalar_phase() {
+    for basis in [
+        vec![StandardGate::RZ, StandardGate::RX, StandardGate::RZZ],
+        vec![StandardGate::RX, StandardGate::RY, StandardGate::RZZ],
+        vec![StandardGate::H, StandardGate::RZ, StandardGate::RZZ],
+    ] {
+        for gate in [StandardGate::CX, StandardGate::CY, StandardGate::CZ] {
+            for reversed in [false, true] {
+                let qubits = if reversed {
+                    [Qubit::new(1), Qubit::new(0)]
+                } else {
+                    [Qubit::new(0), Qubit::new(1)]
+                };
+                let mut source = Circuit::from_operations(
+                    vec![Qubit::new(0), Qubit::new(1)],
+                    vec![ValueOperation::from_standard(gate, qubits, [])],
+                    None,
+                    None,
+                )
+                .unwrap();
+                source.set_global_phase(0.371.into());
+                let actual = run_target_lowering(&source, &basis);
+                let expected = circuit_to_matrix(&source, None).unwrap();
+                let actual = circuit_to_matrix(&actual, None).unwrap();
+                assert!(
+                    expected
+                        .iter()
+                        .zip(actual.iter())
+                        .all(|(a, b)| (*a - *b).norm() <= 1e-8),
+                    "gate={gate:?}, basis={basis:?}, reversed={reversed}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn local_cleanup_preserves_matrix_phase_and_target_basis() {
+    use std::f64::consts::{PI, TAU};
+    for basis in [
+        vec![StandardGate::RZ, StandardGate::X2P, StandardGate::CZ],
+        vec![StandardGate::RX, StandardGate::RY, StandardGate::CZ],
+        vec![StandardGate::RX, StandardGate::RZ, StandardGate::CX],
+        vec![StandardGate::RX, StandardGate::RY, StandardGate::RXX],
+        vec![StandardGate::RX, StandardGate::RY, StandardGate::RZZ],
+        vec![StandardGate::H, StandardGate::RZ, StandardGate::RZZ],
+    ] {
+        let model = TargetBasisCostModel::new(target_basis(&basis)).unwrap();
+        for reversed in [false, true] {
+            let q = if reversed {
+                [Qubit::new(1), Qubit::new(0)]
+            } else {
+                [Qubit::new(0), Qubit::new(1)]
+            };
+            for angle in [0.0, PI, -PI, TAU, -TAU, 0.37] {
+                let operations = vec![
+                    ValueOperation::from_standard(StandardGate::CX, q, []),
+                    ValueOperation::from_standard(StandardGate::H, [q[1]], []),
+                    ValueOperation::from_standard(StandardGate::H, [q[0]], []),
+                    ValueOperation::from_standard(StandardGate::RX, [q[0]], [PI.into()]),
+                    ValueOperation::from_standard(StandardGate::RZZ, q, [angle.into()]),
+                    ValueOperation::from_standard(StandardGate::RX, [q[0]], [(-PI).into()]),
+                ];
+                let mut source =
+                    Circuit::from_operations(q.to_vec(), operations.clone(), None, None).unwrap();
+                source.set_global_phase(0.371.into());
+                let mut lowered = model
+                    .lower_fixed_operations(q.to_vec(), operations.clone())
+                    .unwrap();
+                lowered.set_global_phase(lowered.global_phase() + 0.371);
+                let actual = model.cleanup_lowered(lowered).unwrap();
+                assert_only_target_standard_gates(&actual, &basis);
+                let expected_matrix = circuit_to_matrix(&source, None).unwrap();
+                let actual_matrix = circuit_to_matrix(&actual, None).unwrap();
+                assert!(
+                    expected_matrix
+                        .iter()
+                        .zip(actual_matrix.iter())
+                        .all(|(a, b)| (*a - *b).norm() <= 1e-8),
+                    "basis={basis:?}, reversed={reversed}, angle={angle}"
+                );
+                assert_eq!(
+                    model
+                        .cost_after_local_cleanup(q.to_vec(), operations)
+                        .unwrap(),
+                    TargetBasisCostModel::count_lowered(&actual).unwrap(),
+                );
+            }
+        }
+    }
+}
