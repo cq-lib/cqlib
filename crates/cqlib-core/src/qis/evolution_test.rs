@@ -388,6 +388,36 @@ fn test_trotter_zero_steps_error() {
 }
 
 #[test]
+fn test_trotter_scale_factor_overflow_returns_error() {
+    let mut h = Hamiltonian::new(1);
+    h.add_term("Z".parse().unwrap(), f64::MAX.into()).unwrap();
+
+    for mode in [TrotterMode::FirstOrder, TrotterMode::Randomized(42)] {
+        // All inputs are finite, but doubling the coefficient overflows.
+        let result = h.to_trotter_circuit(0.25, 2, mode);
+        assert!(matches!(result, Err(QisError::UnsupportedOperation(_))));
+    }
+}
+
+#[test]
+fn test_trotter_merged_coefficient_overflow_returns_error() {
+    let mut h = Hamiltonian::new(1);
+    for _ in 0..2 {
+        h.add_term("Z".parse().unwrap(), f64::MAX.into()).unwrap();
+    }
+
+    for mode in [
+        TrotterMode::FirstOrder,
+        TrotterMode::SecondOrder,
+        TrotterMode::Randomized(42),
+    ] {
+        // Simplification can overflow even before the scale factor is computed.
+        let result = h.to_trotter_circuit(0.25, 2, mode);
+        assert!(matches!(result, Err(QisError::UnsupportedOperation(_))));
+    }
+}
+
+#[test]
 fn test_trotter_randomized() {
     // H = 0.5 * ZZ + 0.3 * XX
     let mut h = Hamiltonian::new(2);

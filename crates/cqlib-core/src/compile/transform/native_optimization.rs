@@ -43,6 +43,7 @@ use crate::circuit::{
 use crate::compile::CompilerError;
 use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::device_planning::cost::{RobustDurationKey, RobustErrorKey};
+use crate::compile::numeric_matrix::one_qubit_run_matrix;
 use crate::compile::sabre::MetricAvailability;
 use crate::compile::transform::decompose::unitary::{
     DeviceContextCostFailure, DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
@@ -61,8 +62,6 @@ use crate::compile::transform::{
     Canonicalizer, CircuitAnalysis, DeviceLowerer, RewriteEdits, TransformOutcome, Transformer,
 };
 use crate::device::Device;
-use ndarray::Array2;
-use num_complex::Complex64;
 use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -836,29 +835,11 @@ fn collect_scope_costs(
             Instruction::Standard(_) | Instruction::McGate(_) => accumulator
                 .add_gate(&operation.instruction, &operation.qubits)
                 .map_err(ScopeCostError::Context)?,
-            Instruction::ClassicalControl(control) => match control {
-                ClassicalControlOp::If(op) => {
-                    collect_scope_costs(op.then_body().operations(), context, output)?;
-                    if let Some(body) = op.else_body() {
-                        collect_scope_costs(body.operations(), context, output)?;
-                    }
+            Instruction::ClassicalControl(control) => {
+                for body in control.bodies() {
+                    collect_scope_costs(body.operations(), context, output)?;
                 }
-                ClassicalControlOp::While(op) => {
-                    collect_scope_costs(op.body().operations(), context, output)?;
-                }
-                ClassicalControlOp::For(op) => {
-                    collect_scope_costs(op.body().operations(), context, output)?;
-                }
-                ClassicalControlOp::Switch(op) => {
-                    for case in op.cases() {
-                        collect_scope_costs(case.body().operations(), context, output)?;
-                    }
-                    if let Some(body) = op.default() {
-                        collect_scope_costs(body.operations(), context, output)?;
-                    }
-                }
-                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
-            },
+            }
             Instruction::UnitaryGate(_)
             | Instruction::CircuitGate(_)
             | Instruction::ClassicalData(_)
@@ -1569,19 +1550,6 @@ fn fixed_params(operation: &ValueOperation) -> Option<Vec<f64>> {
             ParameterValue::Fixed(_) | ParameterValue::Param(_) => None,
         })
         .collect()
-}
-
-fn one_qubit_run_matrix(operations: &[ValueOperation]) -> Option<Array2<Complex64>> {
-    let mut matrix = Array2::<Complex64>::eye(2);
-    for operation in operations {
-        let ValueInstruction::Instruction(Instruction::Standard(gate)) = &operation.instruction
-        else {
-            return None;
-        };
-        let gate_matrix = gate.matrix(&fixed_params(operation)?).ok()?;
-        matrix = gate_matrix.dot(&matrix);
-    }
-    Some(matrix)
 }
 
 fn u_operation(qubit: Qubit, decomposition: OneQubitUnitaryDecomposition) -> ValueOperation {

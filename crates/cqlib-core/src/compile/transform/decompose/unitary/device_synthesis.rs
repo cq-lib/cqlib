@@ -661,8 +661,6 @@ fn ordered_topology_pairs(
 fn collect_exact_physical_gate_roots(
     operations: &[crate::circuit::Operation],
 ) -> Vec<DeviceGateState> {
-    use crate::circuit::ClassicalControlOp;
-
     let mut roots = Vec::new();
     for operation in operations {
         match &operation.instruction {
@@ -680,31 +678,11 @@ fn collect_exact_physical_gate_roots(
                     roots.push(state);
                 }
             }
-            Instruction::ClassicalControl(control) => match control {
-                ClassicalControlOp::If(op) => {
-                    roots.extend(collect_exact_physical_gate_roots(
-                        op.then_body().operations(),
-                    ));
-                    if let Some(body) = op.else_body() {
-                        roots.extend(collect_exact_physical_gate_roots(body.operations()));
-                    }
+            Instruction::ClassicalControl(control) => {
+                for body in control.bodies() {
+                    roots.extend(collect_exact_physical_gate_roots(body.operations()));
                 }
-                ClassicalControlOp::While(op) => {
-                    roots.extend(collect_exact_physical_gate_roots(op.body().operations()));
-                }
-                ClassicalControlOp::For(op) => {
-                    roots.extend(collect_exact_physical_gate_roots(op.body().operations()));
-                }
-                ClassicalControlOp::Switch(op) => {
-                    for case in op.cases() {
-                        roots.extend(collect_exact_physical_gate_roots(case.body().operations()));
-                    }
-                    if let Some(body) = op.default() {
-                        roots.extend(collect_exact_physical_gate_roots(body.operations()));
-                    }
-                }
-                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
-            },
+            }
             _ => {}
         }
     }
@@ -714,8 +692,6 @@ fn collect_exact_physical_gate_roots(
 fn collect_exact_physical_pairs(
     operations: &[crate::circuit::Operation],
 ) -> Vec<[PhysicalQubit; 2]> {
-    use crate::circuit::ClassicalControlOp;
-
     let mut pairs = BTreeSet::new();
     for operation in operations {
         match &operation.instruction {
@@ -731,29 +707,11 @@ fn collect_exact_physical_pairs(
                 pairs.insert([pair[0], pair[1]]);
                 pairs.insert([pair[1], pair[0]]);
             }
-            Instruction::ClassicalControl(control) => match control {
-                ClassicalControlOp::If(op) => {
-                    pairs.extend(collect_exact_physical_pairs(op.then_body().operations()));
-                    if let Some(body) = op.else_body() {
-                        pairs.extend(collect_exact_physical_pairs(body.operations()));
-                    }
+            Instruction::ClassicalControl(control) => {
+                for body in control.bodies() {
+                    pairs.extend(collect_exact_physical_pairs(body.operations()));
                 }
-                ClassicalControlOp::While(op) => {
-                    pairs.extend(collect_exact_physical_pairs(op.body().operations()));
-                }
-                ClassicalControlOp::For(op) => {
-                    pairs.extend(collect_exact_physical_pairs(op.body().operations()));
-                }
-                ClassicalControlOp::Switch(op) => {
-                    for case in op.cases() {
-                        pairs.extend(collect_exact_physical_pairs(case.body().operations()));
-                    }
-                    if let Some(body) = op.default() {
-                        pairs.extend(collect_exact_physical_pairs(body.operations()));
-                    }
-                }
-                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
-            },
+            }
             _ => {}
         }
     }

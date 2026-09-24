@@ -13,17 +13,9 @@
 //! Shared MC-SU(2) synthesis helpers.
 
 use super::DECOMPOSE_MC_SU2_NAME;
-use crate::circuit::{ParameterValue, Qubit};
+use crate::circuit::Qubit;
 use crate::compile::error::CompilerError;
 use crate::compile::transform::decompose::mc_gate::validation::find_duplicate_qubit;
-
-/// Returns a scaled clone while preserving symbolic expressions.
-pub(super) fn scale_parameter(theta: &ParameterValue, factor: f64) -> ParameterValue {
-    match theta {
-        ParameterValue::Fixed(value) => ParameterValue::Fixed(value * factor),
-        ParameterValue::Param(parameter) => ParameterValue::Param(parameter.clone() * factor),
-    }
-}
 
 /// Rejects a repeated qubit across the consumed input groups.
 pub(super) fn validate_distinct_qubits(qubit_groups: &[&[Qubit]]) -> Result<(), CompilerError> {

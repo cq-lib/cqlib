@@ -206,7 +206,7 @@ impl PauliEvolution for Circuit {
         // phase_complex.re is either 1.0 or -1.0
         let angle_param: ParameterValue = angle.into();
         let adjusted_angle = if phase_complex.re < 0.0 {
-            multiply_angle_by_factor(angle_param, -1.0)
+            angle_param.scaled(-1.0)
         } else {
             angle_param
         };
@@ -233,7 +233,7 @@ impl PauliEvolution for Circuit {
         if non_identity_positions.is_empty() {
             // The operation is e^(-iθ/2 * I) = e^(-iθ/2) * I
             // This is just a global phase
-            let global_phase_param = multiply_angle_by_factor(adjusted_angle, -0.5);
+            let global_phase_param = adjusted_angle.scaled(-0.5);
 
             // Add to circuit's global phase
             let current_phase = self.global_phase();
@@ -320,14 +320,6 @@ impl PauliEvolution for Circuit {
     }
 }
 
-/// Helper function to multiply an angle parameter by a factor
-pub(crate) fn multiply_angle_by_factor(angle: ParameterValue, factor: f64) -> ParameterValue {
-    match angle {
-        ParameterValue::Fixed(val) => ParameterValue::Fixed(val * factor),
-        ParameterValue::Param(param) => ParameterValue::Param(Parameter::from(factor) * param),
-    }
-}
-
 // These `pub(crate)` functions implement the product-formula math for both the
 // numeric API (`to_trotter_circuit` / `to_evolution_circuit`) and the parametric
 // ansatz (`PauliEvolutionAnsatz` in `circuit/ansatz/hamiltonian_evolution.rs`).
@@ -336,7 +328,7 @@ pub(crate) fn multiply_angle_by_factor(angle: ParameterValue, factor: f64) -> Pa
 // e^{-i c t P} we pass θ = 2 c t.
 //
 // Both `ParameterValue::Fixed(f64)` and `ParameterValue::Param(Parameter)` are
-// handled uniformly via `multiply_angle_by_factor`.
+// handled uniformly via `ParameterValue::scaled`.
 
 /// Applies first-order Lie-Trotter (or randomized product-formula) decomposition.
 ///
@@ -367,8 +359,17 @@ pub(crate) fn trotter_first_order_core(
     // Pre-compute one ParameterValue per term: θ_k = 2 c_k t / n.
     let angles: Vec<ParameterValue> = terms
         .iter()
-        .map(|(_, coeff)| multiply_angle_by_factor(t.clone(), 2.0 * coeff.re / steps as f64))
-        .collect();
+        .map(|(_, coeff)| {
+            // Even finite coefficients can overflow when computing the factor.
+            let factor = 2.0 * coeff.re / steps as f64;
+            if !factor.is_finite() {
+                return Err(CircuitError::InvalidOperation(format!(
+                    "Hamiltonian evolution scale factor must be finite, got {factor}"
+                )));
+            }
+            Ok(t.scaled(factor))
+        })
+        .collect::<Result<_, _>>()?;
 
     let mut indices: Vec<usize> = (0..terms.len()).collect();
 
@@ -416,8 +417,16 @@ pub(crate) fn trotter_second_order_core(
     // Forward and backward passes share the same value by symmetry.
     let angles: Vec<ParameterValue> = terms
         .iter()
-        .map(|(_, coeff)| multiply_angle_by_factor(t.clone(), coeff.re / steps as f64))
-        .collect();
+        .map(|(_, coeff)| {
+            let factor = coeff.re / steps as f64;
+            if !factor.is_finite() {
+                return Err(CircuitError::InvalidOperation(format!(
+                    "Hamiltonian evolution scale factor must be finite, got {factor}"
+                )));
+            }
+            Ok(t.scaled(factor))
+        })
+        .collect::<Result<_, _>>()?;
 
     for _ in 0..steps {
         // Forward half-step

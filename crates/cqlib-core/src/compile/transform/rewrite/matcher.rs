@@ -734,7 +734,8 @@ impl BlockMatchCache {
             let params = operation
                 .params
                 .iter()
-                .map(|param| resolve_operation_param(circuit, param))
+                .enumerate()
+                .map(|(index, param)| resolve_operation_param(circuit, param, index))
                 .collect::<Result<SmallVec<[_; 3]>, _>>()?;
 
             touched_qubits.extend(operation.qubits.iter().copied());
@@ -853,7 +854,8 @@ impl BlockMatchCache {
                 let params = operation
                     .params
                     .iter()
-                    .map(|parameter| resolve_operation_param(after, parameter))
+                    .enumerate()
+                    .map(|(index, parameter)| resolve_operation_param(after, parameter, index))
                     .collect::<Result<SmallVec<[_; 3]>, _>>()
                     .ok()?;
                 instruction_positions
@@ -2259,17 +2261,19 @@ fn match_item(
 pub(super) fn resolve_operation_param(
     circuit: &Circuit,
     param: &CircuitParam,
+    param_index: usize,
 ) -> Result<Parameter, CompilerError> {
-    match param {
-        CircuitParam::Fixed(value) => Ok(Parameter::from(*value)),
-        CircuitParam::Index(index) => circuit
-            .parameters()
-            .get_index(*index as usize)
-            .cloned()
-            .ok_or_else(|| {
-                CompilerError::InvalidInput(format!("invalid rewrite parameter index {}", index))
-            }),
-    }
+    circuit.resolve_parameter(param).map_err(|error| {
+        CompilerError::InvalidInput(match error {
+            crate::circuit::CircuitError::InvalidParameterIndex(index) => {
+                format!("invalid rewrite parameter index {}", index)
+            }
+            crate::circuit::CircuitError::InvalidParameterValue(_, value) => {
+                format!("invalid rewrite parameter {param_index}: non-finite fixed value {value}")
+            }
+            _ => format!("invalid rewrite parameter {param_index}: {error}"),
+        })
+    })
 }
 
 /// Computes the local rewrite cost for matched source operations.

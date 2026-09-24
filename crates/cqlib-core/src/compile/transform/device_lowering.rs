@@ -43,27 +43,20 @@ use crate::compile::knowledge::{
     ConcreteOperationView, KnowledgeInstructionKey, RuleLibrary, instantiate_target,
     rule_matches_operations,
 };
+use crate::compile::numeric_matrix::one_qubit_run_matrix;
 use crate::compile::transform::decompose::unitary::synthesize_numeric_1q_unitary;
-use crate::compile::transform::lowering_support::{LoweringTarget, OperationSequenceLowerer};
+use crate::compile::transform::lowering_support::{
+    LowerableOperation, LoweringTarget, OperationSequenceLowerer,
+};
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use crate::device::{Device, PhysicalQubit};
-use ndarray::Array2;
-use num_complex::Complex64;
 use smallvec::{SmallVec, smallvec};
 use std::collections::{BTreeMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::sync::Arc;
 
 const PHASE_EPS: f64 = 1e-12;
-
-#[derive(Debug, Clone)]
-pub(super) struct LowerableOperation {
-    pub(super) instruction: Instruction,
-    pub(super) qubits: SmallVec<[Qubit; 3]>,
-    pub(super) params: SmallVec<[ParameterValue; 1]>,
-    pub(super) label: Option<Box<str>>,
-}
 
 /// Lowers a routed physical circuit to one device's exact native instruction
 /// capabilities, including ordered qargs and local capability overrides.
@@ -282,7 +275,7 @@ impl<'a> DeviceCircuitLowerer<'a> {
             Instruction::Standard(StandardGate::GPhase)
         ) {
             self.changed = true;
-            target.accumulate_phase(gphase_param(&operation)?);
+            target.accumulate_phase(operation.gphase_param()?);
             return Ok(());
         }
 
@@ -938,27 +931,6 @@ fn bufferable_one_qubit(
         .then_some(qubits[0])
 }
 
-/// Recomposes the exact 2x2 unitary of one buffered one-qubit run.
-fn one_qubit_run_matrix(operations: &[ValueOperation]) -> Option<Array2<Complex64>> {
-    let mut matrix = Array2::<Complex64>::eye(2);
-    for operation in operations {
-        let ValueInstruction::Instruction(Instruction::Standard(gate)) = &operation.instruction
-        else {
-            return None;
-        };
-        let params = operation
-            .params
-            .iter()
-            .map(|param| match param {
-                ParameterValue::Fixed(value) if value.is_finite() => Some(*value),
-                ParameterValue::Fixed(_) | ParameterValue::Param(_) => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-        matrix = gate.matrix(&params).ok()?.dot(&matrix);
-    }
-    Some(matrix)
-}
-
 /// Returns the fixed angle of a one-parameter `RZ` operation.
 fn fixed_rz_angle(operation: &ValueOperation) -> Option<f64> {
     if !matches!(
@@ -1040,25 +1012,11 @@ fn collect_root_states(circuit: &Circuit) -> Result<RootStateScan, CompilerError
                         });
                     }
                 }
-                Instruction::ClassicalControl(control) => match control {
-                    ClassicalControlOp::If(op) => {
-                        collect(op.then_body().operations(), scan);
-                        if let Some(body) = op.else_body() {
-                            collect(body.operations(), scan);
-                        }
+                Instruction::ClassicalControl(control) => {
+                    for body in control.bodies() {
+                        collect(body.operations(), scan);
                     }
-                    ClassicalControlOp::While(op) => collect(op.body().operations(), scan),
-                    ClassicalControlOp::For(op) => collect(op.body().operations(), scan),
-                    ClassicalControlOp::Switch(op) => {
-                        for case in op.cases() {
-                            collect(case.body().operations(), scan);
-                        }
-                        if let Some(body) = op.default() {
-                            collect(body.operations(), scan);
-                        }
-                    }
-                    ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
-                },
+                }
                 _ => {}
             }
         }
@@ -1121,19 +1079,7 @@ fn has_fusible_one_qubit_run(circuit: &Circuit) -> bool {
                 }
                 Instruction::ClassicalControl(control) => {
                     pending.clear();
-                    let body_has_run = match control {
-                        ClassicalControlOp::If(op) => {
-                            scan(op.then_body().operations())
-                                || op.else_body().is_some_and(|body| scan(body.operations()))
-                        }
-                        ClassicalControlOp::While(op) => scan(op.body().operations()),
-                        ClassicalControlOp::For(op) => scan(op.body().operations()),
-                        ClassicalControlOp::Switch(op) => {
-                            op.cases().iter().any(|case| scan(case.body().operations()))
-                                || op.default().is_some_and(|body| scan(body.operations()))
-                        }
-                        ClassicalControlOp::Break | ClassicalControlOp::Continue => false,
-                    };
+                    let body_has_run = control.bodies().any(|body| scan(body.operations()));
                     if body_has_run {
                         return true;
                     }
@@ -1203,18 +1149,6 @@ fn instantiate_direction_template(
         }
         DirectionTemplate::Symmetric(_) => vec![reversed()],
     }
-}
-
-fn gphase_param(operation: &LowerableOperation) -> Result<Parameter, CompilerError> {
-    operation
-        .params
-        .first()
-        .map(Parameter::from)
-        .ok_or_else(|| {
-            CompilerError::InvariantViolation(
-                "GPhase operation must contain one parameter".to_string(),
-            )
-        })
 }
 
 #[cfg(test)]

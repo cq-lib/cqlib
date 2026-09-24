@@ -12,7 +12,7 @@
 
 //! Target-basis policy for knowledge-based rewrite.
 
-use crate::circuit::{Circuit, ClassicalControlOp, Instruction, Operation, StandardGate};
+use crate::circuit::{Circuit, Instruction, Operation, StandardGate};
 use crate::compile::error::CompilerError;
 use crate::compile::knowledge::library::RuleKind;
 use crate::compile::knowledge::matcher::KnowledgeInstructionKey as RewriteInstructionKey;
@@ -192,58 +192,13 @@ fn scan_operations(
             }
             Instruction::ClassicalControl(cc) => {
                 if recurse_control_flow {
-                    match cc {
-                        ClassicalControlOp::If(op) => {
-                            scan_operations(
-                                op.then_body().operations(),
-                                physical_keys,
-                                recurse_control_flow,
-                                scan,
-                            );
-                            if let Some(else_body) = op.else_body() {
-                                scan_operations(
-                                    else_body.operations(),
-                                    physical_keys,
-                                    recurse_control_flow,
-                                    scan,
-                                );
-                            }
-                        }
-                        ClassicalControlOp::While(op) => {
-                            scan_operations(
-                                op.body().operations(),
-                                physical_keys,
-                                recurse_control_flow,
-                                scan,
-                            );
-                        }
-                        ClassicalControlOp::For(op) => {
-                            scan_operations(
-                                op.body().operations(),
-                                physical_keys,
-                                recurse_control_flow,
-                                scan,
-                            );
-                        }
-                        ClassicalControlOp::Switch(op) => {
-                            for case in op.cases() {
-                                scan_operations(
-                                    case.body().operations(),
-                                    physical_keys,
-                                    recurse_control_flow,
-                                    scan,
-                                );
-                            }
-                            if let Some(default) = op.default() {
-                                scan_operations(
-                                    default.operations(),
-                                    physical_keys,
-                                    recurse_control_flow,
-                                    scan,
-                                );
-                            }
-                        }
-                        ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+                    for body in cc.bodies() {
+                        scan_operations(
+                            body.operations(),
+                            physical_keys,
+                            recurse_control_flow,
+                            scan,
+                        );
                     }
                 } else {
                     scan.control_flow_ops += 1;

@@ -230,35 +230,12 @@ fn used_qubits_recursive(operations: &[Operation]) -> BTreeSet<Qubit> {
     for operation in operations {
         qubits.extend(operation.qubits.iter().copied());
         if let Instruction::ClassicalControl(control) = &operation.instruction {
-            for body in control_bodies(control) {
+            for body in control.bodies() {
                 qubits.extend(used_qubits_recursive(body.operations()));
             }
         }
     }
     qubits
-}
-
-/// Borrows the structured bodies of a control-flow op for recursion.
-fn control_bodies(control: &ClassicalControlOp) -> Vec<&ControlBody> {
-    match control {
-        ClassicalControlOp::If(op) => {
-            let mut bodies = vec![op.then_body()];
-            if let Some(else_body) = op.else_body() {
-                bodies.push(else_body);
-            }
-            bodies
-        }
-        ClassicalControlOp::While(op) => vec![op.body()],
-        ClassicalControlOp::For(op) => vec![op.body()],
-        ClassicalControlOp::Switch(op) => {
-            let mut bodies: Vec<&ControlBody> = op.cases().iter().map(|case| case.body()).collect();
-            if let Some(default) = op.default() {
-                bodies.push(default);
-            }
-            bodies
-        }
-        ClassicalControlOp::Break | ClassicalControlOp::Continue => Vec::new(),
-    }
 }
 
 /// Returns true iff `operations` contains any `ClassicalControl` instruction.
