@@ -930,3 +930,59 @@ fn local_cleanup_preserves_matrix_phase_and_target_basis() {
         }
     }
 }
+
+#[test]
+fn target_lowering_uses_compact_qcis_decompositions() {
+    use StandardGate::*;
+    use std::collections::HashMap;
+    use std::f64::consts::PI;
+
+    let fixed = vec![RZ, X2P, X2M, Y2P, Y2M, CZ];
+    let phased = vec![RZ, XY2P, XY2M, CZ];
+    for (gate, parameters, basis, max_ops, entanglers) in [
+        (CX, vec![], fixed.clone(), 3, 1),
+        (CY, vec![], fixed.clone(), 3, 1),
+        (RZZ, vec!["theta"], fixed, 7, 2),
+        (RXY, vec!["theta", "phi"], phased.clone(), 3, 0),
+        (U, vec!["theta", "phi", "lambda"], phased, 3, 0),
+        (XY2M, vec!["phi"], vec![XY2P], 1, 0),
+        (U, vec!["theta", "phi", "lambda"], vec![XY2P, RZ], 3, 0),
+        (Phase, vec!["theta"], vec![U, CZ], 1, 0),
+    ] {
+        let num_qubits = if matches!(gate, CX | CY | RZZ) { 2 } else { 1 };
+        let mut input = Circuit::new(num_qubits);
+        input
+            .append(
+                Instruction::Standard(gate),
+                (0..num_qubits as u32).map(Qubit::new),
+                parameters
+                    .into_iter()
+                    .map(|name| ParameterValue::Param(Parameter::symbol(name))),
+                None,
+            )
+            .unwrap();
+        let result = run_target_lowering(&input, &basis);
+        assert!(
+            result.operations().len() <= max_ops,
+            "{gate:?}: {} operations",
+            result.operations().len()
+        );
+        let gates = standard_ops(&result);
+        assert_eq!(gates.iter().filter(|&&gate| gate == CZ).count(), entanglers);
+        assert_only_target_standard_gates(&result, &basis);
+        for angle in [0.0, 0.317, -1.239, PI / 2.0, PI, 2.0 * PI, -4.0 * PI] {
+            let bindings = Some(HashMap::from([
+                ("theta", angle),
+                ("phi", 0.19 + angle),
+                ("lambda", -0.39),
+            ]));
+            let source = input.assign_parameters(&bindings).unwrap();
+            let lowered = result.assign_parameters(&bindings).unwrap();
+            assert_matrix_approx_eq(
+                &circuit_to_matrix(&source, None).unwrap(),
+                &circuit_to_matrix(&lowered, None).unwrap(),
+                1e-9,
+            );
+        }
+    }
+}

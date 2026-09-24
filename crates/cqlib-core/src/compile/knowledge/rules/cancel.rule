@@ -442,3 +442,16 @@ rule cancel_mcswap1_targets_swapped {
     match { MCSWAP[1] 0 1 2, MCSWAP[1] 0 2 1 }
     rewrite {}
 }
+
+// Equal-sign half turns about opposite axes cancel exactly.
+rule cancel_xy2p_opposite_axis {
+    match { XY2P(a) 0, XY2P(b) 0 }
+    require { b - a == π mod 2*π }
+    rewrite {  }
+}
+
+rule cancel_xy2m_opposite_axis {
+    match { XY2M(a) 0, XY2M(b) 0 }
+    require { b - a == π mod 2*π }
+    rewrite {  }
+}
