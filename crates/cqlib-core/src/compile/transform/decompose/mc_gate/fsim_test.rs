@@ -92,6 +92,59 @@ fn symbolic_decomposition_matches_interaction_phase_and_rotation_formula() {
 }
 
 #[test]
+fn constant_phi_expression_is_preserved_without_changing_numeric_semantics() {
+    let controls = [Qubit::new(0)];
+    let first = Qubit::new(1);
+    let second = Qubit::new(2);
+    let params = [
+        ParameterValue::Fixed(0.731),
+        ParameterValue::Param(Parameter::from(0.418)),
+    ];
+    let operations = decompose_fsim_no_aux(&params, &controls, first, second).unwrap();
+    let phase = operations
+        .iter()
+        .find(|operation| {
+            matches!(
+                operation.instruction,
+                ValueInstruction::Instruction(Instruction::Standard(StandardGate::Phase))
+            )
+        })
+        .expect("controlled FSIM must emit its conditional phase");
+    assert!(matches!(
+        phase.params.as_slice(),
+        [ParameterValue::Param(parameter)]
+            if parameter.evaluate(&None).unwrap() == -0.1045
+    ));
+    let rotations: Vec<_> = operations
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation.instruction,
+                ValueInstruction::Instruction(Instruction::Standard(StandardGate::RZ))
+            ) && operation.qubits.as_slice() == [second]
+                && matches!(operation.params.as_slice(), [ParameterValue::Param(_)])
+        })
+        .collect();
+    // The twice-controlled RZ(-phi) emits four quarter-angle rotations.
+    // Other RZ gates from the numeric theta interaction remain Fixed.
+    assert_eq!(rotations.len(), 4);
+
+    // Matrix evaluation requires explicit constant resolution after preserving Param.
+    let circuit = circuit_from_value_operations(3, operations)
+        .assign_parameters(&None)
+        .unwrap();
+    let actual = circuit_to_matrix(&circuit, None).unwrap();
+    let expected = mc_gate_matrix(
+        3,
+        1,
+        StandardGate::FSIM,
+        vec![controls[0], first, second],
+        [ParameterValue::Fixed(0.731), ParameterValue::Fixed(0.418)],
+    );
+    assert_selected_matrix_columns_approx_eq(&actual, &expected, 0..8, EPSILON);
+}
+
+#[test]
 fn no_aux_decompositions_match_mcgate_semantics_exactly() {
     let params = [ParameterValue::Fixed(0.731), ParameterValue::Fixed(-0.418)];
     for num_controls in 1..=3 {

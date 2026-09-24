@@ -18,7 +18,7 @@ use super::{
     phase::{decompose_phase_n_clean, decompose_phase_no_aux},
     rotation::{decompose_rotation_n_clean, decompose_rotation_no_aux},
 };
-use crate::circuit::{Parameter, ParameterValue, Qubit, StandardGate, operation::ValueOperation};
+use crate::circuit::{ParameterValue, Qubit, StandardGate, operation::ValueOperation};
 use crate::compile::error::CompilerError;
 
 const DECOMPOSE_FSIM_NAME: &str = "decompose.fsim";
@@ -143,9 +143,9 @@ fn decompose_fsim_with(
     }
 
     let theta = &params[0];
-    let phi = Parameter::from(&params[1]);
-    let negative_half_phi = ParameterValue::from(phi.clone() * -0.5);
-    let negative_phi = ParameterValue::from(phi * -1.0);
+    let phi = &params[1];
+    let negative_half_phi = phi.scaled(-0.5);
+    let negative_phi = phi.scaled(-1.0);
     let mut flattened_controls = controls.to_vec();
     flattened_controls.push(first);
     let mut operations = decompose_pauli_rotation(StandardGate::RXX, theta)?;

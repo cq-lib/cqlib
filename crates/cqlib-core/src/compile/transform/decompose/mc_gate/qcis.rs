@@ -25,7 +25,7 @@
 //! changes. Only the central rotation receives the caller-provided controls.
 
 use super::rotation::{decompose_rotation_n_clean, decompose_rotation_no_aux};
-use crate::circuit::{Parameter, ParameterValue, Qubit, StandardGate, operation::ValueOperation};
+use crate::circuit::{ParameterValue, Qubit, StandardGate, operation::ValueOperation};
 use crate::compile::error::CompilerError;
 use std::f64::consts::PI;
 
@@ -120,11 +120,10 @@ fn decompose_xy_with(
         &ParameterValue,
     ) -> Result<Vec<ValueOperation>, CompilerError>,
 ) -> Result<Vec<ValueOperation>, CompilerError> {
-    let phi = Parameter::from(phi);
     let mut operations = vec![ValueOperation::from_standard(
         StandardGate::RZ,
         [target],
-        [ParameterValue::from(-phi.clone())],
+        [phi.scaled(-1.0)],
     )];
     operations.extend(decompose_rotation(
         StandardGate::RX,
@@ -133,7 +132,7 @@ fn decompose_xy_with(
     operations.push(ValueOperation::from_standard(
         StandardGate::RZ,
         [target],
-        [ParameterValue::from(phi)],
+        [phi.clone()],
     ));
     Ok(operations)
 }

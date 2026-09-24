@@ -97,6 +97,32 @@ pub enum ParameterValue {
     Fixed(f64),
 }
 
+impl ParameterValue {
+    /// Returns a scaled value, preserving the `Fixed` or `Param` variant.
+    ///
+    /// Fixed values use floating-point multiplication. Symbolic values use
+    /// expression multiplication and remain `Param`, even if the resulting
+    /// expression is constant (including multiplication by zero). This method
+    /// does not explicitly evaluate, simplify, or canonicalize expressions.
+    /// Unlike converting a `Parameter` with `Into`, it does not fold constants
+    /// into `Fixed` values.
+    ///
+    /// Fixed multiplication follows IEEE 754, including signed zero and
+    /// overflow; validation of the resulting value remains the caller's
+    /// responsibility.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `factor` is not finite, for either variant.
+    pub fn scaled(&self, factor: f64) -> Self {
+        assert!(factor.is_finite(), "parameter scale factor must be finite");
+        match self {
+            Self::Fixed(value) => Self::Fixed(value * factor),
+            Self::Param(parameter) => Self::Param(parameter.clone() * factor),
+        }
+    }
+}
+
 impl PartialEq for ParameterValue {
     /// Compares the construction form: two values are equal only when both
     /// are symbolic with structurally equal expressions, or both are fixed
@@ -177,3 +203,7 @@ impl From<&str> for ParameterValue {
         Parameter::symbol(para).into()
     }
 }
+
+#[cfg(test)]
+#[path = "circuit_param_test.rs"]
+mod circuit_param_test;
