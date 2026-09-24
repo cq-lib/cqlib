@@ -183,3 +183,10 @@ rule normalize_crz_2pi {
     require { a == 2*π mod 4*π }
     rewrite { Phase(π) 0 }
 }
+
+// A full RXY turn is minus identity, independently of its axis.
+rule normalize_rxy_2pi {
+    match { RXY(a, phi) 0 }
+    require { a == 2*π mod 4*π }
+    rewrite { GPhase(π) }
+}

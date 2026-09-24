@@ -55,3 +55,6 @@ pub(crate) use session::{KnowledgeRewriteSession, RewriteExecutionRecord};
 #[cfg(test)]
 #[path = "./rewrite_test.rs"]
 mod rewrite_test;
+
+#[cfg(test)]
+mod qcis_rules_test;

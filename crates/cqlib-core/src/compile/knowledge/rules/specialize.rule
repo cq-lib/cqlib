@@ -371,3 +371,58 @@ rule specialize_fsim_to_cz {
     require { a == 0 mod 2*π, b == π mod 2*π }
     rewrite { CZ 0 1 }
 }
+
+// Arbitrary-axis pulse specialization; rotation and axis periods differ.
+rule specialize_rxy_pi_2_to_xy2p {
+    match { RXY(a, phi) 0 }
+    require { a == π/2 mod 4*π }
+    rewrite { XY2P(phi) 0 }
+}
+
+rule specialize_rxy_minus_pi_2_to_xy2m {
+    match { RXY(a, phi) 0 }
+    require { a == -π/2 mod 4*π }
+    rewrite { XY2M(phi) 0 }
+}
+
+rule specialize_rxy_pi_to_xy {
+    match { RXY(a, phi) 0 }
+    require { a == π mod 4*π }
+    rewrite { XY(phi) 0 }
+}
+
+rule specialize_rxy_axis_x {
+    match { RXY(a, phi) 0 }
+    require { phi == 0 mod 2*π }
+    rewrite { RX(a) 0 }
+}
+
+rule specialize_rxy_axis_minus_x {
+    match { RXY(a, phi) 0 }
+    require { phi == π mod 2*π }
+    rewrite { RX(-a) 0 }
+}
+
+rule specialize_rxy_axis_y {
+    match { RXY(a, phi) 0 }
+    require { phi == π/2 mod 2*π }
+    rewrite { RY(a) 0 }
+}
+
+rule specialize_rxy_axis_minus_y {
+    match { RXY(a, phi) 0 }
+    require { phi == -π/2 mod 2*π }
+    rewrite { RY(-a) 0 }
+}
+
+rule specialize_xy2p_pi_to_x2m {
+    match { XY2P(a) 0 }
+    require { a == π mod 2*π }
+    rewrite { X2M 0 }
+}
+
+rule specialize_xy2m_pi_to_x2p {
+    match { XY2M(a) 0 }
+    require { a == π mod 2*π }
+    rewrite { X2P 0 }
+}
