@@ -77,7 +77,7 @@ int main(void) {
 
 ## Documentation
 
-The full API manual lives in [`docs/api/c/`](../../docs/api/c/0_overview.md)
+The full API manual lives in [`docs/api/en/c/`](../../docs/api/en/c/0_overview.md)
 and mirrors the Python manual's structure: per-function signatures,
 parameters, return values, error codes, and examples for every module
 (circuit, IR, device, QIS, compile, visualization, error mitigation).

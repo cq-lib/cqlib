@@ -173,7 +173,7 @@ pytest crates/binding-python/tests/
 |-----------------|----------------------------------------------------------|
 | API 参考 (Rust)   | [docs.rs/cqlib-core](https://docs.rs/cqlib-core)         |
 | API 参考 (Python) | [qc.zdxlz.com/docs](https://qc.zdxlz.com/)               |
-| API 参考 (C)      | [docs/api/c/0_overview.md](docs/api/c/0_overview.md)     |
+| API 参考 (C)      | [docs/api/cn/c/0_overview.md](docs/api/cn/c/0_overview.md)     |
 | 源码仓库 (Gitee)    | [gitee.com/cq-lib/cqlib](https://gitee.com/cq-lib/cqlib) |
 | 源码仓库 (GitHub)   | [github.com/cq-lib/cqlib](https://github.com/cq-lib/cqlib) |
 

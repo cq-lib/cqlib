@@ -14,13 +14,23 @@
 
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+pub mod advanced;
+pub mod ansatz;
+pub mod cfg;
+pub mod classical;
+pub mod control_flow;
+pub mod dag;
+pub mod evolution;
 pub mod gates_single;
 pub mod gates_three;
 pub mod gates_two;
 pub mod instructions;
 pub mod lifecycle;
+pub mod operations;
 pub mod parameter;
 pub mod properties;
+pub mod qubit;
+pub mod symbolic_matrix;
 
 use cqlib_core::circuit::{Circuit, Parameter, ParameterValue, Qubit};
 use std::collections::HashMap;
@@ -311,10 +321,20 @@ pub(crate) fn apply_three(
     apply(&mut wrapper.inner, first, second, third).map_or(-3, |_| 0)
 }
 
+pub use advanced::*;
+pub use ansatz::*;
+pub use cfg::*;
+pub use classical::*;
+pub use control_flow::*;
+pub use dag::*;
+pub use evolution::*;
 pub use gates_single::*;
 pub use gates_three::*;
 pub use gates_two::*;
 pub use instructions::*;
 pub use lifecycle::*;
+pub use operations::*;
 pub use parameter::*;
 pub use properties::*;
+pub use qubit::*;
+pub use symbolic_matrix::*;

@@ -1,216 +1,433 @@
 # Statevector
 
-Statevector simulator: represents a pure state exactly with `2^N` complex amplitudes, supports all standard gates, and suits exact simulation of N ≤ 30 qubits.
+The `CStatevector*` handle is the pure-state simulator: the quantum state is represented as `2^N` complex amplitudes, and every operation goes through the `statevector_*` free functions. This page covers construction and circuit ingestion, amplitude access, gate operations, probabilities and measurement, and expectation values. Error codes and memory conventions are described in [Overview](../0_overview.md); for the module summary see [QIS Overview](0_overview.md).
 
 ---
 
-## Construction and release
+## Construction and Release
 
 ### statevector_new(num_qubits)
 
-Creates a statevector initialized to `\|0...0⟩`.
+```c
+struct CStatevector *statevector_new(uintptr_t num_qubits);
+```
 
-Parameters:
+Creates a pure-state simulator initialized to `|0...0>`: the first amplitude is 1, all others are 0.
 
 - `num_qubits` (`uintptr_t`): the number of qubits.
 
-Returns:
-
-- `CStatevector *`: a heap-allocated object, released with `statevector_free`; returns NULL on failure.
+Returns: a newly allocated `CStatevector*`; free it with `statevector_free`.
 
 ### statevector_from_circuit(circuit)
 
-Simulates `circuit` and returns the final state.
+```c
+struct CStatevector *statevector_from_circuit(const struct CCircuit *circuit);
+```
 
-Parameters:
+Executes the circuit and returns the evolved state; the input circuit is not modified. The circuit is decomposed into basic gates and executed instruction by instruction; measurement declarations do not take part in the state evolution.
 
-- `circuit` (`const CCircuit *`): the input circuit.
+- `circuit` (`const CCircuit*`): circuit handle, see [Circuit](../0_circuit/1_circuit.md).
 
-Returns:
+Returns: a newly allocated `CStatevector*`; `NULL` when `circuit` is NULL or execution fails.
 
-- `CStatevector *`; returns NULL on failure (NULL, simulation failure, and so on).
+### statevector_from_state(num_qubits, initial_state, len)
+
+```c
+struct CStatevector *statevector_from_state(uintptr_t num_qubits,
+                                            const Complex64 *initial_state,
+                                            uintptr_t len);
+```
+
+Creates a state from the given amplitude array: `len` must equal `2^num_qubits` and the array must be normalized. Entry `i` is the coefficient of the computational basis state `|i>`, with qubit 0 as the least significant bit.
+
+- `num_qubits` (`uintptr_t`): the number of qubits.
+- `initial_state` (`const Complex64*`): amplitude array of length `2^num_qubits`.
+- `len` (`uintptr_t`): array length.
+
+Returns: a newly allocated `CStatevector*`; `NULL` on NULL input, wrong dimension, or a non-normalized state.
 
 ### statevector_free(ptr)
 
-Releases the statevector. Accepts NULL.
+```c
+void statevector_free(struct CStatevector *ptr);
+```
+
+Frees the handle. Passing NULL is allowed.
+
+- `ptr` (`CStatevector*`): statevector handle.
 
 ### statevector_num_qubits(ptr)
 
-Returns the number of qubits; a NULL handle returns `0`.
+```c
+uintptr_t statevector_num_qubits(const struct CStatevector *ptr);
+```
+
+Returns the number of qubits.
+
+- `ptr` (`const CStatevector*`): statevector handle.
+
+Returns: the qubit count; 0 for NULL.
+
+### statevector_apply_circuit(ptr, circuit)
+
+```c
+int32_t statevector_apply_circuit(struct CStatevector *ptr, const struct CCircuit *circuit);
+```
+
+Applies the circuit in place to the current state; the circuit's qubit count must match the state.
+
+- `ptr` (`CStatevector*`): statevector handle.
+- `circuit` (`const CCircuit*`): circuit handle.
+
+Returns: `0` on success; `-1` NULL pointer; `-3` circuit error (a gate without a matrix representation, unresolved symbolic parameters, etc.); `-7` the circuit contains an unsupported operation; `-8` the circuit's qubit count does not match the state.
 
 ---
 
-## Gate operations
+## Amplitude Access
 
-All gate functions use the prefix `statevector_apply_` and return an `int32_t` status code: `0` success, `-2` qubit out of range, `-7` simulation failure, `-1` NULL handle. The groups correspond one-to-one with [Circuit gate operations](../0_circuit/1_circuit.md#gate-operations).
+### statevector_data_len(ptr)
 
-### 1. Single-qubit gates without parameters
+```c
+uintptr_t statevector_data_len(const struct CStatevector *ptr);
+```
 
-| Function | Gate | Description |
-| --- | --- | --- |
-| `statevector_apply_i(sv, qubit)` | `I` | Identity gate |
-| `statevector_apply_h(sv, qubit)` | `H` | Hadamard gate |
-| `statevector_apply_x(sv, qubit)` | `X` | Pauli-X gate |
-| `statevector_apply_y(sv, qubit)` | `Y` | Pauli-Y gate |
-| `statevector_apply_z(sv, qubit)` | `Z` | Pauli-Z gate |
-| `statevector_apply_s(sv, qubit)` | `S` | S gate |
-| `statevector_apply_sdg(sv, qubit)` | `S†` | S dagger gate |
-| `statevector_apply_t(sv, qubit)` | `T` | T gate |
-| `statevector_apply_tdg(sv, qubit)` | `T†` | T dagger gate |
-| `statevector_apply_x2p(sv, qubit)` | `X2P` | Rotation by +π/2 about the X axis |
-| `statevector_apply_x2m(sv, qubit)` | `X2M` | Rotation by −π/2 about the X axis |
-| `statevector_apply_y2p(sv, qubit)` | `Y2P` | Rotation by +π/2 about the Y axis |
-| `statevector_apply_y2m(sv, qubit)` | `Y2M` | Rotation by −π/2 about the Y axis |
+Returns the number of complex amplitudes (`2^N`), for sizing the buffer passed to `statevector_data`.
 
-### 2. Parameterized single-qubit gates
+- `ptr` (`const CStatevector*`): statevector handle.
 
-| Function | Gate | Description |
-| --- | --- | --- |
-| `statevector_apply_rx(sv, qubit, theta)` | `RX` | Rotation about the X axis |
-| `statevector_apply_ry(sv, qubit, theta)` | `RY` | Rotation about the Y axis |
-| `statevector_apply_rz(sv, qubit, theta)` | `RZ` | Rotation about the Z axis |
-| `statevector_apply_phase(sv, qubit, theta)` | `P` | Phase gate |
-| `statevector_apply_u(sv, qubit, theta, phi, lambda)` | `U` | General single-qubit gate |
-| `statevector_apply_xy(sv, qubit, theta)` | `XY` | XY interaction gate |
-| `statevector_apply_xy2p(sv, qubit, theta)` | `XY2P` | Positive half-angle XY gate |
-| `statevector_apply_xy2m(sv, qubit, theta)` | `XY2M` | Negative half-angle XY gate |
-| `statevector_apply_rxy(sv, qubit, theta, phi)` | `RXY` | Rotation about an arbitrary axis in the XY plane |
-| `statevector_apply_gphase(sv, phi)` | `gphase` | Global phase |
+Returns: the amplitude count; 0 for NULL.
 
-### 3. Two-qubit gates
+### statevector_data(ptr, buffer, len)
 
-| Function | Gate | Description |
-| --- | --- | --- |
-| `statevector_apply_cx(sv, control, target)` | `CX` | CNOT gate |
-| `statevector_apply_cy(sv, control, target)` | `CY` | controlled-Y gate |
-| `statevector_apply_cz(sv, q0, q1)` | `CZ` | controlled-Z gate |
-| `statevector_apply_swap(sv, q0, q1)` | `SWAP` | Swaps the states of the two qubits |
-| `statevector_apply_rxx(sv, q0, q1, theta)` | `RXX` | `exp(-i θ XX / 2)` |
-| `statevector_apply_ryy(sv, q0, q1, theta)` | `RYY` | `exp(-i θ YY / 2)` |
-| `statevector_apply_rzz(sv, q0, q1, theta)` | `RZZ` | `exp(-i θ ZZ / 2)` |
-| `statevector_apply_rzx(sv, q0, q1, theta)` | `RZX` | `exp(-i θ ZX / 2)` |
-| `statevector_apply_crx(sv, control, target, theta)` | `CRX` | controlled-RX gate |
-| `statevector_apply_cry(sv, control, target, theta)` | `CRY` | controlled-RY gate |
-| `statevector_apply_crz(sv, control, target, theta)` | `CRZ` | controlled-RZ gate |
-| `statevector_apply_fsim(sv, q0, q1, theta, phi)` | `fSim` | fSim gate |
+```c
+int32_t statevector_data(const struct CStatevector *ptr, Complex64 *buffer, uintptr_t len);
+```
 
-### 4. Three-qubit gates and whole circuits
+Copies all amplitudes row-major into `buffer` as `2^N` `Complex64` values.
 
-| Function | Gate | Description |
-| --- | --- | --- |
-| `statevector_apply_ccx(sv, c0, c1, target)` | `CCX` | Toffoli gate |
-| `statevector_apply_circuit(sv, circuit)` | — | Executes the whole circuit **in place** (measurement/reset in the circuit take effect as well) |
+- `ptr` (`const CStatevector*`): statevector handle.
+- `buffer` (`Complex64*`): output buffer.
+- `len` (`uintptr_t`): buffer length; must equal `statevector_data_len`.
+
+Returns: `0` on success; `-1` NULL pointers; `-8` when `len` does not match the actual count.
+
+```c
+uintptr_t n = statevector_data_len(sv);
+Complex64 *amps = malloc(n * sizeof(Complex64));
+if (statevector_data(sv, amps, n) == 0) {
+    /* amps[i] is the amplitude of |i> */
+}
+free(amps);
+```
+
+### statevector_data_mut(ptr, buffer, len)
+
+```c
+int32_t statevector_data_mut(struct CStatevector *ptr, const Complex64 *buffer, uintptr_t len);
+```
+
+Overwrites the amplitudes by copying `len` `Complex64` values from `buffer` into the statevector; the writable counterpart of `statevector_data`.
+
+- `ptr` (`CStatevector*`): statevector handle.
+- `buffer` (`const Complex64*`): input array of `2^N` amplitudes.
+- `len` (`uintptr_t`): array length; must equal `statevector_data_len`.
+
+Returns: `0` on success; `-1` NULL pointers; `-8` when `len` does not match the actual count.
+
+Overwriting the amplitudes can break normalization; the caller is responsible for providing a valid statevector — the simulator keeps operating on the written data as-is.
 
 ---
 
-## Probabilities and measurement
+## Gate Operations
+
+All gate functions return `int32_t`: `0` on success; `-1` when the handle is NULL; `-2` when a qubit index is out of bounds; parameterized gates return `-8` when an angle is NaN or Inf. Single-qubit gates share the signature:
+
+```c
+int32_t statevector_apply_h(struct CStatevector *ptr, uint32_t qubit);
+```
+
+### Non-parameterized single-qubit gates
+
+| Function | Gate | Description |
+| --- | --- | --- |
+| `statevector_apply_h(ptr, qubit)` | H | Hadamard gate. |
+| `statevector_apply_x(ptr, qubit)` | X | Pauli-X, bit flip. |
+| `statevector_apply_y(ptr, qubit)` | Y | Pauli-Y. |
+| `statevector_apply_z(ptr, qubit)` | Z | Pauli-Z, phase flip. |
+| `statevector_apply_s(ptr, qubit)` | S | S gate (√Z). |
+| `statevector_apply_sdg(ptr, qubit)` | S† | Inverse of S. |
+| `statevector_apply_t(ptr, qubit)` | T | T gate (√S). |
+| `statevector_apply_tdg(ptr, qubit)` | T† | Inverse of T. |
+| `statevector_apply_x2p(ptr, qubit)` | X2P | `Rx(π/2)`. |
+| `statevector_apply_x2m(ptr, qubit)` | X2M | `Rx(-π/2)`. |
+| `statevector_apply_y2p(ptr, qubit)` | Y2P | `Ry(π/2)`. |
+| `statevector_apply_y2m(ptr, qubit)` | Y2M | `Ry(-π/2)`. |
+
+### Parameterized single-qubit gates
+
+| Function | Gate | Description |
+| --- | --- | --- |
+| `statevector_apply_rx(ptr, qubit, theta)` | Rx(θ) | Rotation by `θ` about the X axis. |
+| `statevector_apply_ry(ptr, qubit, theta)` | Ry(θ) | Rotation by `θ` about the Y axis. |
+| `statevector_apply_rz(ptr, qubit, theta)` | Rz(θ) | Rotation by `θ` about the Z axis. |
+| `statevector_apply_phase(ptr, qubit, theta)` | P(θ) | Phase gate, multiplies the `\|1>` component by `e^(iθ)`. |
+| `statevector_apply_u(ptr, qubit, theta, phi, lambda)` | U(θ, φ, λ) | Generic single-qubit gate. |
+| `statevector_apply_xy(ptr, qubit, theta)` | XY(θ) | XY gate. |
+| `statevector_apply_xy2p(ptr, qubit, theta)` | XY2P(θ) | XY2P gate. |
+| `statevector_apply_xy2m(ptr, qubit, theta)` | XY2M(θ) | XY2M gate. |
+| `statevector_apply_rxy(ptr, qubit, theta, phi)` | RXY(θ, φ) | Rotation by `θ` about the axis at azimuth `φ` in the XY plane. |
+| `statevector_apply_gphase(ptr, phi)` | GPhase(φ) | Multiplies the whole state by the global phase `e^(iφ)`; the signature has no qubit parameter. |
+
+GPhase signature:
+
+```c
+int32_t statevector_apply_gphase(struct CStatevector *ptr, double phi);
+```
+
+### Two-qubit gates
+
+Shared signature `int32_t statevector_apply_<gate>(struct CStatevector *ptr, uint32_t q0, uint32_t q1, ...)`; the two qubit parameters of controlled gates are named `control` / `target`.
+
+| Function | Gate | Description |
+| --- | --- | --- |
+| `statevector_apply_cx(ptr, control, target)` | CX | Controlled X. |
+| `statevector_apply_cy(ptr, control, target)` | CY | Controlled Y. |
+| `statevector_apply_cz(ptr, q0, q1)` | CZ | Controlled Z; the two parameters are symmetric. |
+| `statevector_apply_swap(ptr, q0, q1)` | SWAP | Swaps two qubits. |
+| `statevector_apply_rxx(ptr, q0, q1, theta)` | RXX(θ) | `exp(-i·θ/2·X⊗X)`. |
+| `statevector_apply_ryy(ptr, q0, q1, theta)` | RYY(θ) | `exp(-i·θ/2·Y⊗Y)`. |
+| `statevector_apply_rzz(ptr, q0, q1, theta)` | RZZ(θ) | `exp(-i·θ/2·Z⊗Z)`. |
+| `statevector_apply_rzx(ptr, q0, q1, theta)` | RZX(θ) | `exp(-i·θ/2·Z⊗X)`. |
+| `statevector_apply_crx(ptr, control, target, theta)` | CrX(θ) | Controlled `Rx(θ)`. |
+| `statevector_apply_cry(ptr, control, target, theta)` | CrY(θ) | Controlled `Ry(θ)`. |
+| `statevector_apply_crz(ptr, control, target, theta)` | CrZ(θ) | Controlled `Rz(θ)`. |
+| `statevector_apply_fsim(ptr, q0, q1, theta, phi)` | FSIM | Fermionic simulation gate; `theta` is the iSWAP angle and `phi` the controlled-phase angle. |
+
+### Three-qubit gates
+
+| Function | Gate | Description |
+| --- | --- | --- |
+| `statevector_apply_ccx(ptr, c0, c1, target)` | CCX | Toffoli gate; flips the target when both controls are `\|1>`. |
+
+### Generic gate entry points
+
+#### statevector_apply_standard_gate(ptr, gate_name, qubits, num_target_qubits, params, num_params)
+
+```c
+int32_t statevector_apply_standard_gate(struct CStatevector *ptr,
+                                        const char *gate_name,
+                                        const uint32_t *qubits,
+                                        uintptr_t num_target_qubits,
+                                        const double *params,
+                                        uintptr_t num_params);
+```
+
+Applies a standard gate by name (e.g. `"H"`, `"CX"`, `"RZZ"`, `"FSIM"`), dispatching to the dedicated implementation.
+
+- `ptr` (`CStatevector*`): statevector handle.
+- `gate_name` (`const char*`): NUL-terminated standard-gate name.
+- `qubits` (`const uint32_t*`): array of target qubits with length `num_target_qubits`.
+- `num_target_qubits` (`uintptr_t`): number of target qubits; must match the gate's arity.
+- `params` (`const double*`): gate-parameter array; may be NULL when `num_params` is 0.
+- `num_params` (`uintptr_t`): number of parameters; must match the gate's arity.
+
+Returns: `0` on success; `-1` NULL pointers; `-2` out-of-bounds qubit; `-8` unknown gate name, gate name that is not valid UTF-8, qubit or parameter count that does not match the gate, or a non-finite parameter value.
+
+#### statevector_apply_unitary_gate(ptr, qubits, num_target_qubits, matrix, dim)
+
+```c
+int32_t statevector_apply_unitary_gate(struct CStatevector *ptr,
+                                       const uint32_t *qubits,
+                                       uintptr_t num_target_qubits,
+                                       const Complex64 *matrix,
+                                       uintptr_t dim);
+```
+
+Applies an arbitrary unitary matrix to the given qubits.
+
+- `ptr` (`CStatevector*`): statevector handle.
+- `qubits` (`const uint32_t*`): array of target qubits; indices must not repeat.
+- `num_target_qubits` (`uintptr_t`): number of target qubits.
+- `matrix` (`const Complex64*`): row-major `dim × dim` matrix.
+- `dim` (`uintptr_t`): matrix dimension; must equal `2^num_target_qubits`.
+
+Returns: `0` on success; `-1` NULL pointers; `-2` out-of-bounds qubit; `-8` when `num_target_qubits` or `dim` is 0, the dimension does not match, or a qubit repeats.
+
+#### statevector_apply_pauli_rotation(ptr, pauli, theta)
+
+```c
+int32_t statevector_apply_pauli_rotation(struct CStatevector *ptr,
+                                         const struct CPauliString *pauli,
+                                         double theta);
+```
+
+Applies the Pauli-string rotation `exp(-i·θ/2·P)` in place without gate decomposition. The Pauli string must span the full register and be Hermitian; see [Pauli](6_pauli.md) for construction.
+
+- `ptr` (`CStatevector*`): statevector handle.
+- `pauli` (`const CPauliString*`): Pauli-string handle.
+- `theta` (`double`): rotation angle.
+
+Returns: `0` on success; `-1` NULL pointers; `-8` when `theta` is not finite or the Pauli string's qubit count does not match the state.
+
+---
+
+## Probabilities and Measurement
 
 ### statevector_probabilities_len(ptr)
 
-Returns the number of basis state probabilities, `2^N`; a NULL handle returns `0`. Used to allocate the `buffer` of `statevector_probabilities`.
+```c
+uintptr_t statevector_probabilities_len(const struct CStatevector *ptr);
+```
+
+Returns the length of the computational-basis probability distribution (`2^N`).
+
+- `ptr` (`const CStatevector*`): statevector handle.
+
+Returns: the probability count; 0 for NULL.
 
 ### statevector_probabilities(ptr, buffer, len)
 
-Copies the `2^N` basis state probabilities (computational basis `|q_{N-1}...q_0⟩`, with indices in big-endian binary order) into `buffer`.
+```c
+int32_t statevector_probabilities(const struct CStatevector *ptr, double *buffer, uintptr_t len);
+```
 
-Returns:
+Copies the measurement probabilities over all computational basis states (the squared modulus of each amplitude) into `buffer`.
 
-- `int32_t`; `0` on success, a negative status code on an error such as an insufficient buffer.
+- `ptr` (`const CStatevector*`): statevector handle.
+- `buffer` (`double*`): output buffer.
+- `len` (`uintptr_t`): buffer length; must equal `statevector_probabilities_len`.
 
-### statevector_expectation(ptr, observable, out)
-
-Computes the observable expectation value `⟨H⟩` and writes it to `out`.
-
-Parameters:
-
-- `observable` (`const CHamiltonian *`): see [Hamiltonian](5_hamiltonian.md).
-
-Returns:
-
-- `int32_t`; `0` on success, a negative status code on failure.
+Returns: `0` on success; `-1` NULL pointers; `-8` when `len` does not match the actual count.
 
 ### statevector_measure(ptr, qubit)
 
-Measures `qubit` in the Z basis and **collapses** the statevector.
+```c
+int32_t statevector_measure(struct CStatevector *ptr, uint32_t qubit);
+```
 
-Returns:
+Measures the qubit in the Z basis and collapses the state; after the measurement the state is renormalized within the corresponding subspace. The operation is destructive.
 
-- `int32_t`: the measurement result `0` (`\|0⟩`) or `1` (`\|1⟩`); a negative status code on failure.
+- `ptr` (`CStatevector*`): statevector handle.
+- `qubit` (`uint32_t`): the measured qubit.
+
+Returns: `0` for outcome `|0>`, `1` for outcome `|1>`; `-1` NULL; `-2` out-of-bounds qubit.
 
 ### statevector_measure_all(ptr)
 
-Measures all qubits and collapses.
+```c
+char *statevector_measure_all(struct CStatevector *ptr);
+```
 
-Returns:
+Measures qubits in order `0..num_qubits`, collapsing the state, and returns the outcome as a big-endian bitstring (MSB = qubit `N-1`, LSB = qubit `0`).
 
-- `char *`: the heap-allocated big-endian bit string (the MSB is qubit `N-1`, the LSB is qubit `0`), released with `cqlib_string_free`; returns NULL on failure.
+- `ptr` (`CStatevector*`): statevector handle.
+
+Returns: a heap-allocated C string, freed with `cqlib_string_free`; `NULL` on error.
 
 ### statevector_sample_shots(ptr, shots)
 
-Independently samples `shots` measurement results (the original state is not collapsed).
+```c
+struct COutcomeList *statevector_sample_shots(const struct CStatevector *ptr, uintptr_t shots);
+```
 
-Returns:
+Samples `shots` independent measurement outcomes in parallel from the current distribution without modifying the state. Use `outcome_list_len` for the count, `outcome_list_get` to fetch each big-endian bitstring (freed with `cqlib_string_free`), and `outcome_list_free` to free the list — see [ClassicalState](5_classical_state.md).
 
-- `COutcomeList *`: a heap-allocated sampling list, released with `outcome_list_free`; for usage see [Overview](0_overview.md#sampling-results-outcomelist); returns NULL on failure.
+- `ptr` (`const CStatevector*`): statevector handle.
+- `shots` (`uintptr_t`): number of shots.
+
+Returns: a newly allocated `COutcomeList*`; `NULL` on error.
 
 ### statevector_reset(ptr, qubit)
 
-Resets `qubit` to `\|0⟩` (a conditional flip after measurement).
+```c
+int32_t statevector_reset(struct CStatevector *ptr, uint32_t qubit);
+```
 
-Returns:
+Resets the qubit to `|0>`: performs a Z-basis measurement and applies an X correction when the outcome is `|1>`.
 
-- `int32_t`; `0` on success, a negative status code on failure.
+- `ptr` (`CStatevector*`): statevector handle.
+- `qubit` (`uint32_t`): target qubit.
+
+Returns: `0` on success; `-1` NULL; `-2` out-of-bounds qubit.
 
 ---
 
-## Complete example
+## Expectation Values
+
+### statevector_expectation(ptr, observable, out)
 
 ```c
-/* 构造 Bell 线路并模拟 */
-CCircuit *qc = circuit_new(2);
-circuit_h(qc, 0);
-circuit_cx(qc, 0, 1);
-
-CStatevector *sv = statevector_from_circuit(qc);
-
-/* 概率分布 */
-double probs[4];
-statevector_probabilities(sv, probs, 4);
-/* probs = [0.5, 0, 0, 0.5] */
-
-/* 采样 */
-COutcomeList *samples = statevector_sample_shots(sv, 1000);
-for (uintptr_t i = 0; i < outcome_list_len(samples); i++) {
-    char *s = outcome_list_get(samples, i);
-    printf("%s\n", s);
-    cqlib_string_free(s);
-}
-outcome_list_free(samples);
-
-/* 坍缩测量 */
-int32_t bit = statevector_measure(sv, 0);      // 0 或 1
-char *all = statevector_measure_all(sv);       // 如 "11"
-cqlib_string_free(all);
-
-statevector_free(sv);
-circuit_free(qc);
+int32_t statevector_expectation(const struct CStatevector *ptr,
+                                const struct CHamiltonian *observable,
+                                double *out);
 ```
 
-### Gate-by-gate construction and Hamiltonian expectation
+Computes `⟨ψ|H|ψ⟩` and writes it to `out`.
+
+- `ptr` (`const CStatevector*`): statevector handle.
+- `observable` (`const CHamiltonian*`): observable handle, see [Hamiltonian](7_hamiltonian.md).
+- `out` (`double*`): output pointer.
+
+Returns: `0` on success; `-1` NULL pointers; `-8` when the observable's qubit count does not match the state.
 
 ```c
-CStatevector *sv = statevector_new(1);
-statevector_apply_h(sv, 0);
-statevector_apply_rz(sv, 0, 0.5);
-
-/* ⟨Z⟩ */
-CPauliString *z = pauli_string_parse("Z");
-CHamiltonian *h = hamiltonian_from_pauli(z);   // 接管 z 所有权
-
-double ez;
-statevector_expectation(sv, h, &ez);
-printf("<Z> = %f\n", ez);
-
+/* <ZZ> of the Bell state equals 1 */
+struct CPauliString *zz = pauli_string_parse("ZZ");
+struct CHamiltonian *h = hamiltonian_from_pauli(zz);  /* takes ownership of zz */
+double exp = 0.0;
+statevector_expectation(sv, h, &exp);   /* exp ≈ 1.0 */
 hamiltonian_free(h);
-statevector_free(sv);
+```
+
+---
+
+## Examples
+
+A complete workflow: prepare a Bell state, read probabilities, sample, compute an expectation value, and measure.
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include "cqlib_c.h"
+
+int main(void) {
+    /* Bell state (|00> + |11>)/sqrt(2) */
+    struct CStatevector *sv = statevector_new(2);
+    if (sv == NULL) return 1;
+    statevector_apply_h(sv, 0);
+    statevector_apply_cx(sv, 0, 1);
+
+    /* Probabilities: P(00) = P(11) = 0.5 */
+    uintptr_t n = statevector_probabilities_len(sv);   /* 4 */
+    double *probs = malloc(n * sizeof(double));
+    statevector_probabilities(sv, probs, n);
+    printf("P(00)=%.3f P(11)=%.3f\n", probs[0], probs[3]);
+    free(probs);
+
+    /* Sample 100 shots: only "00" and "11" appear */
+    struct COutcomeList *shots = statevector_sample_shots(sv, 100);
+    for (uintptr_t i = 0; i < outcome_list_len(shots); i++) {
+        char *bits = outcome_list_get(shots, i);
+        printf("%s ", bits);
+        cqlib_string_free(bits);
+    }
+    printf("\n");
+    outcome_list_free(shots);
+
+    /* Expectation <ZZ> = 1 */
+    struct CPauliString *zz = pauli_string_parse("ZZ");
+    struct CHamiltonian *h = hamiltonian_from_pauli(zz);
+    double exp = 0.0;
+    statevector_expectation(sv, h, &exp);
+    printf("<ZZ>=%.3f\n", exp);
+    hamiltonian_free(h);
+
+    /* Destructive full measurement collapses the state */
+    char *bits = statevector_measure_all(sv);
+    printf("measured: %s\n", bits);   /* "00" or "11" */
+    cqlib_string_free(bits);
+
+    statevector_free(sv);
+    return 0;
+}
 ```

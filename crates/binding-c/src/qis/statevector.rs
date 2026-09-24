@@ -598,3 +598,223 @@ pub extern "C" fn outcome_list_get(ptr: *const COutcomeList, index: usize) -> *m
         None => std::ptr::null_mut(),
     }
 }
+
+// =====  Simulator supplement (checklist 2.5)  =====
+
+use num_complex::Complex64;
+use std::ffi::CStr;
+
+use crate::device::standard_gate_from_name;
+use crate::qis::CPauliString;
+
+/// Resolves a NUL-terminated standard-gate name (e.g. "H", "CX", "RZZ").
+/// Returns -1 for NULL input and -8 for an unknown name or invalid UTF-8.
+fn parse_standard_gate(name: *const c_char) -> Result<cqlib_core::circuit::StandardGate, i32> {
+    if name.is_null() {
+        return Err(CqlibError::NullPtr as i32);
+    }
+    let name = unsafe { CStr::from_ptr(name) };
+    let name = match name.to_str() {
+        Ok(s) => s,
+        Err(_) => return Err(CqlibError::InvalidParam as i32),
+    };
+    standard_gate_from_name(name).ok_or(CqlibError::InvalidParam as i32)
+}
+
+/// Collects and bounds-checks a qubit-index array for this simulator.
+fn resolve_qubits(num_qubits: usize, qubits: *const u32, len: usize) -> Result<Vec<usize>, i32> {
+    let slice = unsafe { std::slice::from_raw_parts(qubits, len) };
+    slice.iter().map(|&q| check_qubit(num_qubits, q)).collect()
+}
+
+/// Builds the gate-parameter slice, validating that every value is finite.
+/// A NULL pointer is allowed when `num_params` is zero.
+fn resolve_params(params: *const f64, num_params: usize) -> Result<Vec<f64>, i32> {
+    if num_params == 0 {
+        return Ok(Vec::new());
+    }
+    if params.is_null() {
+        return Err(CqlibError::NullPtr as i32);
+    }
+    let slice = unsafe { std::slice::from_raw_parts(params, num_params) };
+    if slice.iter().any(|v| !v.is_finite()) {
+        return Err(CqlibError::InvalidParam as i32);
+    }
+    Ok(slice.to_vec())
+}
+
+/// Return the number of complex amplitudes (2^N), or 0 for NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn statevector_data_len(ptr: *const CStatevector) -> usize {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).inner.data().len() }
+}
+
+/// Copy the complex amplitudes into `buffer` (2^N Complex64 values).
+/// Returns 0 on success, -1 on NULL pointers, -8 when `len` does not equal
+/// `statevector_data_len`.
+#[unsafe(no_mangle)]
+pub extern "C" fn statevector_data(
+    ptr: *const CStatevector,
+    buffer: *mut Complex64,
+    len: usize,
+) -> i32 {
+    if ptr.is_null() || buffer.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    let data = unsafe { (*ptr).inner.data() };
+    if data.len() != len {
+        return CqlibError::InvalidParam as i32;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(data.as_ptr(), buffer, len);
+    }
+    0
+}
+
+/// Overwrite the complex amplitudes by copying `len` Complex64 values from
+/// `buffer` into the statevector. This is the writable two-step counterpart
+/// of `statevector_data` and mirrors `Statevector::data_mut`.
+///
+/// `len` must equal `statevector_data_len`. Overwriting the amplitudes can
+/// break normalization; the caller is responsible for preserving a valid
+/// statevector. Returns 0 on success, -1 on NULL pointers, -8 when `len`
+/// does not equal `statevector_data_len`.
+#[unsafe(no_mangle)]
+pub extern "C" fn statevector_data_mut(
+    ptr: *mut CStatevector,
+    buffer: *const Complex64,
+    len: usize,
+) -> i32 {
+    if ptr.is_null() || buffer.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    let wrapper = unsafe { &mut *ptr };
+    let data = wrapper.inner.data_mut();
+    if data.len() != len {
+        return CqlibError::InvalidParam as i32;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(buffer, data.as_mut_ptr(), len);
+    }
+    0
+}
+
+/// Create a statevector from a normalized amplitude array of 2^N Complex64
+/// values. Returns NULL on error (NULL input, wrong dimension, or a state
+/// that is not normalized).
+#[unsafe(no_mangle)]
+pub extern "C" fn statevector_from_state(
+    num_qubits: usize,
+    initial_state: *const Complex64,
+    len: usize,
+) -> *mut CStatevector {
+    if initial_state.is_null() {
+        return std::ptr::null_mut();
+    }
+    let amplitudes = unsafe { std::slice::from_raw_parts(initial_state, len) }.to_vec();
+    match Statevector::from_state(num_qubits, amplitudes) {
+        Ok(sv) => Box::into_raw(Box::new(CStatevector { inner: sv })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Apply a standard gate identified by name (e.g. "H", "CX", "RZZ", "FSIM").
+///
+/// `qubits` holds `num_target_qubits` target indices and `params` holds
+/// `num_params` gate parameters (NULL is allowed when `num_params` is 0).
+/// Returns 0 on success, -1 for NULL pointers, -2 for an out-of-bounds qubit,
+/// -8 for an unknown gate name or invalid argument counts.
+#[unsafe(no_mangle)]
+pub extern "C" fn statevector_apply_standard_gate(
+    ptr: *mut CStatevector,
+    gate_name: *const c_char,
+    qubits: *const u32,
+    num_target_qubits: usize,
+    params: *const f64,
+    num_params: usize,
+) -> i32 {
+    if ptr.is_null() || qubits.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    let gate = match parse_standard_gate(gate_name) {
+        Ok(gate) => gate,
+        Err(code) => return code,
+    };
+    let wrapper = unsafe { &mut *ptr };
+    let targets = match resolve_qubits(wrapper.inner.num_qubits, qubits, num_target_qubits) {
+        Ok(targets) => targets,
+        Err(code) => return code,
+    };
+    let params = match resolve_params(params, num_params) {
+        Ok(params) => params,
+        Err(code) => return code,
+    };
+    wrapper
+        .inner
+        .apply_standard_gate(gate, &targets, &params)
+        .map_err(map_err)
+        .map_or_else(|e| e, |_| 0)
+}
+
+/// Apply a native Pauli-string rotation `exp(-i * theta / 2 * P)` in place.
+/// The Pauli string must span the full register and be Hermitian.
+/// Returns 0 on success or a negative error code.
+#[unsafe(no_mangle)]
+pub extern "C" fn statevector_apply_pauli_rotation(
+    ptr: *mut CStatevector,
+    pauli: *const CPauliString,
+    theta: f64,
+) -> i32 {
+    if ptr.is_null() || pauli.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    if !theta.is_finite() {
+        return CqlibError::InvalidParam as i32;
+    }
+    let wrapper = unsafe { &mut *ptr };
+    let pauli = unsafe { &(*pauli).inner };
+    wrapper
+        .inner
+        .apply_pauli_rotation(pauli, theta)
+        .map_err(map_err)
+        .map_or_else(|e| e, |_| 0)
+}
+
+/// Apply an arbitrary unitary matrix to `qubits` in place.
+///
+/// `matrix` is a flattened row-major `dim x dim` Complex64 array where
+/// `dim = 2^num_target_qubits`. Qubit indices must not repeat. Returns 0 on
+/// success or a negative error code.
+#[unsafe(no_mangle)]
+pub extern "C" fn statevector_apply_unitary_gate(
+    ptr: *mut CStatevector,
+    qubits: *const u32,
+    num_target_qubits: usize,
+    matrix: *const Complex64,
+    dim: usize,
+) -> i32 {
+    if ptr.is_null() || qubits.is_null() || matrix.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    if num_target_qubits == 0 || dim == 0 {
+        return CqlibError::InvalidParam as i32;
+    }
+    let wrapper = unsafe { &mut *ptr };
+    let targets = match resolve_qubits(wrapper.inner.num_qubits, qubits, num_target_qubits) {
+        Ok(targets) => targets,
+        Err(code) => return code,
+    };
+    let flat = unsafe { std::slice::from_raw_parts(matrix, dim * dim) };
+    let matrix = match ndarray::Array2::from_shape_vec((dim, dim), flat.to_vec()) {
+        Ok(matrix) => matrix,
+        Err(_) => return CqlibError::InvalidParam as i32,
+    };
+    wrapper
+        .inner
+        .apply_unitary_gate(&targets, &matrix)
+        .map_err(map_err)
+        .map_or_else(|e| e, |_| 0)
+}

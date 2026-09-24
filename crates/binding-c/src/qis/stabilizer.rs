@@ -346,3 +346,178 @@ pub extern "C" fn stabilizer_get_stabilizer(
         None => std::ptr::null_mut(),
     }
 }
+
+// =====  Simulator supplement (checklist 2.5)  =====
+
+use std::ffi::CStr;
+
+use crate::device::standard_gate_from_name;
+
+/// Resolves a NUL-terminated standard-gate name (e.g. "H", "CX", "SWAP").
+/// Returns -1 for NULL input and -8 for an unknown name or invalid UTF-8.
+fn parse_standard_gate(name: *const c_char) -> Result<cqlib_core::circuit::StandardGate, i32> {
+    if name.is_null() {
+        return Err(CqlibError::NullPtr as i32);
+    }
+    let name = unsafe { CStr::from_ptr(name) };
+    let name = match name.to_str() {
+        Ok(s) => s,
+        Err(_) => return Err(CqlibError::InvalidParam as i32),
+    };
+    standard_gate_from_name(name).ok_or(CqlibError::InvalidParam as i32)
+}
+
+/// Collects and bounds-checks a qubit-index array for this simulator.
+fn resolve_qubits(num_qubits: usize, qubits: *const u32, len: usize) -> Result<Vec<usize>, i32> {
+    let slice = unsafe { std::slice::from_raw_parts(qubits, len) };
+    slice.iter().map(|&q| check_qubit(num_qubits, q)).collect()
+}
+
+/// Builds the gate-parameter slice, validating that every value is finite.
+/// A NULL pointer is allowed when `num_params` is zero.
+fn resolve_params(params: *const f64, num_params: usize) -> Result<Vec<f64>, i32> {
+    if num_params == 0 {
+        return Ok(Vec::new());
+    }
+    if params.is_null() {
+        return Err(CqlibError::NullPtr as i32);
+    }
+    let slice = unsafe { std::slice::from_raw_parts(params, num_params) };
+    if slice.iter().any(|v| !v.is_finite()) {
+        return Err(CqlibError::InvalidParam as i32);
+    }
+    Ok(slice.to_vec())
+}
+
+/// Apply a Clifford standard gate identified by name (e.g. "H", "CX", "SWAP").
+/// Non-Clifford gates are rejected by the simulator.
+///
+/// `qubits` holds `num_target_qubits` target indices and `params` holds
+/// `num_params` gate parameters (NULL is allowed when `num_params` is 0).
+/// Returns 0 on success, -1 for NULL pointers, -2 for an out-of-bounds qubit,
+/// -8 for an unknown gate name or invalid argument counts, -7 for a
+/// non-Clifford gate.
+#[unsafe(no_mangle)]
+pub extern "C" fn stabilizer_apply_standard_gate(
+    ptr: *mut CStabilizerState,
+    gate_name: *const c_char,
+    qubits: *const u32,
+    num_target_qubits: usize,
+    params: *const f64,
+    num_params: usize,
+) -> i32 {
+    if ptr.is_null() || qubits.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    let gate = match parse_standard_gate(gate_name) {
+        Ok(gate) => gate,
+        Err(code) => return code,
+    };
+    let wrapper = unsafe { &mut *ptr };
+    let targets = match resolve_qubits(wrapper.inner.num_qubits(), qubits, num_target_qubits) {
+        Ok(targets) => targets,
+        Err(code) => return code,
+    };
+    let params = match resolve_params(params, num_params) {
+        Ok(params) => params,
+        Err(code) => return code,
+    };
+    wrapper
+        .inner
+        .apply_standard_gate(gate, &targets, &params)
+        .map_err(map_err)
+        .map_or_else(|e| e, |_| 0)
+}
+
+/// Return the number of destabilizer generators (always N), or 0 for NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn stabilizer_get_destabilizers_len(ptr: *const CStabilizerState) -> usize {
+    if ptr.is_null() {
+        return 0;
+    }
+    let wrapper = unsafe { &*ptr };
+    wrapper.inner.num_qubits()
+}
+
+/// Return the destabilizer generator at `index` as a heap-allocated Pauli
+/// label (same "+XYZ" format as `stabilizer_get_stabilizer`). Caller must free
+/// with `cqlib_string_free`. Returns NULL on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn stabilizer_get_destabilizer(
+    ptr: *const CStabilizerState,
+    index: usize,
+) -> *mut c_char {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let wrapper = unsafe { &*ptr };
+    let destabilizers = wrapper.inner.get_destabilizers();
+    match destabilizers.get(index) {
+        Some(pauli) => match CString::new(pauli.to_string()) {
+            Ok(cs) => cs.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// Return the probability of measuring a specific computational-basis
+/// outcome. `bits` is an array of `len` booleans where `bits[0]` is qubit 0;
+/// `len` must equal the number of qubits. Writes the probability to `out` and
+/// returns 0 on success, -1 on NULL pointers, -8 on a length mismatch.
+#[unsafe(no_mangle)]
+pub extern "C" fn stabilizer_probability_of(
+    ptr: *const CStabilizerState,
+    bits: *const bool,
+    len: usize,
+    out: *mut f64,
+) -> i32 {
+    if ptr.is_null() || bits.is_null() || out.is_null() {
+        return CqlibError::NullPtr as i32;
+    }
+    let wrapper = unsafe { &*ptr };
+    let bits = unsafe { std::slice::from_raw_parts(bits, len) };
+    match wrapper.inner.probability_of(bits) {
+        Ok(probability) => {
+            unsafe { *out = probability };
+            0
+        }
+        Err(err) => qis_err_code(&err),
+    }
+}
+
+/// Execute a Clifford circuit from |0...0> and return the final state.
+///
+/// Unlike `stabilizer_from_circuit` / `stabilizer_apply_circuit`, which ignore
+/// terminal measurement declarations, this entry point executes `MeasureBit`
+/// and `MeasureBits` operations, so the returned state is already collapsed.
+/// Runtime classical results are not yet exposed through the C ABI.
+/// Returns NULL on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn stabilizer_run_circuit(circuit: *const CCircuit) -> *mut CStabilizerState {
+    if circuit.is_null() {
+        return std::ptr::null_mut();
+    }
+    let circuit = unsafe { &(*circuit).inner };
+    match StabilizerState::run_circuit(circuit) {
+        Ok(result) => Box::into_raw(Box::new(CStabilizerState {
+            inner: result.state,
+        })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Export the stabilizer generators in Stim-compatible text format (one
+/// "+XYZ" Pauli label per line). Caller must free with `cqlib_string_free`.
+/// Returns NULL on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn stabilizer_to_stim_format(ptr: *const CStabilizerState) -> *mut c_char {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let wrapper = unsafe { &*ptr };
+    match CString::new(wrapper.inner.to_stim_format()) {
+        Ok(cs) => cs.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}

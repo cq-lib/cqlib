@@ -15,5 +15,13 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 pub mod circuit_render;
+pub mod plot_render;
+pub mod result_plot;
+pub mod state_plot;
+pub mod visual_ir;
 
 pub use circuit_render::*;
+pub use plot_render::*;
+pub use result_plot::*;
+pub use state_plot::*;
+pub use visual_ir::*;

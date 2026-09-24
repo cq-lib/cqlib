@@ -14,7 +14,16 @@
 
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+pub mod commutation;
+pub mod decompose;
+pub mod knowledge;
+pub mod layout;
 pub mod pipeline;
+pub mod resource;
+pub mod routing;
+pub mod sabre;
+pub mod transform;
+pub mod workflow;
 
 use cqlib_core::compile::CompileResult;
 
@@ -63,4 +72,13 @@ pub struct CompileConfigC {
     pub _reserved: [u8; 4],
 }
 
+pub use commutation::*;
+pub use decompose::*;
+pub use knowledge::*;
+pub use layout::*;
 pub use pipeline::*;
+pub use resource::*;
+pub use routing::*;
+pub use sabre::*;
+pub use transform::*;
+pub use workflow::*;
