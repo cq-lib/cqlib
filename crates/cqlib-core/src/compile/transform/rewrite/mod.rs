@@ -45,6 +45,7 @@ mod session;
 
 pub use config::{RewriteConfig, RewriteMode};
 pub use diagnostics::KnowledgeRewriteDiagnostics;
+pub(crate) use edit::resolved_params_are_equal;
 pub(crate) use edit::{OperationReplacement, QubitBijection, RewriteEdits};
 pub use rewriter::{
     KnowledgeRewriteResult, KnowledgeRewriteStats, KnowledgeRewriter, rewrite_circuit,

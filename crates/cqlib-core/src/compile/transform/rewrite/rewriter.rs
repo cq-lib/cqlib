@@ -1182,7 +1182,7 @@ impl<'a> RoundRewriter<'a> {
                 "GPhase operation must contain one parameter".to_string(),
             ));
         }
-        resolve_operation_param(self.source, &params[0])
+        resolve_operation_param(self.source, &params[0], 0)
     }
 
     fn replacement_gphase_param(replacement: &ReplacementItem) -> Result<Parameter, CompilerError> {

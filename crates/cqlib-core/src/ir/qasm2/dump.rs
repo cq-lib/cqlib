@@ -68,7 +68,6 @@
 //! - Non-zero global phase and `GPhase` instructions are emitted only as comments;
 //!   loading the generated OpenQASM 2.0 does not restore that phase.
 
-use crate::circuit::circuit_param::CircuitParam;
 use crate::circuit::gate::{
     CircuitGate, ClassicalDataOp, Directive, Instruction, StandardGate, UnitaryGate,
 };
@@ -703,7 +702,7 @@ fn process_circuit_operations(
                 // Output gate call: name(params) qubits;
 
                 // Resolve arguments
-                let params_str = format_params(op, circuit, param_map);
+                let params_str = format_params(op, circuit, param_map)?;
 
                 // Map qubits
                 let mapped_qs = map_qubits(op, qubit_map);
@@ -713,7 +712,7 @@ fn process_circuit_operations(
             Instruction::UnitaryGate(unitary_gate) => {
                 // Output gate call: label(params) qubits;
                 // (The gate definition or opaque declaration was already output in Pass 1)
-                let params_str = format_params(op, circuit, param_map);
+                let params_str = format_params(op, circuit, param_map)?;
                 let mapped_qs = map_qubits(op, qubit_map);
                 writeln!(
                     output,
@@ -767,7 +766,7 @@ fn process_circuit_operations(
             }
             Instruction::Delay => {
                 // Output delay gate call: delay(value) q[i];
-                let params_str = format_params(op, circuit, param_map);
+                let params_str = format_params(op, circuit, param_map)?;
                 let mapped_qs = map_qubits(op, qubit_map);
 
                 writeln!(output, "delay({}) {};", params_str, mapped_qs[0])?;
@@ -963,43 +962,46 @@ fn measurement_qasm_lines(
 }
 
 fn resolve_param(
-    circuit_param: &CircuitParam,
+    op: &Operation,
+    param_index: usize,
     circuit: &Circuit,
     param_map: &HashMap<String, Parameter>,
-) -> Parameter {
-    let mut param = match circuit_param {
-        CircuitParam::Fixed(val) => Parameter::from(*val),
-        CircuitParam::Index(idx) => circuit.parameters()[*idx as usize].clone(),
-    };
-
-    if !param_map.is_empty() {
-        for (sym, repl) in param_map {
-            param = param.replace(sym, repl.clone());
-        }
+) -> Result<Parameter, QasmDumpError> {
+    let mut param = circuit
+        .resolve_parameter(&op.params[param_index])
+        .map_err(|error| {
+            let error = match error {
+                crate::circuit::CircuitError::InvalidParameterValue(_, value) => {
+                    crate::circuit::CircuitError::InvalidParameterValue(param_index, value)
+                }
+                error => error,
+            };
+            QasmDumpError::FormatError(format!(
+                "invalid parameter {param_index} for {:?}: {error}",
+                op.instruction
+            ))
+        })?;
+    for (symbol, replacement) in param_map {
+        param = param.replace(symbol, replacement.clone());
     }
-
-    // param = param.simplify();
-    param
+    Ok(param)
 }
 
 fn format_params(
     op: &Operation,
     circuit: &Circuit,
     param_map: &HashMap<String, Parameter>,
-) -> String {
+) -> Result<String, QasmDumpError> {
     if op.params.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
-    let params_str: Vec<String> = op
-        .params
-        .iter()
-        .map(|p| {
-            resolve_param(p, circuit, param_map)
-                .to_string()
-                .replace("π", "pi")
+    let params = (0..op.params.len())
+        .map(|index| {
+            resolve_param(op, index, circuit, param_map)
+                .map(|param| param.to_string().replace("π", "pi"))
         })
-        .collect();
-    format!("({})", params_str.join(","))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!("({})", params.join(",")))
 }
 
 fn map_qubits(op: &Operation, qubit_map: &HashMap<Qubit, String>) -> Vec<String> {
@@ -1079,7 +1081,7 @@ fn dump_standard_gate(
             return Ok(());
         }
         StandardGate::XY2P => {
-            let theta = resolve_param(&op.params[0], circuit, param_map);
+            let theta = resolve_param(op, 0, circuit, param_map)?;
             let p1 = Parameter::pi() / 2.0 - theta.clone();
             let p3 = theta.clone() - Parameter::pi() / 2.0;
             let q_str = &mapped_qs[0];
@@ -1091,7 +1093,7 @@ fn dump_standard_gate(
             return Ok(());
         }
         StandardGate::XY2M => {
-            let theta = resolve_param(&op.params[0], circuit, param_map);
+            let theta = resolve_param(op, 0, circuit, param_map)?;
             let m1 = Parameter::from(0.0) - (Parameter::pi() / 2.0 + theta.clone());
             let m3 = theta.clone() + Parameter::pi() / 2.0;
             let q_str = &mapped_qs[0];
@@ -1103,7 +1105,7 @@ fn dump_standard_gate(
             return Ok(());
         }
         StandardGate::XY => {
-            let theta = resolve_param(&op.params[0], circuit, param_map);
+            let theta = resolve_param(op, 0, circuit, param_map)?;
             let phase: Parameter = theta.clone() - Parameter::pi() / 2.0;
             let lambda: Parameter = Parameter::pi() / 2.0 - theta.clone();
             let q_str = &mapped_qs[0];
@@ -1125,8 +1127,8 @@ fn dump_standard_gate(
             return Ok(());
         }
         StandardGate::RXY => {
-            let theta = resolve_param(&op.params[0], circuit, param_map);
-            let phi = resolve_param(&op.params[1], circuit, param_map);
+            let theta = resolve_param(op, 0, circuit, param_map)?;
+            let phi = resolve_param(op, 1, circuit, param_map)?;
             let phase: Parameter = phi.clone() - Parameter::pi() / 2.0;
             let lambda: Parameter = Parameter::pi() / 2.0 - phi.clone();
             let q_str = &mapped_qs[0];
@@ -1149,7 +1151,7 @@ fn dump_standard_gate(
             return Ok(());
         }
         StandardGate::GPhase => {
-            let param = resolve_param(&op.params[0], circuit, param_map);
+            let param = resolve_param(op, 0, circuit, param_map)?;
             writeln!(output, "// gphase({})", param)?;
             return Ok(());
         }
@@ -1162,7 +1164,7 @@ fn dump_standard_gate(
         ))
     })?;
 
-    let params_str = format_params(op, circuit, param_map);
+    let params_str = format_params(op, circuit, param_map)?;
     writeln!(output, "{}{} {};", name, params_str, mapped_qs.join(","))?;
     Ok(())
 }
@@ -1224,7 +1226,7 @@ fn dump_mc_gate(
         }
     };
 
-    let params_str = format_params(op, circuit, param_map);
+    let params_str = format_params(op, circuit, param_map)?;
     let mapped_qs = map_qubits(op, qubit_map);
 
     writeln!(output, "{}{} {};", name, params_str, mapped_qs.join(","))?;
@@ -1468,7 +1470,7 @@ fn operation_to_qasm(
             let mapped_qs = map_qubits(op, qubit_map);
             match gate {
                 StandardGate::XY => {
-                    let theta = resolve_param(&op.params[0], circuit, param_map);
+                    let theta = resolve_param(op, 0, circuit, param_map)?;
                     let phase: Parameter = theta.clone() - Parameter::pi() / 2.0;
                     let lambda: Parameter = Parameter::pi() / 2.0 - theta;
                     return Ok(format!(
@@ -1480,8 +1482,8 @@ fn operation_to_qasm(
                     ));
                 }
                 StandardGate::RXY => {
-                    let theta = resolve_param(&op.params[0], circuit, param_map);
-                    let phi = resolve_param(&op.params[1], circuit, param_map);
+                    let theta = resolve_param(op, 0, circuit, param_map)?;
+                    let phi = resolve_param(op, 1, circuit, param_map)?;
                     let phase: Parameter = phi.clone() - Parameter::pi() / 2.0;
                     let lambda: Parameter = Parameter::pi() / 2.0 - phi;
                     return Ok(format!(
@@ -1499,7 +1501,7 @@ fn operation_to_qasm(
                     "gate {gate:?} cannot be used in an OpenQASM 2.0 conditional body"
                 ))
             })?;
-            let params_str = format_params(op, circuit, param_map);
+            let params_str = format_params(op, circuit, param_map)?;
             Ok(format!("{}{} {}", name, params_str, mapped_qs.join(",")))
         }
         Instruction::McGate(mc_gate) => {
@@ -1524,7 +1526,7 @@ fn operation_to_qasm(
                     )));
                 }
             };
-            let params_str = format_params(op, circuit, param_map);
+            let params_str = format_params(op, circuit, param_map)?;
             let mapped_qs = map_qubits(op, qubit_map);
             Ok(format!("{}{} {}", name, params_str, mapped_qs.join(",")))
         }
@@ -1539,12 +1541,12 @@ fn operation_to_qasm(
             Directive::Measure => Err(QasmDumpError::MeasureInGateNotAllowed),
         },
         Instruction::CircuitGate(cg) => {
-            let params_str = format_params(op, circuit, param_map);
+            let params_str = format_params(op, circuit, param_map)?;
             let mapped_qs = map_qubits(op, qubit_map);
             Ok(format!("{}{} {}", cg.name, params_str, mapped_qs.join(",")))
         }
         Instruction::UnitaryGate(unitary_gate) => {
-            let params_str = format_params(op, circuit, param_map);
+            let params_str = format_params(op, circuit, param_map)?;
             let mapped_qs = map_qubits(op, qubit_map);
             Ok(format!(
                 "{}{} {}",
