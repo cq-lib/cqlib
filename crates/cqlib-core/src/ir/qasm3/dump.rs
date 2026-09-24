@@ -323,10 +323,7 @@ fn dump_global_phase(
     if phase.is_zero() {
         return Ok(());
     }
-    let mut phase = phase.clone();
-    for (symbol, replacement) in param_map {
-        phase = phase.replace(symbol, replacement.clone());
-    }
+    let phase = phase.substitute_many_simultaneous(param_map);
     writeln!(output, "gphase({});", phase.to_string().replace("π", "pi"))?;
     Ok(())
 }
@@ -1334,7 +1331,7 @@ fn resolve_param(
     circuit: &Circuit,
     param_map: &HashMap<String, Parameter>,
 ) -> Result<Parameter, Qasm3DumpError> {
-    let mut param = circuit
+    let param = circuit
         .resolve_parameter(&op.params[param_index])
         .map_err(|error| {
             let error = match error {
@@ -1348,10 +1345,7 @@ fn resolve_param(
                 op.instruction
             ))
         })?;
-    for (symbol, replacement) in param_map {
-        param = param.replace(symbol, replacement.clone());
-    }
-    Ok(param)
+    Ok(param.substitute_many_simultaneous(param_map))
 }
 
 fn format_params(

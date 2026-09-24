@@ -609,6 +609,99 @@ measure q;
 }
 
 #[test]
+fn parameter_renaming_preserves_overlapping_names_through_round_trip() {
+    let q0 = Qubit::new(0);
+    let mut gate = Circuit::new(1);
+    gate.x(q0).unwrap();
+    let mut circuit = Circuit::new(1);
+    circuit
+        .append(gate.to_gate("a").unwrap(), [q0], [], None)
+        .unwrap();
+    // Register the symbols separately so the allocator must produce
+    // a -> a0 followed by a0 -> a00.
+    circuit.rx(q0, Parameter::symbol("a")).unwrap();
+    circuit.rz(q0, Parameter::symbol("a0")).unwrap();
+    circuit.set_global_phase(Parameter::symbol("a") + Parameter::symbol("a0") * 2.0);
+
+    let qasm = dumps(&circuit).unwrap();
+    assert!(qasm.contains("input angle[64] a0;"), "got:\n{qasm}");
+    assert!(qasm.contains("input angle[64] a00;"), "got:\n{qasm}");
+    assert!(qasm.contains("rx(a0) q[0];"), "got:\n{qasm}");
+    assert!(qasm.contains("rz(a00) q[0];"), "got:\n{qasm}");
+
+    let loaded = qasm3_loads(&qasm).unwrap();
+    let values = Some(HashMap::from([("a0", 0.125), ("a00", 0.5)]));
+    assert_eq!(loaded.global_phase().evaluate(&values).unwrap(), 1.125);
+    let angles: Vec<_> = loaded
+        .operations()
+        .iter()
+        .filter(|op| {
+            matches!(
+                op.instruction,
+                Instruction::Standard(StandardGate::RX | StandardGate::RZ)
+            )
+        })
+        .map(|op| {
+            loaded
+                .resolve_parameter(&op.params[0])
+                .unwrap()
+                .evaluate(&values)
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(angles, [0.125, 0.5]);
+}
+
+#[test]
+fn parameter_renaming_resolves_swapped_symbols_simultaneously() {
+    let mut circuit = Circuit::new(1);
+    circuit
+        .rx(
+            Qubit::new(0),
+            Parameter::symbol("a") + Parameter::symbol("b") * 2.0,
+        )
+        .unwrap();
+    // A swap fails under sequential replacement in either HashMap order.
+    let param_map = HashMap::from([
+        ("a".to_string(), Parameter::symbol("b")),
+        ("b".to_string(), Parameter::symbol("a")),
+    ]);
+    let renamed = resolve_param(&circuit.operations()[0], 0, &circuit, &param_map).unwrap();
+    assert_eq!(
+        renamed
+            .evaluate(&Some(HashMap::from([("a", 2.0), ("b", 3.0)])))
+            .unwrap(),
+        7.0
+    );
+}
+
+#[test]
+fn parameter_renaming_swaps_global_phase_symbols_simultaneously() {
+    let mut circuit = Circuit::new(1);
+    circuit.set_global_phase(Parameter::symbol("a") + Parameter::symbol("b") * 2.0);
+    let param_map = HashMap::from([
+        ("a".to_string(), Parameter::symbol("b")),
+        ("b".to_string(), Parameter::symbol("a")),
+    ]);
+    let mut output = String::new();
+    dump_global_phase(&circuit, &mut output, &param_map).unwrap();
+    let phase = Parameter::try_from(
+        output
+            .strip_prefix("gphase(")
+            .unwrap()
+            .strip_suffix(");\n")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        phase
+            .evaluate(&Some(HashMap::from([("a", 2.0), ("b", 3.0)])))
+            .unwrap(),
+        7.0
+    );
+}
+
+#[test]
 fn avoids_auto_measurement_name_collision_with_gate() {
     let source = r#"OPENQASM 3.0;
 include "stdgates.inc";
