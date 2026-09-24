@@ -42,6 +42,14 @@ impl KnowledgeInstructionKey {
         }
     }
 
+    /// Reconstructs the instruction represented by this key.
+    pub(crate) fn to_instruction(&self) -> Instruction {
+        match self {
+            Self::Standard(gate) => Instruction::Standard(*gate),
+            Self::McGate(gate) => Instruction::McGate(Box::new(gate.clone())),
+        }
+    }
+
     pub(crate) fn is_implicit(&self) -> bool {
         matches!(self, Self::Standard(StandardGate::GPhase))
     }

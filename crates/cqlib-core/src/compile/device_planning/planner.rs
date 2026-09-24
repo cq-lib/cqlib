@@ -422,7 +422,7 @@ impl<'a> DevicePlanner<'a> {
                     .filter(|child| self.plans[*child].is_none())
                     .filter(|child| seen.insert(*child))
                     .map(|child| DeviceLoweringDependency {
-                        instruction: instruction_from_key(&self.states[child].instruction),
+                        instruction: self.states[child].instruction.to_instruction(),
                         qargs: self.states[child].ordered_qargs.to_vec(),
                     })
                     .collect();
@@ -434,7 +434,7 @@ impl<'a> DevicePlanner<'a> {
             .collect();
 
         DeviceLoweringFailure {
-            instruction: instruction_from_key(&state.instruction),
+            instruction: state.instruction.to_instruction(),
             qargs: state.ordered_qargs.to_vec(),
             attempted_candidates,
         }
@@ -443,7 +443,7 @@ impl<'a> DevicePlanner<'a> {
     fn solve(&mut self) -> Result<(), DevicePlannerError> {
         for state_id in 0..self.states.len() {
             let state = self.states[state_id].clone();
-            let instruction = instruction_from_key(&state.instruction);
+            let instruction = state.instruction.to_instruction();
             if self
                 .device
                 .supports_native_instruction(&instruction, &state.ordered_qargs)
@@ -786,7 +786,7 @@ impl<'a> GraphBuilder<'a> {
         &self,
         parent: &DeviceGateState,
     ) -> Result<Vec<(String, PlanTemplate, Vec<DeviceGateState>)>, String> {
-        let instruction = instruction_from_key(&parent.instruction);
+        let instruction = parent.instruction.to_instruction();
         let rule_ids = self
             .library
             .candidates_for_first_instruction(&instruction)
@@ -873,13 +873,6 @@ fn source_params_are_generic_and_distinct(params: &Option<SmallVec<[ParameterVal
             .as_symbol()
             .is_some_and(|symbol| symbols.insert(symbol))
     })
-}
-
-pub(crate) fn instruction_from_key(key: &KnowledgeInstructionKey) -> Instruction {
-    match key {
-        KnowledgeInstructionKey::Standard(gate) => Instruction::Standard(*gate),
-        KnowledgeInstructionKey::McGate(gate) => Instruction::McGate(Box::new(gate.clone())),
-    }
 }
 
 #[cfg(test)]
