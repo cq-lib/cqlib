@@ -1018,25 +1018,11 @@ fn collect_root_states(circuit: &Circuit) -> Result<RootStateScan, CompilerError
                         });
                     }
                 }
-                Instruction::ClassicalControl(control) => match control {
-                    ClassicalControlOp::If(op) => {
-                        collect(op.then_body().operations(), scan);
-                        if let Some(body) = op.else_body() {
-                            collect(body.operations(), scan);
-                        }
+                Instruction::ClassicalControl(control) => {
+                    for body in control.bodies() {
+                        collect(body.operations(), scan);
                     }
-                    ClassicalControlOp::While(op) => collect(op.body().operations(), scan),
-                    ClassicalControlOp::For(op) => collect(op.body().operations(), scan),
-                    ClassicalControlOp::Switch(op) => {
-                        for case in op.cases() {
-                            collect(case.body().operations(), scan);
-                        }
-                        if let Some(body) = op.default() {
-                            collect(body.operations(), scan);
-                        }
-                    }
-                    ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
-                },
+                }
                 _ => {}
             }
         }
@@ -1099,19 +1085,7 @@ fn has_fusible_one_qubit_run(circuit: &Circuit) -> bool {
                 }
                 Instruction::ClassicalControl(control) => {
                     pending.clear();
-                    let body_has_run = match control {
-                        ClassicalControlOp::If(op) => {
-                            scan(op.then_body().operations())
-                                || op.else_body().is_some_and(|body| scan(body.operations()))
-                        }
-                        ClassicalControlOp::While(op) => scan(op.body().operations()),
-                        ClassicalControlOp::For(op) => scan(op.body().operations()),
-                        ClassicalControlOp::Switch(op) => {
-                            op.cases().iter().any(|case| scan(case.body().operations()))
-                                || op.default().is_some_and(|body| scan(body.operations()))
-                        }
-                        ClassicalControlOp::Break | ClassicalControlOp::Continue => false,
-                    };
+                    let body_has_run = control.bodies().any(|body| scan(body.operations()));
                     if body_has_run {
                         return true;
                     }

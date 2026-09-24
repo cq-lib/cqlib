@@ -52,7 +52,7 @@
 //! orchestration and reporting step; it applies no transform after validation
 //! and can select only an already validated candidate.
 
-use crate::circuit::{Circuit, ClassicalControlOp, Instruction, Operation, StandardGate};
+use crate::circuit::{Circuit, Instruction, Operation, StandardGate};
 use crate::compile::CompilerError;
 use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::resource::ResourceLimits;
@@ -1991,29 +1991,11 @@ fn validate_operations_in_target_basis(
                     "target-basis one-qubit cleanup left gate {gate:?} outside the configured basis"
                 )));
             }
-            Instruction::ClassicalControl(control) => match control {
-                ClassicalControlOp::If(op) => {
-                    validate_operations_in_target_basis(op.then_body().operations(), allowed)?;
-                    if let Some(body) = op.else_body() {
-                        validate_operations_in_target_basis(body.operations(), allowed)?;
-                    }
+            Instruction::ClassicalControl(control) => {
+                for body in control.bodies() {
+                    validate_operations_in_target_basis(body.operations(), allowed)?;
                 }
-                ClassicalControlOp::While(op) => {
-                    validate_operations_in_target_basis(op.body().operations(), allowed)?;
-                }
-                ClassicalControlOp::For(op) => {
-                    validate_operations_in_target_basis(op.body().operations(), allowed)?;
-                }
-                ClassicalControlOp::Switch(op) => {
-                    for case in op.cases() {
-                        validate_operations_in_target_basis(case.body().operations(), allowed)?;
-                    }
-                    if let Some(body) = op.default() {
-                        validate_operations_in_target_basis(body.operations(), allowed)?;
-                    }
-                }
-                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
-            },
+            }
             Instruction::McGate(_) | Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
                 return Err(CompilerError::InvariantViolation(format!(
                     "target-basis one-qubit cleanup left gate-like instruction {} outside the configured basis",
@@ -2065,29 +2047,11 @@ fn validate_operations_on_topology(
                     "topology-basis output contains undecomposed gate {gate:?}"
                 )));
             }
-            Instruction::ClassicalControl(control) => match control {
-                ClassicalControlOp::If(op) => {
-                    validate_operations_on_topology(op.then_body().operations(), device)?;
-                    if let Some(body) = op.else_body() {
-                        validate_operations_on_topology(body.operations(), device)?;
-                    }
+            Instruction::ClassicalControl(control) => {
+                for body in control.bodies() {
+                    validate_operations_on_topology(body.operations(), device)?;
                 }
-                ClassicalControlOp::While(op) => {
-                    validate_operations_on_topology(op.body().operations(), device)?;
-                }
-                ClassicalControlOp::For(op) => {
-                    validate_operations_on_topology(op.body().operations(), device)?;
-                }
-                ClassicalControlOp::Switch(op) => {
-                    for case in op.cases() {
-                        validate_operations_on_topology(case.body().operations(), device)?;
-                    }
-                    if let Some(body) = op.default() {
-                        validate_operations_on_topology(body.operations(), device)?;
-                    }
-                }
-                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
-            },
+            }
             Instruction::McGate(_) | Instruction::UnitaryGate(_) | Instruction::CircuitGate(_) => {
                 return Err(CompilerError::InvariantViolation(format!(
                     "topology-basis output contains undecomposed instruction {}",

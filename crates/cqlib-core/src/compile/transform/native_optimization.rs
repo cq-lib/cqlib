@@ -835,29 +835,11 @@ fn collect_scope_costs(
             Instruction::Standard(_) | Instruction::McGate(_) => accumulator
                 .add_gate(&operation.instruction, &operation.qubits)
                 .map_err(ScopeCostError::Context)?,
-            Instruction::ClassicalControl(control) => match control {
-                ClassicalControlOp::If(op) => {
-                    collect_scope_costs(op.then_body().operations(), context, output)?;
-                    if let Some(body) = op.else_body() {
-                        collect_scope_costs(body.operations(), context, output)?;
-                    }
+            Instruction::ClassicalControl(control) => {
+                for body in control.bodies() {
+                    collect_scope_costs(body.operations(), context, output)?;
                 }
-                ClassicalControlOp::While(op) => {
-                    collect_scope_costs(op.body().operations(), context, output)?;
-                }
-                ClassicalControlOp::For(op) => {
-                    collect_scope_costs(op.body().operations(), context, output)?;
-                }
-                ClassicalControlOp::Switch(op) => {
-                    for case in op.cases() {
-                        collect_scope_costs(case.body().operations(), context, output)?;
-                    }
-                    if let Some(body) = op.default() {
-                        collect_scope_costs(body.operations(), context, output)?;
-                    }
-                }
-                ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
-            },
+            }
             Instruction::UnitaryGate(_)
             | Instruction::CircuitGate(_)
             | Instruction::ClassicalData(_)

@@ -221,25 +221,9 @@ fn instruction_requires_lowering(instruction: &Instruction, plans: &LoweringPlan
 }
 
 fn control_flow_requires_lowering(control: &ClassicalControlOp, plans: &LoweringPlans) -> bool {
-    match control {
-        ClassicalControlOp::If(op) => {
-            operations_require_lowering(op.then_body().operations(), plans)
-                || op
-                    .else_body()
-                    .is_some_and(|body| operations_require_lowering(body.operations(), plans))
-        }
-        ClassicalControlOp::While(op) => operations_require_lowering(op.body().operations(), plans),
-        ClassicalControlOp::For(op) => operations_require_lowering(op.body().operations(), plans),
-        ClassicalControlOp::Switch(op) => {
-            op.cases()
-                .iter()
-                .any(|case| operations_require_lowering(case.body().operations(), plans))
-                || op
-                    .default()
-                    .is_some_and(|body| operations_require_lowering(body.operations(), plans))
-        }
-        ClassicalControlOp::Break | ClassicalControlOp::Continue => false,
-    }
+    control
+        .bodies()
+        .any(|body| operations_require_lowering(body.operations(), plans))
 }
 
 impl TargetBasisSignature {

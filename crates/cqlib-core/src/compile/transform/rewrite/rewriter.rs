@@ -1354,28 +1354,11 @@ fn merge_ranges(ranges: &mut Vec<Range<usize>>) {
 fn recursive_operation_count(operations: &[Operation]) -> usize {
     let mut count = operations.len();
     for operation in operations {
-        let Instruction::ClassicalControl(control) = &operation.instruction else {
-            continue;
-        };
-        count = count.saturating_add(match control {
-            ClassicalControlOp::If(op) => recursive_operation_count(op.then_body().operations())
-                .saturating_add(
-                    op.else_body()
-                        .map_or(0, |body| recursive_operation_count(body.operations())),
-                ),
-            ClassicalControlOp::While(op) => recursive_operation_count(op.body().operations()),
-            ClassicalControlOp::For(op) => recursive_operation_count(op.body().operations()),
-            ClassicalControlOp::Switch(op) => op
-                .cases()
-                .iter()
-                .map(|case| recursive_operation_count(case.body().operations()))
-                .fold(0usize, usize::saturating_add)
-                .saturating_add(
-                    op.default()
-                        .map_or(0, |body| recursive_operation_count(body.operations())),
-                ),
-            ClassicalControlOp::Break | ClassicalControlOp::Continue => 0,
-        });
+        if let Instruction::ClassicalControl(control) = &operation.instruction {
+            for body in control.bodies() {
+                count = count.saturating_add(recursive_operation_count(body.operations()));
+            }
+        }
     }
     count
 }

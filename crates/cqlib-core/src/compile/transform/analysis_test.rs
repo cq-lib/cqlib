@@ -16,6 +16,37 @@ use crate::circuit::{
 };
 
 #[test]
+fn analysis_reaches_measurements_and_gates_in_nested_default_and_else() {
+    let mut circuit = Circuit::new(2);
+    circuit
+        .switch(ClassicalExpr::uint_literal(2, 0).unwrap(), |cases| {
+            cases.value(0, |_| Ok(()))?;
+            cases.default(|body| {
+                body.if_else(
+                    ClassicalExpr::bool_literal(true),
+                    |_| Ok(()),
+                    |body| {
+                        body.cx(Qubit::new(0), Qubit::new(1))?;
+                        body.measure(Qubit::new(0))?;
+                        Ok(())
+                    },
+                )
+            })
+        })
+        .unwrap();
+
+    let analysis = WorkflowCircuitAnalysis::analyze(&circuit);
+    assert!(analysis.public().has_measurement);
+    assert!(analysis.public().has_classical_data);
+    assert!(analysis.has_direction_sensitive_two_qubit_operation);
+    assert_eq!(
+        analysis.standard_gates().collect::<Vec<_>>(),
+        vec![StandardGate::CX]
+    );
+    assert!(circuit.operations()[0].instruction.has_measurement());
+}
+
+#[test]
 fn analysis_detects_runtime_classical_and_definitions_recursively() {
     let mut inner = Circuit::new(1);
     let measured = inner.measure(Qubit::new(0)).unwrap();

@@ -255,28 +255,10 @@ fn count_layout_order_operations(operations: &[Operation]) -> usize {
     operations
         .iter()
         .map(|operation| match &operation.instruction {
-            Instruction::ClassicalControl(control) => match control {
-                ClassicalControlOp::If(op) => {
-                    count_layout_order_operations(op.then_body().operations())
-                        + op.else_body()
-                            .map_or(0, |body| count_layout_order_operations(body.operations()))
-                }
-                ClassicalControlOp::While(op) => {
-                    count_layout_order_operations(op.body().operations())
-                }
-                ClassicalControlOp::For(op) => {
-                    count_layout_order_operations(op.body().operations())
-                }
-                ClassicalControlOp::Switch(op) => {
-                    op.cases()
-                        .iter()
-                        .map(|case| count_layout_order_operations(case.body().operations()))
-                        .sum::<usize>()
-                        + op.default()
-                            .map_or(0, |body| count_layout_order_operations(body.operations()))
-                }
-                ClassicalControlOp::Break | ClassicalControlOp::Continue => 0,
-            },
+            Instruction::ClassicalControl(control) => control
+                .bodies()
+                .map(|body| count_layout_order_operations(body.operations()))
+                .sum(),
             Instruction::ClassicalData(_) | Instruction::Directive(_) | Instruction::Delay => 0,
             _ => 1,
         })
@@ -365,27 +347,9 @@ impl InteractionAnalyzer {
     /// This is structural analysis: each branch, loop body, or switch case is
     /// included once, without runtime probability or loop-count weighting.
     fn scan_control_flow(&mut self, control: &ClassicalControlOp) -> Result<(), CompilerError> {
-        // Control flow is scanned as a static operation tree. We include every
-        // body once and leave runtime path weighting to future profile-guided
-        // compilation work.
-        match control {
-            ClassicalControlOp::If(op) => {
-                self.scan_operations(op.then_body().operations())?;
-                if let Some(body) = op.else_body() {
-                    self.scan_operations(body.operations())?;
-                }
-            }
-            ClassicalControlOp::While(op) => self.scan_operations(op.body().operations())?,
-            ClassicalControlOp::For(op) => self.scan_operations(op.body().operations())?,
-            ClassicalControlOp::Switch(op) => {
-                for case in op.cases() {
-                    self.scan_operations(case.body().operations())?;
-                }
-                if let Some(body) = op.default() {
-                    self.scan_operations(body.operations())?;
-                }
-            }
-            ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+        // Structural scan: visit each body once without execution weighting.
+        for body in control.bodies() {
+            self.scan_operations(body.operations())?;
         }
         Ok(())
     }
