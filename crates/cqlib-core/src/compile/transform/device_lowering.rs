@@ -43,13 +43,12 @@ use crate::compile::knowledge::{
     ConcreteOperationView, KnowledgeInstructionKey, RuleLibrary, instantiate_target,
     rule_matches_operations,
 };
+use crate::compile::numeric_matrix::one_qubit_run_matrix;
 use crate::compile::transform::decompose::unitary::synthesize_numeric_1q_unitary;
 use crate::compile::transform::lowering_support::{LoweringTarget, OperationSequenceLowerer};
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use crate::device::{Device, PhysicalQubit};
-use ndarray::Array2;
-use num_complex::Complex64;
 use smallvec::{SmallVec, smallvec};
 use std::collections::{BTreeMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, PI};
@@ -936,27 +935,6 @@ fn bufferable_one_qubit(
 ) -> Option<Qubit> {
     (gate.num_qubits() == 1 && qubits.len() == 1 && !has_label && fixed_numeric)
         .then_some(qubits[0])
-}
-
-/// Recomposes the exact 2x2 unitary of one buffered one-qubit run.
-fn one_qubit_run_matrix(operations: &[ValueOperation]) -> Option<Array2<Complex64>> {
-    let mut matrix = Array2::<Complex64>::eye(2);
-    for operation in operations {
-        let ValueInstruction::Instruction(Instruction::Standard(gate)) = &operation.instruction
-        else {
-            return None;
-        };
-        let params = operation
-            .params
-            .iter()
-            .map(|param| match param {
-                ParameterValue::Fixed(value) if value.is_finite() => Some(*value),
-                ParameterValue::Fixed(_) | ParameterValue::Param(_) => None,
-            })
-            .collect::<Option<Vec<_>>>()?;
-        matrix = gate.matrix(&params).ok()?.dot(&matrix);
-    }
-    Some(matrix)
 }
 
 /// Returns the fixed angle of a one-parameter `RZ` operation.
