@@ -17,8 +17,8 @@ use ndarray::Array2;
 use num_complex::Complex64;
 
 use super::{
-    EULER_ANGLE_EPS, Euler1qCandidate, Euler1qFamily, Euler1qGate, push_normalized_rz,
-    synthesize_euler_1q_candidates,
+    EULER_ANGLE_EPS, Euler1qCandidate, Euler1qFamily, Euler1qGate, normalize_rotation_angle,
+    push_normalized_rz, synthesize_euler_1q_candidates,
 };
 use crate::circuit::StandardGate;
 use crate::circuit::test_utils::assert_matrix_approx_eq;
@@ -27,6 +27,41 @@ use crate::compile::transform::decompose::unitary::unitary_1q::{
 };
 
 const MATRIX_EQ_EPS: f64 = 1e-12;
+
+fn pi_ulp_boundaries() -> [f64; 6] {
+    let below_pi = f64::from_bits(PI.to_bits() - 1);
+    let above_pi = f64::from_bits(PI.to_bits() + 1);
+    [below_pi, PI, above_pi, -below_pi, -PI, -above_pi]
+}
+
+#[test]
+fn normalize_rotation_angle_handles_pi_ulp_boundaries() {
+    for angle in pi_ulp_boundaries() {
+        let mut phase = 0.0;
+        let normalized = normalize_rotation_angle(angle, &mut phase).unwrap();
+        assert!(
+            normalized > -PI && normalized <= PI,
+            "input={angle:.17e}, normalized={normalized:.17e}, bits={:#018x}",
+            normalized.to_bits()
+        );
+    }
+}
+
+#[test]
+fn normalize_rotation_angle_preserves_phase_at_pi_ulp_boundaries() {
+    for angle in pi_ulp_boundaries() {
+        let initial_phase = 0.37;
+        let mut phase = initial_phase;
+        let normalized = normalize_rotation_angle(angle, &mut phase).unwrap();
+        for gate in [StandardGate::RX, StandardGate::RY, StandardGate::RZ] {
+            let expected = gate.matrix(&[angle]).unwrap().into_owned()
+                * Complex64::new(0.0, initial_phase).exp();
+            let actual =
+                gate.matrix(&[normalized]).unwrap().into_owned() * Complex64::new(0.0, phase).exp();
+            assert_matrix_approx_eq(&actual, &expected, MATRIX_EQ_EPS);
+        }
+    }
+}
 
 fn decomposition(theta: f64, phi: f64, lambda: f64) -> OneQubitUnitaryDecomposition {
     OneQubitUnitaryDecomposition {
@@ -462,7 +497,11 @@ fn assert_xyx_synthesis(first: f64, middle: f64, last: f64, expected_ops: usize)
     assert_matrix_approx_eq(&candidate_matrix(candidate), &source, MATRIX_EQ_EPS);
     for gate in &candidate.gates {
         let angle = gate.param.unwrap();
-        assert!(angle > -PI && angle <= PI);
+        assert!(
+            angle > -PI && angle <= PI,
+            "XYX({first}, {middle}, {last}): gate={gate:?}, angle={angle:.17e}, bits={:#018x}",
+            angle.to_bits()
+        );
         assert!(angle.abs() > EULER_ANGLE_EPS);
     }
 }
