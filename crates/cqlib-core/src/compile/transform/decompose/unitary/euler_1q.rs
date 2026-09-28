@@ -124,9 +124,9 @@ impl Euler1qFamily {
 /// normalized angle is numerically zero.
 ///
 /// `RZ(a + 2*pi*k) = (-1)^k * RZ(a)`, so every removed `2*pi` contributes a
-/// `pi` phase shift. Solving `angle = normalized + 2*pi*k` with
-/// `normalized in (-pi, pi]` in one step makes the compensation happen exactly
-/// once, including the `-pi -> +pi` boundary (`k = -1`).
+/// `pi` phase shift. The normalizer tracks `angle = normalized + 2*pi*k`
+/// through boundary corrections and applies the phase compensation once,
+/// including the `-pi -> +pi` boundary (`k = -1`).
 fn push_normalized_rz(
     angle: f64,
     gates: &mut SmallVec<[Euler1qGate; 5]>,
@@ -142,8 +142,18 @@ fn normalize_rotation_angle(angle: f64, phase: &mut f64) -> Result<f64, Compiler
             "euler 1q synthesis received a non-finite rotation angle: {angle}"
         )));
     }
-    let k = ((angle - PI) / TWO_PI).ceil();
-    let normalized = angle - TWO_PI * k;
+    let mut k = ((angle - PI) / TWO_PI).ceil();
+    let mut normalized = angle - TWO_PI * k;
+    // Rounding in the quotient or subtraction can cross a canonical boundary,
+    // e.g. the float just above -PI can normalize to the float just above PI.
+    // Keep the removed turn count in sync to preserve the scalar phase.
+    if normalized <= -PI {
+        normalized += TWO_PI;
+        k -= 1.0;
+    } else if normalized > PI {
+        normalized -= TWO_PI;
+        k += 1.0;
+    }
     *phase += k * PI;
     Ok(normalized)
 }
