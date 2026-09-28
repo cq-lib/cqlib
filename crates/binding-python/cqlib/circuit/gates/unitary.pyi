@@ -44,7 +44,9 @@ class UnitaryGate:
             matrix: A 2D square NumPy array or array-like of shape (2ⁿ, 2ⁿ).
         """
         ...
-    def with_symbolic_matrix(self, matrix: SymbolicMatrix, params: list[str]) -> UnitaryGate:
+    def with_symbolic_matrix(
+        self, matrix: SymbolicMatrix, params: list[str]
+    ) -> UnitaryGate:
         """Attach a symbolic matrix with positional parameter names.
 
         Args:
@@ -97,7 +99,9 @@ class UnitaryGate:
             params: Numeric values for each positional parameter.
         """
         ...
-    def __array__(self, dtype: Any | None = ..., copy: bool | None = ...) -> NDArray[np.complex128]:
+    def __array__(
+        self, dtype: Any | None = ..., copy: bool | None = ...
+    ) -> NDArray[np.complex128]:
         """NumPy array protocol — allows ``np.array(gate)``."""
         ...
     def __copy__(self) -> UnitaryGate: ...

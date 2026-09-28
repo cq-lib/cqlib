@@ -1,4 +1,5 @@
 // This code is part of Cqlib.
+// Modified to support reproducible state sampling.
 //
 // (C) Copyright China Telecom Quantum Group 2026
 //
@@ -474,22 +475,25 @@ impl PyDensityMatrixNoise {
         PyOutcome::from(py.detach(|| self.inner.measure_all()))
     }
 
-    /// Samples measurement outcomes with readout noise, without mutating this state.
-    fn sample_shots(&self, py: Python<'_>, shots: usize) -> Vec<PyOutcome> {
-        py.detach(|| self.inner.sample_shots(shots))
+    /// Samples the prepared state without mutation or additional readout noise.
+    #[pyo3(signature = (shots, *, seed=None))]
+    fn sample_shots(&self, py: Python<'_>, shots: usize, seed: Option<u64>) -> Vec<PyOutcome> {
+        py.detach(|| self.inner.sample_shots_with_seed(shots, seed))
             .into_iter()
             .map(PyOutcome::from)
             .collect()
     }
 
     /// Samples measurement outcomes according to a circuit measurement receipt.
+    #[pyo3(signature = (measurement, shots, *, seed=None))]
     fn sample(
         &self,
         py: Python<'_>,
         measurement: &PyMeasurement,
         shots: usize,
+        seed: Option<u64>,
     ) -> PyResult<PyExecutionResult> {
-        py.detach(|| self.inner.sample(&measurement.inner, shots))
+        py.detach(|| self.inner.sample_with_seed(&measurement.inner, shots, seed))
             .map(PyExecutionResult::from)
             .map_err(qis_error_to_py_err)
     }

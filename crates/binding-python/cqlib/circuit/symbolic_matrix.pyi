@@ -110,7 +110,9 @@ class SymbolicMatrix:
     def symbols(self) -> list[str]:
         """All free symbols in deterministic order."""
         ...
-    def evaluate(self, bindings: Mapping[str, float] | None = ...) -> NDArray[np.complex128]:
+    def evaluate(
+        self, bindings: Mapping[str, float] | None = ...
+    ) -> NDArray[np.complex128]:
         """Evaluate as a NumPy complex128 array after binding symbols."""
         ...
     def simplify(self) -> SymbolicMatrix:

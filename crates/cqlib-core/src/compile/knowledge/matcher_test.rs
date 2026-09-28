@@ -33,7 +33,15 @@ fn instruction_keys_support_standard_and_multi_controlled_gates() {
             StandardGate::X
         )))
     );
-    // assert!(!is_supported_instruction(&barrier));
+    for instruction in [&x, &mcx] {
+        let key = KnowledgeInstructionKey::from_instruction(instruction).unwrap();
+        let restored = key.to_instruction();
+        assert_eq!(&restored, instruction);
+        assert_eq!(
+            KnowledgeInstructionKey::from_instruction(&restored),
+            Some(key)
+        );
+    }
     assert!(KnowledgeInstructionKey::from_instruction(&barrier).is_none());
 }
 

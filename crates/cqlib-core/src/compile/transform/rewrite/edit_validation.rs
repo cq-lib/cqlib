@@ -13,8 +13,10 @@
 
 //! Validation and coordinate mapping for rewrite edit scripts.
 
-use super::edit::{OperationReplacement, QubitBijection, operations_are_equivalent};
-use crate::circuit::{Circuit, CircuitParam, Operation, Parameter};
+use super::edit::{
+    OperationReplacement, QubitBijection, operations_are_equivalent, resolved_params_are_equal,
+};
+use crate::circuit::Circuit;
 use std::ops::Range;
 
 pub(super) fn valid_exact_clean_gaps(
@@ -234,7 +236,7 @@ fn valid_clean_gap_bijection(
         if source.instruction != target.instruction
             || source.label != target.label
             || source.qubits.len() != target.qubits.len()
-            || !resolved_params_are_equal(before, source, after, target)
+            || !resolved_params_are_equal(before, &source.params, after, &target.params)
         {
             return false;
         }
@@ -252,28 +254,4 @@ fn valid_clean_gap_bijection(
         }
     }
     used.into_iter().all(|entry| entry)
-}
-
-fn resolved_params_are_equal(
-    before: &Circuit,
-    source: &Operation,
-    after: &Circuit,
-    target: &Operation,
-) -> bool {
-    source.params.len() == target.params.len()
-        && source
-            .params
-            .iter()
-            .zip(&target.params)
-            .all(|(source_parameter, target_parameter)| {
-                resolve_operation_param(before, source_parameter)
-                    == resolve_operation_param(after, target_parameter)
-            })
-}
-
-fn resolve_operation_param(circuit: &Circuit, parameter: &CircuitParam) -> Option<Parameter> {
-    match parameter {
-        CircuitParam::Fixed(value) => Some(Parameter::from(*value)),
-        CircuitParam::Index(index) => circuit.parameters().get_index(*index as usize).cloned(),
-    }
 }

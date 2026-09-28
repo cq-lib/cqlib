@@ -103,28 +103,8 @@ fn collect_control_flow_gate_counts(
     control: &ClassicalControlOp,
     counts: &mut Vec<(Instruction, usize)>,
 ) {
-    match control {
-        ClassicalControlOp::If(operation) => {
-            collect_gate_instruction_counts(operation.then_body().operations(), true, counts);
-            if let Some(body) = operation.else_body() {
-                collect_gate_instruction_counts(body.operations(), true, counts);
-            }
-        }
-        ClassicalControlOp::While(operation) => {
-            collect_gate_instruction_counts(operation.body().operations(), true, counts);
-        }
-        ClassicalControlOp::For(operation) => {
-            collect_gate_instruction_counts(operation.body().operations(), true, counts);
-        }
-        ClassicalControlOp::Switch(operation) => {
-            for case in operation.cases() {
-                collect_gate_instruction_counts(case.body().operations(), true, counts);
-            }
-            if let Some(body) = operation.default() {
-                collect_gate_instruction_counts(body.operations(), true, counts);
-            }
-        }
-        ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+    for body in control.bodies() {
+        collect_gate_instruction_counts(body.operations(), true, counts);
     }
 }
 

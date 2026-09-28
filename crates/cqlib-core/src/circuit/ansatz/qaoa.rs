@@ -33,8 +33,7 @@ use crate::circuit::circuit_impl::Circuit;
 use crate::circuit::circuit_param::ParameterValue;
 use crate::circuit::error::CircuitError;
 use crate::qis::evolution::{
-    PauliEvolution, TrotterMode, multiply_angle_by_factor, trotter_first_order_core,
-    trotter_second_order_core,
+    PauliEvolution, TrotterMode, trotter_first_order_core, trotter_second_order_core,
 };
 use crate::qis::hamiltonian::Hamiltonian;
 use crate::qis::pauli::{Pauli, PauliString};
@@ -293,7 +292,13 @@ fn append_exact_hamiltonian_evolution(
     qubits: &[Qubit],
 ) -> Result<(), CircuitError> {
     for (pauli_str, coeff) in &hamiltonian.terms {
-        let term_angle = multiply_angle_by_factor(time.clone(), 2.0 * coeff.re);
+        let factor = 2.0 * coeff.re;
+        if !factor.is_finite() {
+            return Err(CircuitError::InvalidOperation(format!(
+                "Hamiltonian evolution scale factor must be finite, got {factor}"
+            )));
+        }
+        let term_angle = time.scaled(factor);
         circuit.pauli_evolution(pauli_str, term_angle, qubits)?;
     }
     Ok(())

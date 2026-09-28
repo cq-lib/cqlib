@@ -55,6 +55,7 @@ circuit = h.to_trotter_circuit(1.0, 10, TrotterMode.first_order())
 from typing import Protocol, List, Tuple, Dict
 
 from . import state
+from .._native import qis as _qis_module
 
 # Pauli module
 from .pauli import Phase as Phase
@@ -67,8 +68,13 @@ from .hamiltonian import Hamiltonian as Hamiltonian
 # Evolution module
 from .evolution import TrotterMode as TrotterMode
 
+# Entropy and metrics modules
+from . import entropy as entropy
+from . import metrics as metrics
+
 
 # Expose key state classes at qis level for convenience
+sample = _qis_module.sample
 DensityMatrix = state.DensityMatrix
 Statevector = state.Statevector
 DensityMatrixNoise = state.DensityMatrixNoise
@@ -91,11 +97,8 @@ class Observable(Protocol):
     def num_qubits(self) -> int: ...
 
 
-# Entropy and metrics modules
-from . import entropy as entropy
-from . import metrics as metrics
-
 __all__ = [
+    "sample",
     "Phase",
     "Pauli",
     "PauliString",

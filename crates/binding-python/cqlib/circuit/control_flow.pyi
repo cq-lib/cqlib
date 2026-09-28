@@ -79,7 +79,11 @@ class ClassicalControlOp:
     :meth:`~circuit.Circuit.append_control`.
     """
     @staticmethod
-    def if_(condition: ClassicalExpr, then_body: ValueControlBody, else_body: ValueControlBody | None = ...) -> ClassicalControlOp:
+    def if_(
+        condition: ClassicalExpr,
+        then_body: ValueControlBody,
+        else_body: ValueControlBody | None = ...,
+    ) -> ClassicalControlOp:
         """Build an ``if`` / ``if-else`` operation.
 
         Args:
@@ -98,7 +102,13 @@ class ClassicalControlOp:
         """
         ...
     @staticmethod
-    def for_uint(var: ClassicalVar, start: ClassicalExpr, stop: ClassicalExpr, step: ClassicalExpr, body: ValueControlBody) -> ClassicalControlOp:
+    def for_uint(
+        var: ClassicalVar,
+        start: ClassicalExpr,
+        stop: ClassicalExpr,
+        step: ClassicalExpr,
+        body: ValueControlBody,
+    ) -> ClassicalControlOp:
         """Build an unsigned runtime range ``for`` loop.
 
         Args:
@@ -114,7 +124,11 @@ class ClassicalControlOp:
         """
         ...
     @staticmethod
-    def switch(target: ClassicalExpr, cases: list[ValueSwitchCase], default: ValueControlBody | None = ...) -> ClassicalControlOp:
+    def switch(
+        target: ClassicalExpr,
+        cases: list[ValueSwitchCase],
+        default: ValueControlBody | None = ...,
+    ) -> ClassicalControlOp:
         """Build a ``switch`` operation over a UInt expression.
 
         Args:

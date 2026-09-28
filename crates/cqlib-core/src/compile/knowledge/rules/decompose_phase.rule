@@ -19,6 +19,12 @@ rule decompose_phase_to_rz {
     rewrite { RZ(theta) 0, GPhase(theta/2) }
 }
 
+// Keep phase-specialized U gates lowerable to a U-native target basis.
+rule decompose_phase_to_u {
+    match { Phase(theta) 0 }
+    rewrite { U(0, 0, theta) 0 }
+}
+
 rule decompose_phase_to_rx_ry {
     match { Phase(theta) 0 }
     rewrite { RX(-π/2) 0, RY(theta) 0, RX(π/2) 0, GPhase(theta/2) }

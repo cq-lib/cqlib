@@ -117,3 +117,83 @@ fn linear_derivation_handles_insertions_and_deletions() {
         )
     );
 }
+
+#[test]
+fn resolved_comparison_uses_values_across_parameter_tables() {
+    use super::resolved_params_are_equal;
+    use crate::circuit::{CircuitParam, Parameter};
+
+    let mut before = Circuit::new(1);
+    let mut after = Circuit::new(1);
+    before.add_parameter(Parameter::symbol("theta"));
+    after.add_parameter(Parameter::symbol("phi"));
+    after.add_parameter(Parameter::symbol("theta"));
+    assert!(!resolved_params_are_equal(
+        &before,
+        &[CircuitParam::Index(0)],
+        &after,
+        &[CircuitParam::Index(0)],
+    ));
+    assert!(resolved_params_are_equal(
+        &before,
+        &[CircuitParam::Index(0)],
+        &after,
+        &[CircuitParam::Index(1)],
+    ));
+    assert!(!resolved_params_are_equal(
+        &before,
+        &[],
+        &after,
+        &[CircuitParam::Fixed(0.0)]
+    ));
+}
+
+#[test]
+fn resolved_comparison_preserves_structure_without_constant_folding() {
+    use super::resolved_params_are_equal;
+    use crate::circuit::{CircuitParam, Parameter};
+
+    let mut circuit = Circuit::new(1);
+    circuit.add_parameter(Parameter::from(0.5));
+    circuit.add_parameter(Parameter::pi());
+    assert!(resolved_params_are_equal(
+        &circuit,
+        &[CircuitParam::Fixed(0.5)],
+        &circuit,
+        &[CircuitParam::Index(0)],
+    ));
+    assert!(!resolved_params_are_equal(
+        &circuit,
+        &[CircuitParam::Fixed(std::f64::consts::PI)],
+        &circuit,
+        &[CircuitParam::Index(1)],
+    ));
+}
+
+#[test]
+fn invalid_parameters_cannot_establish_operation_equivalence() {
+    use super::operations_are_equivalent;
+    use crate::circuit::CircuitParam;
+
+    let mut circuit = Circuit::new(1);
+    circuit.rx(Qubit::new(0), 0.5).unwrap();
+    let valid = &circuit.operations()[0];
+    for param in [
+        CircuitParam::Index(99),
+        CircuitParam::Fixed(f64::NAN),
+        CircuitParam::Fixed(f64::INFINITY),
+        CircuitParam::Fixed(f64::NEG_INFINITY),
+    ] {
+        let mut invalid = valid.clone();
+        invalid.params[0] = param;
+        assert!(!operations_are_equivalent(
+            &circuit, &invalid, &circuit, &invalid
+        ));
+        assert!(!operations_are_equivalent(
+            &circuit, valid, &circuit, &invalid
+        ));
+        assert!(!operations_are_equivalent(
+            &circuit, &invalid, &circuit, valid
+        ));
+    }
+}

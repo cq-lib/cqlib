@@ -50,6 +50,40 @@ fn test_qaoa_ansatz_default_mixer() {
 }
 
 #[test]
+fn test_qaoa_non_finite_scale_factor_returns_error() {
+    let mut h = Hamiltonian::new(1);
+    for _ in 0..2 {
+        h.add_term("Z".parse().unwrap(), f64::MAX.into()).unwrap();
+    }
+
+    for strategy in [
+        EvolutionStrategy::Exact,
+        EvolutionStrategy::Auto { steps: 2 },
+        EvolutionStrategy::Trotter {
+            mode: TrotterMode::FirstOrder,
+            steps: 2,
+        },
+        EvolutionStrategy::Trotter {
+            mode: TrotterMode::SecondOrder,
+            steps: 2,
+        },
+        EvolutionStrategy::Trotter {
+            mode: TrotterMode::Randomized(42),
+            steps: 2,
+        },
+    ] {
+        let result = QAOAAnsatz::new(h.clone())
+            .unwrap()
+            .evolution_strategy(strategy)
+            .build_circuit("p");
+        assert!(matches!(
+            result,
+            Err(CircuitError::InvalidOperation(message)) if message.contains("scale factor")
+        ));
+    }
+}
+
+#[test]
 fn test_qaoa_custom_mixer() {
     let mut h_c = Hamiltonian::new(2);
     h_c.add_term("ZZ".parse().unwrap(), 0.5.into()).unwrap();

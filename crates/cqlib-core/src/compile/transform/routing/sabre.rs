@@ -25,7 +25,7 @@
 //!   Returns [`SabreRouteResult`], which wraps a [`RoutedCircuit`] and adds
 //!   the layout score.
 
-use crate::circuit::{Circuit, CircuitParam, Parameter, Qubit};
+use crate::circuit::{Circuit, Qubit};
 use crate::compile::CompilerError;
 use crate::compile::device_planning::DevicePlanningSession;
 use crate::compile::sabre::{
@@ -39,6 +39,7 @@ use crate::compile::transform::layout::{
     prepare_sabre_device_target_with_session_and_physical, prepare_sabre_topology_target,
     prepare_sabre_topology_target_with_prepared, sabre_route_selection_prepared,
 };
+use crate::compile::transform::rewrite::resolved_params_are_equal;
 use crate::compile::transform::{QubitBijection, RewriteEdits};
 use crate::device::{Device, Layout, LogicalQubit, PhysicalQubit};
 use std::collections::HashMap;
@@ -304,12 +305,7 @@ fn routed_gap_bijection(
         if source.instruction != target.instruction
             || source.label != target.label
             || source.qubits.len() != target.qubits.len()
-            || source.params.len() != target.params.len()
-            || !source
-                .params
-                .iter()
-                .zip(&target.params)
-                .all(|(left, right)| resolve_param(original, left) == resolve_param(routed, right))
+            || !resolved_params_are_equal(original, &source.params, routed, &target.params)
         {
             return None;
         }
@@ -328,13 +324,6 @@ fn routed_gap_bijection(
     let mut pairs = forward.into_iter().collect::<Vec<_>>();
     pairs.sort_by_key(|(source, target)| (*source, *target));
     Some(QubitBijection { pairs })
-}
-
-fn resolve_param(circuit: &Circuit, parameter: &CircuitParam) -> Option<Parameter> {
-    match parameter {
-        CircuitParam::Fixed(value) => Some(Parameter::from(*value)),
-        CircuitParam::Index(index) => circuit.parameters().get_index(*index as usize).cloned(),
-    }
 }
 
 /// Full SABRE pipeline result: layout selection + routing.

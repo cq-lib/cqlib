@@ -14,14 +14,13 @@ use super::*;
 use crate::circuit::{MCGate, ParameterValue, UnitaryGate};
 use crate::compile::device_planning::cost::MetricAvailability;
 use crate::compile::test_utils::build_device_synthesis_context;
-use crate::compile::transform::decompose::unitary::TwoQubitUnitaryDecomposeBasis;
 use crate::compile::transform::decompose::unitary::unitary_2q::{
     plan_numeric_2q_unitary_for_device, take_best_device_unitary_candidate,
 };
 use crate::device::{EdgeProp, InstructionProp};
 
 #[test]
-fn pre_layout_prefers_broad_family_over_single_calibrated_edge() {
+fn pre_layout_preserves_full_pair_coverage_with_one_calibrated_edge() {
     let p1 = PhysicalQubit::new(1);
     let p2 = PhysicalQubit::new(2);
     let mut device = Device::bidirectional_line("coverage", 4)
@@ -65,13 +64,17 @@ fn pre_layout_prefers_broad_family_over_single_calibrated_edge() {
         .unwrap()
         .candidate;
 
-    assert_eq!(selected.backend, TwoQubitUnitaryDecomposeBasis::Cx);
-    assert!(selected.operations.iter().all(|operation| {
-        !matches!(
-            operation.instruction,
-            ValueInstruction::Instruction(Instruction::Standard(StandardGate::CZ))
-        )
-    }));
+    // Phase -> U also makes CZ decompositions executable on the U/CX edges.
+    // Either backend can now have full coverage; the calibrated CZ edge must
+    // not entice selection of a sequence that only works on that single pair.
+    let evaluation = context
+        .evaluate_pre_layout(&selected.operations, qubits)
+        .unwrap();
+    assert_eq!(evaluation.coverage, DeviceCoverageKey::default());
+    assert_eq!(
+        evaluation.domain,
+        context.data.eligible_pairs.iter().copied().collect()
+    );
     assert!(selected.operations.iter().all(|operation| {
         operation
             .params

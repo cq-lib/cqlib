@@ -628,3 +628,32 @@ fn occurrence_index_is_ordered_and_only_used_for_sparse_keys() {
         CandidatePositions::Linear(_)
     ));
 }
+
+#[test]
+fn match_cache_reports_invalid_parameters_without_panicking() {
+    use crate::circuit::CircuitParam;
+    use crate::compile::CompilerError;
+
+    let mut circuit = Circuit::new(1);
+    circuit.rx(Qubit::new(0), 0.5).unwrap();
+    for param in [
+        CircuitParam::Index(99),
+        CircuitParam::Fixed(f64::NAN),
+        CircuitParam::Fixed(f64::INFINITY),
+        CircuitParam::Fixed(f64::NEG_INFINITY),
+    ] {
+        let missing_index = matches!(param, CircuitParam::Index(_));
+        let mut operation = circuit.operations()[0].clone();
+        operation.params[0] = param;
+        let error =
+            BlockMatchCache::new_with_diagnostics(&circuit, &[operation], false).unwrap_err();
+        let CompilerError::InvalidInput(message) = error else {
+            panic!("unexpected error: {error}");
+        };
+        if missing_index {
+            assert_eq!(message, "invalid rewrite parameter index 99");
+        } else {
+            assert!(message.contains("invalid rewrite parameter"), "{message}");
+        }
+    }
+}

@@ -20,9 +20,9 @@
 //!
 //! One parameter-aware specialization sits on top of the static rule graph:
 //! fixed-parameter `U` gates are re-synthesized numerically by the `euler_1q`
-//! module so degenerate angles collapse to the shortest half-rotation
-//! sequence. The dynamic candidate is used only when its physical output cost
-//! is strictly below the static plan's; ties keep the static path.
+//! module using continuous-axis or half-rotation candidates with degenerate
+//! angles simplified. The dynamic candidate is used only when its physical
+//! output cost is strictly below the static plan's; ties keep the static path.
 
 use crate::circuit::{
     Circuit, ClassicalControlOp, Instruction, Operation, Parameter, ParameterValue, Qubit,
@@ -39,10 +39,14 @@ use crate::compile::transform::decompose::unitary::euler_1q::{
     Euler1qCandidate, synthesize_euler_1q_candidates,
 };
 use crate::compile::transform::decompose::unitary::synthesize_numeric_1q_unitary;
-use crate::compile::transform::lowering_support::{LoweringTarget, OperationSequenceLowerer};
+use crate::compile::transform::lowering_support::{
+    LowerableOperation, LoweringTarget, OperationSequenceLowerer,
+};
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::transformer::{PassApplicability, WorkflowPass};
-use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
+use crate::compile::transform::{
+    Canonicalizer, CircuitAnalysis, OptimizeOneQubitRuns, TransformOutcome, Transformer,
+};
 use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -118,14 +122,6 @@ struct PlanCost {
     two_qubit_ops: usize,
     parameterized_ops: usize,
     rule_id: usize,
-}
-
-#[derive(Debug, Clone)]
-struct LowerableOperation {
-    instruction: Instruction,
-    qubits: SmallVec<[Qubit; 3]>,
-    params: SmallVec<[ParameterValue; 1]>,
-    label: Option<Box<str>>,
 }
 
 struct CircuitLowerer<'a> {
@@ -219,25 +215,9 @@ fn instruction_requires_lowering(instruction: &Instruction, plans: &LoweringPlan
 }
 
 fn control_flow_requires_lowering(control: &ClassicalControlOp, plans: &LoweringPlans) -> bool {
-    match control {
-        ClassicalControlOp::If(op) => {
-            operations_require_lowering(op.then_body().operations(), plans)
-                || op
-                    .else_body()
-                    .is_some_and(|body| operations_require_lowering(body.operations(), plans))
-        }
-        ClassicalControlOp::While(op) => operations_require_lowering(op.body().operations(), plans),
-        ClassicalControlOp::For(op) => operations_require_lowering(op.body().operations(), plans),
-        ClassicalControlOp::Switch(op) => {
-            op.cases()
-                .iter()
-                .any(|case| operations_require_lowering(case.body().operations(), plans))
-                || op
-                    .default()
-                    .is_some_and(|body| operations_require_lowering(body.operations(), plans))
-        }
-        ClassicalControlOp::Break | ClassicalControlOp::Continue => false,
-    }
+    control
+        .bodies()
+        .any(|body| operations_require_lowering(body.operations(), plans))
 }
 
 impl TargetBasisSignature {
@@ -300,12 +280,54 @@ impl TargetBasisCostModel {
         qubits: Vec<Qubit>,
         operations: Vec<ValueOperation>,
     ) -> Result<TargetBasisCost, CompilerError> {
+        Self::count_lowered(&self.lower_fixed_operations(qubits, operations)?)
+    }
+
+    /// Two-qubit scoring includes one existing local cleanup pass. The 1Q
+    /// optimizer calls `cost_of_fixed_operations`, so scoring never recurses.
+    pub(crate) fn cost_after_local_cleanup(
+        &self,
+        qubits: Vec<Qubit>,
+        operations: Vec<ValueOperation>,
+    ) -> Result<TargetBasisCost, CompilerError> {
+        let lowered = self.lower_fixed_operations(qubits, operations)?;
+        Self::count_lowered(&self.cleanup_lowered(lowered)?)
+    }
+
+    fn lower_fixed_operations(
+        &self,
+        qubits: Vec<Qubit>,
+        operations: Vec<ValueOperation>,
+    ) -> Result<Circuit, CompilerError> {
         let source = Circuit::from_operations(qubits, operations, None, None)
             .map_err(CompilerError::Circuit)?;
         let lowered = match self.lowerer.transform(&source, None)? {
             TransformOutcome::Unchanged => source,
             TransformOutcome::Changed(lowered) => lowered,
         };
+        Ok(lowered)
+    }
+
+    fn cleanup_lowered(&self, mut circuit: Circuit) -> Result<Circuit, CompilerError> {
+        let canonicalizer = Canonicalizer::production();
+        let optimizer = OptimizeOneQubitRuns::basis_with_cost_model(Arc::new(self.clone()));
+        for pass in [&canonicalizer as &dyn Transformer, &optimizer] {
+            if let TransformOutcome::Changed(next) = pass.transform(&circuit, None)? {
+                circuit = next;
+            }
+        }
+        if self.lowerer.requires_lowering(&circuit)
+            && let TransformOutcome::Changed(next) = self.lowerer.transform(&circuit, None)?
+        {
+            circuit = next;
+        }
+        if let TransformOutcome::Changed(next) = canonicalizer.transform(&circuit, None)? {
+            circuit = next;
+        }
+        Ok(circuit)
+    }
+
+    fn count_lowered(lowered: &Circuit) -> Result<TargetBasisCost, CompilerError> {
         let mut cost = TargetBasisCost::default();
         let mut depths = HashMap::new();
         for operation in lowered.operations() {
@@ -609,7 +631,7 @@ impl<'a> CircuitLowerer<'a> {
             })?;
         if key.is_implicit() {
             self.changed = true;
-            target.accumulate_phase(gphase_param(&operation)?);
+            target.accumulate_phase(operation.gphase_param()?);
             return Ok(());
         }
         if self.plans.is_physical(&key) {
@@ -1068,13 +1090,6 @@ fn instantiate_rule_param(
         }
     };
     Ok(ParameterValue::from(parameter))
-}
-
-fn gphase_param(operation: &LowerableOperation) -> Result<Parameter, CompilerError> {
-    let phase = operation.params.first().ok_or_else(|| {
-        CompilerError::InvariantViolation("GPhase operation must contain one parameter".to_string())
-    })?;
-    Ok(Parameter::from(phase))
 }
 
 fn key_rule_sort_value(key: &KnowledgeInstructionKey) -> usize {

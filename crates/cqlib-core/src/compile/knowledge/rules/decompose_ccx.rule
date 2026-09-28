@@ -121,7 +121,7 @@ rule decompose_ccx_to_rz_x2p_x_cz {
         CZ 0 1,
         X2P 1, RZ(π/2) 1,
         X2P 2, RZ(5*π/4) 2, X2P 2, RZ(π/2) 2,
-        GPhase(13*π/8)
+        GPhase(21*π/8)
     }
 }
 
@@ -249,7 +249,7 @@ rule decompose_h_ccx_h_to_rz_x2p_cz {
         CZ 0 1,
         X2P 1, RZ(π/2) 1,
         X2P 2, RZ(3*π/4) 2,
-        GPhase(13*π/8)
+        GPhase(21*π/8)
     }
 }
 

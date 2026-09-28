@@ -263,36 +263,21 @@ rule merge_y2m_to_y {
 }
 
 rule merge_rxy {
-    match {
-        RXY(a, phi) 0,
-        RXY(b, phi) 0
-    }
-
-    rewrite {
-        RXY(a + b, phi) 0
-    }
+    match { RXY(a, phi_a) 0, RXY(b, phi_b) 0 }
+    require { phi_b - phi_a == 0 mod 2*π }
+    rewrite { RXY(a + b, phi_a) 0 }
 }
 
 rule merge_xy2p {
-    match {
-        XY2P(a) 0,
-        XY2P(a) 0
-    }
-
-    rewrite {
-        XY(a) 0
-    }
+    match { XY2P(a) 0, XY2P(b) 0 }
+    require { b - a == 0 mod 2*π }
+    rewrite { XY(a) 0 }
 }
 
 rule merge_xy2m {
-    match {
-        XY2M(a) 0,
-        XY2M(a) 0
-    }
-
-    rewrite {
-        XY(π + a) 0
-    }
+    match { XY2M(a) 0, XY2M(b) 0 }
+    require { b - a == 0 mod 2*π }
+    rewrite { XY(π + a) 0 }
 }
 
 rule merge_fsim {
@@ -310,4 +295,16 @@ rule merge_xy2m_xy2p_to_xy {
     match { XY2M(a) 0, XY2P(b) 0 }
     require { b - a == π mod 2*π }
     rewrite { XY(π + a) 0 }
+}
+
+// General equatorial pi-pulse products and opposite-axis rotations.
+rule merge_xy_pair_to_rz {
+    match { XY(a) 0, XY(b) 0 }
+    rewrite { RZ(2*(b - a)) 0, GPhase(π) }
+}
+
+rule merge_rxy_opposite_axis {
+    match { RXY(a, phi_a) 0, RXY(b, phi_b) 0 }
+    require { phi_b - phi_a == π mod 2*π }
+    rewrite { RXY(a - b, phi_a) 0 }
 }

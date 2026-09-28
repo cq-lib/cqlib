@@ -19,10 +19,7 @@
 //! `RY` and `RZ` use the Vale sequence directly. `RX` is reduced to `RZ` by
 //! Hadamard conjugation.
 
-use super::{
-    Su2RotationAxis,
-    utils::{scale_parameter, validate_distinct_qubits},
-};
+use super::{Su2RotationAxis, utils::validate_distinct_qubits};
 use crate::circuit::{ParameterValue, Qubit, StandardGate, operation::ValueOperation};
 use crate::compile::error::CompilerError;
 use crate::compile::transform::decompose::mc_gate::mcx::decompose_mcx_n_dirty;
@@ -73,8 +70,8 @@ pub fn decompose_mc_su2_no_aux(
     let (first_group, second_group) = controls.split_at(first_group_len);
     let first_mcx = decompose_mcx_n_dirty(first_group, target, second_group)?;
     let second_mcx = decompose_mcx_n_dirty(second_group, target, first_group)?;
-    let negative_quarter_theta = scale_parameter(theta, -0.25);
-    let positive_quarter_theta = scale_parameter(theta, 0.25);
+    let negative_quarter_theta = theta.scaled(-0.25);
+    let positive_quarter_theta = theta.scaled(0.25);
     let inner_rotation = match axis {
         Su2RotationAxis::X => StandardGate::RZ,
         Su2RotationAxis::Y | Su2RotationAxis::Z => axis.rotation_gate(),

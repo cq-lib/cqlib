@@ -21,6 +21,7 @@ pub mod evolution;
 pub mod hamiltonian;
 pub mod metrics;
 pub mod pauli;
+mod sampling;
 pub mod state;
 
 /// Converts a QisError to the appropriate Python exception.
@@ -34,6 +35,7 @@ pub(crate) fn qis_error_to_py_err(err: QisError) -> PyErr {
 /// Register the qis submodule.
 pub fn register_qis_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let qis_module = PyModule::new(parent.py(), "qis")?;
+    qis_module.add_function(wrap_pyfunction!(sampling::sample, &qis_module)?)?;
 
     // Register evolution types
     qis_module.add_class::<evolution::PyTrotterMode>()?;

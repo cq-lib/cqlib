@@ -19,6 +19,7 @@ from .policy import ResourcePolicy as ResourcePolicy
 
 class ResourceError(CqlibError):
     """Base exception for ancillary-resource management failures."""
+
     ...
 
 class ResourceUnavailableError(ResourceError):
@@ -28,6 +29,7 @@ class ResourceUnavailableError(ResourceError):
     candidate and try another. Other ``ResourceError`` instances indicate an
     invalid request or inconsistent planner state and should not be ignored.
     """
+
     ...
 
 __all__ = [

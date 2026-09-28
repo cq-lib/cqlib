@@ -12,8 +12,6 @@
 
 import copy
 import sys
-import threading
-import time
 
 import numpy as np
 import pytest
@@ -174,29 +172,14 @@ def test_transform_results_have_value_equality() -> None:
     "run",
     [canonicalize_circuit, lambda circuit: Canonicalizer().run(circuit)],
 )
-def test_canonicalization_releases_gil(run) -> None:
+def test_canonicalization_releases_gil(run, assert_releases_gil) -> None:
     circuit = Circuit(1)
     for _ in range(20_000):
         circuit.h(0)
 
-    started = threading.Event()
-    finished = threading.Event()
-    progressed = threading.Event()
-
-    def worker() -> None:
-        started.wait()
-        time.sleep(0.01)
-        if not finished.is_set():
-            progressed.set()
-
-    thread = threading.Thread(target=worker)
-    thread.start()
-    started.set()
-    run(circuit)
-    finished.set()
-    thread.join()
-
-    assert progressed.is_set()
+    # Fast implementations may finish a call before the worker is scheduled.
+    # Retry within a bounded window instead of requiring any minimum call time.
+    assert_releases_gil(lambda: run(circuit))
 
 
 def test_zero_round_limit_is_rejected_when_run() -> None:

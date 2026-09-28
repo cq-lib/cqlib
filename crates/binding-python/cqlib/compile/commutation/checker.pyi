@@ -193,9 +193,7 @@ class CommutationChecker:
     def config(self) -> CommutationConfig:
         """Return a copy of the active checker configuration."""
         ...
-    def check(
-        self, lhs: ValueOperation, rhs: ValueOperation
-    ) -> Commutation | None:
+    def check(self, lhs: ValueOperation, rhs: ValueOperation) -> Commutation | None:
         """Prove whether two concrete operation applications commute.
 
         ``ValueOperation`` parameters are passed through without numeric
@@ -213,9 +211,7 @@ class CommutationChecker:
         """Return an independent deep copy of this checker."""
         ...
 
-def check_commutation(
-    lhs: ValueOperation, rhs: ValueOperation
-) -> Commutation | None:
+def check_commutation(lhs: ValueOperation, rhs: ValueOperation) -> Commutation | None:
     """Check commutation using the shared builtin checker.
 
     Args:

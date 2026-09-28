@@ -45,6 +45,7 @@ mod session;
 
 pub use config::{RewriteConfig, RewriteMode};
 pub use diagnostics::KnowledgeRewriteDiagnostics;
+pub(crate) use edit::resolved_params_are_equal;
 pub(crate) use edit::{OperationReplacement, QubitBijection, RewriteEdits};
 pub use rewriter::{
     KnowledgeRewriteResult, KnowledgeRewriteStats, KnowledgeRewriter, rewrite_circuit,
@@ -54,3 +55,6 @@ pub(crate) use session::{KnowledgeRewriteSession, RewriteExecutionRecord};
 #[cfg(test)]
 #[path = "./rewrite_test.rs"]
 mod rewrite_test;
+
+#[cfg(test)]
+mod qcis_rules_test;

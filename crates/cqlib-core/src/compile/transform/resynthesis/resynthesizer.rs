@@ -773,29 +773,9 @@ fn has_fixed_numeric_two_qubit_standard(operations: &[Operation], circuit: &Circ
 }
 
 fn control_has_fixed_numeric_2q(control: &ClassicalControlOp, circuit: &Circuit) -> bool {
-    match control {
-        ClassicalControlOp::If(op) => {
-            has_fixed_numeric_two_qubit_standard(op.then_body().operations(), circuit)
-                || op.else_body().is_some_and(|body| {
-                    has_fixed_numeric_two_qubit_standard(body.operations(), circuit)
-                })
-        }
-        ClassicalControlOp::While(op) => {
-            has_fixed_numeric_two_qubit_standard(op.body().operations(), circuit)
-        }
-        ClassicalControlOp::For(op) => {
-            has_fixed_numeric_two_qubit_standard(op.body().operations(), circuit)
-        }
-        ClassicalControlOp::Switch(op) => {
-            op.cases()
-                .iter()
-                .any(|case| has_fixed_numeric_two_qubit_standard(case.body().operations(), circuit))
-                || op.default().is_some_and(|body| {
-                    has_fixed_numeric_two_qubit_standard(body.operations(), circuit)
-                })
-        }
-        ClassicalControlOp::Break | ClassicalControlOp::Continue => false,
-    }
+    control
+        .bodies()
+        .any(|body| has_fixed_numeric_two_qubit_standard(body.operations(), circuit))
 }
 
 #[cfg(test)]

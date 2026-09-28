@@ -170,12 +170,14 @@ dependencies = [
  "cbindgen",
  "cqlib-core",
  "libc",
+ "ndarray 0.17.2",
  "num-complex",
+ "rustworkx-core",
 ]
 
 [[package]]
 name = "binding-python"
-version = "1.4.0-beta1"
+version = "2.0.0-beta1"
 dependencies = [
  "chrono",
  "cqlib-core",
@@ -491,6 +493,7 @@ dependencies = [
  "rustworkx-core",
  "serde",
  "serde_json",
+ "sha2",
  "smallvec",
  "symb_anafis",
  "thiserror 2.0.18",

@@ -15,12 +15,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cache
+import hashlib
 import os
 from pathlib import Path
 import struct
+import subprocess
+import tempfile
 import zlib
 
 import pytest
+import resvg_py
 
 import cqlib
 import cqlib._native as cqlib_native
@@ -31,6 +36,54 @@ import cqlib.visualization as vis
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _FIGURE_ROOT = Path(__file__).resolve().parent / "figure"
+_FONT_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/standard_fonts/LiberationSans-Regular.ttf"
+_FONT_SHA256 = "f8ace1f892b2bd9dc1792ba7f097fa7588f84fed48321480e04de5390828221f"
+
+
+@cache
+def _visual_font() -> Path:
+    """Use the same verified font as the Rust tests, including installed-wheel tests."""
+    override = os.environ.get("CQLIB_VISUAL_FONT")
+    cache_root = Path(os.environ.get("CARGO_TARGET_DIR", tempfile.gettempdir()))
+    path = (
+        Path(override)
+        if override
+        else cache_root / "cqlib-visual-fonts" / "LiberationSans-Regular.ttf"
+    )
+    if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == _FONT_SHA256:
+        return path
+    assert not override, f"{path} is missing or has the wrong SHA-256"
+    result = subprocess.run(
+        [
+            "curl",
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--max-time",
+            "45",
+            "--retry",
+            "1",
+            _FONT_URL,
+        ],
+        capture_output=True,
+        check=False,
+        timeout=100,
+    )
+    assert (
+        result.returncode == 0
+        and hashlib.sha256(result.stdout).hexdigest() == _FONT_SHA256
+    ), (
+        f"visual-test font download failed or SHA-256 mismatch: {result.stderr.decode(errors='replace')}; "
+        "set CQLIB_VISUAL_FONT to a verified font for offline tests"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(result.stdout)
+    return path
 
 
 @dataclass(frozen=True)
@@ -44,6 +97,7 @@ class _RgbImage:
 class _VisualCasePaths:
     actual_svg: Path
     actual_png: Path
+    exported_png: Path
     reference_png: Path
     diff_png: Path
 
@@ -150,6 +204,7 @@ def _visual_case_paths(filename: str) -> _VisualCasePaths:
     return _VisualCasePaths(
         actual_svg=_FIGURE_ROOT / filename.replace(".png", ".svg"),
         actual_png=_FIGURE_ROOT / filename,
+        exported_png=_FIGURE_ROOT / filename.replace(".png", "_export.png"),
         reference_png=references_dir / filename,
         diff_png=diffs_dir / f"diff_{filename}",
     )
@@ -316,10 +371,6 @@ def _save_diff_and_similarity(
     actual_png: Path, reference_png: Path, diff_png: Path
 ) -> float:
     actual = _load_png_rgb(actual_png)
-    if not reference_png.exists():
-        reference_png.write_bytes(actual_png.read_bytes())
-        return 1.0
-
     reference = _load_png_rgb(reference_png)
     width = max(actual.width, reference.width)
     height = max(actual.height, reference.height)
@@ -327,6 +378,9 @@ def _save_diff_and_similarity(
     reference_padded = _pad_rgb_to_canvas(reference, width, height)
     ratio = _similarity_ratio(actual_padded, reference_padded)
     _save_diff_png(actual_padded, reference_padded, width, height, diff_png)
+    assert (actual.width, actual.height) == (reference.width, reference.height), (
+        f"image dimensions changed: actual {actual_png}, reference {reference_png}, diff {diff_png}"
+    )
     return ratio
 
 
@@ -334,18 +388,38 @@ def _assert_visual_match(filename: str, render):
     paths = _visual_case_paths(filename)
 
     svg = render(str(paths.actual_svg))
-    render(str(paths.actual_png))
+    # Exercise the public PNG exporter; compare with a fixed font independently
+    # of OS font discovery, just as the Rust visual tests do.
+    render(str(paths.exported_png))
+    exported = _load_png_rgb(paths.exported_png)
+    assert exported.width > 0 and exported.height > 0
 
     assert isinstance(svg, str)
     assert paths.actual_svg.read_text(encoding="utf-8").startswith("<svg")
+
+    paths.actual_png.write_bytes(
+        resvg_py.svg_to_bytes(
+            svg_string=str(svg),
+            skip_system_fonts=True,
+            font_files=[str(_visual_font())],
+            font_family="Liberation Sans",
+            sans_serif_family="Liberation Sans",
+            serif_family="Liberation Sans",
+            monospace_family="Liberation Sans",
+        )
+    )
+    assert paths.reference_png.is_file(), (
+        f"missing visual reference: {paths.reference_png}"
+    )
 
     ratio = _save_diff_and_similarity(
         paths.actual_png, paths.reference_png, paths.diff_png
     )
     threshold = _visual_threshold()
     assert ratio >= threshold, (
-        f"Similarity ratio {ratio:.4f} < {threshold:.4f} for {filename}; "
-        f"diff written to {paths.diff_png}"
+        f"Similarity ratio {ratio:.6f} < {threshold:.6f} for {filename}; "
+        f"actual: {paths.actual_png}; reference: {paths.reference_png}; "
+        f"diff: {paths.diff_png}; SVG: {paths.actual_svg}; font: Liberation Sans"
     )
     return svg
 

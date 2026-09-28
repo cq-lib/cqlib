@@ -18,9 +18,7 @@
 //! on more than two qubits, while preserving existing 2-qubit standard gates
 //! that are already routable.
 
-use crate::circuit::{
-    Circuit, ClassicalControlOp, Instruction, Operation, StandardGate, ValueOperation,
-};
+use crate::circuit::{Circuit, Instruction, Operation, StandardGate, ValueOperation};
 use crate::compile::CompilerError;
 use crate::compile::transform::analysis::WorkflowCircuitAnalysis;
 use crate::compile::transform::rebuild::CircuitRebuildContext;
@@ -165,14 +163,12 @@ fn can_directly_lower_top_level_ccx(operations: &[Operation]) -> bool {
             {
                 return false;
             }
-            Instruction::ClassicalControl(op) => {
-                let mut nested_unroutable = false;
-                for_each_control_body(op, |body| {
-                    nested_unroutable |= has_unroutable_gate_like_operation(body.operations());
-                });
-                if nested_unroutable {
-                    return false;
-                }
+            Instruction::ClassicalControl(op)
+                if op
+                    .bodies()
+                    .any(|body| has_unroutable_gate_like_operation(body.operations())) =>
+            {
+                return false;
             }
             _ => {}
         }
@@ -300,16 +296,12 @@ fn has_unroutable_gate_like_operation(operations: &[Operation]) -> bool {
                     return true;
                 }
             }
-            Instruction::ClassicalControl(op) => {
-                let mut found = false;
-                for_each_control_body(op, |body| {
-                    if !found {
-                        found = has_unroutable_gate_like_operation(body.operations());
-                    }
-                });
-                if found {
-                    return true;
-                }
+            Instruction::ClassicalControl(op)
+                if op
+                    .bodies()
+                    .any(|body| has_unroutable_gate_like_operation(body.operations())) =>
+            {
+                return true;
             }
             _ => {}
         }
@@ -327,9 +319,9 @@ fn collect_routable_two_qubit_gates(operations: &[Operation], basis: &mut Vec<St
                 }
             }
             Instruction::ClassicalControl(op) => {
-                for_each_control_body(op, |body| {
+                for body in op.bodies() {
                     collect_routable_two_qubit_gates(body.operations(), basis);
-                });
+                }
             }
             _ => {}
         }
@@ -352,48 +344,15 @@ fn validate_routing_basis_contract(operations: &[Operation]) -> Result<(), Compi
                 )));
             }
             Instruction::ClassicalControl(op) => {
-                let mut result = Ok(());
-                for_each_control_body(op, |body| {
-                    if result.is_ok() {
-                        result = validate_routing_basis_contract(body.operations());
-                    }
-                });
-                result?;
+                for body in op.bodies() {
+                    validate_routing_basis_contract(body.operations())?;
+                }
             }
             _ => {}
         }
     }
 
     Ok(())
-}
-
-fn for_each_control_body(
-    op: &ClassicalControlOp,
-    mut visit: impl FnMut(&crate::circuit::ControlBody),
-) {
-    match op {
-        ClassicalControlOp::If(op) => {
-            visit(op.then_body());
-            if let Some(body) = op.else_body() {
-                visit(body);
-            }
-        }
-        ClassicalControlOp::While(op) => {
-            visit(op.body());
-        }
-        ClassicalControlOp::For(op) => {
-            visit(op.body());
-        }
-        ClassicalControlOp::Switch(op) => {
-            for case in op.cases() {
-                visit(case.body());
-            }
-            if let Some(body) = op.default() {
-                visit(body);
-            }
-        }
-        ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
-    }
 }
 
 #[cfg(test)]

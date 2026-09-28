@@ -1185,6 +1185,36 @@ fn fixed_for_loop_multiplies_execution_path_two_qubit_depth() {
         .unwrap();
 
     assert_eq!(two_qubit_depth(circuit.operations()), 3);
+    assert_eq!(two_qubit_operation_count(circuit.operations()), 1);
+    assert_eq!(operation_count(circuit.operations()), 2);
+}
+
+#[test]
+fn structural_counts_include_all_branches_and_nested_default_bodies() {
+    let mut circuit = Circuit::new(2);
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    circuit
+        .switch(ClassicalExpr::uint_literal(2, 0).unwrap(), |cases| {
+            cases.value(0, |body| body.cx(q0, q1))?;
+            cases.value(1, |body| body.h(q0))?;
+            cases.default(|body| {
+                body.if_else(
+                    ClassicalExpr::bool_literal(true),
+                    |body| body.cx(q0, q1),
+                    |body| {
+                        body.cx(q0, q1)?;
+                        body.cx(q0, q1)
+                    },
+                )
+            })
+        })
+        .unwrap();
+
+    // Five gates and two control nodes are stored, regardless of reachability.
+    assert_eq!(operation_count(circuit.operations()), 7);
+    assert_eq!(two_qubit_operation_count(circuit.operations()), 4);
+    assert_eq!(two_qubit_depth(circuit.operations()), 2);
 }
 
 #[test]

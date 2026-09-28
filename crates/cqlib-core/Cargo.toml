@@ -29,6 +29,7 @@ include = [
     "src/compile/knowledge/rules/*.rule",
     "src/ir/qasm2/parser.lalrpop",
     "src/visualization/circuit/styles/*.json",
+    "src/visualization/**/figure/references/*.png",
     "build.rs",
     "Cargo.toml",
     "README.md",
@@ -65,6 +66,7 @@ lalrpop.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true
+sha2 = "0.10.9"
 
 [[bench]]
 name = "two_qubit_synthesis_cache"

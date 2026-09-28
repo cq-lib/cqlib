@@ -5178,27 +5178,13 @@ fn two_qubit_operation_count(operations: &[Operation]) -> usize {
     operations
         .iter()
         .map(|operation| match &operation.instruction {
-            Instruction::ClassicalControl(ClassicalControlOp::If(op)) => {
-                two_qubit_operation_count(op.then_body().operations())
-                    + op.else_body()
-                        .map(|body| two_qubit_operation_count(body.operations()))
-                        .unwrap_or(0)
-            }
-            Instruction::ClassicalControl(ClassicalControlOp::While(op)) => {
-                two_qubit_operation_count(op.body().operations())
-            }
-            Instruction::ClassicalControl(ClassicalControlOp::For(op)) => {
-                two_qubit_operation_count(op.body().operations())
-            }
-            Instruction::ClassicalControl(ClassicalControlOp::Switch(op)) => {
-                op.cases()
-                    .iter()
-                    .map(|case| two_qubit_operation_count(case.body().operations()))
-                    .sum::<usize>()
-                    + op.default()
-                        .map(|body| two_qubit_operation_count(body.operations()))
-                        .unwrap_or(0)
-            }
+            Instruction::ClassicalControl(
+                ClassicalControlOp::Break | ClassicalControlOp::Continue,
+            ) => usize::from(operation.qubits.len() == 2),
+            Instruction::ClassicalControl(control) => control
+                .bodies()
+                .map(|body| two_qubit_operation_count(body.operations()))
+                .sum(),
             _ => usize::from(operation.qubits.len() == 2),
         })
         .sum()
@@ -5276,27 +5262,10 @@ fn operation_count(operations: &[Operation]) -> usize {
         .iter()
         .map(|operation| {
             1 + match &operation.instruction {
-                Instruction::ClassicalControl(ClassicalControlOp::If(op)) => {
-                    operation_count(op.then_body().operations())
-                        + op.else_body()
-                            .map(|body| operation_count(body.operations()))
-                            .unwrap_or(0)
-                }
-                Instruction::ClassicalControl(ClassicalControlOp::While(op)) => {
-                    operation_count(op.body().operations())
-                }
-                Instruction::ClassicalControl(ClassicalControlOp::For(op)) => {
-                    operation_count(op.body().operations())
-                }
-                Instruction::ClassicalControl(ClassicalControlOp::Switch(op)) => {
-                    op.cases()
-                        .iter()
-                        .map(|case| operation_count(case.body().operations()))
-                        .sum::<usize>()
-                        + op.default()
-                            .map(|body| operation_count(body.operations()))
-                            .unwrap_or(0)
-                }
+                Instruction::ClassicalControl(control) => control
+                    .bodies()
+                    .map(|body| operation_count(body.operations()))
+                    .sum::<usize>(),
                 _ => 0,
             }
         })

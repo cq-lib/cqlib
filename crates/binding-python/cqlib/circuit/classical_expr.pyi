@@ -109,7 +109,9 @@ class ClassicalExpr:
         """Bool-typed greater-or-equal comparison."""
         ...
     @staticmethod
-    def select(condition: ClassicalExpr, then_expr: ClassicalExpr, else_expr: ClassicalExpr) -> ClassicalExpr:
+    def select(
+        condition: ClassicalExpr, then_expr: ClassicalExpr, else_expr: ClassicalExpr
+    ) -> ClassicalExpr:
         """Ternary conditional: returns ``then_expr`` if condition is true, else ``else_expr``."""
         ...
     def extract_bit(self, index: int) -> ClassicalExpr:

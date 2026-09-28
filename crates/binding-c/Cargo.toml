@@ -11,7 +11,9 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 [dependencies]
 cqlib-core = { path = "../cqlib-core", version = "0.1.0-beta.1" }
 libc = "0.2"
+ndarray.workspace = true
 num-complex.workspace = true
+rustworkx-core.workspace = true
 
 [build-dependencies]
 cbindgen.workspace = true

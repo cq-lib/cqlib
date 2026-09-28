@@ -471,3 +471,233 @@ rule move_x1_cz {
     match { X 1, CZ 0 1 }
     rewrite { CZ 0 1, Z 0, X 1 }
 }
+
+// Shortening identities, in circuit execution order; preserve scalar phases.
+rule identity_rz_xy_absorb {
+    match { RZ(a) 0, XY(b) 0 }
+    rewrite { XY(b - a/2) 0 }
+}
+
+rule identity_xy_rz_absorb {
+    match { XY(b) 0, RZ(a) 0 }
+    rewrite { XY(b + a/2) 0 }
+}
+
+rule compose_rz_xy2p_rz {
+    match { RZ(a) 0, XY2P(b) 0, RZ(c) 0 }
+    rewrite { XY2P(b - a) 0, RZ(a + c) 0 }
+}
+
+rule compose_rz_xy2p_rz_cancel {
+    match { RZ(a) 0, XY2P(b) 0, RZ(c) 0 }
+    require { a + c == 0 mod 4*π }
+    rewrite { XY2P(b - a) 0 }
+}
+
+rule compose_rz_xy2p_rz_global_phase {
+    match { RZ(a) 0, XY2P(b) 0, RZ(c) 0 }
+    require { a + c == 2*π mod 4*π }
+    rewrite { XY2P(b - a) 0, GPhase(π) }
+}
+
+rule compose_rz_xy2m_rz {
+    match { RZ(a) 0, XY2M(b) 0, RZ(c) 0 }
+    rewrite { XY2M(b - a) 0, RZ(a + c) 0 }
+}
+
+rule compose_rz_xy2m_rz_cancel {
+    match { RZ(a) 0, XY2M(b) 0, RZ(c) 0 }
+    require { a + c == 0 mod 4*π }
+    rewrite { XY2M(b - a) 0 }
+}
+
+rule compose_rz_xy2m_rz_global_phase {
+    match { RZ(a) 0, XY2M(b) 0, RZ(c) 0 }
+    require { a + c == 2*π mod 4*π }
+    rewrite { XY2M(b - a) 0, GPhase(π) }
+}
+
+rule compose_rz_rxy_rz {
+    match { RZ(a) 0, RXY(theta, b) 0, RZ(c) 0 }
+    rewrite { RXY(theta, b - a) 0, RZ(a + c) 0 }
+}
+
+rule compose_rz_rxy_rz_cancel {
+    match { RZ(a) 0, RXY(theta, b) 0, RZ(c) 0 }
+    require { a + c == 0 mod 4*π }
+    rewrite { RXY(theta, b - a) 0 }
+}
+
+rule compose_rz_rxy_rz_global_phase {
+    match { RZ(a) 0, RXY(theta, b) 0, RZ(c) 0 }
+    require { a + c == 2*π mod 4*π }
+    rewrite { RXY(theta, b - a) 0, GPhase(π) }
+}
+
+rule compose_x2p_rz_x2m {
+    match { X2P 0, RZ(a) 0, X2M 0 }
+    rewrite { RY(a) 0 }
+}
+
+rule compose_x2m_rz_x2p {
+    match { X2M 0, RZ(a) 0, X2P 0 }
+    rewrite { RY(-a) 0 }
+}
+
+rule compose_y2m_rz_y2p {
+    match { Y2M 0, RZ(a) 0, Y2P 0 }
+    rewrite { RX(a) 0 }
+}
+
+rule compose_y2p_rz_y2m {
+    match { Y2P 0, RZ(a) 0, Y2M 0 }
+    rewrite { RX(-a) 0 }
+}
+
+rule identity_x2p_rz_pi_echo {
+    match { X2P 0, RZ(a) 0, X2P 0 }
+    require { a == π mod 2*π }
+    rewrite { RZ(a) 0 }
+}
+
+rule identity_x2m_rz_pi_echo {
+    match { X2M 0, RZ(a) 0, X2M 0 }
+    require { a == π mod 2*π }
+    rewrite { RZ(a) 0 }
+}
+
+rule identity_y2p_rz_pi_echo {
+    match { Y2P 0, RZ(a) 0, Y2P 0 }
+    require { a == π mod 2*π }
+    rewrite { RZ(a) 0 }
+}
+
+rule identity_y2m_rz_pi_echo {
+    match { Y2M 0, RZ(a) 0, Y2M 0 }
+    require { a == π mod 2*π }
+    rewrite { RZ(a) 0 }
+}
+
+rule identity_xy2p_rz_pi_echo {
+    match { XY2P(phi) 0, RZ(a) 0, XY2P(phi) 0 }
+    require { a == π mod 2*π }
+    rewrite { RZ(a) 0 }
+}
+
+rule identity_xy2m_rz_pi_echo {
+    match { XY2M(phi) 0, RZ(a) 0, XY2M(phi) 0 }
+    require { a == π mod 2*π }
+    rewrite { RZ(a) 0 }
+}
+
+// CZ conjugation of pi pulses removes both entanglers; include native RZ targets.
+rule identity_cz_y0_cz {
+    match { CZ 0 1, Y 0, CZ 0 1 }
+    rewrite { Y 0, Z 1 }
+}
+
+rule identity_cz_y0_cz_to_rz {
+    match { CZ 0 1, Y 0, CZ 0 1 }
+    rewrite { Y 0, RZ(π) 1, GPhase(π/2) }
+}
+
+rule identity_cz_y0_cz_swapped {
+    match { CZ 0 1, Y 0, CZ 1 0 }
+    rewrite { Y 0, Z 1 }
+}
+
+rule identity_cz_y0_cz_to_rz_swapped {
+    match { CZ 0 1, Y 0, CZ 1 0 }
+    rewrite { Y 0, RZ(π) 1, GPhase(π/2) }
+}
+
+rule identity_cz_y1_cz {
+    match { CZ 0 1, Y 1, CZ 0 1 }
+    rewrite { Y 1, Z 0 }
+}
+
+rule identity_cz_y1_cz_to_rz {
+    match { CZ 0 1, Y 1, CZ 0 1 }
+    rewrite { Y 1, RZ(π) 0, GPhase(π/2) }
+}
+
+rule identity_cz_y1_cz_swapped {
+    match { CZ 0 1, Y 1, CZ 1 0 }
+    rewrite { Y 1, Z 0 }
+}
+
+rule identity_cz_y1_cz_to_rz_swapped {
+    match { CZ 0 1, Y 1, CZ 1 0 }
+    rewrite { Y 1, RZ(π) 0, GPhase(π/2) }
+}
+
+rule identity_cz_xy0_cz {
+    match { CZ 0 1, XY(phi) 0, CZ 0 1 }
+    rewrite { XY(phi) 0, Z 1 }
+}
+
+rule identity_cz_xy0_cz_to_rz {
+    match { CZ 0 1, XY(phi) 0, CZ 0 1 }
+    rewrite { XY(phi) 0, RZ(π) 1, GPhase(π/2) }
+}
+
+rule identity_cz_xy0_cz_swapped {
+    match { CZ 0 1, XY(phi) 0, CZ 1 0 }
+    rewrite { XY(phi) 0, Z 1 }
+}
+
+rule identity_cz_xy0_cz_to_rz_swapped {
+    match { CZ 0 1, XY(phi) 0, CZ 1 0 }
+    rewrite { XY(phi) 0, RZ(π) 1, GPhase(π/2) }
+}
+
+rule identity_cz_xy1_cz {
+    match { CZ 0 1, XY(phi) 1, CZ 0 1 }
+    rewrite { XY(phi) 1, Z 0 }
+}
+
+rule identity_cz_xy1_cz_to_rz {
+    match { CZ 0 1, XY(phi) 1, CZ 0 1 }
+    rewrite { XY(phi) 1, RZ(π) 0, GPhase(π/2) }
+}
+
+rule identity_cz_xy1_cz_swapped {
+    match { CZ 0 1, XY(phi) 1, CZ 1 0 }
+    rewrite { XY(phi) 1, Z 0 }
+}
+
+rule identity_cz_xy1_cz_to_rz_swapped {
+    match { CZ 0 1, XY(phi) 1, CZ 1 0 }
+    rewrite { XY(phi) 1, RZ(π) 0, GPhase(π/2) }
+}
+
+// Also accept Z after the central RZ(pi) has been specialized.
+rule identity_x2p_z_echo {
+    match { X2P 0, Z 0, X2P 0 }
+    rewrite { Z 0 }
+}
+
+rule identity_x2m_z_echo {
+    match { X2M 0, Z 0, X2M 0 }
+    rewrite { Z 0 }
+}
+
+rule identity_y2p_z_echo {
+    match { Y2P 0, Z 0, Y2P 0 }
+    rewrite { Z 0 }
+}
+
+rule identity_y2m_z_echo {
+    match { Y2M 0, Z 0, Y2M 0 }
+    rewrite { Z 0 }
+}
+
+rule identity_xy2p_z_echo {
+    match { XY2P(phi) 0, Z 0, XY2P(phi) 0 }
+    rewrite { Z 0 }
+}
+
+rule identity_xy2m_z_echo {
+    match { XY2M(phi) 0, Z 0, XY2M(phi) 0 }
+    rewrite { Z 0 }
+}

@@ -446,40 +446,16 @@ impl WorkloadBuilder {
         state: &mut WorkloadState,
     ) -> Result<BTreeSet<LogicalQubit>, CompilerError> {
         let fork = self.add_global_synchronize(state);
-        let branches = match flow {
-            ClassicalControlOp::If(op) => {
-                let mut branches = vec![op.then_body().operations()];
-                if let Some(else_body) = op.else_body() {
-                    branches.push(else_body.operations());
-                }
-                branches
-            }
-            ClassicalControlOp::While(op) => vec![op.body().operations()],
-            ClassicalControlOp::For(op) => vec![op.body().operations()],
-            ClassicalControlOp::Switch(op) => {
-                let mut branches = op
-                    .cases()
-                    .iter()
-                    .map(|case| case.body().operations())
-                    .collect::<Vec<_>>();
-                if let Some(default) = op.default() {
-                    branches.push(default.operations());
-                }
-                branches
-            }
-            ClassicalControlOp::Break | ClassicalControlOp::Continue => Vec::new(),
-        };
-
         let base_frontier = state.wire_frontier.clone();
         let mut cross_branch_frontier = base_frontier.clone();
         let mut all_touched = BTreeSet::new();
         let mut join_parents = BTreeSet::from([fork]);
-        for branch in branches {
+        for body in flow.bodies() {
             let mut branch_state = WorkloadState {
                 wire_frontier: cross_branch_frontier.clone(),
                 global_barrier: Some(fork),
             };
-            let branch_touched = self.add_operations(branch, &mut branch_state)?;
+            let branch_touched = self.add_operations(body.operations(), &mut branch_state)?;
             for &logical in &branch_touched {
                 if let Some(frontier) = branch_state.wire_frontier.get(&logical).copied() {
                     cross_branch_frontier.insert(logical, frontier);

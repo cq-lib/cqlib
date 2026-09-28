@@ -1,4 +1,5 @@
 // This code is part of Cqlib.
+// Modified to support reproducible state sampling.
 //
 // (C) Copyright China Telecom Quantum Group 2026
 //
@@ -9,6 +10,8 @@
 // Any modifications or derivative works of this code must retain this
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
+//
+// Modified to validate terminal measurements and correct density matrix reset.
 
 //! Stabilizer state simulator using the Aaronson-Gottesman tableau algorithm.
 //!
@@ -205,6 +208,8 @@ enum CircuitClassicalMode {
 /// of an X-block and Z-block of packed `u64` words, plus a phase per row.
 #[derive(Debug)]
 pub struct StabilizerState {
+    /// Circuit qubit identifiers mapped to storage positions.
+    qubit_map: super::QubitMap,
     /// Number of qubits.
     pub num_qubits: usize,
     /// Number of `u64` words per block (X-block or Z-block) per row.
@@ -375,6 +380,7 @@ impl StabilizerState {
 
         StabilizerState {
             num_qubits: n,
+            qubit_map: None,
             row_len,
             tableau,
             phases,
@@ -392,6 +398,7 @@ impl StabilizerState {
     /// pre-allocated working buffer per Rayon worker thread.
     fn reset_from(&mut self, source: &StabilizerState) {
         debug_assert_eq!(self.num_qubits, source.num_qubits);
+        self.qubit_map.clone_from(&source.qubit_map);
         debug_assert_eq!(self.row_len, source.row_len);
         self.tableau
             .as_mut_slice()
@@ -1319,10 +1326,18 @@ impl StabilizerState {
     /// for shot in &results { assert_eq!(shot.is_one(0), shot.is_one(1)); }
     /// ```
     pub fn sample_shots(&self, shots: usize) -> Vec<Outcome> {
+        self.sample_shots_with_seed(shots, None)
+    }
+
+    /// Samples using per-shot random streams independent of Rayon scheduling.
+    /// With no seed, preserves the state's existing random stream.
+    pub fn sample_shots_with_seed(&self, shots: usize, seed: Option<u64>) -> Vec<Outcome> {
         // Derive independent seeds sequentially so the overall sequence is
         // deterministic and reproducible from the same initial RNG state.
         let seeds: Vec<u64> = {
-            let mut rng = self.rng.clone();
+            let mut rng = seed
+                .map(SmallRng::seed_from_u64)
+                .unwrap_or_else(|| self.rng.clone());
             (0..shots).map(|_| rng.random()).collect()
         };
         seeds
@@ -1333,6 +1348,11 @@ impl StabilizerState {
                 work.measure_all()
             })
             .collect()
+    }
+
+    /// Seeds the internal RNG for direct circuit sampling.
+    pub(crate) fn seed_rng(&mut self, seed: u64) {
+        self.rng = SmallRng::seed_from_u64(seed);
     }
 
     /// Samples the state using a circuit [`Measurement`] as the output contract.
@@ -1370,11 +1390,21 @@ impl StabilizerState {
         measurement: &Measurement,
         shots: usize,
     ) -> Result<ExecutionResult, QisError> {
-        measurement.check_qubits(self.num_qubits)?;
+        self.sample_with_seed(measurement, shots, None)
+    }
+
+    /// Projects seeded full-state samples onto the requested measurement.
+    pub fn sample_with_seed(
+        &self,
+        measurement: &Measurement,
+        shots: usize,
+        seed: Option<u64>,
+    ) -> Result<ExecutionResult, QisError> {
+        let projection = super::resolve_measurement(measurement, &self.qubit_map, self.num_qubits)?;
 
         let mut counts = HashMap::new();
-        for full in self.sample_shots(shots) {
-            *counts.entry(measurement.project(&full)).or_insert(0usize) += 1;
+        for full in self.sample_shots_with_seed(shots, seed) {
+            *counts.entry(projection.project(&full)).or_insert(0usize) += 1;
         }
 
         Ok(ExecutionResult::from_counts(
@@ -1396,7 +1426,7 @@ impl StabilizerState {
     /// v1 intentionally reuses [`probabilities`](Self::probabilities), so it has
     /// the same `n <= 20` limit. Use [`sample`](Self::sample) for larger states.
     pub fn probs(&self, measurement: &Measurement) -> Result<HashMap<Outcome, f64>, QisError> {
-        measurement.check_qubits(self.num_qubits)?;
+        let projection = super::resolve_measurement(measurement, &self.qubit_map, self.num_qubits)?;
 
         let mut marginal = HashMap::new();
         for (basis, prob) in self.probabilities()?.into_iter().enumerate() {
@@ -1404,7 +1434,7 @@ impl StabilizerState {
                 continue;
             }
             *marginal
-                .entry(measurement.project_basis(basis))
+                .entry(projection.project_basis(basis))
                 .or_insert(0.0) += prob;
         }
         Ok(marginal)
@@ -1413,13 +1443,13 @@ impl StabilizerState {
     /// Constructs a `StabilizerState` by simulating a Clifford circuit.
     ///
     /// This state-level entry point only performs quantum state evolution.
-    /// Measurement and store operations produced by `Circuit::measure*` are
+    /// Terminal measurement and store operations produced by `Circuit::measure*` are
     /// treated as output declarations and ignored here: they do not collapse
     /// the state and do not populate runtime classical data.
     ///
     /// Use [`sample`](Self::sample) or [`probs`](Self::probs) with the returned
     /// [`Measurement`] to query measurement distributions from the final state.
-    /// Use [`apply_circuit`](Self::apply_circuit) when you need execution
+    /// Use [`run_circuit`](Self::run_circuit) when you need execution
     /// semantics where measurements collapse the state and write classical data.
     ///
     /// # Supported instructions
@@ -1427,7 +1457,7 @@ impl StabilizerState {
     /// - Classical data: `MeasureBit`, `MeasureBits`, `Store` are ignored
     /// - Directives: `Reset` (returns qubit to |0⟩), `Barrier`/`Delay` (no-op)
     ///
-    /// [`apply_circuit`]: StabilizerState::apply_circuit
+    /// [`run_circuit`]: StabilizerState::run_circuit
     ///
     /// # Example
     /// ```rust
@@ -1455,6 +1485,14 @@ impl StabilizerState {
 
     /// Applies a Clifford circuit to this stabilizer state in-place.
     ///
+    /// Once bound to circuit qubit IDs, subsequent circuits must have the same
+    /// IDs in the same order. The mapping is committed only on success; gates
+    /// completed before an error are not rolled back.
+    ///
+    /// As in `from_circuit`, terminal measurements are ignored. A measured qubit
+    /// used by a later gate or Reset is rejected before the state is changed.
+    /// Independent gates, repeated measurements, Barrier, Delay, and Store are allowed.
+    ///
     /// This state-level entry point ignores terminal measurement declarations,
     /// matching [`from_circuit`](Self::from_circuit). Use
     /// [`run_circuit`](Self::run_circuit) when runtime classical measurement
@@ -1474,12 +1512,8 @@ impl StabilizerState {
         }
 
         let circuit = input_circuit.decompose()?;
-        let qubits = circuit.qubits();
-        let qubit_map: std::collections::HashMap<_, _> = qubits
-            .iter()
-            .enumerate()
-            .map(|(idx, q)| (*q, idx))
-            .collect();
+        super::validate_terminal_measurements(&circuit)?;
+        let qubit_map = super::prepare_qubit_map(&circuit.qubits(), &self.qubit_map)?;
 
         let parameter_values: Vec<Option<f64>> = circuit
             .parameters()
@@ -1495,7 +1529,9 @@ impl StabilizerState {
             &parameter_values,
             &mut classical,
             CircuitClassicalMode::Ignore,
-        )
+        )?;
+        self.qubit_map = Some(qubit_map);
+        Ok(())
     }
 
     /// Executes a Clifford circuit and returns both the final state and runtime
@@ -1560,6 +1596,8 @@ impl StabilizerState {
             .enumerate()
             .map(|(idx, q)| (*q, idx))
             .collect();
+        let qubit_map = std::sync::Arc::new(qubit_map);
+        state.qubit_map = Some(qubit_map.clone());
 
         let parameter_values: Vec<Option<f64>> = circuit
             .parameters()
@@ -1978,6 +2016,7 @@ impl Clone for StabilizerState {
     fn clone(&self) -> Self {
         StabilizerState {
             num_qubits: self.num_qubits,
+            qubit_map: self.qubit_map.clone(),
             row_len: self.row_len,
             tableau: self.tableau.clone(),
             phases: self.phases.clone(),

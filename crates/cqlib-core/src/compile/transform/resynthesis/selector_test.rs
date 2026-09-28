@@ -751,3 +751,131 @@ fn patch_priority_uses_the_native_quality_policy() {
         Ordering::Greater
     );
 }
+
+#[test]
+fn local_cleanup_cost_reversal_keeps_original() {
+    let q = [Qubit::new(0), Qubit::new(1)];
+    let operations = [
+        standard_op(StandardGate::CX, &q),
+        standard_op(StandardGate::H, &[q[1]]),
+        standard_op(StandardGate::H, &[q[0]]),
+    ];
+    let ops = operations
+        .iter()
+        .enumerate()
+        .map(|(i, op)| view(i, op))
+        .collect::<Vec<_>>();
+    let config = TwoQubitBlockResynthesisConfig::normal(
+        TwoQubitSynthesisTarget::from_standard_gates(
+            vec![StandardGate::RZ, StandardGate::X2P],
+            vec![StandardGate::CZ],
+            true,
+        )
+        .unwrap(),
+    );
+    let commutation = CachedCommutation::new(config.commutation.clone());
+    let patches = select_patches(
+        vec![block(q, vec![0, 1, 2], 2, 1)],
+        &ops,
+        &commutation,
+        &config,
+    )
+    .unwrap();
+    assert!(patches.is_empty(), "{patches:?}");
+}
+
+#[test]
+fn local_cleanup_pruning_matches_eager_selection_with_cold_warm_and_full_caches() {
+    for entangler in [
+        StandardGate::CZ,
+        StandardGate::CX,
+        StandardGate::RXX,
+        StandardGate::RZZ,
+    ] {
+        for seed in 0..4 {
+            let q = if seed % 2 == 0 {
+                [Qubit::new(0), Qubit::new(1)]
+            } else {
+                [Qubit::new(1), Qubit::new(0)]
+            };
+            let mut operations = Vec::new();
+            for i in 0..10 {
+                operations.push(rotation_op(
+                    StandardGate::RX,
+                    &[q[i % 2]],
+                    0.13 * (seed + i) as f64,
+                ));
+                operations.push(
+                    if matches!(entangler, StandardGate::RXX | StandardGate::RZZ) {
+                        rotation_op(entangler, &q, if i % 3 == 0 { 0.0 } else { 0.27 })
+                    } else {
+                        standard_op(entangler, &q)
+                    },
+                );
+            }
+            let ops = operations
+                .iter()
+                .enumerate()
+                .map(|(i, op)| view(i, op))
+                .collect::<Vec<_>>();
+            let target = TwoQubitSynthesisTarget::from_standard_gates(
+                if matches!(entangler, StandardGate::RXX | StandardGate::RZZ) {
+                    vec![StandardGate::RX, StandardGate::RY]
+                } else {
+                    vec![StandardGate::RZ, StandardGate::X2P]
+                },
+                vec![entangler],
+                true,
+            )
+            .unwrap();
+            let config = TwoQubitBlockResynthesisConfig::enhanced(target);
+            let commutation = CachedCommutation::new(config.commutation.clone());
+            let blocks = (0..7)
+                .map(|i| {
+                    TwoQubitNumericBlock::dag_dependency_closed(
+                        q,
+                        (i * 2..i * 2 + 8).collect(),
+                        vec![],
+                        4,
+                        4,
+                        false,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let eager = select_patches(
+                (0..7)
+                    .map(|i| block(q, (i * 2..i * 2 + 8).collect(), 4, 4))
+                    .collect(),
+                &ops,
+                &commutation,
+                &config,
+            )
+            .unwrap();
+            assert!(!eager.is_empty(), "entangler={entangler:?}, seed={seed}");
+            for budget in [0, 1, 4096] {
+                let mut cache = TwoQubitSynthesisCache::new(budget);
+                cache.ensure_namespace(&config, None);
+                for _ in 0..2 {
+                    let actual = select_patches_with_device_policy(
+                        blocks.clone(),
+                        &ops,
+                        &commutation,
+                        &config,
+                        None,
+                        &mut cache,
+                        NativeQualityPolicy::EntanglerFirst,
+                    )
+                    .unwrap();
+                    assert_eq!(actual.len(), eager.len());
+                    for (a, b) in actual.iter().zip(&eager) {
+                        assert_eq!(a.matched_orders, b.matched_orders);
+                        assert_eq!(a.replacement, b.replacement);
+                        assert_eq!(a.before_cost, b.before_cost);
+                        assert_eq!(a.after_cost, b.after_cost);
+                        assert_eq!(a.synthesis_phase.to_bits(), b.synthesis_phase.to_bits());
+                    }
+                }
+            }
+        }
+    }
+}

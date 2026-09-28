@@ -95,7 +95,9 @@ class ClassicalVar:
     Created by :meth:`Circuit.var`.  The handle is tied to the circuit's
     identity and cannot be used with a different circuit.
     """
-    def __init__(self, circuit_id: CircuitId, index: int, ty: ClassicalType) -> None: ...
+    def __init__(
+        self, circuit_id: CircuitId, index: int, ty: ClassicalType
+    ) -> None: ...
     @property
     def id(self) -> int:
         """Stable identifier combining circuit id and index."""
@@ -126,7 +128,9 @@ class ClassicalValue:
 
     Produced by measurement operations.  Once created the value never changes.
     """
-    def __init__(self, circuit_id: CircuitId, index: int, ty: ClassicalType) -> None: ...
+    def __init__(
+        self, circuit_id: CircuitId, index: int, ty: ClassicalType
+    ) -> None: ...
     @property
     def index(self) -> int:
         """Position of this value within its owning circuit."""

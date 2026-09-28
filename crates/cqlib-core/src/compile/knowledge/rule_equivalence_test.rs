@@ -288,6 +288,77 @@ fn max_diff_strict_detects_global_phase_difference() {
     assert!(max_diff_strict(&lhs, &rhs) > 1.0);
 }
 
+/// Builtin rewrites must preserve the entire unitary, even though the public
+/// Rule::verify API deliberately also accepts equivalence up to global phase.
+/// Evaluate the actual rule circuits, not copied decomposition formulas.
+#[test]
+fn verify_all_builtin_rules_strict_numeric() {
+    use crate::circuit::circuit_to_matrix::circuit_to_matrix;
+
+    let probes = [
+        0.0,
+        PI / 2.0,
+        -PI / 2.0,
+        PI,
+        -PI,
+        2.0 * PI,
+        -2.0 * PI,
+        4.0 * PI,
+        -4.0 * PI,
+        0.173,
+        -1.239,
+        7.19,
+    ];
+    for rule in RuleLibrary::builtin_rules().unwrap().rules() {
+        let lhs = rule_items_to_circuit(&rule.operations, rule.num_qubits()).unwrap();
+        let rhs = rule_items_to_circuit(&rule.target, rule.num_qubits()).unwrap();
+        let symbols = rule.collect_free_symbols();
+        let names = symbols.iter().map(String::as_str).collect::<Vec<_>>();
+        let count = if names.is_empty() { 1 } else { probes.len() };
+        for sample in 0..count {
+            let mut binding = names
+                .iter()
+                .enumerate()
+                .map(|(index, &name)| {
+                    (name.to_owned(), probes[(sample + 3 * index) % probes.len()])
+                })
+                .collect::<HashMap<_, _>>();
+            // Conditions can share symbols. Reapply them to settle the affine
+            // constraints, then explicitly check that this is a valid sample.
+            for _ in 0..4 {
+                for condition in rule.conditions.iter().flatten() {
+                    adjust_binding_for_condition(&mut binding, condition, &names);
+                }
+            }
+            let binding_ref = Some(binding.iter().map(|(k, &v)| (k.as_str(), v)).collect());
+            for condition in rule.conditions.iter().flatten() {
+                let (Condition::Eq(a, b) | Condition::EqMod(a, b, _)) = condition;
+                let delta = a.evaluate(&binding_ref).unwrap() - b.evaluate(&binding_ref).unwrap();
+                let residual = match condition {
+                    Condition::Eq(_, _) => delta,
+                    Condition::EqMod(_, _, modulus) => {
+                        let period = modulus.evaluate(&binding_ref).unwrap();
+                        delta - (delta / period).round() * period
+                    }
+                };
+                assert!(
+                    residual.abs() < 1e-8,
+                    "{}: invalid probe {binding:?}",
+                    rule.name
+                );
+            }
+            let a = circuit_to_matrix(&lhs.assign_parameters(&binding_ref).unwrap(), None).unwrap();
+            let b = circuit_to_matrix(&rhs.assign_parameters(&binding_ref).unwrap(), None).unwrap();
+            let error = max_diff_strict(&a, &b);
+            assert!(
+                error < 1e-9,
+                "{}: strict error {error}, probe {binding:?}",
+                rule.name
+            );
+        }
+    }
+}
+
 /// Layered equivalence check for every rule in the builtin [`RuleLibrary`].
 fn verify_all_builtin_rules_layered_equivalence() {
     let library = RuleLibrary::builtin_rules().unwrap();

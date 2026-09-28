@@ -564,23 +564,7 @@ fn collect_used_parameters(operations: &[Operation], used: &mut BTreeSet<u32>) {
 }
 
 fn collect_control_parameters(control: &ClassicalControlOp, used: &mut BTreeSet<u32>) {
-    match control {
-        ClassicalControlOp::If(op) => {
-            collect_used_parameters(op.then_body().operations(), used);
-            if let Some(body) = op.else_body() {
-                collect_used_parameters(body.operations(), used);
-            }
-        }
-        ClassicalControlOp::While(op) => collect_used_parameters(op.body().operations(), used),
-        ClassicalControlOp::For(op) => collect_used_parameters(op.body().operations(), used),
-        ClassicalControlOp::Switch(op) => {
-            for case in op.cases() {
-                collect_used_parameters(case.body().operations(), used);
-            }
-            if let Some(body) = op.default() {
-                collect_used_parameters(body.operations(), used);
-            }
-        }
-        ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+    for body in control.bodies() {
+        collect_used_parameters(body.operations(), used);
     }
 }

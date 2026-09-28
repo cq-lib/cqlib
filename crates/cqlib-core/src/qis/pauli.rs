@@ -43,7 +43,7 @@
 
 use crate::qis::error::{PauliStringParseError, QisError};
 use bitvec::prelude::*;
-use ndarray::{Array2, arr2};
+use ndarray::{Array2, arr2, linalg::kron};
 use num_complex::Complex64;
 use std::fmt;
 use std::ops::{Add, AddAssign, Mul, MulAssign};
@@ -617,7 +617,7 @@ impl PauliString {
     pub fn to_matrix(&self) -> Array2<Complex64> {
         let mut matrix = Array2::from_elem((1, 1), Complex64::new(1.0, 0.0));
         for qubit in (0..self.num_qubits).rev() {
-            matrix = kronecker_product(&matrix, &self.get_pauli(qubit).to_matrix());
+            matrix = kron(&matrix, &self.get_pauli(qubit).to_matrix());
         }
 
         let phase = self.phase.to_complex();
@@ -954,30 +954,6 @@ impl PauliString {
             _ => 0,
         }
     }
-}
-
-fn kronecker_product(left: &Array2<Complex64>, right: &Array2<Complex64>) -> Array2<Complex64> {
-    let (left_rows, left_cols) = left.dim();
-    let (right_rows, right_cols) = right.dim();
-    let mut result = Array2::from_elem(
-        (left_rows * right_rows, left_cols * right_cols),
-        Complex64::new(0.0, 0.0),
-    );
-
-    for left_row in 0..left_rows {
-        for left_col in 0..left_cols {
-            for right_row in 0..right_rows {
-                for right_col in 0..right_cols {
-                    result[[
-                        left_row * right_rows + right_row,
-                        left_col * right_cols + right_col,
-                    ]] = left[[left_row, left_col]] * right[[right_row, right_col]];
-                }
-            }
-        }
-    }
-
-    result
 }
 
 /// Multiplies two Pauli strings, returning a new instance.

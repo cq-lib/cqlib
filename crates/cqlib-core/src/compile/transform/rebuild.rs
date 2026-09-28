@@ -302,7 +302,7 @@ impl CircuitRebuildContext {
     /// parameter suitable for a rebuilt operation.
     ///
     /// [`CircuitParam::Index`] is resolved against `source`'s parameter table.
-    /// [`CircuitParam::Fixed`] values are constant-folded when possible.
+    /// Resolved parameters are converted to fixed values when constant evaluation succeeds.
     pub fn resolve_source_param(
         source: &Circuit,
         param: &CircuitParam,
@@ -501,6 +501,39 @@ impl CircuitRebuildContext {
 mod tests {
     use super::*;
     use crate::circuit::StandardGate;
+
+    #[test]
+    fn source_resolution_folds_constants_but_parameter_value_preserves_representation() {
+        use crate::circuit::{CircuitError, Parameter};
+
+        let mut source = Circuit::new(1);
+        let (index, _) = source.add_parameter(Parameter::pi());
+        let param = CircuitParam::Index(index as u32);
+        assert!(matches!(source.parameter_value(&param).unwrap(),
+            ParameterValue::Param(value) if value == Parameter::pi()));
+        assert!(
+            matches!(CircuitRebuildContext::resolve_source_param(&source, &param).unwrap(),
+            ParameterValue::Fixed(value) if value == std::f64::consts::PI)
+        );
+        let (index, _) = source.add_parameter(Parameter::symbol("theta"));
+        assert!(
+            matches!(CircuitRebuildContext::resolve_source_param(&source, &CircuitParam::Index(index as u32)).unwrap(),
+            ParameterValue::Param(value) if value == Parameter::symbol("theta"))
+        );
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let param = CircuitParam::Fixed(value);
+            assert!(
+                matches!(source.parameter_value(&param).unwrap(), ParameterValue::Fixed(stored) if stored.to_bits() == value.to_bits())
+            );
+            assert!(matches!(
+                CircuitRebuildContext::resolve_source_param(&source, &param),
+                Err(CompilerError::Circuit(CircuitError::InvalidParameterValue(
+                    0,
+                    _
+                )))
+            ));
+        }
+    }
 
     #[test]
     fn preserved_rebuild_remaps_runtime_classical_handles_recursively() {

@@ -1,4 +1,5 @@
 // This code is part of Cqlib.
+// Modified to verify repeated post-processing of collected estimates.
 //
 // (C) Copyright China Telecom Quantum Group 2026
 //
@@ -114,7 +115,7 @@ fn test_error_mitigation_new_validates_supported_methods() {
 
 #[test]
 fn test_error_mitigation_requires_run_before_get_mitigated() {
-    let mut mitigation = ErrorMitigation::new(
+    let mitigation = ErrorMitigation::new(
         Circuit::new(1),
         MitigationMethod::Zne(ZneConfig {
             fold_levels: vec![0, 1],
@@ -242,13 +243,13 @@ fn test_error_mitigation_zne_run_then_get_mitigated() {
         }
     );
 
-    let second_err = mitigation
+    let second = mitigation
         .get_mitigated(ProcessArgs::Zne {
             method: ExtrapolateMethod::Polynomial,
             degree: Some(1),
         })
-        .unwrap_err();
-    assert!(matches!(second_err, ErrorMitigationError::AlreadyMitigated));
+        .unwrap();
+    assert_eq!(second, mitigated);
 }
 
 #[test]
@@ -293,4 +294,10 @@ fn test_error_mitigation_vd_run_then_get_mitigated() {
 
     assert!((mitigated.expectation - 0.75).abs() < 1e-12);
     assert!((mitigated.variance.unwrap() - 0.203125).abs() < 1e-12);
+    assert_eq!(
+        mitigation
+            .get_mitigated(ProcessArgs::VirtualDistillation)
+            .unwrap(),
+        mitigated
+    );
 }

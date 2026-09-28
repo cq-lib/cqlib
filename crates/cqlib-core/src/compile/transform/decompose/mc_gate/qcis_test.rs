@@ -107,6 +107,29 @@ fn symbolic_xy_angle_is_preserved() {
 }
 
 #[test]
+fn constant_xy_angle_expression_is_preserved() {
+    let phi = Parameter::from(0.731);
+    for gate in [StandardGate::XY2P, StandardGate::XY2M] {
+        let operations = decompose_qcis_no_aux(
+            gate,
+            &[ParameterValue::Param(phi.clone())],
+            &[Qubit::new(0)],
+            Qubit::new(1),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            operations[0].params.as_slice(),
+            [ParameterValue::Param(actual)] if actual.evaluate(&None).unwrap() == -0.731
+        ));
+        assert!(matches!(
+            operations[2].params.as_slice(),
+            [ParameterValue::Param(actual)] if actual == &phi
+        ));
+    }
+}
+
+#[test]
 fn no_aux_decompositions_match_mcgate_semantics_exactly() {
     for num_controls in 1..=3 {
         let controls: Vec<_> = (0..num_controls)

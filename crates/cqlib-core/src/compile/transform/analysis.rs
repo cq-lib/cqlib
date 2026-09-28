@@ -179,24 +179,8 @@ impl WorkflowCircuitAnalysis {
     }
 
     fn scan_control_flow(&mut self, op: &ClassicalControlOp) {
-        match op {
-            ClassicalControlOp::If(op) => {
-                self.scan_operations(op.then_body().operations());
-                if let Some(body) = op.else_body() {
-                    self.scan_operations(body.operations());
-                }
-            }
-            ClassicalControlOp::While(op) => self.scan_operations(op.body().operations()),
-            ClassicalControlOp::For(op) => self.scan_operations(op.body().operations()),
-            ClassicalControlOp::Switch(op) => {
-                for case in op.cases() {
-                    self.scan_operations(case.body().operations());
-                }
-                if let Some(body) = op.default() {
-                    self.scan_operations(body.operations());
-                }
-            }
-            ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
+        for body in op.bodies() {
+            self.scan_operations(body.operations());
         }
     }
 }

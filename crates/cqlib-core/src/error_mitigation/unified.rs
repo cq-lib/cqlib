@@ -1,4 +1,5 @@
 // This code is part of Cqlib.
+// Modified to allow repeated post-processing of collected estimates.
 //
 // (C) Copyright China Telecom Quantum Group 2026
 //
@@ -113,7 +114,6 @@ pub struct MitigatedResult {
 enum ErrorMitigationState {
     Initialized,
     RunCompleted(Box<RunRecord>),
-    Mitigated(MitigatedResult),
 }
 
 #[derive(Debug, Clone)]
@@ -124,20 +124,14 @@ enum RunRecord {
 
 #[derive(Debug, Clone)]
 struct ZneRunRecord {
-    folded_circuits: Vec<Circuit>,
     noisy_expectations: Vec<f64>,
     noise_factors: Vec<i32>,
-    gate_set: Option<Vec<Instruction>>,
-    shots: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
 struct VirtualDistillationRunRecord {
-    copy_swap_circuit: Circuit,
     numerator: (f64, f64),
     denominator: (f64, f64),
-    shots_numerator: usize,
-    shots_denominator: usize,
 }
 
 /// Unified facade over supported error-mitigation methods.
@@ -340,9 +334,6 @@ impl ErrorMitigation {
         match self.state {
             ErrorMitigationState::Initialized => {}
             ErrorMitigationState::RunCompleted(_) => return Err(ErrorMitigationError::AlreadyRun),
-            ErrorMitigationState::Mitigated(_) => {
-                return Err(ErrorMitigationError::AlreadyMitigated);
-            }
         }
 
         let run_record = match (&self.method, run_args) {
@@ -374,7 +365,8 @@ impl ErrorMitigation {
     /// Produces the final mitigated result from the stored raw execution outputs.
     ///
     /// `run()` must be called first. The provided [`ProcessArgs`] must match the
-    /// configured mitigation method.
+    /// configured mitigation method. This method can be called repeatedly with
+    /// different processing arguments; it does not consume data or rerun the estimator.
     ///
     /// # Example
     ///
@@ -424,7 +416,7 @@ impl ErrorMitigation {
     /// assert!(mitigated.expectation.is_finite());
     /// ```
     pub fn get_mitigated(
-        &mut self,
+        &self,
         process_args: ProcessArgs,
     ) -> Result<MitigatedResult, ErrorMitigationError> {
         let mitigated = match (&self.method, &self.state, process_args) {
@@ -433,10 +425,6 @@ impl ErrorMitigation {
             }
             (MitigationMethod::VirtualDistillation(_), ErrorMitigationState::Initialized, _) => {
                 return Err(ErrorMitigationError::RunRequiredBeforeMitigation);
-            }
-            (_, ErrorMitigationState::Mitigated(cached), _) => {
-                let _ = cached;
-                return Err(ErrorMitigationError::AlreadyMitigated);
             }
             (
                 MitigationMethod::Zne(config),
@@ -472,7 +460,6 @@ impl ErrorMitigation {
             }
         };
 
-        self.state = ErrorMitigationState::Mitigated(mitigated.clone());
         Ok(mitigated)
     }
 
@@ -518,11 +505,8 @@ impl ErrorMitigation {
             .collect();
 
         Ok(ZneRunRecord {
-            folded_circuits,
             noisy_expectations,
             noise_factors: zne.noise_factors().to_vec(),
-            gate_set,
-            shots,
         })
     }
 
@@ -554,11 +538,8 @@ impl ErrorMitigation {
         let denominator = estimator(&copy_swap_circuit, None, Some(shots_denominator));
 
         Ok(VirtualDistillationRunRecord {
-            copy_swap_circuit,
             numerator,
             denominator,
-            shots_numerator,
-            shots_denominator,
         })
     }
 
@@ -571,13 +552,8 @@ impl ErrorMitigation {
     ) -> Result<MitigatedResult, ErrorMitigationError> {
         let zne = ZNEMitigation::new(self.circuit.clone(), config.fold_levels.clone());
 
-        debug_assert_eq!(
-            record.folded_circuits.len(),
-            record.noisy_expectations.len()
-        );
         debug_assert_eq!(record.noise_factors, zne.noise_factors().to_vec());
         debug_assert_eq!(record.noise_factors.len(), record.noisy_expectations.len());
-        let _ = (&record.gate_set, record.shots);
         let degree = match method {
             ExtrapolateMethod::Polynomial => {
                 degree.unwrap_or_else(|| record.noisy_expectations.len().saturating_sub(1).min(1))
@@ -596,8 +572,6 @@ impl ErrorMitigation {
         &self,
         record: &VirtualDistillationRunRecord,
     ) -> Result<MitigatedResult, ErrorMitigationError> {
-        debug_assert!(record.copy_swap_circuit.width() >= self.circuit.width());
-        let _ = (record.shots_numerator, record.shots_denominator);
         let (expectation, variance) = VirtualDistillation::mitigate_from_statistics(
             record.numerator.0,
             record.numerator.1,

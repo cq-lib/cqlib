@@ -18,6 +18,13 @@ fn main() {
     cbindgen::Builder::new()
         .with_crate(crate_dir)
         .with_language(cbindgen::Language::C)
+        // num_complex::Complex64 is referenced by QIS signatures but is not a
+        // cbindgen-known type; define it as a plain struct of two doubles.
+        .with_after_include(
+            "/* Complex64 mirrors num_complex::Complex<f64> as interleaved\n\
+             * (real, imag) double pairs. */\n\
+             typedef struct Complex64 {\n  double re;\n  double im;\n} Complex64;\n",
+        )
         .generate()
         .expect("Unable to generate bindings")
         .write_to_file("include/cqlib_c.h");

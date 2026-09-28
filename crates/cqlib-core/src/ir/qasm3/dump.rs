@@ -12,7 +12,6 @@
 
 //! OpenQASM 3 serializer.
 
-use crate::circuit::circuit_param::CircuitParam;
 use crate::circuit::gate::{
     CircuitGate, ClassicalDataOp, Directive, FrozenCircuit, Instruction, StandardGate,
 };
@@ -324,10 +323,7 @@ fn dump_global_phase(
     if phase.is_zero() {
         return Ok(());
     }
-    let mut phase = phase.clone();
-    for (symbol, replacement) in param_map {
-        phase = phase.replace(symbol, replacement.clone());
-    }
+    let phase = phase.substitute_many_simultaneous(param_map);
     writeln!(output, "gphase({});", phase.to_string().replace("π", "pi"))?;
     Ok(())
 }
@@ -606,7 +602,7 @@ fn dump_operations(
             }
             Instruction::Directive(directive) => dump_directive(directive, op, output, qubit_map)?,
             Instruction::CircuitGate(gate) => {
-                let params = format_params(op, circuit, param_map);
+                let params = format_params(op, circuit, param_map)?;
                 let qubits = map_qubits(op, qubit_map);
                 writeln!(output, "{}{} {};", gate.name, params, qubits.join(","))?;
             }
@@ -1061,7 +1057,7 @@ fn dump_standard_gate(
     param_map: &HashMap<String, Parameter>,
 ) -> Result<(), Qasm3DumpError> {
     let name = standard_gate_name(*gate)?;
-    let params = format_params(op, circuit, param_map);
+    let params = format_params(op, circuit, param_map)?;
     let qubits = map_qubits(op, qubit_map);
     if *gate == StandardGate::GPhase {
         writeln!(output, "gphase{};", params)?;
@@ -1142,7 +1138,7 @@ fn dump_mc_gate(
             )));
         }
     };
-    let params = format_params(op, circuit, param_map);
+    let params = format_params(op, circuit, param_map)?;
     let qubits = map_qubits(op, qubit_map);
     writeln!(output, "{}{} {};", name, params, qubits.join(","))?;
     Ok(())
@@ -1330,39 +1326,43 @@ fn classical_expr_to_qasm(
 }
 
 fn resolve_param(
-    circuit_param: &CircuitParam,
+    op: &Operation,
+    param_index: usize,
     circuit: &Circuit,
     param_map: &HashMap<String, Parameter>,
-) -> Parameter {
-    let mut param = match circuit_param {
-        CircuitParam::Fixed(value) => Parameter::from(*value),
-        CircuitParam::Index(index) => circuit.parameters()[*index as usize].clone(),
-    };
-
-    for (symbol, replacement) in param_map {
-        param = param.replace(symbol, replacement.clone());
-    }
-    param
+) -> Result<Parameter, Qasm3DumpError> {
+    let param = circuit
+        .resolve_parameter(&op.params[param_index])
+        .map_err(|error| {
+            let error = match error {
+                crate::circuit::CircuitError::InvalidParameterValue(_, value) => {
+                    crate::circuit::CircuitError::InvalidParameterValue(param_index, value)
+                }
+                error => error,
+            };
+            Qasm3DumpError::FormatError(format!(
+                "invalid parameter {param_index} for {:?}: {error}",
+                op.instruction
+            ))
+        })?;
+    Ok(param.substitute_many_simultaneous(param_map))
 }
 
 fn format_params(
     op: &Operation,
     circuit: &Circuit,
     param_map: &HashMap<String, Parameter>,
-) -> String {
+) -> Result<String, Qasm3DumpError> {
     if op.params.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
-    let params = op
-        .params
-        .iter()
-        .map(|param| {
-            resolve_param(param, circuit, param_map)
-                .to_string()
-                .replace("π", "pi")
+    let params = (0..op.params.len())
+        .map(|index| {
+            resolve_param(op, index, circuit, param_map)
+                .map(|param| param.to_string().replace("π", "pi"))
         })
-        .collect::<Vec<_>>();
-    format!("({})", params.join(","))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!("({})", params.join(",")))
 }
 
 fn map_qubits(op: &Operation, qubit_map: &HashMap<Qubit, String>) -> Vec<String> {

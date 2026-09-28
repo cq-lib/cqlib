@@ -137,7 +137,9 @@ class RuleLibrary:
     def metadata(self, id: RuleId) -> RuleMetadata | None: ...
     def id_by_name(self, name: str) -> RuleId | None: ...
     def get_by_name(self, name: str) -> Rule | None: ...
-    def candidates_for_first_instruction(self, instruction: Instruction) -> list[RuleId]:
+    def candidates_for_first_instruction(
+        self, instruction: Instruction
+    ) -> list[RuleId]:
         """Return rules indexed under an instruction's matcher key.
 
         Raises:
@@ -145,7 +147,11 @@ class RuleLibrary:
         """
         ...
     def rules_by_kind(self, kind: RuleKind) -> list[RuleId]: ...
-    def filter_rule_ids_by_instruction_keys(self, op_instructions: Sequence[Instruction], target_instructions: Sequence[Instruction]) -> list[RuleId]:
+    def filter_rule_ids_by_instruction_keys(
+        self,
+        op_instructions: Sequence[Instruction],
+        target_instructions: Sequence[Instruction],
+    ) -> list[RuleId]:
         """Select rules whose complete match and target instruction sets fit the supplied bases."""
         ...
     def __contains__(self, name: str) -> bool: ...
@@ -165,6 +171,7 @@ def loads(source: str) -> list[Rule]:
         ValueError: For syntax, lowering, arity, or duplicate-name errors.
     """
     ...
+
 def load(path: str | PathLike[str]) -> list[Rule]:
     """Read and parse a DSL file.
 
@@ -173,9 +180,11 @@ def load(path: str | PathLike[str]) -> list[Rule]:
         ValueError: If DSL parsing or lowering fails.
     """
     ...
+
 def dumps(rule: Rule) -> str:
     """Serialize one runtime rule to canonical DSL text."""
     ...
+
 def dump(rule_or_rules: Rule | Sequence[Rule], path: str | PathLike[str]) -> None:
     """Write one or more rules; multiple rules are separated by a blank line.
 

@@ -12,7 +12,7 @@
 
 //! Rewrite-local edit scripts and routing equivalence metadata.
 
-use crate::circuit::{Circuit, CircuitParam, Operation, Parameter, Qubit};
+use crate::circuit::{Circuit, CircuitParam, Operation, Qubit};
 use std::ops::Range;
 
 /// One exact replacement in a flat operation sequence.
@@ -257,22 +257,27 @@ pub(crate) fn operations_are_equivalent(
     source.instruction == target.instruction
         && source.label == target.label
         && source.qubits == target.qubits
-        && source.params.len() == target.params.len()
-        && source
-            .params
-            .iter()
-            .zip(&target.params)
-            .all(|(source_parameter, target_parameter)| {
-                resolve_operation_param(before, source_parameter)
-                    == resolve_operation_param(after, target_parameter)
-            })
+        && resolved_params_are_equal(before, &source.params, after, &target.params)
 }
 
-fn resolve_operation_param(circuit: &Circuit, parameter: &CircuitParam) -> Option<Parameter> {
-    match parameter {
-        CircuitParam::Fixed(value) => Some(Parameter::from(*value)),
-        CircuitParam::Index(index) => circuit.parameters().get_index(*index as usize).cloned(),
-    }
+/// Compares resolved expression structure across circuit-local parameter tables.
+/// Resolution failures cannot establish equality for edit/proof reuse.
+pub(crate) fn resolved_params_are_equal(
+    before: &Circuit,
+    source: &[CircuitParam],
+    after: &Circuit,
+    target: &[CircuitParam],
+) -> bool {
+    source.len() == target.len()
+        && source.iter().zip(target).all(|(left, right)| {
+            match (
+                before.resolve_parameter(left),
+                after.resolve_parameter(right),
+            ) {
+                (Ok(left), Ok(right)) => left == right,
+                _ => false,
+            }
+        })
 }
 
 fn longest_increasing_source_subsequence(candidates: &[(usize, usize)]) -> Vec<(usize, usize)> {

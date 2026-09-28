@@ -1686,3 +1686,79 @@ fn test_dump_qasm_ordering() {
     assert!(h_pos < measure_pos, "H before measure");
     assert!(measure_pos < if_pos, "Measure before if");
 }
+
+#[test]
+fn parameter_errors_propagate_from_gate_export_with_context() {
+    use crate::circuit::{CircuitParam, ParameterValue};
+    use std::collections::HashMap;
+
+    let mut circuit = Circuit::new(1);
+    let qubit = Qubit::new(0);
+    let qubit_map = HashMap::from([(qubit, "q[0]".to_string())]);
+    // RX uses general formatting; RXY uses the QASM2 special expansion path.
+    for (gate, params) in [
+        (StandardGate::RX, vec![ParameterValue::Fixed(0.5)]),
+        (
+            StandardGate::RXY,
+            vec![ParameterValue::Fixed(0.5), ParameterValue::Fixed(0.25)],
+        ),
+    ] {
+        circuit
+            .append(Instruction::Standard(gate), [qubit], params, None)
+            .unwrap();
+        let valid = circuit.operations().last().unwrap();
+        let param_index = valid.params.len() - 1;
+        for param in [
+            CircuitParam::Index(99),
+            CircuitParam::Fixed(f64::NAN),
+            CircuitParam::Fixed(f64::INFINITY),
+            CircuitParam::Fixed(f64::NEG_INFINITY),
+        ] {
+            let mut operation = valid.clone();
+            operation.params[param_index] = param;
+            let mut output = String::new();
+            let error = super::dump_standard_gate(
+                &gate,
+                &operation,
+                &circuit,
+                &mut output,
+                &qubit_map,
+                &HashMap::new(),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, QasmDumpError::FormatError(ref message)
+                if message.contains(&format!("parameter {param_index}"))
+                    && message.contains(&format!("{gate:?}"))),
+                "{error}"
+            );
+            let error = super::operation_to_qasm(&operation, &circuit, &qubit_map, &HashMap::new())
+                .unwrap_err();
+            assert!(matches!(error, QasmDumpError::FormatError(_)));
+        }
+    }
+}
+
+#[test]
+fn export_preserves_indexed_constants_and_symbol_substitution() {
+    use crate::circuit::ParameterValue;
+    use std::collections::HashMap;
+
+    let mut circuit = Circuit::new(1);
+    circuit
+        .rx(Qubit::new(0), ParameterValue::Param(Parameter::pi()))
+        .unwrap();
+    circuit
+        .rx(
+            Qubit::new(0),
+            ParameterValue::Param(Parameter::symbol("theta")),
+        )
+        .unwrap();
+    let qasm = dumps(&circuit).unwrap();
+    assert!(qasm.contains("rx(pi)"), "{qasm}");
+    let replacements = HashMap::from([("theta".to_string(), Parameter::symbol("angle0"))]);
+    assert_eq!(
+        super::format_params(&circuit.operations()[1], &circuit, &replacements).unwrap(),
+        "(angle0)"
+    );
+}

@@ -822,7 +822,9 @@ fn pauli_string_to_matrix_uses_little_endian_tensor_order() {
         ],
     ]);
 
-    assert_eq!(pauli.to_matrix(), expected);
+    let matrix = pauli.to_matrix();
+    assert_eq!(matrix, expected);
+    assert!(matrix.is_standard_layout());
 }
 
 #[test]

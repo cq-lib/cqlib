@@ -11,9 +11,8 @@
 # that they have been altered from the originals.
 
 import copy
-import threading
-import time
 
+import numpy as np
 import pytest
 
 import cqlib.compile as compile_module
@@ -247,29 +246,12 @@ def test_compile_rejects_conflicting_or_orphaned_target_arguments(
     "run",
     [compile, lambda circuit: CompilerWorkflow().run(circuit)],
 )
-def test_compiler_entry_points_release_gil(run) -> None:
+def test_compiler_entry_points_release_gil(run, assert_releases_gil) -> None:
     circuit = Circuit(1)
     for _ in range(20_000):
         circuit.h(0)
 
-    started = threading.Event()
-    finished = threading.Event()
-    progressed = threading.Event()
-
-    def worker() -> None:
-        started.wait()
-        time.sleep(0.01)
-        if not finished.is_set():
-            progressed.set()
-
-    thread = threading.Thread(target=worker)
-    thread.start()
-    started.set()
-    run(circuit)
-    finished.set()
-    thread.join()
-
-    assert progressed.is_set()
+    assert_releases_gil(lambda: run(circuit))
 
 
 def test_device_compile_returns_layout_metadata() -> None:
@@ -334,3 +316,24 @@ def test_workflow_rejects_non_standard_target_instruction_when_run() -> None:
         CompilerConfigError, match="unsupported workflow target instruction"
     ):
         CompilerWorkflow(config).run(Circuit(1))
+
+
+@pytest.mark.parametrize("mode", ["normal", "enhanced"])
+@pytest.mark.parametrize("phase", [0.0, 0.371])
+@pytest.mark.parametrize("qubits", [(0, 1), (1, 0)])
+def test_two_qubit_local_cleanup_cost_reversal(mode, phase, qubits) -> None:
+    source = Circuit(2)
+    control, target = qubits
+    source.cx(control, target)
+    source.h(target)
+    source.h(control)
+    source.set_global_phase(phase)
+
+    output = compile(source, target_basis=["RZ", "X2P", "CZ"], mode=mode).circuit
+
+    assert sum(len(op.qubits) == 2 for op in output.operations) == 1
+    assert len(output.operations) <= 7
+    assert output.depth() <= 6
+    np.testing.assert_allclose(
+        output.to_matrix(), source.to_matrix(), atol=1e-8, rtol=0
+    )

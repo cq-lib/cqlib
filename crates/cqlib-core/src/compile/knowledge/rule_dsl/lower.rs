@@ -207,7 +207,7 @@ fn lower_gate_pattern(pattern: GatePattern) -> Result<LoweredGate, LowerError> {
     let params = pattern
         .params
         .into_iter()
-        .map(lower_param_pattern)
+        .map(ParameterValue::from)
         .collect();
 
     Ok(LoweredGate {
@@ -231,13 +231,6 @@ fn lower_gate_spec(gate: GateSpec) -> Result<Instruction, LowerError> {
             ))))
         }
     }
-}
-
-fn lower_param_pattern(param: crate::circuit::Parameter) -> ParameterValue {
-    if let Ok(value) = param.evaluate(&None) {
-        return ParameterValue::Fixed(value);
-    }
-    ParameterValue::Param(param)
 }
 
 fn validate_unique_qubits(gate: &str, qubits: &[u32]) -> Result<(), LowerError> {

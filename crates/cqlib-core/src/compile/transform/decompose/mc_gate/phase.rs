@@ -123,10 +123,7 @@ fn decompose_normalized_phase_with(
         )]);
     };
 
-    let half_theta = match theta {
-        ParameterValue::Fixed(value) => ParameterValue::Fixed(value * 0.5),
-        ParameterValue::Param(parameter) => ParameterValue::Param(parameter.clone() * 0.5),
-    };
+    let half_theta = theta.scaled(0.5);
     let mut operations = decompose_normalized_phase_with(
         &half_theta,
         phase_controls,

@@ -10,7 +10,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-use super::{ForOp, IfOp, SwitchOp, WhileOp};
+use super::{ControlBody, ForOp, IfOp, SwitchCase, SwitchOp, WhileOp};
 use crate::circuit::{ClassicalValue, ClassicalVar, Qubit};
 use std::collections::BTreeSet;
 use std::fmt;
@@ -58,6 +58,27 @@ pub enum ClassicalControlOp {
 }
 
 impl ClassicalControlOp {
+    /// Borrows direct child bodies without allocating or recursing.
+    ///
+    /// Visits then/else for `if`, the single body for loops, and cases in source
+    /// order followed by default for `switch`. Absent bodies are skipped, but
+    /// present empty bodies are retained. Break and continue have no bodies.
+    /// Conditions and iteration counts do not affect this structural order.
+    pub(crate) fn bodies(&self) -> impl Iterator<Item = &ControlBody> + '_ {
+        let (first, cases, last): (Option<&ControlBody>, &[SwitchCase], Option<&ControlBody>) =
+            match self {
+                Self::If(op) => (Some(op.then_body()), &[], op.else_body()),
+                Self::While(op) => (Some(op.body()), &[], None),
+                Self::For(op) => (Some(op.body()), &[], None),
+                Self::Switch(op) => (None, op.cases(), op.default()),
+                Self::Break | Self::Continue => (None, &[], None),
+            };
+        first
+            .into_iter()
+            .chain(cases.iter().map(SwitchCase::body))
+            .chain(last)
+    }
+
     /// Returns the stable category of this control-flow operation.
     pub const fn kind(&self) -> ClassicalControlKind {
         match self {
@@ -120,19 +141,7 @@ impl ClassicalControlOp {
 
     /// Returns true when any structured body contains a measurement operation.
     pub fn has_measurement(&self) -> bool {
-        match self {
-            Self::If(op) => {
-                op.then_body().has_measurement()
-                    || op.else_body().is_some_and(|body| body.has_measurement())
-            }
-            Self::While(op) => op.body().has_measurement(),
-            Self::For(op) => op.body().has_measurement(),
-            Self::Switch(op) => {
-                op.cases().iter().any(|case| case.body().has_measurement())
-                    || op.default().is_some_and(|body| body.has_measurement())
-            }
-            Self::Break | Self::Continue => false,
-        }
+        self.bodies().any(ControlBody::has_measurement)
     }
 
     /// Returns true when this operation's controlling expressions or structured
@@ -142,19 +151,7 @@ impl ClassicalControlOp {
             return true;
         }
 
-        match self {
-            Self::If(op) => {
-                op.then_body().reads_value(value)
-                    || op.else_body().is_some_and(|body| body.reads_value(value))
-            }
-            Self::While(op) => op.body().reads_value(value),
-            Self::For(op) => op.body().reads_value(value),
-            Self::Switch(op) => {
-                op.cases().iter().any(|case| case.body().reads_value(value))
-                    || op.default().is_some_and(|body| body.reads_value(value))
-            }
-            Self::Break | Self::Continue => false,
-        }
+        self.bodies().any(|body| body.reads_value(value))
     }
 }
 
@@ -168,9 +165,115 @@ impl fmt::Display for ClassicalControlOp {
 mod tests {
     use super::ClassicalControlOp;
     use crate::circuit::{
-        CircuitId, ClassicalExpr, ClassicalType, ClassicalValue, ClassicalVar, ControlBody, ForOp,
-        IfOp, SwitchCase, SwitchOp, WhileOp,
+        Circuit, CircuitId, ClassicalExpr, ClassicalType, ClassicalValue, ClassicalVar,
+        ControlBody, ForOp, IfOp, Instruction, Qubit, SwitchCase, SwitchOp, WhileOp,
     };
+
+    fn assert_bodies(control: &ClassicalControlOp, expected: &[&ControlBody]) {
+        let actual = control.bodies().collect::<Vec<_>>();
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!(std::ptr::eq(actual, *expected));
+        }
+    }
+
+    #[test]
+    fn bodies_preserve_optional_empty_branches_without_recursing() {
+        let mut nested = Circuit::new(1);
+        nested
+            .while_(ClassicalExpr::bool_literal(false), |body| {
+                body.x(Qubit::new(0))
+            })
+            .unwrap();
+        for else_body in [None, Some(ControlBody::new(vec![]))] {
+            let control = ClassicalControlOp::If(
+                IfOp::new(
+                    ClassicalExpr::bool_literal(false),
+                    ControlBody::new(nested.operations().to_vec()),
+                    else_body,
+                )
+                .unwrap(),
+            );
+            let ClassicalControlOp::If(op) = &control else {
+                unreachable!()
+            };
+            if let Some(else_body) = op.else_body() {
+                assert_bodies(&control, &[op.then_body(), else_body]);
+            } else {
+                assert_bodies(&control, &[op.then_body()]);
+            }
+            assert!(matches!(
+                control.bodies().next().unwrap().operations()[0].instruction,
+                Instruction::ClassicalControl(ClassicalControlOp::While(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn bodies_preserve_switch_source_order_and_optional_default() {
+        let empty = ControlBody::new(vec![]);
+        for cases in [
+            vec![],
+            vec![
+                SwitchCase::new(2, empty.clone()),
+                SwitchCase::new(0, empty.clone()),
+            ],
+        ] {
+            for default in [None, Some(empty.clone())] {
+                let control = ClassicalControlOp::Switch(
+                    SwitchOp::new(
+                        ClassicalExpr::uint_literal(2, 0).unwrap(),
+                        cases.clone(),
+                        default,
+                    )
+                    .unwrap(),
+                );
+                let ClassicalControlOp::Switch(op) = &control else {
+                    unreachable!()
+                };
+                let mut expected = Vec::new();
+                if !op.cases().is_empty() {
+                    // The source order is 2, 0, even though the target is 0.
+                    expected.push(op.cases()[0].body());
+                    expected.push(op.cases()[1].body());
+                }
+                if let Some(default) = op.default() {
+                    expected.push(default);
+                }
+                assert_bodies(&control, &expected);
+            }
+        }
+    }
+
+    #[test]
+    fn bodies_enumerate_loop_structure_independently_of_iteration_count() {
+        let var = ClassicalVar::new(CircuitId::new(), 0, ClassicalType::uint(8).unwrap());
+        for stop in [0, 3] {
+            let control = ClassicalControlOp::For(
+                ForOp::new(
+                    var,
+                    ClassicalExpr::uint_literal(8, 0).unwrap(),
+                    ClassicalExpr::uint_literal(8, stop).unwrap(),
+                    ClassicalExpr::uint_literal(8, 1).unwrap(),
+                    ControlBody::new(vec![]),
+                )
+                .unwrap(),
+            );
+            let ClassicalControlOp::For(op) = &control else {
+                unreachable!()
+            };
+            assert_bodies(&control, &[op.body()]);
+        }
+        let control = ClassicalControlOp::While(
+            WhileOp::new(ClassicalExpr::bool_literal(false), ControlBody::new(vec![])).unwrap(),
+        );
+        let ClassicalControlOp::While(op) = &control else {
+            unreachable!()
+        };
+        assert_bodies(&control, &[op.body()]);
+        assert_bodies(&ClassicalControlOp::Break, &[]);
+        assert_bodies(&ClassicalControlOp::Continue, &[]);
+    }
 
     #[test]
     fn break_and_continue_have_no_resource_dependencies() {

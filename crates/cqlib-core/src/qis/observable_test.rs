@@ -161,6 +161,94 @@ fn single_pauli(pauli: Pauli) -> PauliString {
 }
 
 #[test]
+fn test_statevector_pauli_phases_match_dense_matrices() {
+    use ndarray::Array1;
+
+    for n in 1..=3 {
+        let mut amplitudes = Array1::from_iter(
+            (0..1usize << n)
+                .map(|j| Complex64::new((j + 1) as f64, ((7 * j + 3) % 11) as f64 - 5.0)),
+        );
+        let norm = amplitudes.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
+        amplitudes.mapv_inplace(|a| a / norm);
+        let sv = Statevector::from_state(n, amplitudes.to_vec()).unwrap();
+
+        for encoded in 0..4usize.pow(n as u32) {
+            let mut pauli = PauliString::new(n);
+            for qubit in 0..n {
+                pauli.set_pauli(
+                    qubit,
+                    [Pauli::I, Pauli::X, Pauli::Y, Pauli::Z][(encoded >> (2 * qubit)) & 3],
+                );
+            }
+            for phase in [Phase::Plus, Phase::Minus, Phase::I, Phase::MinusI] {
+                pauli.phase = phase;
+                // The dense tensor-product implementation is independent of the
+                // source-index bit-mask kernels under test.
+                let applied = pauli.to_matrix().dot(&amplitudes);
+                let expected: Complex64 = amplitudes
+                    .iter()
+                    .zip(&applied)
+                    .map(|(a, b)| a.conj() * b)
+                    .sum();
+
+                let coefficient = Complex64::new(0.3, -0.7);
+                let actual = apply_pauli_string_to_statevector(&pauli, &sv, coefficient);
+                for (actual, expected) in actual.iter().zip(&applied) {
+                    assert!(
+                        (*actual - coefficient * expected).norm() < 1e-10,
+                        "incorrect action for {pauli}"
+                    );
+                }
+
+                if matches!(phase, Phase::Plus | Phase::Minus) {
+                    assert_close(expected.im, 0.0);
+                    assert_close(pauli.expectation_statevector(&sv).unwrap(), expected.re);
+                    assert_close(sv.expectation(&pauli).unwrap(), expected.re);
+                }
+
+                // Imaginary Pauli phases are valid inside a Hermitian Hamiltonian
+                // when its coefficient absorbs that phase.
+                let coefficient = -0.37 * phase.to_complex().conj();
+                let h = Hamiltonian::from_list(vec![(pauli.clone(), coefficient)]).unwrap();
+                assert_close((coefficient * expected).im, 0.0);
+                assert_close(
+                    h.expectation_statevector(&sv).unwrap(),
+                    (coefficient * expected).re,
+                );
+                assert_close(sv.expectation(&h).unwrap(), (coefficient * expected).re);
+            }
+        }
+    }
+}
+
+#[test]
+fn test_hamiltonian_y_eigenstate_variance() {
+    // X + Y on its positive eigenstate exposes the mean's sign error.
+    // I + Y also exposes an incorrect H|psi> after fixing only the mean.
+    for (other, angle, expected) in [
+        (Pauli::X, std::f64::consts::FRAC_PI_4, 2.0_f64.sqrt()),
+        (Pauli::I, std::f64::consts::FRAC_PI_2, 2.0),
+    ] {
+        let scale = std::f64::consts::FRAC_1_SQRT_2;
+        let sv = Statevector::from_state(
+            1,
+            vec![
+                Complex64::new(scale, 0.0),
+                Complex64::from_polar(scale, angle),
+            ],
+        )
+        .unwrap();
+        let mut h = Hamiltonian::from_pauli(single_pauli(other));
+        let mut y = single_pauli(Pauli::Y);
+        y.phase = Phase::MinusI;
+        h.add_term(y, Complex64::new(0.0, 1.0)).unwrap();
+        assert_close(h.expectation_statevector(&sv).unwrap(), expected);
+        assert_close(h.variance_statevector(&sv).unwrap(), 0.0);
+    }
+}
+
+#[test]
 fn test_pauli_variance_z_on_zero_is_zero() {
     let sv = Statevector::new(1);
     let ps = single_pauli(Pauli::Z);

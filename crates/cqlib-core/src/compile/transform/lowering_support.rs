@@ -11,11 +11,36 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
-//! Shared output and traversal support for circuit lowering passes.
+//! Shared operation, output, and traversal support for circuit lowering passes.
 
-use crate::circuit::{Operation, Parameter, ValueOperation};
+use crate::circuit::{Instruction, Operation, Parameter, ParameterValue, Qubit, ValueOperation};
 use crate::compile::CompilerError;
 use crate::compile::transform::rebuild::ClassicalRemap;
+use smallvec::SmallVec;
+
+/// A gate-like operation with resolved parameters awaiting lowering.
+#[derive(Debug, Clone)]
+pub(super) struct LowerableOperation {
+    pub(super) instruction: Instruction,
+    pub(super) qubits: SmallVec<[Qubit; 3]>,
+    pub(super) params: SmallVec<[ParameterValue; 1]>,
+    pub(super) label: Option<Box<str>>,
+}
+
+impl LowerableOperation {
+    /// Reads the first parameter as an exact global-phase contribution.
+    ///
+    /// The caller must have identified this operation as `GPhase`. This checks
+    /// for a missing parameter; instruction and parameter arity validation
+    /// remain the responsibility of the caller's input pipeline.
+    pub(super) fn gphase_param(&self) -> Result<Parameter, CompilerError> {
+        self.params.first().map(Parameter::from).ok_or_else(|| {
+            CompilerError::InvariantViolation(
+                "GPhase operation must contain one parameter".to_string(),
+            )
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoweringScope {

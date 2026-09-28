@@ -14,6 +14,7 @@ MCH = "MCH"
 paeth = "paeth"
 pngs = "pngs"
 PNGs = "PNGs"
+Strang = "Strang"
 
 [default.extend-identifiers]
 PNGs = "PNGs"

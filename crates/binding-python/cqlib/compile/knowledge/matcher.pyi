@@ -31,7 +31,9 @@ class MatchBindings:
     def __copy__(self) -> MatchBindings: ...
     def __deepcopy__(self, memo: dict) -> MatchBindings: ...
 
-def match_rule_item(item: RuleItem, operation: ValueOperation, bindings: MatchBindings) -> bool:
+def match_rule_item(
+    item: RuleItem, operation: ValueOperation, bindings: MatchBindings
+) -> bool:
     """Match one item and transactionally update ``bindings``.
 
     Instruction identity, arity, one-to-one qubit mapping, and symbolic
@@ -48,10 +50,14 @@ def match_rule_item(item: RuleItem, operation: ValueOperation, bindings: MatchBi
             print(bindings.qubits, bindings.params)
     """
     ...
+
 def conditions_hold(conditions: Sequence[Condition], bindings: MatchBindings) -> bool:
     """Return whether every condition is fully bound and provably satisfied."""
     ...
-def instantiate_target(target: Sequence[RuleItem], bindings: MatchBindings) -> list[ValueOperation]:
+
+def instantiate_target(
+    target: Sequence[RuleItem], bindings: MatchBindings
+) -> list[ValueOperation]:
     """Create self-contained replacement operations from target items.
 
     Output labels are ``None``. Fixed parameters remain numeric and symbolic
@@ -61,7 +67,10 @@ def instantiate_target(target: Sequence[RuleItem], bindings: MatchBindings) -> l
         ValueError: For unsupported instructions or unbound labels/symbols.
     """
     ...
-def rule_matches_operations(rule: Rule, operations: Sequence[ValueOperation]) -> MatchBindings | None:
+
+def rule_matches_operations(
+    rule: Rule, operations: Sequence[ValueOperation]
+) -> MatchBindings | None:
     """Match a complete rule against one adjacent operation sequence.
 
     This helper performs no circuit search, commutation, cost comparison, or

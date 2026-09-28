@@ -285,6 +285,9 @@ pub(super) struct LocalRewriteCost {
     pub(super) depth_estimate: usize,
     pub(super) total_ops: usize,
     pub(super) parameterized_ops: usize,
+    // Break otherwise equal costs by expression count, so RXY -> XY2P/RX
+    // specializations strictly decrease cost without permitting neutral cycles.
+    pub(super) parameter_count: usize,
 }
 
 /// Policy for counting `GPhase` operations in local rewrite cost.
@@ -321,6 +324,7 @@ impl LocalRewriteCost {
         if param_count > 0 {
             self.parameterized_ops += 1;
         }
+        self.parameter_count += param_count;
         true
     }
 }

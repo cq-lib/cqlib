@@ -15,13 +15,13 @@
 #include "cqlib_c.h"
 
 int main(void) {
-    CircuitWrapper* circuit = circuit_new(2);
+    CCircuit* circuit = circuit_new(2);
     if (circuit == NULL) {
         return 1;
     }
 
-    ParameterWrapper* theta = param_parse("theta");
-    ParameterWrapper* phi = param_parse("phi");
+    CParameter* theta = param_parse("theta");
+    CParameter* phi = param_parse("phi");
     if (theta == NULL || phi == NULL) {
         circuit_free(circuit);
         param_free(theta);
@@ -41,7 +41,7 @@ int main(void) {
     printf("qubits=%zu operations=%zu parameters=%zu\n", circuit_num_qubits(circuit),
            circuit_num_operations(circuit), circuit_num_parameters(circuit));
 
-    CircuitWrapper* assigned = circuit_assign_params(circuit, "theta:0.5,phi:1.25");
+    CCircuit* assigned = circuit_assign_params(circuit, "theta:0.5,phi:1.25");
     if (assigned == NULL) {
         circuit_free(circuit);
         param_free(theta);
