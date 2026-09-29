@@ -22,6 +22,8 @@ use thiserror::Error;
 
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum DeviceError {
+    /// The device must contain at least one physical qubit.
+    EmptyDevice,
     InvalidOnlineQubit(PhysicalQubit),
     QubitNotInDevice(PhysicalQubit),
     QubitNotInTopology(PhysicalQubit),
@@ -153,6 +155,9 @@ impl std::error::Error for DeviceValidationError {}
 impl fmt::Display for DeviceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::EmptyDevice => {
+                write!(f, "Device must contain at least one physical qubit")
+            }
             Self::InvalidOnlineQubit(q) => {
                 write!(
                     f,
