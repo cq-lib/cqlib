@@ -63,7 +63,7 @@ task = backend.run_with_mode(
 
 ```python
 task = backend.run(["H Q1\nM Q1"], shots=1000)
-results = task.wait(timeout_secs=120.0)
+results = task.wait(timeout=120.0)
 ```
 
 The `auto` mode applies readout error correction automatically when the conditions are met.
@@ -74,14 +74,14 @@ To obtain raw counts only without any correction, use `run_raw`:
 
 ```python
 task = backend.run_raw(["H Q1\nM Q1"], shots=1000)
-raw_results = task.wait(timeout_secs=120.0)
+raw_results = task.wait(timeout=120.0)
 ```
 
 Or use `wait_raw` on an existing task:
 
 ```python
 task = backend.run(["H Q1\nM Q1"], shots=1000)
-raw_results = task.wait_raw(timeout_secs=120.0)
+raw_results = task.wait_raw(timeout=120.0)
 ```
 
 ## 5. Specifying the correction mode explicitly
@@ -135,8 +135,8 @@ qcis = "H Q1\nM Q1"
 
 task = backend.run([qcis], shots=1000)
 
-calibrated = task.wait(timeout_secs=120.0)
-raw = task.wait_raw(timeout_secs=120.0)
+calibrated = task.wait(timeout=120.0)
+raw = task.wait_raw(timeout=120.0)
 
 print("corrected:", calibrated[0].counts, calibrated[0].probabilities)
 print("raw:", raw[0].counts, raw[0].probabilities)

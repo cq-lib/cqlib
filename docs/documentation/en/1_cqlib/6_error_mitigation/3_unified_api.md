@@ -70,10 +70,15 @@ mitigation = em.ErrorMitigation(
 )
 
 def estimator(run_circuit, observable, shots):
-    assert run_circuit.width == 2
-    if observable is None:
-        return (2.0, 1.0)
-    return (1.5, 0.25)
+    assert run_circuit.width == 3  # 2 copies × 1 qubit + 1 ancilla
+    is_numerator = any(
+        qubit < observable.num_qubits - 1
+        for term, _ in observable.terms
+        for qubit in term.support()
+    )
+    if is_numerator:
+        return (1.5, 0.25)
+    return (2.0, 1.0)
 
 mitigation.run(hamiltonian, em.RunArgs.virtual_distillation(3, 2), estimator)
 result = mitigation.get_mitigated(em.ProcessArgs.virtual_distillation())
@@ -121,7 +126,9 @@ em.MitigationMethod.virtual_distillation(em.VirtualDistillationConfig(2))
 ```python
 def estimator(run_circuit, observable, shots):
     # run_circuit: may be a folded circuit or a copy-swap circuit
-    # observable: a Hamiltonian or None (VD denominator)
+    # observable: a Hamiltonian (for VD both the numerator and the
+    #             denominator carry one; the denominator observable is X
+    #             on the ancillary qubit)
     # shots: an int or None
     return (expectation, variance)
 ```
@@ -130,7 +137,7 @@ Confirm the following when implementing:
 
 - The return value must be `(float, float)`;
 - The `run_em_sequence_with_shots` of ZNE passes `shots` to the estimator;
-- On the VD denominator path, `observable is None`;
+- On both VD paths `observable` is a `Hamiltonian`; the numerator and denominator are told apart by content — the numerator acts non-trivially on the first copy's qubits, the denominator carries only `X` on the ancillary (last) qubit;
 - Exceptions inside the estimator are propagated upwards as-is.
 
 ---

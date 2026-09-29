@@ -34,6 +34,20 @@ def single_x_circuit() -> Circuit:
     return circuit
 
 
+def is_numerator_observable(observable: Hamiltonian) -> bool:
+    """Distinguish VD numerator from denominator observables by content.
+
+    The denominator observable is a single X on the ancillary (last) qubit;
+    the numerator also carries non-identity Paulis on the first copy's
+    qubits.
+    """
+    return any(
+        qubit < observable.num_qubits - 1
+        for term, _coefficient in observable.terms
+        for qubit in term.support()
+    )
+
+
 def test_error_mitigation_public_exports_and_estimator_aliases() -> None:
     assert em.ZNEMitigation.__module__ == "cqlib.error_mitigation"
     assert em.ErrorMitigation.__module__ == "cqlib.error_mitigation"
@@ -122,10 +136,10 @@ def test_virtual_distillation_copy_swap_and_run_paths() -> None:
     vd = em.VirtualDistillation(circuit, 2)
 
     copy_swap = vd.build_copy_swap_circuit()
-    assert copy_swap.width == 2
+    assert copy_swap.width == 3
     assert [
         operation.instruction.instruction.name for operation in copy_swap.operations
-    ] == ["SWAP"]
+    ] == ["H", "C1-SWAP"]
 
     calls: list[tuple[int, int | None, bool]] = []
 
@@ -134,10 +148,16 @@ def test_virtual_distillation_copy_swap_and_run_paths() -> None:
         observable: Hamiltonian | None,
         shots: int | None,
     ) -> tuple[float, float]:
-        calls.append((run_circuit.width, shots, observable is None))
-        if observable is None:
-            return (2.0, 1.0)
-        return (1.5, 0.25)
+        assert observable is not None
+        is_numerator = is_numerator_observable(observable)
+        # Numerator: Z on the first copy's qubit, X on the ancilla.
+        # Denominator: only X on the ancilla. (str prints highest index first.)
+        terms = [str(term) for term, _coefficient in observable.terms]
+        assert terms == (["+XIZ"] if is_numerator else ["+XII"])
+        calls.append((run_circuit.width, shots, is_numerator))
+        if is_numerator:
+            return (1.5, 0.25)
+        return (2.0, 1.0)
 
     assert vd.run_numerator_circuit(hamiltonian, 3, estimator) == (1.5, 0.25)
     assert vd.run_denominator_circuit(2, estimator) == (2.0, 1.0)
@@ -146,10 +166,10 @@ def test_virtual_distillation_copy_swap_and_run_paths() -> None:
     assert mitigated[0] == pytest.approx(0.75)
     assert mitigated[1] == pytest.approx(0.203125)
     assert calls == [
-        (2, 3, False),
-        (2, 2, True),
-        (2, 3, False),
-        (2, 2, True),
+        (3, 3, True),
+        (3, 2, False),
+        (3, 3, True),
+        (3, 2, False),
     ]
 
 
@@ -208,8 +228,9 @@ def test_unified_error_mitigation_virtual_distillation_pipeline() -> None:
         observable: Hamiltonian | None,
         shots: int | None,
     ) -> tuple[float, float]:
-        assert run_circuit.width == 2
-        if observable is None:
+        assert run_circuit.width == 3
+        assert observable is not None
+        if not is_numerator_observable(observable):
             assert shots == 2
             return (2.0, 1.0)
         assert shots == 3

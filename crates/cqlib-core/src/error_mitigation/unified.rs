@@ -221,7 +221,10 @@ struct VirtualDistillationRunRecord {
 ///
 /// // A portal to real quantum device or classical simulation backend that calculates <h> and its variance
 /// let estimator = |_circuit: &Circuit, hamiltonian: Option<&Hamiltonian>, _shots: Option<usize>| {
-///     if hamiltonian.is_some() {
+///     // Both the numerator and the denominator carry a Hamiltonian: the
+///     // numerator additionally acts on the first copy (qubit 0 here).
+///     let term = &hamiltonian.unwrap().terms[0].0;
+///     if term.x[0] || term.z[0] {
 ///         (1.5, 0.25)
 ///     } else {
 ///         (2.0, 1.0)
@@ -307,7 +310,10 @@ impl ErrorMitigation {
     ///
     /// // A portal to real quantum device or classical simulation backend that calculates <h> and its variance
     /// let estimator = |_circuit: &Circuit, hamiltonian: Option<&Hamiltonian>, _shots: Option<usize>| {
-    ///     if hamiltonian.is_some() {
+    ///     // Both the numerator and the denominator carry a Hamiltonian: the
+    ///     // numerator additionally acts on the first copy (qubit 0 here).
+    ///     let term = &hamiltonian.unwrap().terms[0].0;
+    ///     if term.x[0] || term.z[0] {
     ///         (1.0, 0.1)
     ///     } else {
     ///         (2.0, 0.2)
@@ -526,16 +532,8 @@ impl ErrorMitigation {
             });
         }
 
-        let copy_swap_circuit = vd.build_copy_swap_circuit()?;
-        let extra_qubits = copy_swap_circuit.width() - hamiltonian.num_qubits;
-        let expanded_hamiltonian =
-            VirtualDistillation::expand_hamiltonian(hamiltonian, extra_qubits)?;
-        let numerator = estimator(
-            &copy_swap_circuit,
-            Some(&expanded_hamiltonian),
-            Some(shots_numerator),
-        );
-        let denominator = estimator(&copy_swap_circuit, None, Some(shots_denominator));
+        let numerator = vd.run_numerator_circuit(hamiltonian, shots_numerator, estimator)?;
+        let denominator = vd.run_denominator_circuit(shots_denominator, estimator)?;
 
         Ok(VirtualDistillationRunRecord {
             numerator,

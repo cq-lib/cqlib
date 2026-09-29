@@ -21,7 +21,6 @@ categories = [
     "science",
     "simulation",
     "algorithms",
-    "science::physics",
     "data-structures"
 ]
 include = [

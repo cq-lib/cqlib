@@ -86,10 +86,15 @@ mitigation = em.ErrorMitigation(
 )
 
 def estimator(run_circuit, observable, shots):
-    assert run_circuit.width == 2
-    if observable is None:
-        return (2.0, 1.0)
-    return (1.5, 0.25)
+    assert run_circuit.width == 3  # 2 份副本 × 1 比特 + 1 个辅助比特
+    is_numerator = any(
+        qubit < observable.num_qubits - 1
+        for term, _ in observable.terms
+        for qubit in term.support()
+    )
+    if is_numerator:
+        return (1.5, 0.25)
+    return (2.0, 1.0)
 
 mitigation.run(hamiltonian, em.RunArgs.virtual_distillation(3, 2), estimator)
 result = mitigation.get_mitigated(em.ProcessArgs.virtual_distillation())
@@ -137,7 +142,8 @@ em.MitigationMethod.virtual_distillation(em.VirtualDistillationConfig(2))
 ```python
 def estimator(run_circuit, observable, shots):
     # run_circuit: 可能是折叠线路或 copy-swap 线路
-    # observable: Hamiltonian 或 None（VD 分母）
+    # observable: Hamiltonian（VD 的分子与分母都会携带；分母观测量为
+    #             辅助比特上的 X）
     # shots: int 或 None
     return (expectation, variance)
 ```
@@ -146,7 +152,7 @@ def estimator(run_circuit, observable, shots):
 
 - 返回值必须是 `(float, float)`；
 - ZNE 的 `run_em_sequence_with_shots` 会把 `shots` 传给 estimator；
-- VD 分母路径上 `observable is None`；
+- VD 的分子与分母路径上 `observable` 都是 `Hamiltonian`，按内容区分——分子在第 0 份副本的比特上有非恒等 Pauli，分母只在辅助比特（最后一个比特）上携带 `X`；
 - estimator 内部异常会原样向上抛出。
 
 ---

@@ -32,7 +32,7 @@ pub struct VirtualDistillation {
 - `fn new(circuit: Circuit, copies: usize) -> Result<Self, ErrorMitigationError>`：创建入口，取得线路所有权。模板线路只能通过 `new` 传入，没有对应的读接口。
 - `fn set_copies(&mut self, copies: usize) -> Result<(), ErrorMitigationError>`：更新副本数。更新失败时保持原值不变。
 - `fn build_copy_swap_circuit(&self) -> Result<Circuit, CircuitError>`：由基底线路构造 copy-swap 线路。
-- `fn run_denominator_circuit(&self, shots: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), CircuitError>`：跑分母线路，返回 `(均值, 方差)`。
+- `fn run_denominator_circuit(&self, shots: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), ErrorMitigationError>`：跑分母线路，返回 `(均值, 方差)`。
 - `fn run_numerator_circuit(&self, hamiltonian: &Hamiltonian, shots: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), ErrorMitigationError>`：跑分子线路，返回 `(均值, 方差)`。
 - `fn run_vd(&self, hamiltonian: &Hamiltonian, shots_numerator: usize, shots_denominator: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), ErrorMitigationError>`：跑完整流程，返回缓解后的 `(期望值, 方差)`。
 
@@ -55,10 +55,10 @@ pub struct VirtualDistillation {
 
 ### `build_copy_swap_circuit(&self) -> Result<Circuit, CircuitError>`
 
-构造 copy-swap 线路，包含三个部分：先对基底线路做门分解，再把基底线路并排准备 `copies` 份——第 `i` 份整体平移到从 `i × 基底宽度` 开始的比特区间，各份之间互不重叠——最后在首份与其他每一份之间逐比特插入 `SWAP`。
+构造 copy-swap 线路——即虚拟蒸馏协议的 Hadamard-test 线路——包含三个部分：先对基底线路做门分解，再把基底线路并排准备 `copies` 份——第 `i` 份整体平移到从 `i × 基底宽度` 开始的比特区间，各份之间互不重叠——最后在末尾的辅助比特（最后一个比特）上施加 `H` 门制备到 `|+⟩`，并在相邻副本之间施加由辅助比特控制的 `SWAP` 梯（CSWAP），实现各副本的轮换（derangement）。
 
-- 线路宽度为 `copies × 基底宽度`，其中基底宽度取分解后线路的宽度。
-- 操作数为 `copies` 份基底操作加上 `(copies - 1) × 基底宽度` 个 `SWAP`。
+- 线路宽度为 `copies × 基底宽度 + 1`，其中基底宽度取分解后线路的宽度，最后一个比特是辅助比特。
+- 操作数为 `copies` 份基底操作加上 1 个 `H` 与 `(copies - 1) × 基底宽度` 个受控 `SWAP`。
 
 返回：
 
@@ -70,8 +70,8 @@ pub struct VirtualDistillation {
 
 ### 分子与分母
 
-- `fn run_denominator_circuit(&self, shots: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), CircuitError>`：在 copy-swap 线路上估计分母 `Tr(ρ^M)`。估计器收到的可观测量参数为 `None`，shot 数为 `Some(shots)`；回调形态见 [概览](0_overview.md)。
-- `fn run_numerator_circuit(&self, hamiltonian: &Hamiltonian, shots: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), ErrorMitigationError>`：在 copy-swap 线路上估计分子 `Tr(O ρ^M)`。可观测量会在模块内部先扩展到 copy-swap 线路的宽度：原有 Pauli 项保持原比特索引与相位、系数不变，新增的高索引比特上补 `Z`；扩展结果经估计器的可观测量参数传入，shot 数为 `Some(shots)`。
+- `fn run_denominator_circuit(&self, shots: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), ErrorMitigationError>`：在 copy-swap 线路上估计分母 `Tr(ρ^M)`。估计器收到的可观测量参数为 `Some(分母观测量)`——辅助比特（最后一个比特）上的 `X`，其余比特为恒等——shot 数为 `Some(shots)`；回调形态见 [概览](0_overview.md)。
+- `fn run_numerator_circuit(&self, hamiltonian: &Hamiltonian, shots: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), ErrorMitigationError>`：在 copy-swap 线路上估计分子 `Tr(O ρ^M)`。可观测量会在模块内部先扩展到 copy-swap 线路的宽度：原有 Pauli 项保持原比特索引（即作用在第 0 份副本上）与相位、系数不变，其余副本补恒等 `I`，并在辅助比特（最后一个比特）上追加 `X`；扩展结果经估计器的可观测量参数传入，shot 数为 `Some(shots)`。
 - `fn run_vd(&self, hamiltonian: &Hamiltonian, shots_numerator: usize, shots_denominator: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), ErrorMitigationError>`：先校验哈密顿量的比特数等于基底线路宽度，再依次执行分子线路与分母线路，最后组合成缓解结果。分子与分母使用各自的 shot 数。
 
 `run_vd` 的异常情况：
@@ -94,11 +94,12 @@ let q0 = Qubit::new(0);
 let mut circuit = Circuit::new(1);
 circuit.x(q0).unwrap();
 
-// 两份单比特副本：X 作用于比特 0、X 作用于比特 1，再加一对逐比特 SWAP
+// 两份单比特副本加 1 个辅助比特：X 作用于比特 0、X 作用于比特 1，
+// 辅助比特（比特 2）上的 H，以及一次由辅助比特控制的 SWAP
 let vd = VirtualDistillation::new(circuit, 2).unwrap();
 let copy_swap = vd.build_copy_swap_circuit().unwrap();
-assert_eq!(copy_swap.width(), 2);
-assert_eq!(copy_swap.operations().len(), 3);
+assert_eq!(copy_swap.width(), 3);
+assert_eq!(copy_swap.operations().len(), 4);
 ```
 
 ```rust
@@ -127,11 +128,17 @@ let mut pauli = PauliString::new(1);
 pauli.set_pauli(0, Pauli::Z);
 let hamiltonian = Hamiltonian::from_list(vec![(pauli, Complex64::new(1.0, 0.0))]).unwrap();
 
-// 分子线路带可观测量，分母线路不带；两者使用各自的 shot 数
+// 分子与分母都携带可观测量，按内容区分：分子在第 0 份副本的比特上有
+// 非恒等 Pauli，分母只有辅助比特上的 X；两者使用各自的 shot 数
 let vd = VirtualDistillation::new(Circuit::new(1), 2).unwrap();
 let (mu_vd, var_vd) = vd
     .run_vd(&hamiltonian, 3, 2, &|_circuit, hamiltonian_arg, shots| {
-        if hamiltonian_arg.is_some() {
+        let observable = hamiltonian_arg.unwrap();
+        let is_numerator = observable
+            .terms
+            .iter()
+            .any(|(term, _)| term.get_pauli(0) != Pauli::I);
+        if is_numerator {
             assert_eq!(shots, Some(3));
             (1.5, 0.25)
         } else {
@@ -175,6 +182,6 @@ pub struct VirtualDistillationConfig {
 | `ErrorMitigationError::HamiltonianQubitCountMismatch` | `run_vd` 收到的哈密顿量比特数与基底线路宽度不一致。 |
 | `ErrorMitigationError::ZeroDenominatorMean` | 分母线路的均值为零。 |
 | `ErrorMitigationError::Circuit` | 携带 `CircuitError::QubitCountMismatch`，表示扩展后的可观测量宽度与 copy-swap 线路宽度不一致。 |
-| `CircuitError` | `build_copy_swap_circuit` 与 `run_denominator_circuit` 直接返回的线路错误。 |
+| `CircuitError` | `build_copy_swap_circuit` 直接返回的线路错误；`run_denominator_circuit` 将其包装为 `ErrorMitigationError::Circuit`。 |
 
 错误类型的完整定义见 [统一流水线](3_unified.md)。

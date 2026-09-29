@@ -24,7 +24,7 @@
 pub type Estimator<'a> = dyn Fn(&Circuit, Option<&Hamiltonian>, Option<usize>) -> (f64, f64) + 'a;
 ```
 
-参数依次为待执行线路、待估计的可观测量与 shot 数，返回 `(期望值, 方差)`。分母线路不携带可观测量，第二个参数为 `None`；`ZNEMitigation::run_em_sequence` 不指定 shot 数，第三个参数为 `None`。公开方法统一以 `&Estimator<'_>` 接收它，即 trait 对象引用 `&dyn Fn(&Circuit, Option<&Hamiltonian>, Option<usize>) -> (f64, f64)`，闭包与函数项都可以直接取引用传入。返回值中的方差只有虚拟蒸馏会使用，零噪声外推只取期望值。
+参数依次为待执行线路、待估计的可观测量与 shot 数，返回 `(期望值, 方差)`。虚拟蒸馏的分子与分母调用都会传入具体可观测量——分母可观测量是 copy-swap 线路辅助比特上的 `X`；`ZNEMitigation::run_em_sequence` 不指定 shot 数，第三个参数为 `None`。公开方法统一以 `&Estimator<'_>` 接收它，即 trait 对象引用 `&dyn Fn(&Circuit, Option<&Hamiltonian>, Option<usize>) -> (f64, f64)`，闭包与函数项都可以直接取引用传入。返回值中的方差只有虚拟蒸馏会使用，零噪声外推只取期望值。
 
 ### 缓解流水线状态
 
@@ -100,8 +100,8 @@ assert_eq!(mitigated.expectation, 0.5);
 | **门折叠** | 把线路改写为 `U -> U (U† U)^level` 的构造方式；只对指定门折叠时称为选择性折叠。 |
 | **虚拟蒸馏** | 通过副本与 copy-swap 线路估计 `Tr(O ρ^M) / Tr(ρ^M)` 的方法，`M` 为副本数。 |
 | **副本（copy）** | 虚拟蒸馏中并行准备的基底线路份数，最少为 2。 |
-| **copy-swap 线路** | 把多份基底线路并排放在互不重叠的比特区间、并在首份与其他每份之间插入逐比特 SWAP 的线路，宽度等于副本数乘以基底线路宽度。 |
-| **分子线路 / 分母线路** | 虚拟蒸馏的两条统计线路。分子线路携带扩展后的可观测量；分母线路不携带可观测量，估计器收到 `None`。 |
+| **copy-swap 线路** | 把多份基底线路并排放在互不重叠的比特区间、在末尾追加一个经 Hadamard 门制备到 `|+⟩` 的辅助比特、并在相邻副本之间施加由辅助比特控制的逐比特 SWAP 梯的线路，宽度等于副本数乘以基底线路宽度再加 1。 |
+| **分子线路 / 分母线路** | 虚拟蒸馏的两条统计线路。分子线路携带扩展后的可观测量（第 0 份副本上的原可观测量与辅助比特上的 `X`）；分母线路携带辅助比特上的 `X`，其余比特为恒等。 |
 | **缓解流水线** | `ErrorMitigation` 表示的顺序式流程：`new` 创建、`run` 收集原始数据、`get_mitigated` 做方法相关的后处理。 |
 
 ---
@@ -159,7 +159,8 @@ let mut mitigation = ErrorMitigation::new(
 )
 .unwrap();
 
-// 分子线路带可观测量，分母线路不带
+// 分子与分母都携带可观测量：分子在第 0 份副本的比特上有非恒等 Pauli，
+// 分母只有辅助比特上的 X
 mitigation
     .run(
         &hamiltonian,
@@ -168,7 +169,12 @@ mitigation
             shots_denominator: 2,
         },
         &|_circuit, hamiltonian_arg, shots| {
-            if hamiltonian_arg.is_some() {
+            let observable = hamiltonian_arg.unwrap();
+            let is_numerator = observable
+                .terms
+                .iter()
+                .any(|(term, _)| term.get_pauli(0) != Pauli::I);
+            if is_numerator {
                 assert_eq!(shots, Some(3));
                 (1.5, 0.25)
             } else {
@@ -232,13 +238,18 @@ let hamiltonian = Hamiltonian::from_list(vec![(pauli, Complex64::new(1.0, 0.0))]
 
 let vd = VirtualDistillation::new(Circuit::new(1), 2).unwrap();
 
-// 两份基底线路加一对逐比特 SWAP
+// 两份基底线路加 1 个辅助比特：辅助比特上的 H 与一次受控 SWAP
 let copy_swap = vd.build_copy_swap_circuit().unwrap();
-assert_eq!(copy_swap.width(), 2);
+assert_eq!(copy_swap.width(), 3);
 
 let (mu_vd, var_vd) = vd
     .run_vd(&hamiltonian, 3, 2, &|_circuit, hamiltonian_arg, shots| {
-        if hamiltonian_arg.is_some() {
+        let observable = hamiltonian_arg.unwrap();
+        let is_numerator = observable
+            .terms
+            .iter()
+            .any(|(term, _)| term.get_pauli(0) != Pauli::I);
+        if is_numerator {
             assert_eq!(shots, Some(3));
             (1.5, 0.25)
         } else {

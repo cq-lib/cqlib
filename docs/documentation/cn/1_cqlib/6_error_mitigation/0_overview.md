@@ -88,7 +88,7 @@ Estimator = Callable[
 | 参数 | 含义 |
 |------|------|
 | `run_circuit` | 待执行的线路（可能是折叠线路或 copy-swap 线路） |
-| `observable` | 待估计的 `Hamiltonian`；分母线路时为 `None` |
+| `observable` | 待估计的 `Hamiltonian`；VD 的分子与分母调用都会携带（分母观测量为辅助比特上的 `X`） |
 | `shots` | 本次执行的 shot 数；部分 API 可为 `None` |
 | 返回值 | `(expectation, variance)` |
 
