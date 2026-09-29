@@ -30,7 +30,7 @@
 两种方法都不直接执行输入线路，而是先构造一族缓解线路：
 
 - 零噪声外推按折叠等级展开线路。全局折叠把线路改写为 `U -> U (U† U)^level`，使线路深度随等级增长；选择性折叠只对指令名匹配给定门集的操作执行同样的展开，其余操作原样保留。等级为 `0` 时缓解线路即输入线路的副本。
-- 虚拟蒸馏把线路复制 `copies` 份并按位插入 SWAP，得到一条宽度为 `copies` 倍的 copy-swap 线路。分子与分母在同一线路上执行，区别只在传给回调的观测量：分母为 `None`，分子为按拷贝数扩展后的 `Hamiltonian`。
+- 虚拟蒸馏把线路复制 `copies` 份，追加一个经 Hadamard 门制备到 `|+⟩` 的辅助比特，并在相邻副本之间按位施加由辅助比特控制的 SWAP，得到一条宽度为 `copies` 倍再加 1 的 copy-swap 线路。分子与分母在同一线路上执行，区别只在传给回调的观测量：分子为扩展到全宽的 `Hamiltonian`（第 0 份副本上的原观测量 ⊗ 辅助比特上的 `X`），分母为仅辅助比特上带 `X` 的 `Hamiltonian`。
 
 ### 数据流
 
@@ -104,9 +104,9 @@ print("variance:", result.variance)
 | **选择性折叠** | 只对指令名匹配 `gate_set` 的操作做折叠，其余操作原样保留。 |
 | **外推方法** | 把不同噪声因子下的期望值外推到零噪声点的拟合模型，包括多项式与指数两种。 |
 | **拷贝数** | 虚拟蒸馏中密度矩阵的拷贝份数，由 `copies` 给出，最小为 2。 |
-| **copy-swap 线路** | 由输入线路复制 `copies` 份并按位插入 SWAP 得到的缓解线路。 |
-| **分子线路** | 用于估计 `Tr(O ρ^M)` 的 copy-swap 线路执行，观测量为按拷贝数扩展后的 `Hamiltonian`。 |
-| **分母线路** | 用于估计 `Tr(ρ^M)` 的 copy-swap 线路执行，观测量为 `None`。 |
+| **copy-swap 线路** | 由输入线路复制 `copies` 份、追加一个经 Hadamard 门制备的辅助比特、并在相邻副本之间按位施加辅助比特控制的 SWAP 得到的缓解线路。 |
+| **分子线路** | 用于估计 `Tr(O ρ^M)` 的 copy-swap 线路执行，观测量为扩展到全宽的 `Hamiltonian`（第 0 份副本上的原观测量 ⊗ 辅助比特上的 `X`）。 |
+| **分母线路** | 用于估计 `Tr(ρ^M)` 的 copy-swap 线路执行，观测量为辅助比特上的 `X`（其余比特为恒等）。 |
 | **estimator** | 调用方提供的回调，执行一条缓解线路并返回 `(期望值, 方差)` 二元组。 |
 | **统一流水线** | 由 `ErrorMitigation` 承载的顺序式流程：`run()` 收集估计值，`get_mitigated()` 做后处理。 |
 
@@ -190,13 +190,20 @@ hamiltonian = Hamiltonian.from_list([(PauliString.from_str("Z"), 1.0)])
 
 vd = VirtualDistillation(circuit, 2)
 copy_swap = vd.build_copy_swap_circuit()
-print(copy_swap.width)  # 2
+print(copy_swap.width)  # 3 = copies * 基础宽度 + 1
 
 
 def estimator(run_circuit, observable, shots):
-    if observable is None:
-        return (2.0, 1.0)   # 分母：Tr(ρ^M)
-    return (1.5, 0.25)      # 分子：Tr(O ρ^M)
+    # 分子与分母都携带观测量：分子在第 0 份副本的比特上有非恒等 Pauli，
+    # 分母只有辅助比特（最后一个比特）上的 X
+    is_numerator = any(
+        qubit < observable.num_qubits - 1
+        for term, _ in observable.terms
+        for qubit in term.support()
+    )
+    if is_numerator:
+        return (1.5, 0.25)      # 分子：Tr(O ρ^M)
+    return (2.0, 1.0)           # 分母：Tr(ρ^M)
 
 
 expectation, variance = vd.run_vd(
@@ -229,9 +236,14 @@ hamiltonian = Hamiltonian.from_list([(PauliString.from_str("Z"), 1.0)])
 
 
 def estimator(run_circuit, observable, shots):
-    if observable is None:
-        return (2.0, 1.0)
-    return (1.5, 0.25)
+    is_numerator = any(
+        qubit < observable.num_qubits - 1
+        for term, _ in observable.terms
+        for qubit in term.support()
+    )
+    if is_numerator:
+        return (1.5, 0.25)
+    return (2.0, 1.0)
 
 
 mitigation = ErrorMitigation(

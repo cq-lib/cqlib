@@ -493,8 +493,11 @@ fn test_zne_run_em_sequence() {
 
 // ===== Fine-grained VirtualDistillation API (checklist section 5) =====
 
-/// Static estimator: numerator invocations (Hamiltonian present) report
-/// (4.0, 0.1); denominator invocations (Hamiltonian NULL) report (2.0, 0.05).
+/// Static estimator: numerator invocations report (4.0, 0.1); denominator
+/// invocations report (2.0, 0.05). Both receive a non-NULL Hamiltonian now:
+/// they are told apart by content — the denominator Hamiltonian is identity
+/// on qubit 0 (a single X on the ancilla), while the numerator Hamiltonian
+/// carries a non-identity Pauli on qubit 0 (the original Z term).
 extern "C" fn static_vd_estimator(
     _circuit: *const binding_c::circuit::CCircuit,
     hamiltonian: *const binding_c::qis::CHamiltonian,
@@ -502,11 +505,14 @@ extern "C" fn static_vd_estimator(
     expectation: *mut f64,
     variance: *mut f64,
 ) {
-    if expectation.is_null() || variance.is_null() {
+    if expectation.is_null() || variance.is_null() || hamiltonian.is_null() {
         return;
     }
     unsafe {
-        if hamiltonian.is_null() {
+        let hamiltonian = &(*hamiltonian).inner;
+        let first_term = &hamiltonian.terms[0].0;
+        let is_denominator = !first_term.x[0] && !first_term.z[0];
+        if is_denominator {
             *expectation = 2.0;
             *variance = 0.05;
         } else {
@@ -557,7 +563,8 @@ fn test_virtual_distillation_run_vd_sampling() {
     pauli_string_free(pauli);
 
     // Numerator: the estimator sees the copy-swap circuit and the expanded
-    // Hamiltonian; denominator: no Hamiltonian.
+    // Hamiltonian (original Pauli on the first copy, X on the ancilla);
+    // denominator: an ancilla-X Hamiltonian with identity elsewhere.
     let mut num_mean = f64::NAN;
     let mut num_var = f64::NAN;
     assert_eq!(

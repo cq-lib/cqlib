@@ -32,7 +32,7 @@ Other methods:
 - `fn new(circuit: Circuit, copies: usize) -> Result<Self, ErrorMitigationError>`: the creation entry point; it takes ownership of the circuit. The template circuit can only be passed through `new`, and there is no corresponding read interface.
 - `fn set_copies(&mut self, copies: usize) -> Result<(), ErrorMitigationError>`: updates the number of copies. On failure the original value stays unchanged.
 - `fn build_copy_swap_circuit(&self) -> Result<Circuit, CircuitError>`: constructs the copy-swap circuit from the base circuit.
-- `fn run_denominator_circuit(&self, shots: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), CircuitError>`: runs the denominator circuit and returns `(mean, variance)`.
+- `fn run_denominator_circuit(&self, shots: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), ErrorMitigationError>`: runs the denominator circuit and returns `(mean, variance)`.
 - `fn run_numerator_circuit(&self, hamiltonian: &Hamiltonian, shots: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), ErrorMitigationError>`: runs the numerator circuit and returns `(mean, variance)`.
 - `fn run_vd(&self, hamiltonian: &Hamiltonian, shots_numerator: usize, shots_denominator: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), ErrorMitigationError>`: runs the complete flow and returns the mitigated `(expectation value, variance)`.
 
@@ -55,10 +55,10 @@ Raises:
 
 ### `build_copy_swap_circuit(&self) -> Result<Circuit, CircuitError>`
 
-Constructs the copy-swap circuit, which consists of three parts: first the base circuit is decomposed into gates, then `copies` copies of the base circuit are prepared side by side — the `i`-th copy is shifted as a whole onto the qubit range starting at `i × base width`, and the copies do not overlap — and finally a `SWAP` is inserted bit by bit between the first copy and each of the others.
+Constructs the copy-swap circuit — the Hadamard-test circuit of the virtual distillation protocol — which consists of three parts: first the base circuit is decomposed into gates, then `copies` copies of the base circuit are prepared side by side — the `i`-th copy is shifted as a whole onto the qubit range starting at `i × base width`, and the copies do not overlap — and finally one ancillary qubit (the last qubit) is prepared in `|+⟩` by a Hadamard gate, followed by a ladder of `SWAP`s between adjacent copies, each controlled by the ancillary qubit (CSWAP), implementing the derangement of the copies.
 
-- The circuit width is `copies × base width`, where the base width is the width of the decomposed circuit.
-- The number of operations is `copies` sets of base operations plus `(copies - 1) × base width` `SWAP`s.
+- The circuit width is `copies × base width + 1`, where the base width is the width of the decomposed circuit and the last qubit is the ancillary qubit.
+- The number of operations is `copies` sets of base operations plus one `H` and `(copies - 1) × base width` controlled `SWAP`s.
 
 Returns:
 
@@ -70,8 +70,8 @@ Raises:
 
 ### Numerator and denominator
 
-- `fn run_denominator_circuit(&self, shots: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), CircuitError>`: estimates the denominator `Tr(ρ^M)` on the copy-swap circuit. The observable parameter the estimator receives is `None` and the number of shots is `Some(shots)`; for the callback form see [Overview](0_overview.md).
-- `fn run_numerator_circuit(&self, hamiltonian: &Hamiltonian, shots: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), ErrorMitigationError>`: estimates the numerator `Tr(O ρ^M)` on the copy-swap circuit. The observable is first expanded inside the module to the width of the copy-swap circuit: the original Pauli terms keep their original qubit indices, phase and coefficients unchanged, and `Z` is filled in on the newly added higher-index qubits; the expanded result is passed in through the observable parameter of the estimator, and the number of shots is `Some(shots)`.
+- `fn run_denominator_circuit(&self, shots: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), ErrorMitigationError>`: estimates the denominator `Tr(ρ^M)` on the copy-swap circuit. The estimator receives `Some(denominator observable)` — `X` on the ancillary qubit (the last qubit) with identities everywhere else — and the number of shots is `Some(shots)`; for the callback form see [Overview](0_overview.md).
+- `fn run_numerator_circuit(&self, hamiltonian: &Hamiltonian, shots: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), ErrorMitigationError>`: estimates the numerator `Tr(O ρ^M)` on the copy-swap circuit. The observable is first expanded inside the module to the width of the copy-swap circuit: the original Pauli terms keep their original qubit indices (i.e. they act on the first copy), phase and coefficients unchanged, the remaining copies are padded with `I`, and an `X` is appended on the ancillary qubit (the last qubit); the expanded result is passed in through the observable parameter of the estimator, and the number of shots is `Some(shots)`.
 - `fn run_vd(&self, hamiltonian: &Hamiltonian, shots_numerator: usize, shots_denominator: usize, estimator: &Estimator<'_>) -> Result<(f64, f64), ErrorMitigationError>`: first validates that the number of qubits of the Hamiltonian equals the width of the base circuit, then executes the numerator circuit and the denominator circuit in turn, and finally combines them into the mitigated result. The numerator and the denominator use their own number of shots.
 
 Raises for `run_vd`:
@@ -94,11 +94,12 @@ let q0 = Qubit::new(0);
 let mut circuit = Circuit::new(1);
 circuit.x(q0).unwrap();
 
-// 两份单比特副本：X 作用于比特 0、X 作用于比特 1，再加一对逐比特 SWAP
+// 两份单比特副本加 1 个辅助比特：X 作用于比特 0、X 作用于比特 1，
+// 辅助比特（比特 2）上的 H，以及一次由辅助比特控制的 SWAP
 let vd = VirtualDistillation::new(circuit, 2).unwrap();
 let copy_swap = vd.build_copy_swap_circuit().unwrap();
-assert_eq!(copy_swap.width(), 2);
-assert_eq!(copy_swap.operations().len(), 3);
+assert_eq!(copy_swap.width(), 3);
+assert_eq!(copy_swap.operations().len(), 4);
 ```
 
 ```rust
@@ -127,11 +128,17 @@ let mut pauli = PauliString::new(1);
 pauli.set_pauli(0, Pauli::Z);
 let hamiltonian = Hamiltonian::from_list(vec![(pauli, Complex64::new(1.0, 0.0))]).unwrap();
 
-// 分子线路带可观测量，分母线路不带；两者使用各自的 shot 数
+// 分子与分母都携带可观测量，按内容区分：分子在第 0 份副本的比特上有
+// 非恒等 Pauli，分母只有辅助比特上的 X；两者使用各自的 shot 数
 let vd = VirtualDistillation::new(Circuit::new(1), 2).unwrap();
 let (mu_vd, var_vd) = vd
     .run_vd(&hamiltonian, 3, 2, &|_circuit, hamiltonian_arg, shots| {
-        if hamiltonian_arg.is_some() {
+        let observable = hamiltonian_arg.unwrap();
+        let is_numerator = observable
+            .terms
+            .iter()
+            .any(|(term, _)| term.get_pauli(0) != Pauli::I);
+        if is_numerator {
             assert_eq!(shots, Some(3));
             (1.5, 0.25)
         } else {
@@ -175,6 +182,6 @@ There is no `Default` implementation, so `copies` must be given explicitly. Impl
 | `ErrorMitigationError::HamiltonianQubitCountMismatch` | The number of qubits of the Hamiltonian received by `run_vd` is inconsistent with the width of the base circuit. |
 | `ErrorMitigationError::ZeroDenominatorMean` | The mean of the denominator circuit is zero. |
 | `ErrorMitigationError::Circuit` | Carries `CircuitError::QubitCountMismatch`, indicating that the width of the expanded observable is inconsistent with the width of the copy-swap circuit. |
-| `CircuitError` | The circuit error returned directly by `build_copy_swap_circuit` and `run_denominator_circuit`. |
+| `CircuitError` | The circuit error returned directly by `build_copy_swap_circuit`; `run_denominator_circuit` wraps it into `ErrorMitigationError::Circuit`. |
 
 For the complete definition of the error type, see [Unified pipeline](3_unified.md).

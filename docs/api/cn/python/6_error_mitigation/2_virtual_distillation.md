@@ -2,7 +2,7 @@
 
 `cqlib.error_mitigation.virtual_distillation`
 
-`cqlib.error_mitigation.virtual_distillation` 提供虚拟蒸馏的低层接口：把基础线路复制若干份并插入 SWAP 构造 copy-swap 线路，再分别估计分子与分母，最后求比值得到缓解后的期望值。本页覆盖 `VirtualDistillation` 与 `VirtualDistillationConfig`。
+`cqlib.error_mitigation.virtual_distillation` 提供虚拟蒸馏的低层接口：把基础线路复制若干份，追加一个经 Hadamard 门制备的辅助比特，并在相邻副本之间施加由辅助比特控制的 SWAP（Hadamard-test 线路），再分别估计分子与分母，最后求比值得到缓解后的期望值。本页覆盖 `VirtualDistillation` 与 `VirtualDistillationConfig`。
 
 ## 导入
 
@@ -50,7 +50,7 @@ from cqlib.error_mitigation.virtual_distillation import (
 参数：
 
 - `circuit` (`Circuit`)：基础线路。构造时复制保存，不会修改传入的线路。
-- `copies` (`int`)：拷贝份数，必须不小于 2，否则抛出 `ErrorMitigationError`。拷贝数决定缓解线路的宽度：copy-swap 线路的宽度为基础线路宽度的 `copies` 倍。
+- `copies` (`int`)：拷贝份数，必须不小于 2，否则抛出 `ErrorMitigationError`。拷贝数决定缓解线路的宽度：copy-swap 线路的宽度为基础线路宽度的 `copies` 倍再加 1（多出的比特是 Hadamard 检验的辅助比特）。
 
 ### 属性
 
@@ -59,7 +59,7 @@ from cqlib.error_mitigation.virtual_distillation import (
 ### 方法
 
 - `set_copies(copies)`：更新拷贝数。校验在赋值之前完成，校验失败时对象的拷贝数保持不变。
-- `build_copy_swap_circuit() -> Circuit`：构造 copy-swap 线路。基础线路先做分解，再逐份复制到各自比特区间，最后按位插入 SWAP。
+- `build_copy_swap_circuit() -> Circuit`：构造 copy-swap 线路。基础线路先做分解，再逐份复制到各自比特区间，最后在末尾辅助比特上施加 Hadamard 门，并在相邻副本之间按位施加由辅助比特控制的 SWAP。
 - `run_denominator_circuit(shots, estimator) -> tuple[float, float]`：执行分母线路，返回回调给出的二元组。
 - `run_numerator_circuit(hamiltonian, shots, estimator) -> tuple[float, float]`：执行分子线路，返回回调给出的二元组。
 - `run_vd(hamiltonian, shots_numerator, shots_denominator, estimator) -> tuple[float, float]`：依次执行分子与分母并求比值，返回 `(缓解后的期望值, 方差)`。
@@ -78,9 +78,9 @@ from cqlib.error_mitigation.virtual_distillation import (
 
 1. 基础线路先做分解，保证复制的是一组已展开的操作。
 2. 基础线路按 `copies` 份复制，第 `i` 份落在偏移 `i` 倍基础宽度的比特区间上。
-3. 对第 1 份与其余每一份，逐位插入 SWAP。SWAP 只在第 1 份与其他各份之间插入，其余份之间不直接相连。
+3. 在末尾追加一个辅助比特，经 `H` 门制备到 `|+⟩`；随后在相邻副本之间逐位插入 SWAP，全部由辅助比特控制（CSWAP）。这一受控 SWAP 梯实现 Hadamard 检验所需的副本轮换（derangement）。
 
-因此拷贝数为 2 时，基础线路每条操作出现 2 次，另加按位 SWAP；拷贝数增加时 SWAP 数量按份数线性增长，而不随拷贝数两两配对增长。
+因此拷贝数为 2 时，基础线路每条操作出现 2 次，另加辅助比特上的 1 个 `H` 与按位的受控 SWAP；拷贝数增加时受控 SWAP 数量按份数线性增长，而不随拷贝数两两配对增长。
 
 ```python
 from cqlib.circuit import Circuit
@@ -91,7 +91,7 @@ circuit.x(0)
 
 vd = VirtualDistillation(circuit, 2)
 copy_swap = vd.build_copy_swap_circuit()
-print(copy_swap.width)  # 2
+print(copy_swap.width)  # 3 = copies * 基础宽度 + 1
 ```
 
 ---
@@ -102,11 +102,13 @@ print(copy_swap.width)  # 2
 
 | 方法 | 回调收到的线路 | 回调收到的观测量 | 回调收到的采样次数 |
 | --- | --- | --- | --- |
-| `run_denominator_circuit(shots, estimator)` | copy-swap 线路 | `None` | `shots` |
-| `run_numerator_circuit(hamiltonian, shots, estimator)` | copy-swap 线路 | 按拷贝数扩展后的 `Hamiltonian` | `shots` |
+| `run_denominator_circuit(shots, estimator)` | copy-swap 线路 | 辅助比特上为 `X`（其余为恒等）的 `Hamiltonian` | `shots` |
+| `run_numerator_circuit(hamiltonian, shots, estimator)` | copy-swap 线路 | 扩展到全宽的 `Hamiltonian`（第 0 份副本上的 `O` ⊗ 辅助比特上的 `X`） | `shots` |
 | `run_vd(...)` | copy-swap 线路 | 先分子后分母，同上 | 分别为 `shots_numerator` 与 `shots_denominator` |
 
-分子所用的观测量由传入的 `Hamiltonian` 扩展得到：原有 Pauli 项保留在各自比特上，更高位的比特补 `Z`，使观测量比特数与 copy-swap 线路宽度一致。扩展由类内部完成，调用方只需传入作用在基础线路上的观测量。
+分子与分母的观测量都是具体的 `Hamiltonian`，按内容区分：分子观测量在第 0 份副本的比特上有非恒等 Pauli，分母观测量只在辅助比特（最后一个比特）上非恒等。
+
+分子所用的观测量由传入的 `Hamiltonian` 扩展得到：原有 Pauli 项保留在各自比特上（即第 0 份副本），其余副本补恒等 `I`，并在辅助比特上追加 `X`，使观测量比特数与 copy-swap 线路宽度一致。扩展由类内部完成，调用方只需传入作用在基础线路上的观测量。
 
 `run_vd()` 依次完成两步：先按 `shots_numerator` 执行分子，再按 `shots_denominator` 执行分母，然后按下式合成结果：
 
@@ -136,9 +138,16 @@ vd = VirtualDistillation(circuit, 2)
 
 
 def estimator(run_circuit, observable, shots):
-    if observable is None:
-        return (2.0, 1.0)   # 分母：Tr(ρ^M)
-    return (1.5, 0.25)      # 分子：Tr(O ρ^M)
+    # 分子与分母都携带观测量：分子在第 0 份副本的比特上有非恒等 Pauli，
+    # 分母只有辅助比特（最后一个比特）上的 X
+    is_numerator = any(
+        qubit < observable.num_qubits - 1
+        for term, _ in observable.terms
+        for qubit in term.support()
+    )
+    if is_numerator:
+        return (1.5, 0.25)      # 分子：Tr(O ρ^M)
+    return (2.0, 1.0)           # 分母：Tr(ρ^M)
 
 
 expectation, variance = vd.run_vd(

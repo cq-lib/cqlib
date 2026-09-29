@@ -2,7 +2,7 @@
 
 `cqlib.error_mitigation.virtual_distillation`
 
-`cqlib.error_mitigation.virtual_distillation` provides the low-level interface of virtual distillation: copy the base circuit several times and insert SWAPs to construct a copy-swap circuit, then estimate the numerator and the denominator separately, and finally compute the ratio to obtain the mitigated expectation value. This page covers `VirtualDistillation` and `VirtualDistillationConfig`.
+`cqlib.error_mitigation.virtual_distillation` provides the low-level interface of virtual distillation: copy the base circuit several times, add one ancillary qubit prepared by a Hadamard gate and apply ancilla-controlled SWAPs between adjacent copies (a Hadamard-test circuit), then estimate the numerator and the denominator separately, and finally compute the ratio to obtain the mitigated expectation value. This page covers `VirtualDistillation` and `VirtualDistillationConfig`.
 
 ## Import
 
@@ -50,7 +50,7 @@ Low-level helper class of virtual distillation; it holds a copy of the base circ
 Parameters:
 
 - `circuit` (`Circuit`): the base circuit. It is copied on construction and the circuit passed in is not modified.
-- `copies` (`int`): the number of copies, which must not be less than 2, otherwise `ErrorMitigationError` is raised. The number of copies determines the width of the mitigation circuit: the width of the copy-swap circuit is `copies` times the width of the base circuit.
+- `copies` (`int`): the number of copies, which must not be less than 2, otherwise `ErrorMitigationError` is raised. The number of copies determines the width of the mitigation circuit: the width of the copy-swap circuit is `copies` times the width of the base circuit plus 1 (the extra qubit is the ancillary qubit of the Hadamard test).
 
 ### Attributes
 
@@ -59,7 +59,7 @@ Parameters:
 ### Methods
 
 - `set_copies(copies)`: update the number of copies. Validation is completed before assignment, so the number of copies of the object stays unchanged when validation fails.
-- `build_copy_swap_circuit() -> Circuit`: construct the copy-swap circuit. The base circuit is first decomposed, then copied one by one into their respective qubit ranges, and finally SWAPs are inserted qubit-wise.
+- `build_copy_swap_circuit() -> Circuit`: construct the copy-swap circuit. The base circuit is first decomposed, then copied one by one into their respective qubit ranges, and finally a Hadamard gate is applied to the trailing ancillary qubit, followed by SWAPs between adjacent copies controlled by the ancillary qubit.
 - `run_denominator_circuit(shots, estimator) -> tuple[float, float]`: execute the denominator circuit and return the pair given by the callback.
 - `run_numerator_circuit(hamiltonian, shots, estimator) -> tuple[float, float]`: execute the numerator circuit and return the pair given by the callback.
 - `run_vd(hamiltonian, shots_numerator, shots_denominator, estimator) -> tuple[float, float]`: execute the numerator and the denominator in turn and compute the ratio, returning `(mitigated expectation value, variance)`.
@@ -78,9 +78,9 @@ The output of `build_copy_swap_circuit()` consists of three parts:
 
 1. The base circuit is first decomposed, ensuring that a group of already expanded operations is copied.
 2. The base circuit is copied `copies` times, with the `i`-th copy landing on the qubit range offset by `i` times the base width.
-3. For the 1st copy and each of the other copies, SWAPs are inserted qubit-wise. SWAPs are inserted only between the 1st copy and each of the other copies; the other copies are not directly connected to one another.
+3. One ancillary qubit is appended as the last qubit, prepared in `|+⟩` by an `H` gate; then, between each pair of adjacent copies, SWAPs are inserted qubit-wise, all controlled by the ancillary qubit (CSWAP). This ladder of controlled SWAPs implements the derangement of the copies required by the Hadamard test.
 
-Therefore, when the number of copies is 2, each operation of the base circuit appears 2 times, plus the qubit-wise SWAPs; as the number of copies increases, the number of SWAPs grows linearly with the number of copies rather than as pairwise combinations of copies.
+Therefore, when the number of copies is 2, each operation of the base circuit appears 2 times, plus one `H` on the ancillary qubit and the qubit-wise controlled SWAPs; as the number of copies increases, the number of controlled SWAPs grows linearly with the number of copies rather than as pairwise combinations of copies.
 
 ```python
 from cqlib.circuit import Circuit
@@ -91,7 +91,7 @@ circuit.x(0)
 
 vd = VirtualDistillation(circuit, 2)
 copy_swap = vd.build_copy_swap_circuit()
-print(copy_swap.width)  # 2
+print(copy_swap.width)  # 3 = copies * base_width + 1
 ```
 
 ---
@@ -102,11 +102,13 @@ Virtual distillation has only one mitigation circuit; both the numerator and the
 
 | Method | Circuit received by the callback | Observable received by the callback | Shots received by the callback |
 | --- | --- | --- | --- |
-| `run_denominator_circuit(shots, estimator)` | copy-swap circuit | `None` | `shots` |
-| `run_numerator_circuit(hamiltonian, shots, estimator)` | copy-swap circuit | The `Hamiltonian` expanded by the number of copies | `shots` |
+| `run_denominator_circuit(shots, estimator)` | copy-swap circuit | `Hamiltonian` of `X` on the ancillary qubit (identities elsewhere) | `shots` |
+| `run_numerator_circuit(hamiltonian, shots, estimator)` | copy-swap circuit | The `Hamiltonian` expanded to the full width (`O` on the first copy ⊗ `X` on the ancillary qubit) | `shots` |
 | `run_vd(...)` | copy-swap circuit | Numerator first, then denominator, as above | `shots_numerator` and `shots_denominator` respectively |
 
-The observable used by the numerator is obtained by expanding the `Hamiltonian` passed in: the original Pauli terms are kept on their respective qubits and the higher-order qubits are padded with `Z`, so that the observable qubit count matches the width of the copy-swap circuit. The expansion is performed inside the class, and the caller only needs to pass the observable acting on the base circuit.
+Both the numerator and the denominator observables are concrete `Hamiltonian` objects; they are told apart by content — the numerator observable has non-identity Paulis on the first copy's qubits, while the denominator observable is non-identity only on the ancillary (last) qubit.
+
+The observable used by the numerator is obtained by expanding the `Hamiltonian` passed in: the original Pauli terms are kept on their respective qubits (the first copy), the remaining copies are padded with `I`, and an `X` is appended on the ancillary qubit, so that the observable qubit count matches the width of the copy-swap circuit. The expansion is performed inside the class, and the caller only needs to pass the observable acting on the base circuit.
 
 `run_vd()` completes two steps in turn: first execute the numerator with `shots_numerator`, then execute the denominator with `shots_denominator`, and then combine the results as follows:
 
@@ -136,9 +138,16 @@ vd = VirtualDistillation(circuit, 2)
 
 
 def estimator(run_circuit, observable, shots):
-    if observable is None:
-        return (2.0, 1.0)   # 分母：Tr(ρ^M)
-    return (1.5, 0.25)      # 分子：Tr(O ρ^M)
+    # 分子与分母都携带观测量：分子在第 0 份副本的比特上有非恒等 Pauli，
+    # 分母只有辅助比特（最后一个比特）上的 X
+    is_numerator = any(
+        qubit < observable.num_qubits - 1
+        for term, _ in observable.terms
+        for qubit in term.support()
+    )
+    if is_numerator:
+        return (1.5, 0.25)      # 分子：Tr(O ρ^M)
+    return (2.0, 1.0)           # 分母：Tr(ρ^M)
 
 
 expectation, variance = vd.run_vd(

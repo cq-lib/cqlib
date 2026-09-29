@@ -77,7 +77,7 @@ Parameters:
 Execution details differ by method:
 
 - Zero-noise extrapolation: constructs the folded circuits according to the configured fold levels, calls the estimator one by one with the observable parameter `Some(hamiltonian)` and the number of shots `RunArgs::Zne::shots`, and takes only the expectation value from the return value. The folded circuits, the expectation values, the noise factors and the execution arguments are kept together.
-- Virtual distillation: constructs the copy-swap circuit and expands the observable to the width of that circuit; the estimator of the numerator circuit receives `Some(expanded observable)` and `Some(shots_numerator)`, and the denominator circuit receives `None` and `Some(shots_denominator)`. The means and variances of the numerator and the denominator are kept together.
+- Virtual distillation: constructs the copy-swap circuit and expands the observable to the width of that circuit; the estimator of the numerator circuit receives `Some(expanded observable)` — the original observable on the first copy together with `X` on the ancillary qubit — and `Some(shots_numerator)`, and the denominator circuit receives `Some(denominator observable)` — `X` on the ancillary qubit with identities elsewhere — and `Some(shots_denominator)`. The means and variances of the numerator and the denominator are kept together.
 
 Returns:
 

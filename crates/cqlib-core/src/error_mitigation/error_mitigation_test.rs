@@ -270,14 +270,20 @@ fn test_error_mitigation_vd_run_then_get_mitigated() {
             },
             &|circuit, hamiltonian_arg, shots| {
                 let ops = circuit.operations();
-                assert_eq!(ops.len(), 1);
+                assert_eq!(ops.len(), 2);
                 assert!(matches!(
                     ops[0].instruction,
-                    Instruction::Standard(StandardGate::SWAP)
+                    Instruction::Standard(StandardGate::H)
                 ));
+                assert!(matches!(ops[1].instruction, Instruction::McGate(_)));
 
-                if let Some(expanded_hamiltonian) = hamiltonian_arg {
-                    assert_eq!(expanded_hamiltonian.num_qubits, 2);
+                let expanded_hamiltonian =
+                    hamiltonian_arg.expect("numerator and denominator both provide a Hamiltonian");
+                assert_eq!(expanded_hamiltonian.num_qubits, 3);
+                let (term, _coeff) = &expanded_hamiltonian.terms[0];
+                assert_eq!((term.x[2], term.z[2]), (true, false));
+
+                if (term.x[0], term.z[0]) != (false, false) {
                     assert_eq!(shots, Some(3));
                     (1.5, 0.25)
                 } else {

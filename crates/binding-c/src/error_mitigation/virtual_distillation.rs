@@ -45,10 +45,14 @@ pub extern "C" fn virtual_distillation_free(ptr: *mut CVirtualDistillation) {
     }
 }
 
-/// Builds the copy-swap circuit used by the virtual distillation protocol.
+/// Builds the copy-swap circuit used by the virtual distillation protocol
+/// (a Hadamard-test circuit: one preparation per configured copy, a Hadamard
+/// on a trailing ancilla qubit, and a ladder of ancilla-controlled SWAPs
+/// between adjacent copies).
 ///
-/// Returns an owned `CCircuit*` (free with `circuit_free`), or NULL
-/// on error.
+/// The circuit width is `copies * base_width + 1`, where the last qubit is
+/// the ancilla. Returns an owned `CCircuit*` (free with `circuit_free`), or
+/// NULL on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn virtual_distillation_build_circuit(
     ptr: *const CVirtualDistillation,
@@ -66,8 +70,10 @@ pub extern "C" fn virtual_distillation_build_circuit(
 /// Builds the copy-swap circuit from the base circuit (the C mirror of
 /// `VirtualDistillation::build_copy_swap_circuit`).
 ///
-/// The circuit contains one preparation per configured copy plus pairwise
-/// SWAPs against the first copy. Returns an owned `CCircuit*` (free with
+/// The circuit contains one preparation per configured copy, a Hadamard
+/// gate on a trailing ancilla qubit, and a ladder of ancilla-controlled
+/// SWAPs (McGates) between adjacent copies. The width is
+/// `copies * base_width + 1`. Returns an owned `CCircuit*` (free with
 /// `circuit_free`), or NULL on NULL input or a build failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn virtual_distillation_build_copy_swap_circuit(
@@ -116,8 +122,9 @@ pub extern "C" fn virtual_distillation_set_copies(
 /// mean and variance to the out pointers.
 ///
 /// The estimator receives the copy-swap circuit, a Hamiltonian expanded to
-/// the full copy-swap width, and `shots`. Returns 0 on success or a negative
-/// error code.
+/// the full copy-swap width (the original Pauli terms on the first copy's
+/// qubits, identity elsewhere, and an X on the ancilla qubit), and `shots`.
+/// Returns 0 on success or a negative error code.
 #[unsafe(no_mangle)]
 pub extern "C" fn virtual_distillation_run_numerator_circuit(
     ptr: *const CVirtualDistillation,
@@ -148,8 +155,9 @@ pub extern "C" fn virtual_distillation_run_numerator_circuit(
 /// Runs the denominator circuit through `estimator` and writes the estimated
 /// mean and variance to the out pointers.
 ///
-/// The estimator receives the copy-swap circuit, no Hamiltonian (NULL), and
-/// `shots`. Returns 0 on success or a negative error code.
+/// The estimator receives the copy-swap circuit, the denominator Hamiltonian
+/// (a single X term on the ancilla qubit, identity elsewhere), and `shots`.
+/// Returns 0 on success or a negative error code.
 #[unsafe(no_mangle)]
 pub extern "C" fn virtual_distillation_run_denominator_circuit(
     ptr: *const CVirtualDistillation,
@@ -171,7 +179,7 @@ pub extern "C" fn virtual_distillation_run_denominator_circuit(
             }
             CqlibError::Ok as i32
         }
-        Err(_) => CqlibError::CircuitError as i32,
+        Err(err) => em_error_code(&err),
     }
 }
 
