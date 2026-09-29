@@ -52,7 +52,7 @@ platform = TianyanPlatform.login(os.environ["TIANYAN_API_KEY"])
 backend = platform.get_backend("tianyan-287")
 
 task = backend.run([qcis_text], shots=1000)
-results = task.wait(timeout_secs=120.0)
+results = task.wait(timeout=120.0)
 
 print(results[0].counts)
 ```

@@ -80,7 +80,7 @@ backend = platform.get_backend("tianyan-287")
 qcis = "H Q1\nM Q1"
 task = backend.run([qcis], shots=1000)
 
-results = task.wait(timeout_secs=120.0, poll_interval_secs=5.0)
+results = task.wait(timeout=120.0, poll_interval=5.0)
 result = results[0]
 
 print(result.task_id)
@@ -124,8 +124,8 @@ classDiagram
         +shots
         +submitted_at
         +status()
-        +wait(timeout_secs, poll_interval_secs)
-        +wait_raw(timeout_secs, poll_interval_secs)
+        +wait(timeout, poll_interval)
+        +wait_raw(timeout, poll_interval)
     }
     class ExecutionResult {
         +task_id
