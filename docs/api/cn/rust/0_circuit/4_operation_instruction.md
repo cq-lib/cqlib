@@ -98,11 +98,25 @@ pub enum Instruction {
 | `is_delay()` | 是否为延迟指令。 |
 | `is_quantum_gate()` | 是否为酉量子门，即前四类之一。 |
 
-### 3. 结构相等
+### 3. Payload 访问器
+
+每个类别谓词都配有一个 payload 访问器，返回包裹的定义对象，调用方可以先用 `is_*()` 分派、再读取内容，无需手动模式匹配。变体不匹配时访问器一律返回 `None`。
+
+| 方法 | 返回 | 说明 |
+| --- | --- | --- |
+| `standard_gate()` | `Option<StandardGate>` | 当指令为标准门时，返回标准门定义。 |
+| `mc_gate()` | `Option<&MCGate>` | 当指令为多控制门时，返回多控制门定义。 |
+| `unitary_gate()` | `Option<&UnitaryGate>` | 当指令为自定义酉门时，返回酉门定义。 |
+| `circuit_gate()` | `Option<&CircuitGate>` | 当指令为复合门时，返回复合门定义。 |
+| `directive()` | `Option<Directive>` | 当指令为非酉指令时，返回对应 `Directive`。 |
+| `classical_data()` | `Option<&ClassicalDataOp>` | 当指令为经典数据操作时，返回经典数据操作。 |
+| `classical_control()` | `Option<&ClassicalControlOp>` | 当指令为结构化控制流时，返回存储层控制流操作。 |
+
+### 4. 结构相等
 
 `Instruction` 实现了 `PartialEq`。两个指令相等当且仅当变体与内部定义在结构上一致，比较过程不涉及量子比特绑定与参数取值。
 
-### 4. 常用方法
+### 5. 常用方法
 
 | 方法 | 说明 |
 | --- | --- |
@@ -113,7 +127,7 @@ pub enum Instruction {
 | `inverse(params)` | 尝试返回反指令及反参数；不可逆指令返回 `None`。 |
 | `control(num_new_ctrls)` | 尝试将当前指令提升为受控指令。 |
 
-### 5. `From` 转换
+### 6. `From` 转换
 
 `Instruction` 支持从多种底层类型转换而来，便于在构造 IR 或编译 pass 中快速创建指令。
 
@@ -277,7 +291,10 @@ pub enum ValueInstruction {
 | `is_standard()` / `is_mcgate()` / `is_unitary()` / `is_circuit_gate()` | 判断是否分别为标准门、多控制门、自定义酉门、复合门指令。 |
 | `is_directive()` / `is_classical_data()` / `is_delay()` | 判断是否分别为非酉指令、经典数据操作、延迟指令。 |
 | `standard_gate()` | 当指令为标准门时返回对应 `StandardGate`。 |
+| `mc_gate()` / `unitary_gate()` / `circuit_gate()` | 当指令属于对应类别时，返回对应门定义的引用。 |
 | `directive()` | 当指令为非酉指令时返回对应 `Directive`。 |
+| `classical_data()` | 当指令为经典数据操作时，返回对应 `ClassicalDataOp` 的引用。 |
+| `classical_control()` | 当指令为构造层控制流时，返回对应 `ValueClassicalControlOp` 的引用。 |
 | `as_instruction()` | 读取内部 `Instruction` 引用。 |
 | `into_instruction()` | 消耗对象并取出内部 `Instruction`。 |
 

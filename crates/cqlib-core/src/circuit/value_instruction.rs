@@ -47,9 +47,11 @@ use crate::circuit::classical::{ClassicalValue, ClassicalVar};
 use crate::circuit::classical_expr::ClassicalExpr;
 use crate::circuit::control_flow::{ControlBody, validate_for_types, validate_switch};
 use crate::circuit::error::CircuitError;
+use crate::circuit::gate::circuit_gate::CircuitGate;
 use crate::circuit::gate::directive::Directive;
 use crate::circuit::gate::instruction::Instruction;
 use crate::circuit::gate::standard_gate::StandardGate;
+use crate::circuit::gate::{ClassicalDataOp, MCGate, UnitaryGate};
 use crate::circuit::operation::{Operation, ValueOperation};
 use alloc::collections::BTreeSet;
 use std::fmt;
@@ -551,17 +553,40 @@ impl ValueInstruction {
 
     /// Returns the standard gate when this is a standard-gate instruction.
     pub fn standard_gate(&self) -> Option<StandardGate> {
-        match self {
-            Self::Instruction(Instruction::Standard(gate)) => Some(*gate),
-            _ => None,
-        }
+        self.as_instruction().and_then(Instruction::standard_gate)
     }
 
     /// Returns the directive when this is a directive instruction.
     pub fn directive(&self) -> Option<Directive> {
+        self.as_instruction().and_then(Instruction::directive)
+    }
+
+    /// Returns the multi-controlled gate when this is an mc-gate instruction.
+    pub fn mc_gate(&self) -> Option<&MCGate> {
+        self.as_instruction().and_then(Instruction::mc_gate)
+    }
+
+    /// Returns the user-defined unitary gate when this is a unitary instruction.
+    pub fn unitary_gate(&self) -> Option<&UnitaryGate> {
+        self.as_instruction().and_then(Instruction::unitary_gate)
+    }
+
+    /// Returns the circuit-backed gate when this is a circuit-gate instruction.
+    pub fn circuit_gate(&self) -> Option<&CircuitGate> {
+        self.as_instruction().and_then(Instruction::circuit_gate)
+    }
+
+    /// Returns the classical data operation when this is a classical-data instruction.
+    pub fn classical_data(&self) -> Option<&ClassicalDataOp> {
+        self.as_instruction().and_then(Instruction::classical_data)
+    }
+
+    /// Returns the value-level control-flow operation when this is a classical
+    /// control-flow instruction.
+    pub fn classical_control(&self) -> Option<&ValueClassicalControlOp> {
         match self {
-            Self::Instruction(Instruction::Directive(directive)) => Some(*directive),
-            _ => None,
+            Self::Instruction(_) => None,
+            Self::ClassicalControl(op) => Some(op),
         }
     }
 
@@ -787,6 +812,64 @@ mod tests {
         assert_eq!(delay.name(), "delay");
         assert_eq!(delay.instruction_type(), "delay");
         assert!(delay.is_delay());
+    }
+
+    #[test]
+    fn value_instruction_delegates_payload_accessors() {
+        let mc = ValueInstruction::from_instruction(Instruction::McGate(Box::new(MCGate::new(
+            2,
+            StandardGate::X,
+        ))));
+        assert!(mc.is_mcgate());
+        let mc_gate = mc.mc_gate().unwrap();
+        assert_eq!(mc_gate.num_ctrl_qubits(), 2);
+        assert_eq!(mc_gate.base_gate(), &StandardGate::X);
+        assert!(mc.unitary_gate().is_none());
+        assert!(mc.circuit_gate().is_none());
+        assert!(mc.classical_data().is_none());
+
+        let unitary = ValueInstruction::from_instruction(Instruction::UnitaryGate(Box::new(
+            UnitaryGate::new("oracle", 1, 0),
+        )));
+        assert!(unitary.is_unitary());
+        assert_eq!(
+            unitary.unitary_gate().map(|gate| gate.label()),
+            Some("oracle")
+        );
+        assert!(unitary.mc_gate().is_none());
+
+        let circuit_gate = CircuitGate::new(
+            "composite",
+            crate::circuit::gate::circuit_gate::FrozenCircuit::new(crate::circuit::Circuit::new(1)),
+        )
+        .unwrap();
+        let circuit =
+            ValueInstruction::from_instruction(Instruction::CircuitGate(Box::new(circuit_gate)));
+        assert_eq!(
+            circuit.circuit_gate().map(|gate| gate.name()),
+            Some("composite")
+        );
+
+        let value =
+            ClassicalValue::new(crate::circuit::CircuitId::default(), 0, ClassicalType::Bit);
+        let data = ValueInstruction::from_instruction(Instruction::ClassicalData(
+            ClassicalDataOp::MeasureBit { result: value },
+        ));
+        assert_eq!(
+            data.classical_data().and_then(|op| op.result()),
+            Some(value)
+        );
+
+        let control = ValueInstruction::from(ValueClassicalControlOp::Break);
+        assert!(control.mc_gate().is_none());
+        assert!(control.unitary_gate().is_none());
+        assert!(control.circuit_gate().is_none());
+        assert!(control.classical_data().is_none());
+        assert_eq!(
+            control.classical_control(),
+            Some(&ValueClassicalControlOp::Break)
+        );
+        assert!(data.classical_control().is_none());
     }
 
     #[test]

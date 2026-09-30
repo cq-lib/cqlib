@@ -98,11 +98,25 @@ Category checks use a set of constant predicates, all evaluated at compile time:
 | `is_delay()` | Whether the instruction is a delay instruction. |
 | `is_quantum_gate()` | Whether the instruction is a unitary quantum gate, that is, one of the first four categories. |
 
-### 3. Structural equality
+### 3. Payload accessors
+
+Each category predicate is paired with a payload accessor that returns the wrapped definition, so callers can dispatch on `is_*()` and then read the payload without pattern matching. Every accessor returns `None` when the variant does not match.
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `standard_gate()` | `Option<StandardGate>` | The standard gate definition when the instruction is a standard gate. |
+| `mc_gate()` | `Option<&MCGate>` | The multi-controlled gate definition when the instruction is an mc-gate instruction. |
+| `unitary_gate()` | `Option<&UnitaryGate>` | The user-defined unitary gate definition when the instruction is a unitary instruction. |
+| `circuit_gate()` | `Option<&CircuitGate>` | The composite gate definition when the instruction is a circuit-gate instruction. |
+| `directive()` | `Option<Directive>` | The directive when the instruction is a non-unitary instruction. |
+| `classical_data()` | `Option<&ClassicalDataOp>` | The classical data operation when the instruction is a classical data operation. |
+| `classical_control()` | `Option<&ClassicalControlOp>` | The storage-layer control flow operation when the instruction is structured control flow. |
+
+### 4. Structural equality
 
 `Instruction` implements `PartialEq`. Two instructions are equal if and only if their variants and internal definitions agree structurally; the comparison does not involve qubit binding or parameter values.
 
-### 4. Common methods
+### 5. Common methods
 
 | Method | Description |
 | --- | --- |
@@ -113,7 +127,7 @@ Category checks use a set of constant predicates, all evaluated at compile time:
 | `inverse(params)` | Try to return the inverse instruction and inverse parameters; non-invertible instructions return `None`. |
 | `control(num_new_ctrls)` | Try to promote the current instruction to a controlled instruction. |
 
-### 5. `From` conversions
+### 6. `From` conversions
 
 `Instruction` supports conversion from several underlying types, which makes it convenient to create instructions quickly when building IR or in compiler passes.
 
@@ -277,7 +291,10 @@ The common methods are as follows:
 | `is_standard()` / `is_mcgate()` / `is_unitary()` / `is_circuit_gate()` | Determine whether the instruction is a standard gate, a multi-controlled gate, a custom unitary gate or a composite gate respectively. |
 | `is_directive()` / `is_classical_data()` / `is_delay()` | Determine whether the instruction is a non-unitary instruction, a classical data operation or a delay instruction respectively. |
 | `standard_gate()` | Return the corresponding `StandardGate` when the instruction is a standard gate. |
+| `mc_gate()` / `unitary_gate()` / `circuit_gate()` | Return a reference to the corresponding gate definition when the instruction is of the matching category. |
 | `directive()` | Return the corresponding `Directive` when the instruction is a non-unitary instruction. |
+| `classical_data()` | Return a reference to the `ClassicalDataOp` when the instruction is a classical data operation. |
+| `classical_control()` | Return a reference to the `ValueClassicalControlOp` when the instruction is construction-layer control flow. |
 | `as_instruction()` | Read a reference to the inner `Instruction`. |
 | `into_instruction()` | Consume the object and take out the inner `Instruction`. |
 

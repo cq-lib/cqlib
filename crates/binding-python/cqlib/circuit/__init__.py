@@ -49,6 +49,7 @@ ClassicalVar = _circuit_module.ClassicalVar
 ClassicalValue = _circuit_module.ClassicalValue
 Measurement = _circuit_module.Measurement
 ClassicalExpr = _circuit_module.ClassicalExpr
+ClassicalDataOp = _circuit_module.ClassicalDataOp
 ValueControlBody = _circuit_module.ValueControlBody
 ValueSwitchCase = _circuit_module.ValueSwitchCase
 ClassicalControlOp = _circuit_module.ClassicalControlOp
@@ -66,6 +67,7 @@ __all__ = [
     "CircuitId",
     "CircuitError",
     "ClassicalControlOp",
+    "ClassicalDataOp",
     "ClassicalExpr",
     "ClassicalType",
     "ClassicalValue",

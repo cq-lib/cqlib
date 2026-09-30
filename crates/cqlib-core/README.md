@@ -14,13 +14,13 @@ Add the crate to your project:
 
 ```toml
 [dependencies]
-cqlib-core = "0.1.0-beta.2"
+cqlib-core = "0.1.0-beta.3"
 ```
 
 Or use Cargo:
 
 ```shell
-cargo add cqlib-core@0.1.0-beta.2
+cargo add cqlib-core@0.1.0-beta.3
 ```
 
 ## Quick start

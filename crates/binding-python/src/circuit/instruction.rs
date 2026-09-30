@@ -19,7 +19,8 @@
 use crate::circuit::error::CircuitError as PyCircuitError;
 use crate::circuit::gate::standard::standard_gate_from_name;
 use crate::circuit::{
-    PyCircuitGate, PyClassicalControlOp, PyDirective, PyMcGate, PyStandardGate, PyUnitaryGate,
+    PyCircuitGate, PyClassicalControlOp, PyClassicalDataOp, PyDirective, PyMcGate, PyStandardGate,
+    PyUnitaryGate,
 };
 use crate::utils::python_string_literal;
 use cqlib_core::circuit::{Instruction, ValueInstruction};
@@ -180,10 +181,50 @@ impl PyInstruction {
 
     #[getter]
     fn directive(&self) -> Option<PyDirective> {
-        match &self.inner {
-            Instruction::Directive(directive) => Some(PyDirective::from(*directive)),
-            _ => None,
-        }
+        self.inner.directive().map(PyDirective::from)
+    }
+
+    /// Returns the multi-controlled gate if this is an mc-gate instruction,
+    /// None otherwise.
+    ///
+    /// The returned gate carries no bound parameters: parameters belong to the
+    /// operation (`Operation.params` / `ValueOperation.params`), not to the
+    /// instruction.
+    #[getter]
+    fn mc_gate(&self) -> Option<PyMcGate> {
+        self.inner.mc_gate().cloned().map(|gate| PyMcGate {
+            inner: gate,
+            params: vec![],
+        })
+    }
+
+    /// Returns the unitary gate if this is a unitary instruction, None otherwise.
+    ///
+    /// Parameters of a parametric unitary belong to the operation
+    /// (`Operation.params` / `ValueOperation.params`), not to the instruction.
+    #[getter]
+    fn unitary_gate(&self) -> Option<PyUnitaryGate> {
+        self.inner.unitary_gate().cloned().map(PyUnitaryGate::from)
+    }
+
+    /// Returns the circuit-backed gate if this is a circuit-gate instruction,
+    /// None otherwise.
+    ///
+    /// Parameters belong to the operation (`Operation.params` /
+    /// `ValueOperation.params`), not to the instruction.
+    #[getter]
+    fn circuit_gate(&self) -> Option<PyCircuitGate> {
+        self.inner.circuit_gate().cloned().map(PyCircuitGate::from)
+    }
+
+    /// Returns the classical data operation if this is a classical-data
+    /// instruction, None otherwise.
+    #[getter]
+    fn classical_data(&self) -> Option<PyClassicalDataOp> {
+        self.inner
+            .classical_data()
+            .cloned()
+            .map(PyClassicalDataOp::from)
     }
 
     fn __str__(&self) -> String {
@@ -327,6 +368,48 @@ impl PyValueInstruction {
         self.inner.directive().map(PyDirective::from)
     }
 
+    /// Returns the multi-controlled gate if this is an mc-gate instruction,
+    /// None otherwise.
+    ///
+    /// The returned gate carries no bound parameters: parameters belong to the
+    /// operation (`ValueOperation.params`), not to the instruction.
+    #[getter]
+    fn mc_gate(&self) -> Option<PyMcGate> {
+        self.inner.mc_gate().cloned().map(|gate| PyMcGate {
+            inner: gate,
+            params: vec![],
+        })
+    }
+
+    /// Returns the unitary gate if this is a unitary instruction, None otherwise.
+    ///
+    /// Parameters of a parametric unitary belong to the operation
+    /// (`ValueOperation.params`), not to the instruction.
+    #[getter]
+    fn unitary_gate(&self) -> Option<PyUnitaryGate> {
+        self.inner.unitary_gate().cloned().map(PyUnitaryGate::from)
+    }
+
+    /// Returns the circuit-backed gate if this is a circuit-gate instruction,
+    /// None otherwise.
+    ///
+    /// Parameters belong to the operation (`ValueOperation.params`), not to
+    /// the instruction.
+    #[getter]
+    fn circuit_gate(&self) -> Option<PyCircuitGate> {
+        self.inner.circuit_gate().cloned().map(PyCircuitGate::from)
+    }
+
+    /// Returns the classical data operation if this is a classical-data
+    /// instruction, None otherwise.
+    #[getter]
+    fn classical_data(&self) -> Option<PyClassicalDataOp> {
+        self.inner
+            .classical_data()
+            .cloned()
+            .map(PyClassicalDataOp::from)
+    }
+
     #[getter]
     fn instruction(&self) -> Option<PyInstruction> {
         self.inner
@@ -337,10 +420,10 @@ impl PyValueInstruction {
 
     #[getter]
     fn classical_control(&self) -> Option<PyClassicalControlOp> {
-        match &self.inner {
-            ValueInstruction::ClassicalControl(control) => Some(control.clone().into()),
-            ValueInstruction::Instruction(_) => None,
-        }
+        self.inner
+            .classical_control()
+            .cloned()
+            .map(PyClassicalControlOp::from)
     }
 
     fn __str__(&self) -> String {
@@ -371,11 +454,96 @@ impl PyValueInstruction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cqlib_core::circuit::{Parameter, StandardGate};
+    use cqlib_core::circuit::gate::{
+        CircuitGate, ClassicalDataOp, FrozenCircuit, MCGate, UnitaryGate,
+    };
+    use cqlib_core::circuit::{
+        Circuit, CircuitId, ClassicalType, ClassicalValue, Parameter, StandardGate,
+    };
 
     #[test]
     fn storage_instruction_rejects_bound_gate_parameters() {
         let gate = PyStandardGate::from(StandardGate::RX, vec![Parameter::symbol("theta")]);
         assert!(PyInstruction::from_standard_gate(gate).is_err());
+    }
+
+    #[test]
+    fn storage_instruction_payload_accessors_return_cloned_gates() {
+        let mc = PyInstruction::from(Instruction::McGate(Box::new(MCGate::new(
+            2,
+            StandardGate::X,
+        ))));
+        let mc_gate = mc.mc_gate().expect("mc gate");
+        assert_eq!(mc_gate.inner.num_ctrl_qubits(), 2);
+        assert_eq!(*mc_gate.inner.base_gate(), StandardGate::X);
+        assert!(mc_gate.params.is_empty());
+        assert!(mc.unitary_gate().is_none());
+        assert!(mc.circuit_gate().is_none());
+        assert!(mc.classical_data().is_none());
+
+        let unitary = PyInstruction::from(Instruction::UnitaryGate(Box::new(UnitaryGate::new(
+            "oracle", 2, 1,
+        ))));
+        let unitary_gate = unitary.unitary_gate().expect("unitary gate");
+        assert_eq!(unitary_gate.label(), "oracle");
+        assert_eq!(unitary_gate.num_qubits(), 2);
+        assert!(unitary.mc_gate().is_none());
+
+        let circuit_gate =
+            CircuitGate::new("composite", FrozenCircuit::new(Circuit::new(1))).unwrap();
+        let circuit = PyInstruction::from(Instruction::CircuitGate(Box::new(circuit_gate)));
+        assert!(circuit.circuit_gate().is_some());
+        assert!(circuit.mc_gate().is_none());
+
+        let standard = PyInstruction::from(Instruction::Standard(StandardGate::H));
+        assert!(standard.mc_gate().is_none());
+        assert!(standard.unitary_gate().is_none());
+        assert!(standard.circuit_gate().is_none());
+        assert!(standard.classical_data().is_none());
+    }
+
+    #[test]
+    fn storage_instruction_classical_data_accessor_returns_operation() {
+        let result = ClassicalValue::new(CircuitId::new(), 0, ClassicalType::Bit);
+        let instruction =
+            PyInstruction::from(Instruction::ClassicalData(ClassicalDataOp::MeasureBit {
+                result,
+            }));
+
+        let data = instruction.classical_data().expect("classical data");
+        assert_eq!(data.kind(), "measure_bit");
+        assert_eq!(data.result().map(|value| value.inner), Some(result));
+        assert!(data.target().is_none());
+        assert!(data.value().is_none());
+    }
+
+    #[test]
+    fn value_instruction_payload_accessors_delegate() {
+        let mc = PyValueInstruction::from(ValueInstruction::from_instruction(Instruction::McGate(
+            Box::new(MCGate::new(3, StandardGate::Z)),
+        )));
+        let mc_gate = mc.mc_gate().expect("mc gate");
+        assert_eq!(mc_gate.inner.num_ctrl_qubits(), 3);
+        assert!(mc_gate.params.is_empty());
+        assert!(mc.unitary_gate().is_none());
+        assert!(mc.circuit_gate().is_none());
+        assert!(mc.classical_data().is_none());
+
+        let unitary = PyValueInstruction::from(ValueInstruction::from_instruction(
+            Instruction::UnitaryGate(Box::new(UnitaryGate::new("oracle", 1, 0))),
+        ));
+        assert_eq!(
+            unitary.unitary_gate().map(|gate| gate.label()),
+            Some("oracle".to_string())
+        );
+
+        let control =
+            PyValueInstruction::from_classical_control(crate::circuit::PyClassicalControlOp {
+                inner: cqlib_core::circuit::ValueClassicalControlOp::Break,
+            });
+        assert!(control.mc_gate().is_none());
+        assert!(control.unitary_gate().is_none());
+        assert!(control.circuit_gate().is_none());
+        assert!(control.classical_data().is_none());
     }
 }
