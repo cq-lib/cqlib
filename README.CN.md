@@ -24,6 +24,8 @@ Distillation）等误差缓解技术。其模块化设计支持独立使用各�
 
 了解更多请访问 **[qc.zdxlz.com/cqlib](https://qc.zdxlz.com/cqlib)**。
 
+**[阅读白皮书](docs/whitepaper/Cqlib.pdf)** —— 一份文档讲清 Cqlib 的设计理念、系统架构与技术细节。
+
 ## 核心特性
 
 - **量子线路构建** — 直观的 API 用于构建、组合和参数化量子线路

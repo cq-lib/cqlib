@@ -28,6 +28,8 @@ education, and integration into larger software stacks.
 
 Learn more at **[qc.zdxlz.com/cqlib](https://qc.zdxlz.com/cqlib)**.
 
+**[Read the Whitepaper](docs/whitepaper/Cqlib.pdf)** — Cqlib's design philosophy, architecture, and technical details in one document.
+
 ## Features
 
 - **Circuit Construction** — Intuitive APIs to build, compose, and parameterize quantum circuits
