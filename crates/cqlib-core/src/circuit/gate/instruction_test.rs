@@ -255,3 +255,85 @@ fn classical_control_op_converts_to_instruction() {
         Instruction::ClassicalControl(ClassicalControlOp::Break)
     ));
 }
+
+#[test]
+fn payload_accessors_match_predicates_for_every_variant() {
+    let circuit_id = CircuitId::new();
+    let measured = ClassicalValue::new(circuit_id, 0, ClassicalType::Bit);
+    let circuit_gate = CircuitGate::new("composite", FrozenCircuit::new(Circuit::new(1))).unwrap();
+
+    let cases = [
+        Instruction::Standard(StandardGate::H),
+        Instruction::McGate(Box::new(MCGate::new(2, StandardGate::X))),
+        Instruction::UnitaryGate(Box::new(UnitaryGate::new("oracle", 1, 0))),
+        Instruction::CircuitGate(Box::new(circuit_gate)),
+        Instruction::Directive(Directive::Barrier),
+        Instruction::ClassicalData(ClassicalDataOp::MeasureBit { result: measured }),
+        Instruction::ClassicalControl(ClassicalControlOp::Break),
+        Instruction::Delay,
+    ];
+
+    for instruction in cases {
+        assert_eq!(
+            instruction.standard_gate().is_some(),
+            instruction.is_standard()
+        );
+        assert_eq!(instruction.mc_gate().is_some(), instruction.is_mcgate());
+        assert_eq!(
+            instruction.unitary_gate().is_some(),
+            instruction.is_unitary()
+        );
+        assert_eq!(
+            instruction.circuit_gate().is_some(),
+            instruction.is_circuit_gate()
+        );
+        assert_eq!(
+            instruction.directive().is_some(),
+            instruction.is_directive()
+        );
+        assert_eq!(
+            instruction.classical_data().is_some(),
+            instruction.is_classical_data()
+        );
+        assert_eq!(
+            instruction.classical_control().is_some(),
+            instruction.is_classical_control()
+        );
+    }
+}
+
+#[test]
+fn payload_accessors_return_the_stored_payload() {
+    let circuit_id = CircuitId::new();
+    let measured = ClassicalValue::new(circuit_id, 0, ClassicalType::Bit);
+    let target = ClassicalVar::new(circuit_id, 0, ClassicalType::Bit);
+
+    let mc = Instruction::McGate(Box::new(MCGate::new(2, StandardGate::RZ)));
+    let mc_gate = mc.mc_gate().unwrap();
+    assert_eq!(mc_gate.num_ctrl_qubits(), 2);
+    assert_eq!(mc_gate.base_gate(), &StandardGate::RZ);
+
+    let unitary = Instruction::UnitaryGate(Box::new(UnitaryGate::new("oracle", 2, 1)));
+    let unitary_gate = unitary.unitary_gate().unwrap();
+    assert_eq!(unitary_gate.label(), "oracle");
+    assert_eq!(unitary_gate.num_qubits(), 2);
+
+    let circuit_gate = CircuitGate::new("composite", FrozenCircuit::new(Circuit::new(1))).unwrap();
+    let circuit = Instruction::CircuitGate(Box::new(circuit_gate));
+    assert_eq!(circuit.circuit_gate().unwrap().name(), "composite");
+
+    let directive = Instruction::Directive(Directive::Measure);
+    assert_eq!(directive.directive(), Some(Directive::Measure));
+
+    let store = Instruction::ClassicalData(ClassicalDataOp::Store {
+        target,
+        value: ClassicalExpr::value(measured),
+    });
+    assert_eq!(store.classical_data().unwrap().target(), Some(target));
+
+    let control = Instruction::ClassicalControl(ClassicalControlOp::Continue);
+    assert!(matches!(
+        control.classical_control(),
+        Some(ClassicalControlOp::Continue)
+    ));
+}

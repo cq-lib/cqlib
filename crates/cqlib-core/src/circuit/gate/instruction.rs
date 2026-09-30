@@ -156,6 +156,54 @@ impl Instruction {
         }
     }
 
+    /// Returns the multi-controlled gate when this is an `McGate` instruction.
+    pub fn mc_gate(&self) -> Option<&MCGate> {
+        match self {
+            Self::McGate(gate) => Some(gate),
+            _ => None,
+        }
+    }
+
+    /// Returns the user-defined unitary gate when this is a `UnitaryGate` instruction.
+    pub fn unitary_gate(&self) -> Option<&UnitaryGate> {
+        match self {
+            Self::UnitaryGate(gate) => Some(gate),
+            _ => None,
+        }
+    }
+
+    /// Returns the circuit-backed gate when this is a `CircuitGate` instruction.
+    pub fn circuit_gate(&self) -> Option<&CircuitGate> {
+        match self {
+            Self::CircuitGate(gate) => Some(gate),
+            _ => None,
+        }
+    }
+
+    /// Returns the directive when this is a `Directive` instruction.
+    pub fn directive(&self) -> Option<Directive> {
+        match self {
+            Self::Directive(directive) => Some(*directive),
+            _ => None,
+        }
+    }
+
+    /// Returns the classical data operation when this is a `ClassicalData` instruction.
+    pub fn classical_data(&self) -> Option<&ClassicalDataOp> {
+        match self {
+            Self::ClassicalData(operation) => Some(operation),
+            _ => None,
+        }
+    }
+
+    /// Returns the classical control operation when this is a `ClassicalControl` instruction.
+    pub fn classical_control(&self) -> Option<&ClassicalControlOp> {
+        match self {
+            Self::ClassicalControl(operation) => Some(operation),
+            _ => None,
+        }
+    }
+
     /// Returns true when this instruction directly or recursively contains a measurement.
     pub fn has_measurement(&self) -> bool {
         match self {
