@@ -5,6 +5,7 @@
 - `cqlib.circuit.ClassicalVar`
 - `cqlib.circuit.ClassicalValue`
 - `cqlib.circuit.Measurement`
+- `cqlib.circuit.ClassicalDataOp`
 - `cqlib.circuit.ClassicalExpr`
 - `cqlib.circuit.ClassicalControlOp`
 - `cqlib.circuit.ValueControlBody`
@@ -15,6 +16,7 @@ from cqlib.circuit import (
     CircuitId,
     ClassicalType,
     ClassicalExpr,
+    ClassicalDataOp,
     ClassicalControlOp,
     ValueControlBody,
     ValueSwitchCase,
@@ -35,6 +37,7 @@ Classical data and control flow objects fall into the following categories:
 | `ClassicalVar` | A mutable classical variable handle, created by `Circuit.var()`. |
 | `ClassicalValue` | An immutable classical value handle, usually produced by measurement. |
 | `Measurement` | A measurement receipt, recording the measurement result handle and the order of the measured qubits. |
+| `ClassicalDataOp` | The instruction form of a classical data operation (a store or a measurement result write), obtained from `Instruction.classical_data`. |
 | `ClassicalExpr` | A side-effect-free classical expression, which can represent literals, variable reads, comparisons and logical composition. |
 | `ClassicalControlOp` | A low-level control flow object, used to represent `if`, `while`, `for`, `switch`, `break` and `continue`. |
 | `ValueControlBody` | The operation sequence in a control flow branch body or loop body. |
@@ -234,6 +237,30 @@ If a measurement result is needed as a condition, a single-bit measurement resul
 ```python
 single = circuit.measure(1)
 condition = single.expr().to_bool()
+```
+
+---
+
+## `ClassicalDataOp`
+
+`ClassicalDataOp` is the instruction form of a classical data operation: a store into a mutable classical variable, or a measurement producing an immutable classical value. It is not constructed directly; instances are obtained from the `classical_data` attribute of `Instruction` or `ValueInstruction`.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `kind` | `str` | The operation kind: `"store"`, `"measure_bit"` or `"measure_bits"`. |
+| `target` | `ClassicalVar / None` | The store target variable when `kind` is `"store"`. |
+| `value` | `ClassicalExpr / None` | The stored expression when `kind` is `"store"`. |
+| `result` | `ClassicalValue / None` | The immutable value receiving the result when `kind` is `"measure_bit"` or `"measure_bits"`. |
+
+```python
+from cqlib import Circuit
+
+circuit = Circuit(2)
+circuit.measure_bits([0, 1])
+
+data = circuit.operations[0].instruction.classical_data
+print(data.kind)    # measure_bits
+print(data.result)  # the produced ClassicalValue
 ```
 
 ---

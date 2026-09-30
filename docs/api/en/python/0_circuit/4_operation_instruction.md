@@ -71,7 +71,13 @@ delay_inst = Instruction.delay()
 | `is_classical_data` | `bool` | Whether it is an instruction related to classical data. |
 | `is_delay` | `bool` | Whether it is a delay instruction. |
 | `standard_gate` | `StandardGate / None` | When the instruction is a standard gate, return the internal standard gate object. |
+| `mc_gate` | `MCGate / None` | When the instruction is a multi-controlled gate, return the internal `MCGate` object. |
+| `unitary_gate` | `UnitaryGate / None` | When the instruction is a user-defined unitary gate, return the internal `UnitaryGate` object. |
+| `circuit_gate` | `CircuitGate / None` | When the instruction is a sub-circuit composite gate, return the internal `CircuitGate` object. |
 | `directive` | `Directive / None` | When the instruction is a `Directive`, return the internal directive object. |
+| `classical_data` | `ClassicalDataOp / None` | When the instruction is a classical data operation, return the internal `ClassicalDataOp` object. |
+
+Gate objects returned by these payload accessors carry no bound parameters: parameters belong to the operation layer (see `ValueOperation.params`), so the returned gates always have an empty parameter list. Note that `Instruction` provides no `classical_control` payload accessor: the storage-layer control flow operation inlines circuit-internal handles, and its content can only be read at the construction layer through `ValueInstruction.classical_control`.
 
 ---
 
@@ -98,7 +104,11 @@ delay_inst = Instruction.delay()
 | `instruction_type` | `str` | The instruction category, with the same values as `Instruction.instruction_type`; it is `"classical_control"` when control flow is wrapped. |
 | `is_standard` / `is_mcgate` / `is_unitary` / `is_circuit_gate` / `is_directive` / `is_classical_data` / `is_delay` | `bool` | Category check attributes with the same names as on `Instruction`; all are `False` when control flow is wrapped. |
 | `standard_gate` | `StandardGate / None` | When a standard gate instruction is wrapped, return the internal standard gate object. |
+| `mc_gate` | `MCGate / None` | When a multi-controlled gate instruction is wrapped, return the internal `MCGate` object. |
+| `unitary_gate` | `UnitaryGate / None` | When a user-defined unitary gate instruction is wrapped, return the internal `UnitaryGate` object. |
+| `circuit_gate` | `CircuitGate / None` | When a sub-circuit composite gate instruction is wrapped, return the internal `CircuitGate` object. |
 | `directive` | `Directive / None` | When a `Directive` instruction is wrapped, return the internal directive object. |
+| `classical_data` | `ClassicalDataOp / None` | When a classical data instruction is wrapped, return the internal `ClassicalDataOp` object. |
 
 ---
 
