@@ -486,10 +486,14 @@ pub fn concurrence(dm: &DensityMatrix) -> Result<f64, QisError> {
 /// This measure represents the minimum number of Bell pairs required to asymptotically
 /// create the state ρ using LOCC (Local Operations and Classical Communication).
 pub fn entanglement_of_formation(dm: &DensityMatrix) -> Result<f64, QisError> {
-    let c = concurrence(dm)?.clamp(0.0, 1.0);
+    Ok(entanglement_of_formation_from_concurrence(concurrence(dm)?))
+}
+
+fn entanglement_of_formation_from_concurrence(c: f64) -> f64 {
+    let c = c.clamp(0.0, 1.0);
 
     if c < 1e-15 {
-        return Ok(0.0);
+        return 0.0;
     }
 
     // Compute x = (1 + sqrt(1 - C^2)) / 2
@@ -506,7 +510,7 @@ pub fn entanglement_of_formation(dm: &DensityMatrix) -> Result<f64, QisError> {
         binary_entropy -= (1.0 - x) * (1.0 - x).log2();
     }
 
-    Ok(binary_entropy)
+    binary_entropy
 }
 
 /// Helper function to compute the matrix square root of a positive semi-definite matrix.
