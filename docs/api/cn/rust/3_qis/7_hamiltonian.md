@@ -1,6 +1,6 @@
 # Hamiltonian 与 Observable
 
-`cqlib_core::qis::hamiltonian`  
+`cqlib_core::qis::hamiltonian`
 `cqlib_core::qis::observable`
 
 本页介绍由 Pauli 串与复系数构成的观测量 `Hamiltonian`，以及计算期望值的统一接口 `Observable` trait。
@@ -174,6 +174,8 @@ pub trait Observable {
 ### 默认方法
 
 - `fn variance_statevector(&self, sv: &Statevector) -> Result<f64, QisError>`：计算纯态方差 $\text{Var}(O) = \langle O^2 \rangle - \langle O \rangle^2$。trait 中的默认实现返回 `QisError::UnsupportedOperation`，支持方差计算的观测量需要覆写该方法。
+
+实数期望值和方差接口在吸收相位、合并重复项后检查厄米性，不删除非零小系数。原始或合并后系数非有限时返回 `QisError::InvalidParameterValue`，非厄米算符返回 `QisError::NotHermitian`。
 
 ### 实现者
 

@@ -1,4 +1,5 @@
 // This code is part of Cqlib.
+// Modified: fix P1 numerical boundaries and simulator error handling.
 // Modified to support reproducible state sampling.
 //
 // (C) Copyright China Telecom Quantum Group 2026
@@ -83,14 +84,17 @@ impl PyDensityMatrix {
     /// Returns:
     ///     A new DensityMatrix instance in the ground state
     ///
+    /// Raises:
+    ///     ValueError: If the dimension is unrepresentable or state allocation fails.
+    ///
     /// Examples:
     ///     >>> from cqlib.qis import DensityMatrix
     ///     >>> dm = DensityMatrix(2)  # |00><00| state
     #[new]
-    fn new(num_qubits: usize) -> Self {
-        Self {
-            inner: DensityMatrix::new(num_qubits),
-        }
+    fn new(num_qubits: usize) -> PyResult<Self> {
+        Ok(Self {
+            inner: DensityMatrix::try_new(num_qubits).map_err(qis_error_to_py_err)?,
+        })
     }
 
     /// Creates a density matrix from an initial statevector (pure state).
@@ -239,10 +243,10 @@ impl PyDensityMatrix {
     ///     >>> dm.probabilities()
     ///     [0.5, 0.5]
     #[staticmethod]
-    fn maximally_mixed(num_qubits: usize) -> Self {
-        Self {
-            inner: DensityMatrix::maximally_mixed(num_qubits),
-        }
+    fn maximally_mixed(num_qubits: usize) -> PyResult<Self> {
+        Ok(Self {
+            inner: DensityMatrix::try_maximally_mixed(num_qubits).map_err(qis_error_to_py_err)?,
+        })
     }
 
     /// Applies a circuit to this density matrix in place.
@@ -848,7 +852,8 @@ impl PyDensityMatrix {
     ///     The expectation value as a real number
     ///
     /// Raises:
-    ///     ValueError: If the qubit counts don't match or the observable type is invalid
+    ///     ValueError: If qubit counts differ, the observable type is invalid,
+    ///         the observable is not Hermitian, or its coefficients are non-finite.
     fn expectation(&self, py: Python<'_>, observable: &Bound<'_, PyAny>) -> PyResult<f64> {
         if let Ok(h) = observable.extract::<crate::qis::hamiltonian::PyHamiltonian>() {
             py.detach(|| self.inner.expectation(&h.inner))

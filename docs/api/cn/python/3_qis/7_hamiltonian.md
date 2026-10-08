@@ -113,6 +113,8 @@ class Observable(Protocol):
 
 ### 异常情况
 
+实数期望值和方差接口要求吸收 Pauli 相位、合并重复项后的算符为厄米算符；原始及合并后的系数必须有限，否则抛出 `ValueError`。计算保留非零小系数。
+
 - `ValueError`：两个算符比特数不一致（`+`、`+=`）、项的比特数与算符不一致（`from_list`、`add_term`）、系数类型不受支持、观测量与量子态比特数不一致（`expectation_*`、`variance_statevector`）、测量概率中找不到可用的测量基（`expectation_probs`）。
 - `ValueError`：`to_trotter_circuit` 与 `to_evolution_circuit` 在 `steps` 为 `0`、算符为空、系数非 Hermitian、或 Pauli 字符串相位非 Hermitian 时抛出。
 

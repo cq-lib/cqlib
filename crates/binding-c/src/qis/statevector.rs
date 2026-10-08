@@ -97,11 +97,14 @@ fn apply_three(
 }
 
 /// Create a new statevector with `num_qubits` initialised to |0...0>.
+/// Returns a newly allocated simulator, or NULL if its dimension is
+/// unrepresentable or its state allocation fails.
 #[unsafe(no_mangle)]
 pub extern "C" fn statevector_new(num_qubits: usize) -> *mut CStatevector {
-    Box::into_raw(Box::new(CStatevector {
-        inner: Statevector::new(num_qubits),
-    }))
+    match Statevector::try_new(num_qubits) {
+        Ok(inner) => Box::into_raw(Box::new(CStatevector { inner })),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 /// Free a statevector. NULL is allowed.

@@ -507,7 +507,8 @@ impl PyPauliString {
     ///     The expectation value as a float.
     ///
     /// Raises:
-    ///     ValueError: If state string length doesn't match num_qubits or contains invalid chars.
+    ///     ValueError: If the Pauli string is not Hermitian, or a state string
+    ///         has the wrong length or contains invalid characters.
     ///
     /// Examples:
     ///     >>> ps = PauliString.from_str("IZ")  # Z on qubit 0
@@ -527,6 +528,9 @@ impl PyPauliString {
     }
 
     /// Computes the expectation value for a statevector.
+    ///
+    /// Raises:
+    ///     ValueError: If the observable is not Hermitian or input dimensions differ.
     fn expectation_statevector(&self, sv: &PyStatevector) -> PyResult<f64> {
         self.inner
             .expectation_statevector(&sv.inner)
@@ -534,6 +538,9 @@ impl PyPauliString {
     }
 
     /// Computes the expectation value for a density matrix.
+    ///
+    /// Raises:
+    ///     ValueError: If the observable is not Hermitian or input dimensions differ.
     fn expectation_density_matrix(&self, dm: &PyDensityMatrix) -> PyResult<f64> {
         self.inner
             .expectation_density_matrix(&dm.inner)
@@ -541,6 +548,9 @@ impl PyPauliString {
     }
 
     /// Computes the expectation value from measurement probabilities.
+    ///
+    /// Raises:
+    ///     ValueError: If the observable is not Hermitian or input dimensions differ.
     fn expectation_probs(&self, measurements: &Bound<'_, PyAny>) -> PyResult<f64> {
         let mut rust_measurements = Vec::new();
         for item in measurements.try_iter()? {
@@ -571,6 +581,9 @@ impl PyPauliString {
     }
 
     /// Computes the variance for a statevector.
+    ///
+    /// Raises:
+    ///     ValueError: If the observable is not Hermitian or input dimensions differ.
     fn variance_statevector(&self, sv: &PyStatevector) -> PyResult<f64> {
         self.inner
             .variance_statevector(&sv.inner)

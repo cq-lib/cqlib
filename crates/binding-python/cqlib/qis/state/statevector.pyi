@@ -61,6 +61,9 @@ class Statevector:
         Returns:
             A new Statevector instance in the ground state
 
+        Raises:
+            ValueError: If the dimension is unrepresentable or state allocation fails.
+
         Examples:
             >>> sv = Statevector(2)  # |00⟩ state
         """
@@ -559,7 +562,8 @@ class Statevector:
             The expectation value as a real number
 
         Raises:
-            ValueError: If the qubit counts don't match or the observable type is invalid
+            ValueError: If qubit counts differ, the observable type is invalid,
+                the observable is not Hermitian, or its coefficients are non-finite.
         """
         ...
 

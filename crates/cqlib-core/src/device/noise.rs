@@ -164,7 +164,7 @@ impl SingleQubitNoise {
                 ]
             }
             Self::Pauli { px, py, pz } => {
-                let pi = (1.0 - px - py - pz).sqrt();
+                let pi = (1.0 - (px + py + pz)).sqrt();
                 vec![
                     Pauli::I.to_matrix() * pi,
                     Pauli::X.to_matrix() * px.sqrt(),

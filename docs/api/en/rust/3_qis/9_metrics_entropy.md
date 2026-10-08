@@ -1,6 +1,6 @@
 # Metrics and Entropy
 
-`cqlib_core::qis::metrics`  
+`cqlib_core::qis::metrics`
 `cqlib_core::qis::entropy`
 
 This page covers the metrics and information measures between quantum states. `metrics` collects purity, fidelity, trace distance, von Neumann entropy and partial transpose related quantities; `entropy` collects linear entropy, Rényi entropy, and the measures aimed at entanglement. The functions of both modules take a statevector or a density matrix as input and return `Result<f64, QisError>` (except `density_matrix_to_faer`).
@@ -143,6 +143,8 @@ The linear entropy $S_L(\rho) = 1 - \text{Tr}(\rho^2)$. It is `0.0` for a pure s
 
 ### `renyi_entropy(dm: &DensityMatrix, alpha: f64) -> Result<f64, QisError>`
 
+The order must be positive and not NaN. At `alpha = 1` the result is the von Neumann entropy; positive infinity returns min-entropy. Nearby orders use stable evaluation. Non-diagonal spectra treat eigenvalues at or below `dimension × f64::EPSILON × largest eigenvalue` as numerical zeros; diagonal spectra retain all positive entries.
+
 The Rényi entropy $S_\alpha(\rho) = \frac{1}{1-\alpha}\log_2\left(\sum_i \lambda_i^\alpha\right)$, where $\lambda_i$ are the eigenvalues of the density matrix. When $\alpha$ is not greater than 0, `QisError::InvalidParameterValue` is returned; when the difference between $\alpha$ and 1 is smaller than `f64::EPSILON`, the von Neumann entropy is used instead, avoiding division by zero. The result is truncated to a non-negative value.
 
 Example:
@@ -283,7 +285,7 @@ Convert a density matrix into the matrix type of the eigendecomposition library,
 | Error | When it occurs |
 | --- | --- |
 | `QisError::QubitMismatch` | The two states involved in the operation have inconsistent qubit counts. |
-| `QisError::InvalidParameterValue` | `alpha` of `renyi_entropy()` is not greater than 0. |
+| `QisError::InvalidParameterValue` | `alpha` of `renyi_entropy()` is NaN or not greater than 0. |
 | `QisError::InvalidSubsystem` | The subsystem of `entanglement_entropy_pure()` is empty, contains all qubits, or has duplicate indices. |
 | `QisError::IndexOutOfBounds` | A target index of `partial_transpose()` is out of range, or a subsystem index of `entanglement_entropy_pure()` is out of range. |
 | `QisError::UnsupportedDimension` | The input of `concurrence()` and `entanglement_of_formation()` is not two-qubit. |

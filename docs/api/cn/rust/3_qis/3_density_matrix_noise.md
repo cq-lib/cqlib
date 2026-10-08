@@ -35,7 +35,10 @@ pub struct DensityMatrixNoise {
 
 ### 构造与线路对接
 
+`new` 在维度无法表示或状态内存分配失败时会 panic。需要处理错误时使用对应的 `try_*` 构造函数。支持零比特状态。
+
 - `fn new(num_qubits: usize, noise_model: Option<NoiseModel>) -> Self`：按比特数与噪声模型构造，初始态为 `|0...0><0...0|`。
+- `fn try_new(num_qubits: usize, noise_model: Option<NoiseModel>) -> Result<Self, QisError>`：构造基态；维度无法表示时返回 `QisError::InvalidParameterValue`，状态内存分配失败时返回 `QisError::UnsupportedOperation`。
 - `fn from_circuit(circuit: &Circuit, noise_model: Option<NoiseModel>) -> Result<Self, QisError>`：执行线路并返回模拟器；线路会先被分解为基础门，噪声在每个门之后施加。
 - `fn apply_circuit(&mut self, circuit: &Circuit) -> Result<(), QisError>`：把线路原地作用到当前模拟器上，噪声按已配置的模型施加。
 

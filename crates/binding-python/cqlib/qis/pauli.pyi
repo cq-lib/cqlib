@@ -289,7 +289,8 @@ class PauliString:
             The expectation value as a float.
 
         Raises:
-            ValueError: If state string length doesn't match num_qubits or contains invalid chars.
+            ValueError: If the Pauli string is not Hermitian, or a state string
+                has the wrong length or contains invalid characters.
         """
         ...
 
@@ -301,6 +302,9 @@ class PauliString:
 
         Returns:
             The real expectation value.
+
+        Raises:
+            ValueError: If the observable is not Hermitian or input dimensions differ.
         """
         ...
 
@@ -312,6 +316,9 @@ class PauliString:
 
         Returns:
             The real expectation value.
+
+        Raises:
+            ValueError: If the observable is not Hermitian or input dimensions differ.
         """
         ...
 
@@ -326,6 +333,10 @@ class PauliString:
 
         Returns:
             The real expectation value.
+
+        Raises:
+            ValueError: If the observable is not Hermitian, input dimensions differ,
+                or no compatible measurement basis is available.
         """
         ...
 

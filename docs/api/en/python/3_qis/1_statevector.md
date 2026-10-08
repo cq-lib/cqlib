@@ -20,6 +20,8 @@ Amplitudes are stored contiguously by index in memory, and the amplitude of the 
 
 ### Statevector(num_qubits)
 
+Raises `ValueError` if the state dimension is unrepresentable or state allocation fails. Zero-qubit states are supported.
+
 Create a state in |0…0⟩.
 
 Parameters:

@@ -190,6 +190,11 @@ impl Hamiltonian {
     ///
     /// This method is crucial for optimizing performance before executing quantum simulations.
     pub fn simplify(&mut self) {
+        self.simplify_with_tolerance(1e-10);
+    }
+
+    // Evolution must merge terms without pruning small, nonzero coefficients.
+    pub(crate) fn simplify_with_tolerance(&mut self, tolerance: f64) {
         if self.terms.is_empty() {
             return;
         }
@@ -235,7 +240,9 @@ impl Hamiltonian {
                 } else {
                     // New operator found, save the previous one if its coefficient is significant
                     // Filter out terms with a coefficient near zero
-                    if current_coeff.norm() > 1e-10 {
+                    if (tolerance == 0.0 && current_coeff != Complex64::new(0.0, 0.0))
+                        || current_coeff.norm() > tolerance
+                    {
                         merged.push((current_op, current_coeff));
                     }
                     current_op = op;
@@ -243,7 +250,9 @@ impl Hamiltonian {
                 }
             }
             // Push the last accumulated term
-            if current_coeff.norm() > 1e-10 {
+            if (tolerance == 0.0 && current_coeff != Complex64::new(0.0, 0.0))
+                || current_coeff.norm() > tolerance
+            {
                 merged.push((current_op, current_coeff));
             }
         }

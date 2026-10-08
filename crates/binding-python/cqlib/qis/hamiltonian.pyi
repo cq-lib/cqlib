@@ -206,6 +206,10 @@ class Hamiltonian:
 
         Returns:
             The real expectation value.
+
+        Raises:
+            ValueError: If the observable is not Hermitian or input dimensions differ.
+            ValueError: If original or merged coefficients are non-finite.
         """
         ...
 
@@ -217,6 +221,10 @@ class Hamiltonian:
 
         Returns:
             The real expectation value.
+
+        Raises:
+            ValueError: If the observable is not Hermitian or input dimensions differ.
+            ValueError: If original or merged coefficients are non-finite.
         """
         ...
 
@@ -231,6 +239,11 @@ class Hamiltonian:
 
         Returns:
             The real expectation value.
+
+        Raises:
+            ValueError: If the observable is not Hermitian, input dimensions differ,
+                or no compatible measurement basis is available.
+            ValueError: If original or merged coefficients are non-finite.
         """
         ...
 
@@ -332,7 +345,8 @@ class Hamiltonian:
         """Computes the variance for a statevector.
 
         Raises:
-            ValueError: If the Hamiltonian is not Hermitian or qubit counts differ.
+            ValueError: If the Hamiltonian is not Hermitian, qubit counts differ,
+                or original or merged coefficients are non-finite.
         """
         ...
 

@@ -76,6 +76,8 @@ const VARIANCE_TOLERANCE: f64 = 1e-10;
 ///
 /// Methods may return [`QisError::QubitMismatch`] if the observable
 /// and the quantum state have incompatible qubit counts.
+/// Real expectation methods return [`QisError::NotHermitian`] for non-Hermitian
+/// observables; Hamiltonian coefficients must also be finite.
 pub trait Observable {
     /// Computes the expectation value for a statevector: $\langle\psi|O|\psi\rangle$.
     ///
@@ -183,6 +185,30 @@ fn finalize_variance(variance: f64) -> Result<f64, QisError> {
     }
 }
 
+// Validate the operator itself, including cancellations between repeated terms.
+// Do not prune small coefficients while checking a real-valued API's contract.
+fn ensure_hermitian_hamiltonian(h: &Hamiltonian) -> Result<(), QisError> {
+    let finite = |c: &Complex64| c.re.is_finite() && c.im.is_finite();
+    if h.terms.iter().any(|(_, c)| !finite(c)) {
+        return Err(QisError::InvalidParameterValue(
+            "observable coefficients must be finite".into(),
+        ));
+    }
+    let mut merged = h.clone();
+    merged.simplify_with_tolerance(0.0);
+    for (_, coeff) in &merged.terms {
+        if !finite(coeff) {
+            return Err(QisError::InvalidParameterValue(
+                "merged observable coefficients must be finite".into(),
+            ));
+        }
+        if coeff.im.abs() > VARIANCE_TOLERANCE {
+            return Err(QisError::NotHermitian);
+        }
+    }
+    Ok(())
+}
+
 impl Observable for Hamiltonian {
     fn expectation_statevector(&self, sv: &Statevector) -> Result<f64, QisError> {
         if sv.num_qubits != self.num_qubits {
@@ -192,6 +218,7 @@ impl Observable for Hamiltonian {
             });
         }
 
+        ensure_hermitian_hamiltonian(self)?;
         let mut expected_value = 0.0;
 
         // Iterate over each term in the Hamiltonian
@@ -240,6 +267,7 @@ impl Observable for Hamiltonian {
             });
         }
 
+        ensure_hermitian_hamiltonian(self)?;
         let mut expected_value = 0.0;
         let n = self.num_qubits;
         let dim = 1 << n; // 2^n
@@ -286,6 +314,7 @@ impl Observable for Hamiltonian {
         &self,
         measurements: &[(PauliString, HashMap<String, f64>)],
     ) -> Result<f64, QisError> {
+        ensure_hermitian_hamiltonian(self)?;
         let mut expected_value = 0.0;
 
         for (term_pauli, coeff) in &self.terms {
@@ -368,8 +397,9 @@ impl Observable for Hamiltonian {
             });
         }
 
+        ensure_hermitian_hamiltonian(self)?;
         let mut simplified = self.clone();
-        simplified.simplify();
+        simplified.simplify_with_tolerance(0.0);
 
         for (_, coeff) in &mut simplified.terms {
             if coeff.im.abs() > VARIANCE_TOLERANCE {
@@ -401,6 +431,7 @@ impl Observable for PauliString {
             });
         }
 
+        self.ensure_hermitian()?;
         let x_mask = self.x_mask();
         let z_mask = self.z_mask();
         let y_phase = self.y_phase();
@@ -433,6 +464,7 @@ impl Observable for PauliString {
             });
         }
 
+        self.ensure_hermitian()?;
         let n = self.num_qubits;
         let dim = 1 << n;
         let x_mask = self.x_mask();
@@ -461,6 +493,7 @@ impl Observable for PauliString {
         &self,
         measurements: &[(PauliString, HashMap<String, f64>)],
     ) -> Result<f64, QisError> {
+        self.ensure_hermitian()?;
         let term_x_mask = self.x_mask();
         let term_z_mask = self.z_mask();
         let p_active = term_x_mask | term_z_mask;

@@ -370,6 +370,8 @@ assert abs(entropy.linear_entropy(dm_pure) - 0.0) < 1e-10
 
 ### `renyi_entropy(dm, alpha) -> float`
 
+The order must be positive and not NaN. At `alpha = 1` the result is the von Neumann entropy; positive infinity returns min-entropy. Nearby orders use stable evaluation. Non-diagonal spectra treat eigenvalues at or below `dimension × f64::EPSILON × largest eigenvalue` as numerical zeros; diagonal spectra retain all positive entries.
+
 Compute the Rényi entropy of order `alpha`.
 
 Parameters:
@@ -383,7 +385,7 @@ Returns:
 
 Raises:
 
-- `ValueError`: `alpha` is not greater than zero, or eigendecomposition failure.
+- `ValueError`: `alpha` is NaN or not greater than zero, or eigendecomposition failure.
 
 Example:
 

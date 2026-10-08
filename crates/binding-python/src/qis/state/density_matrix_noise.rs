@@ -81,6 +81,9 @@ impl PyDensityMatrixNoise {
     /// Returns:
     ///     A new DensityMatrixNoise instance
     ///
+    /// Raises:
+    ///     ValueError: If the dimension is unrepresentable or state allocation fails.
+    ///
     /// Examples:
     ///     >>> from cqlib.qis.state import DensityMatrixNoise
     ///     >>> # Simulator without noise (ideal simulation)
@@ -90,11 +93,11 @@ impl PyDensityMatrixNoise {
     ///     >>> sim = DensityMatrixNoise(2, NoiseModel())
     #[new]
     #[pyo3(signature = (num_qubits, noise_model=None))]
-    fn new(num_qubits: usize, noise_model: Option<PyNoiseModel>) -> Self {
+    fn new(num_qubits: usize, noise_model: Option<PyNoiseModel>) -> PyResult<Self> {
         let model = noise_model.map(|m| m.inner);
-        Self {
-            inner: DensityMatrixNoise::new(num_qubits, model),
-        }
+        Ok(Self {
+            inner: DensityMatrixNoise::try_new(num_qubits, model).map_err(qis_error_to_py_err)?,
+        })
     }
 
     /// Simulates a circuit, applying noise after each operation.
@@ -434,6 +437,10 @@ impl PyDensityMatrixNoise {
     }
 
     /// Computes the expectation value of an observable.
+    ///
+    /// Raises:
+    ///     ValueError: If qubit counts differ, the observable type is invalid,
+    ///         the observable is not Hermitian, or its coefficients are non-finite.
     fn expectation(&self, py: Python<'_>, observable: &Bound<'_, PyAny>) -> PyResult<f64> {
         if let Ok(h) = observable.extract::<crate::qis::hamiltonian::PyHamiltonian>() {
             py.detach(|| self.inner.expectation(&h.inner))

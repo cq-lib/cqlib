@@ -8,6 +8,8 @@ The `CDensityMatrixNoise*` handle is the noisy mixed-state simulator: it layers 
 
 ### density_matrix_noise_new(num_qubits, noise_model)
 
+Returns `NULL` if the state dimension is unrepresentable or state allocation fails. Zero-qubit states are supported.
+
 ```c
 struct CDensityMatrixNoise *density_matrix_noise_new(uintptr_t num_qubits,
                                                      const struct CNoiseModel *noise_model);

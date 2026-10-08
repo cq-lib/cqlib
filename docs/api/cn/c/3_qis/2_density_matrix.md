@@ -8,6 +8,8 @@
 
 ### density_matrix_new(num_qubits)
 
+状态维度无法表示或状态内存分配失败时返回 `NULL`。支持零比特状态。
+
 ```c
 struct CDensityMatrix *density_matrix_new(uintptr_t num_qubits);
 ```
@@ -20,6 +22,8 @@ struct CDensityMatrix *density_matrix_new(uintptr_t num_qubits);
 
 ### density_matrix_maximally_mixed(num_qubits)
 
+状态维度无法表示或状态内存分配失败时返回 `NULL`。支持零比特状态。
+
 ```c
 struct CDensityMatrix *density_matrix_maximally_mixed(uintptr_t num_qubits);
 ```
@@ -31,6 +35,8 @@ struct CDensityMatrix *density_matrix_maximally_mixed(uintptr_t num_qubits);
 返回：新分配的 `CDensityMatrix*`，用 `density_matrix_free` 释放。
 
 ### density_matrix_zeros(num_qubits)
+
+状态维度无法表示或状态内存分配失败时返回 `NULL`。支持零比特状态。
 
 ```c
 struct CDensityMatrix *density_matrix_zeros(uintptr_t num_qubits);

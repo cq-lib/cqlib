@@ -351,16 +351,34 @@ impl Statevector {
     /// assert_eq!(sv.num_qubits, 2);
     /// assert_eq!(sv.data().len(), 4); // 2^2 amplitudes
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the dimension is unrepresentable or allocation fails.
+    /// Use [`Self::try_new`] to receive an error instead.
     pub fn new(num_qubits: usize) -> Self {
-        let size = 1 << num_qubits;
+        Self::try_new(num_qubits).expect("cannot allocate statevector")
+    }
+
+    /// Creates the ground state, returning an error for an unrepresentable
+    /// dimension or a failed allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QisError::InvalidParameterValue`] for an unrepresentable
+    /// dimension, or [`QisError::UnsupportedOperation`] if allocation fails.
+    pub fn try_new(num_qubits: usize) -> Result<Self, QisError> {
+        let size = super::checked_state_len(num_qubits, false)?;
         // 64-byte aligned allocation — zero-initialised (all amplitudes = 0+0i).
-        let mut data = AlignedBuffer::<Complex64>::new_zeroed(size);
+        let mut data = AlignedBuffer::<Complex64>::try_new_zeroed(size).ok_or_else(|| {
+            QisError::UnsupportedOperation("statevector allocation failed".into())
+        })?;
         data[0] = Complex64::new(1.0, 0.0); // |0...0⟩
-        Statevector {
+        Ok(Statevector {
             data,
             num_qubits,
             qubit_map: None,
-        }
+        })
     }
 
     /// Creates a statevector from initial amplitudes with normalization check.
@@ -389,7 +407,7 @@ impl Statevector {
     /// let sv = Statevector::from_state(2, amps);
     /// ```
     pub fn from_state(num_qubits: usize, initial_state: Vec<Complex64>) -> Result<Self, QisError> {
-        let size = 1 << num_qubits;
+        let size = super::checked_state_len(num_qubits, false)?;
         if initial_state.len() != size {
             return Err(QisError::InvalidStateDimension(initial_state.len()));
         }
@@ -397,12 +415,14 @@ impl Statevector {
         // summing many amplitudes accumulates floating-point roundoff.
         let norm: f64 = initial_state.iter().map(|c| c.norm_sqr()).sum();
         let tolerance = 1e-10 * (size.max(1) as f64);
-        if (norm - 1.0).abs() >= tolerance {
+        if !norm.is_finite() || (norm - 1.0).abs() >= tolerance {
             return Err(QisError::NotNormalized);
         }
 
         // Copy caller-provided Vec into 64-byte aligned buffer.
-        let mut data = AlignedBuffer::<Complex64>::new_zeroed(size);
+        let mut data = AlignedBuffer::<Complex64>::try_new_zeroed(size).ok_or_else(|| {
+            QisError::UnsupportedOperation("statevector allocation failed".into())
+        })?;
         data.as_mut_slice().copy_from_slice(&initial_state);
         Ok(Statevector {
             data,
@@ -444,7 +464,7 @@ impl Statevector {
     /// let sv = Statevector::from_circuit(&circuit).unwrap();
     /// ```
     pub fn from_circuit(circuit: &Circuit) -> Result<Self, QisError> {
-        let mut sv = Statevector::new(circuit.num_qubits());
+        let mut sv = Statevector::try_new(circuit.num_qubits())?;
         sv.apply_circuit(circuit)?;
         Ok(sv)
     }

@@ -61,6 +61,15 @@ impl<T: Copy + Default> AlignedBuffer<T> {
         AlignedBuffer { ptr, len, layout }
     }
 
+    /// Fallible allocation used by checked state constructors.
+    pub(super) fn try_new_zeroed(len: usize) -> Option<Self> {
+        let size = len.checked_mul(size_of::<T>())?;
+        let layout = Layout::from_size_align(size.max(1), 64.max(align_of::<T>())).ok()?;
+        // SAFETY: layout is nonzero and validated; null is returned as failure.
+        let ptr = NonNull::new(unsafe { alloc_zeroed(layout) } as *mut T)?;
+        Some(Self { ptr, len, layout })
+    }
+
     /// Returns the raw pointer to the first element (64-byte aligned).
     #[allow(dead_code)]
     #[inline(always)]

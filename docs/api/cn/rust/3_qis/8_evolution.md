@@ -193,7 +193,7 @@ assert!(circuit.pauli_evolution(&pauli, 1.0, &qubits).is_err());
 - `steps` (`usize`)：Trotter 步数 $n$，必须大于 0。
 - `mode` (`TrotterMode`)：分解模式。
 
-两者都先复制一份 Hamilton 量并化简，再检查系数的虚部：虚部绝对值超过 $10^{-10}$ 时返回 `QisError::NotHermitian`，因为只有 Hermitian 算符才能生成酉演化。
+两者都先复制一份 Hamilton 量，吸收 Pauli 相位并合并重复项，保留非零小系数，再检查系数的虚部：虚部绝对值超过 $10^{-10}$ 时返回 `QisError::NotHermitian`，因为只有 Hermitian 算符才能生成酉演化。
 
 ### `fn to_trotter_circuit(&self, time: f64, steps: usize, mode: TrotterMode) -> Result<Circuit, QisError>`
 

@@ -1,6 +1,6 @@
 # Hamiltonian and Observable
 
-`cqlib_core::qis::hamiltonian`  
+`cqlib_core::qis::hamiltonian`
 `cqlib_core::qis::observable`
 
 This page covers the observable `Hamiltonian`, formed by Pauli strings and complex coefficients, and the unified interface `Observable` trait for computing expectation values.
@@ -174,6 +174,8 @@ pub trait Observable {
 ### Default methods
 
 - `fn variance_statevector(&self, sv: &Statevector) -> Result<f64, QisError>`: compute the pure-state variance $\text{Var}(O) = \langle O^2 \rangle - \langle O \rangle^2$. The default implementation in the trait returns `QisError::UnsupportedOperation`; an observable that supports variance computation must override this method.
+
+Real expectation and variance methods validate Hermiticity after merging phases and repeated terms, without pruning small nonzero coefficients. Non-finite original or merged coefficients return `QisError::InvalidParameterValue`; non-Hermitian operators return `QisError::NotHermitian`.
 
 ### Implementors
 

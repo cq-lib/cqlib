@@ -113,6 +113,8 @@ Raises:
 
 ### Raises
 
+Real expectation and variance methods require a Hermitian operator after Pauli phases and duplicate terms are merged. Original and merged coefficients must be finite; violations raise `ValueError`. Small nonzero coefficients are retained.
+
 - `ValueError`: the two operators have inconsistent qubit counts (`+`, `+=`), the qubit count of a term is inconsistent with the operator (`from_list`, `add_term`), the coefficient type is not supported, the observable and the quantum state have inconsistent qubit counts (`expectation_*`, `variance_statevector`), or no usable measurement basis is found in the measurement probabilities (`expectation_probs`).
 - `ValueError`: `to_trotter_circuit` and `to_evolution_circuit` raise when `steps` is `0`, the operator is empty, a coefficient is not Hermitian, or a Pauli string phase is not Hermitian.
 
