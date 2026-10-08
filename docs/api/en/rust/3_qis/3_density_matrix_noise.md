@@ -35,7 +35,10 @@ Methods:
 
 ### Construction and circuit integration
 
+`new` panic when the dimension is unrepresentable or state allocation fails. Use the corresponding `try_*` constructor to handle these errors. Zero-qubit states are supported.
+
 - `fn new(num_qubits: usize, noise_model: Option<NoiseModel>) -> Self`: construct from a qubit count and a noise model; the initial state is `|0...0><0...0|`.
+- `fn try_new(num_qubits: usize, noise_model: Option<NoiseModel>) -> Result<Self, QisError>`: construct the ground state, returning `QisError::InvalidParameterValue` for an unrepresentable dimension or `QisError::UnsupportedOperation` when state allocation fails.
 - `fn from_circuit(circuit: &Circuit, noise_model: Option<NoiseModel>) -> Result<Self, QisError>`: execute a circuit and return the simulator; the circuit is first decomposed into basis gates, and noise is applied after every gate.
 - `fn apply_circuit(&mut self, circuit: &Circuit) -> Result<(), QisError>`: apply a circuit to the current simulator in place; noise is applied according to the configured model.
 

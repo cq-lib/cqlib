@@ -21,6 +21,8 @@ from cqlib.qis.state import DensityMatrixNoise
 
 ### DensityMatrixNoise(num_qubits, noise_model=None)
 
+状态维度无法表示或状态内存分配失败时抛出 `ValueError`。支持零比特状态。
+
 创建一个模拟器。省略噪声模型时等价于理想模拟。
 
 参数：

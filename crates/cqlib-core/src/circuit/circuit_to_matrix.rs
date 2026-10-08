@@ -26,7 +26,7 @@
 //!
 //! ## Memory Layout & Convention
 //!
-//! - **State Vector Ordering**: Little-Endian (similar to Qiskit). Qubit 0 corresponds to the Least Significant Bit (LSB).
+//! - **State Vector Ordering**: Little-Endian. Qubit 0 corresponds to the Least Significant Bit (LSB).
 //!   State $|q_{n-1} \dots q_1 q_0\rangle$.
 //! - **Parallelization**: Large matrix multiplications (large state spaces) are automatically parallelized using `rayon`.
 
@@ -123,7 +123,7 @@ pub fn circuit_to_matrix(
     // Map logical qubit index to physical bit position (0 to N-1).
     // Little-Endian mapping: first qubit in target_order corresponds to LSB (bit 0)
     // q0 -> bit 0, q1 -> bit 1, ...
-    // This matches Qiskit's convention.
+    // Qubit 0 occupies the least significant bit.
     let qubit_bit_map: HashMap<usize, usize> = target_order
         .iter()
         .enumerate()

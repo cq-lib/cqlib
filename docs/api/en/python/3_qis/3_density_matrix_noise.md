@@ -21,6 +21,8 @@ Data is stored contiguously in row-major order. Qubit i corresponds to bit i of 
 
 ### DensityMatrixNoise(num_qubits, noise_model=None)
 
+Raises `ValueError` if the state dimension is unrepresentable or state allocation fails. Zero-qubit states are supported.
+
 Create a simulator. Omitting the noise model is equivalent to an ideal simulation.
 
 Parameters:

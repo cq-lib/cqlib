@@ -99,6 +99,7 @@ Raises:
 - `to_trotter_circuit(time, steps, mode) -> Circuit`: generate the time evolution circuit given by the Trotter-Suzuki decomposition, approximating $U(t) = e^{-iHt}$ by a sequence of Pauli rotations.
 - `to_evolution_circuit(time, steps, mode) -> Circuit`: generate the time evolution circuit. When all terms commute, an exact single-pass decomposition is used; when non-commuting terms exist, it falls back to the specified Trotter mode and number of steps.
 - `copy() -> Hamiltonian`: return a copy.
+- Standard-library `copy.copy(h)` and `copy.deepcopy(h)` also return independent copies of the terms.
 - `expectation_statevector(sv) -> float`: compute the expectation value from a statevector.
 - `expectation_density_matrix(dm) -> float`: compute the expectation value from a density matrix.
 - `expectation_probs(measurements) -> float`: compute the expectation value from measurement probabilities.
@@ -112,6 +113,8 @@ Raises:
 - `str` gives a readable form of the operator; `repr` has the form `Hamiltonian(num_qubits=2, num_terms=2)`.
 
 ### Raises
+
+Real expectation and variance methods require a Hermitian operator after Pauli phases and duplicate terms are merged. Original and merged coefficients must be finite; violations raise `ValueError`. Small nonzero coefficients are retained.
 
 - `ValueError`: the two operators have inconsistent qubit counts (`+`, `+=`), the qubit count of a term is inconsistent with the operator (`from_list`, `add_term`), the coefficient type is not supported, the observable and the quantum state have inconsistent qubit counts (`expectation_*`, `variance_statevector`), or no usable measurement basis is found in the measurement probabilities (`expectation_probs`).
 - `ValueError`: `to_trotter_circuit` and `to_evolution_circuit` raise when `steps` is `0`, the operator is empty, a coefficient is not Hermitian, or a Pauli string phase is not Hermitian.

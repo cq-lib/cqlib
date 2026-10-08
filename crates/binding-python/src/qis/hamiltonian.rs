@@ -465,7 +465,21 @@ impl PyHamiltonian {
         }
     }
 
+    /// Implements Python's shallow-copy protocol with an independent value.
+    fn __copy__(&self) -> Self {
+        self.copy()
+    }
+
+    /// Implements Python's deep-copy protocol; all Rust fields are owned values.
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.copy()
+    }
+
     /// Computes the expectation value for a statevector.
+    ///
+    /// Raises:
+    ///     ValueError: If the observable is not Hermitian or input dimensions differ.
+    ///     ValueError: If original or merged coefficients are non-finite.
     fn expectation_statevector(&self, sv: &PyStatevector) -> PyResult<f64> {
         self.inner
             .expectation_statevector(&sv.inner)
@@ -473,6 +487,10 @@ impl PyHamiltonian {
     }
 
     /// Computes the expectation value for a density matrix.
+    ///
+    /// Raises:
+    ///     ValueError: If the observable is not Hermitian or input dimensions differ.
+    ///     ValueError: If original or merged coefficients are non-finite.
     fn expectation_density_matrix(&self, dm: &PyDensityMatrix) -> PyResult<f64> {
         self.inner
             .expectation_density_matrix(&dm.inner)
@@ -480,6 +498,10 @@ impl PyHamiltonian {
     }
 
     /// Computes the expectation value from measurement probabilities.
+    ///
+    /// Raises:
+    ///     ValueError: If the observable is not Hermitian or input dimensions differ.
+    ///     ValueError: If original or merged coefficients are non-finite.
     fn expectation_probs(&self, measurements: &Bound<'_, PyAny>) -> PyResult<f64> {
         let mut rust_measurements = Vec::new();
         for item in measurements.try_iter()? {
@@ -510,6 +532,10 @@ impl PyHamiltonian {
     }
 
     /// Computes the variance for a statevector.
+    ///
+    /// Raises:
+    ///     ValueError: If the observable is not Hermitian or input dimensions differ.
+    ///     ValueError: If original or merged coefficients are non-finite.
     fn variance_statevector(&self, sv: &PyStatevector) -> PyResult<f64> {
         self.inner
             .variance_statevector(&sv.inner)

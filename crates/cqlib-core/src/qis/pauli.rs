@@ -859,10 +859,12 @@ impl PauliString {
     /// let exp = ps.expectation(&probs).unwrap();
     /// assert!((exp).abs() < 1e-10);
     /// ```
+    /// Returns `QisError::NotHermitian` for an imaginary Pauli phase.
     pub fn expectation(
         &self,
         probs: &std::collections::HashMap<String, f64>,
     ) -> Result<f64, crate::qis::error::QisError> {
+        self.ensure_hermitian()?;
         // Check if this Pauli string contains X or Y operators
         // X is represented by x[i]=1, z[i]=0
         // Y is represented by x[i]=1, z[i]=1
@@ -912,6 +914,13 @@ impl PauliString {
         // Apply global phase and return real part
         // For Hermitian observables (phase = ±1), this is just ±exp_value
         Ok((exp_value * global_phase).re)
+    }
+
+    pub(crate) fn ensure_hermitian(&self) -> Result<(), crate::qis::error::QisError> {
+        match self.phase {
+            Phase::Plus | Phase::Minus => Ok(()),
+            Phase::I | Phase::MinusI => Err(crate::qis::error::QisError::NotHermitian),
+        }
     }
 
     /// Computes the phase exponent for multiplying two Pauli operators.

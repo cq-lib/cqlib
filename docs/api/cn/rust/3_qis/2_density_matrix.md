@@ -32,9 +32,14 @@ pub struct DensityMatrix {
 
 ### 构造与数据访问
 
+`new`、`zeros` 和 `maximally_mixed` 在维度无法表示或状态内存分配失败时会 panic。需要处理错误时使用对应的 `try_*` 构造函数。支持零比特状态。
+
 - `fn new(num_qubits: usize) -> Self`：构造纯态 `|0...0><0...0|`。
+- `fn try_new(num_qubits: usize) -> Result<Self, QisError>`：构造基态；维度无法表示时返回 `QisError::InvalidParameterValue`，状态内存分配失败时返回 `QisError::UnsupportedOperation`。
 - `fn maximally_mixed(num_qubits: usize) -> Self`：构造最大混合态 `I / 2^N`，各计算基态等概率且无相干项。
+- `fn try_maximally_mixed(num_qubits: usize) -> Result<Self, QisError>`：对应的可失败构造，错误类型与 `try_new` 相同。
 - `fn zeros(num_qubits: usize) -> Self`：构造全零矩阵；它不是合法物理态（迹为 0），用于作为量子信道等操作的累加起点。
+- `fn try_zeros(num_qubits: usize) -> Result<Self, QisError>`：对应的可失败构造，错误类型与 `try_new` 相同。
 - `fn from_state(num_qubits: usize, initial_state: Vec<Complex64>) -> Result<Self, QisError>`：由纯态振幅做外积 `ρ = |ψ><ψ|` 构造。
 - `fn from_density_matrix_state(num_qubits: usize, dm_state: Vec<Complex64>) -> Result<Self, QisError>`：直接由展平的 `2^N × 2^N` 矩阵构造，并校验 Hermitian 性、半正定性与单位迹。
 - `fn data(&self) -> &[Complex64]`：按共享切片读取展平的矩阵元素。

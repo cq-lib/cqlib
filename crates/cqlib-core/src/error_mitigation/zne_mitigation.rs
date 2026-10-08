@@ -348,6 +348,7 @@ impl ZNEMitigation {
 
     fn fold_all(&self, level: usize) -> Result<Circuit, CircuitError> {
         let mut folded = Circuit::from_qubits(self.circuit.qubits())?;
+        folded.set_global_phase(self.circuit.global_phase());
         let inverse = self.circuit.inverse()?;
 
         self.append_circuit_ops(&mut folded, &self.circuit)?;
@@ -366,6 +367,7 @@ impl ZNEMitigation {
     ) -> Result<Circuit, CircuitError> {
         let gate_names: HashSet<String> = gate_set.iter().map(Instruction::name).collect();
         let mut folded = Circuit::from_qubits(self.circuit.qubits())?;
+        folded.set_global_phase(self.circuit.global_phase());
 
         for op in self.circuit.operations() {
             self.append_operation(&mut folded, &self.circuit, op)?;

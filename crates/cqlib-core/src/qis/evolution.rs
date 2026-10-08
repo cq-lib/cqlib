@@ -522,7 +522,7 @@ impl Hamiltonian {
         }
 
         let mut simplified_h = self.clone();
-        simplified_h.simplify();
+        simplified_h.simplify_with_tolerance(0.0);
 
         for (_, coeff) in &simplified_h.terms {
             if coeff.im.abs() > 1e-10 {
@@ -642,7 +642,7 @@ impl Hamiltonian {
         }
 
         let mut simplified_h = self.clone();
-        simplified_h.simplify();
+        simplified_h.simplify_with_tolerance(0.0);
 
         for (_, coeff) in &simplified_h.terms {
             if coeff.im.abs() > 1e-10 {

@@ -20,6 +20,8 @@ from cqlib.qis.state import DensityMatrix
 
 ### DensityMatrix(num_qubits)
 
+状态维度无法表示或状态内存分配失败时抛出 `ValueError`。支持零比特状态。
+
 创建一个处于 |0…0⟩⟨0…0| 的纯态。
 
 参数：

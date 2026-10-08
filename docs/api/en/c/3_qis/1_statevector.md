@@ -8,6 +8,8 @@ The `CStatevector*` handle is the pure-state simulator: the quantum state is rep
 
 ### statevector_new(num_qubits)
 
+Returns `NULL` if the state dimension is unrepresentable or state allocation fails. Zero-qubit states are supported.
+
 ```c
 struct CStatevector *statevector_new(uintptr_t num_qubits);
 ```

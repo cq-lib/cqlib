@@ -667,6 +667,21 @@ fn test_eof_bell_states() {
 }
 
 #[test]
+fn test_eof_clamps_concurrence_roundoff_before_square_root() {
+    for c in [1.0, 1.0 + f64::EPSILON, 1.0 + 8.0 * f64::EPSILON] {
+        let eof = super::entanglement_of_formation_from_concurrence(c);
+        assert_eq!(eof, 1.0, "concurrence={c}, entropy={eof}");
+    }
+    for c in [0.0, -f64::EPSILON] {
+        assert_eq!(super::entanglement_of_formation_from_concurrence(c), 0.0);
+    }
+    // An interior value still uses the binary entropy formula: C=0.6 gives x=0.9.
+    let expected = -0.9_f64 * 0.9_f64.log2() - 0.1_f64 * 0.1_f64.log2();
+    let actual = super::entanglement_of_formation_from_concurrence(0.6);
+    assert!((actual - expected).abs() < 1e-14);
+}
+
+#[test]
 fn test_eof_separable_states() {
     // Separable states have EOF = 0
     let dm = DensityMatrix::new(2);

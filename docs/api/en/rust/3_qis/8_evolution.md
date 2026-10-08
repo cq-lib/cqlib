@@ -193,7 +193,7 @@ Both entry points accept the same parameters:
 - `steps` (`usize`): the number of Trotter steps $n$, which must be greater than 0.
 - `mode` (`TrotterMode`): the decomposition mode.
 
-Both first copy the Hamiltonian and simplify it, then check the imaginary part of the coefficients: when the absolute value of the imaginary part exceeds $10^{-10}$, `QisError::NotHermitian` is returned, because only Hermitian operators can generate unitary evolution.
+Both first copy the Hamiltonian, absorb Pauli phases and merge repeated terms without pruning small nonzero coefficients, then check the imaginary part of the coefficients: when the absolute value of the imaginary part exceeds $10^{-10}$, `QisError::NotHermitian` is returned, because only Hermitian operators can generate unitary evolution.
 
 ### `fn to_trotter_circuit(&self, time: f64, steps: usize, mode: TrotterMode) -> Result<Circuit, QisError>`
 

@@ -12,6 +12,9 @@
 
 //! SABRE initial-layout adapter.
 //!
+//! Algorithm reference: Gushu Li, Yufei Ding, and Yuan Xie,
+//! [Tackling the Qubit Mapping Problem for NISQ-Era Quantum Devices](https://arxiv.org/abs/1809.02573).
+//!
 //! This module owns layout-candidate generation, objective scoring, and
 //! [`LayoutResult`] construction. The SABRE core remains in
 //! [`crate::compile::sabre`] and is used here only through crate-internal
@@ -418,7 +421,7 @@ pub(crate) struct PreparedSabreParetoSearch {
 }
 
 impl PreparedSabreParetoSearch {
-    /// Builds the Qiskit-style four-refinement search profile. A supplied
+    /// Builds the multi-start four-refinement search profile. A supplied
     /// layout is normalized and kept fixed; generated layouts deliberately do
     /// not use the dense-interaction refinement shortcut employed by candidate
     /// zero.

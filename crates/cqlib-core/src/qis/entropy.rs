@@ -92,12 +92,14 @@ pub fn linear_entropy(dm: &DensityMatrix) -> Result<f64, QisError> {
 /// # Arguments
 ///
 /// * `dm` - The density matrix representing the quantum state.
-/// * `alpha` - The order parameter. Must be positive and not equal to 1.0
-///   (use Von Neumann entropy directly for α = 1).
+/// * `alpha` - Positive order parameter, including 1.0 and positive infinity.
+///   NaN is rejected. At α = 1 this returns the Von Neumann entropy;
+///   positive infinity returns the min-entropy.
 ///
 /// # Returns
 ///
-/// The Rényi entropy in bits (base-2 logarithm), or an error if α ≤ 0.
+/// The Rényi entropy in bits (base-2 logarithm), or an error if α ≤ 0,
+/// α is NaN, eigendecomposition fails, or no positive spectrum remains.
 ///
 /// # Examples
 ///
@@ -115,8 +117,13 @@ pub fn linear_entropy(dm: &DensityMatrix) -> Result<f64, QisError> {
 ///
 /// For α very close to 1.0 (within `f64::EPSILON`), this function automatically
 /// falls back to computing the Von Neumann entropy for numerical stability.
+/// Nearby orders use `expm1` and `log1p` to avoid cancellation. For non-diagonal
+/// matrices, eigenvalues at or below `dimension * f64::EPSILON * max_eigenvalue`
+/// are treated as numerical zeros. True eigenvalues below this resolution
+/// cannot reliably be distinguished from eigensolver roundoff. Diagonal
+/// matrices retain all positive entries without this cutoff.
 pub fn renyi_entropy(dm: &DensityMatrix, alpha: f64) -> Result<f64, QisError> {
-    if alpha <= 0.0 {
+    if alpha.is_nan() || alpha <= 0.0 {
         return Err(QisError::InvalidParameterValue(
             "Rényi entropy order alpha must be positive".to_string(),
         ));
@@ -128,20 +135,57 @@ pub fn renyi_entropy(dm: &DensityMatrix, alpha: f64) -> Result<f64, QisError> {
     }
 
     let mat = super::metrics::density_matrix_to_faer(dm);
-    let eigenvalues: Vec<f64> = mat.self_adjoint_eigenvalues(Side::Lower).map_err(|e| {
-        QisError::UnsupportedOperation(format!("Eigendecomposition failed: {:?}", e))
-    })?;
+    // A diagonal spectrum is already available exactly. Eigensolvers can lose
+    // relative accuracy in tiny eigenvalues, which matter at small alpha.
+    let diagonal = (0..mat.nrows())
+        .all(|i| (0..mat.ncols()).all(|j| i == j || mat[(i, j)] == faer::c64::new(0.0, 0.0)));
+    let eigenvalues: Vec<f64> = if diagonal {
+        (0..mat.nrows()).map(|i| mat[(i, i)].re).collect()
+    } else {
+        mat.self_adjoint_eigenvalues(Side::Lower).map_err(|e| {
+            QisError::UnsupportedOperation(format!("Eigendecomposition failed: {:?}", e))
+        })?
+    };
 
-    // Compute sum of eigenvalues^alpha, handling numerical noise
-    let mut sum_power = 0.0;
-    for &eigval in &eigenvalues {
-        if eigval > 1e-12 {
-            sum_power += eigval.powf(alpha);
-        }
+    let max_eigenvalue = eigenvalues.iter().copied().fold(0.0, f64::max);
+    if !max_eigenvalue.is_finite() || max_eigenvalue == 0.0 {
+        return Err(QisError::NotNormalized);
     }
-
-    // Rényi entropy formula: 1/(1-α) * log2(sum(λ_i^α))
-    let entropy = sum_power.log2() / (1.0 - alpha);
+    // Small alpha amplifies positive roundoff in the null space of low-rank
+    // states. Scale the cutoff with eigensolver precision instead of using a
+    // fixed probability threshold, while keeping exact diagonal spectra.
+    let cutoff = if diagonal {
+        0.0
+    } else {
+        mat.nrows() as f64 * f64::EPSILON * max_eigenvalue
+    };
+    let eigenvalues: Vec<f64> = eigenvalues.into_iter().filter(|&v| v > cutoff).collect();
+    if alpha == f64::INFINITY {
+        return Ok((-max_eigenvalue.log2()).max(0.0));
+    }
+    let delta = alpha - 1.0;
+    let entropy = if delta.abs() < 1e-5 {
+        // expm1/log1p avoid cancellation near alpha=1. Normalize the spectral
+        // weights here so trace roundoff is not amplified by division by delta.
+        let trace: f64 = eigenvalues.iter().sum();
+        let change: f64 = eigenvalues
+            .iter()
+            .map(|&v| {
+                let p = v / trace;
+                p * (delta * p.ln()).exp_m1()
+            })
+            .sum();
+        -change.ln_1p() / delta / std::f64::consts::LN_2
+    } else {
+        let max_log = max_eigenvalue.ln();
+        let scaled_sum: f64 = eigenvalues
+            .iter()
+            .map(|v| (alpha * (v.ln() - max_log)).exp())
+            .sum();
+        // Divide before multiplying to avoid overflow even for alpha=f64::MAX.
+        ((alpha / (1.0 - alpha)) * max_log + scaled_sum.ln() / (1.0 - alpha))
+            / std::f64::consts::LN_2
+    };
     Ok(entropy.max(0.0))
 }
 
@@ -442,10 +486,14 @@ pub fn concurrence(dm: &DensityMatrix) -> Result<f64, QisError> {
 /// This measure represents the minimum number of Bell pairs required to asymptotically
 /// create the state ρ using LOCC (Local Operations and Classical Communication).
 pub fn entanglement_of_formation(dm: &DensityMatrix) -> Result<f64, QisError> {
-    let c = concurrence(dm)?;
+    Ok(entanglement_of_formation_from_concurrence(concurrence(dm)?))
+}
+
+fn entanglement_of_formation_from_concurrence(c: f64) -> f64 {
+    let c = c.clamp(0.0, 1.0);
 
     if c < 1e-15 {
-        return Ok(0.0);
+        return 0.0;
     }
 
     // Compute x = (1 + sqrt(1 - C^2)) / 2
@@ -462,7 +510,7 @@ pub fn entanglement_of_formation(dm: &DensityMatrix) -> Result<f64, QisError> {
         binary_entropy -= (1.0 - x) * (1.0 - x).log2();
     }
 
-    Ok(binary_entropy)
+    binary_entropy
 }
 
 /// Helper function to compute the matrix square root of a positive semi-definite matrix.

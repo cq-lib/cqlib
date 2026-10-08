@@ -99,6 +99,7 @@ class Observable(Protocol):
 - `to_trotter_circuit(time, steps, mode) -> Circuit`：生成 Trotter-Suzuki 分解给出的时间演化线路，用一串 Pauli 旋转逼近 $U(t) = e^{-iHt}$。
 - `to_evolution_circuit(time, steps, mode) -> Circuit`：生成时间演化线路。所有项对易时走精确的单遍分解；存在非对易项时回退到指定的 Trotter 模式与步数。
 - `copy() -> Hamiltonian`：返回副本。
+- 标准库 `copy.copy(h)` 和 `copy.deepcopy(h)` 同样返回项数据独立的副本。
 - `expectation_statevector(sv) -> float`：由态矢量计算期望值。
 - `expectation_density_matrix(dm) -> float`：由密度矩阵计算期望值。
 - `expectation_probs(measurements) -> float`：由测量概率计算期望值。
@@ -112,6 +113,8 @@ class Observable(Protocol):
 - `str` 给出算符的可读形式；`repr` 形如 `Hamiltonian(num_qubits=2, num_terms=2)`。
 
 ### 异常情况
+
+实数期望值和方差接口要求吸收 Pauli 相位、合并重复项后的算符为厄米算符；原始及合并后的系数必须有限，否则抛出 `ValueError`。计算保留非零小系数。
 
 - `ValueError`：两个算符比特数不一致（`+`、`+=`）、项的比特数与算符不一致（`from_list`、`add_term`）、系数类型不受支持、观测量与量子态比特数不一致（`expectation_*`、`variance_statevector`）、测量概率中找不到可用的测量基（`expectation_probs`）。
 - `ValueError`：`to_trotter_circuit` 与 `to_evolution_circuit` 在 `steps` 为 `0`、算符为空、系数非 Hermitian、或 Pauli 字符串相位非 Hermitian 时抛出。

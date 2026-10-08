@@ -533,7 +533,7 @@ fn lowering_reaches_target_basis_through_multiple_steps() {
 }
 
 #[test]
-fn lowers_ccx_directly_to_multiple_qiskit_basis_sets() {
+fn lowers_ccx_directly_to_multiple_native_basis_sets() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let q2 = Qubit::new(2);
@@ -582,7 +582,7 @@ fn lowers_ccx_directly_to_multiple_qiskit_basis_sets() {
 }
 
 #[test]
-fn qiskit_rzz_ccx_rule_uses_five_entanglers() {
+fn rzz_ccx_rule_uses_five_entanglers() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let q2 = Qubit::new(2);
@@ -612,7 +612,7 @@ fn qiskit_rzz_ccx_rule_uses_five_entanglers() {
 }
 
 #[test]
-fn qiskit_cz_ccx_rule_uses_native_x2p_x_rz_cz_template() {
+fn cz_ccx_rule_uses_native_x2p_x_rz_cz_template() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
     let q2 = Qubit::new(2);

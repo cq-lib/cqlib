@@ -1226,3 +1226,17 @@ fn test_psd_inf_rejected() {
     };
     assert!(!dm.is_positive_semidefinite_approx(1e-10));
 }
+
+#[test]
+fn hermiticity_rejects_nonfinite_entries() {
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for index in 0..4 {
+            for value in [Complex64::new(bad, 0.0), Complex64::new(0.0, bad)] {
+                let mut dm = DensityMatrix::new(1);
+                dm.data[index] = value;
+                assert!(!dm.is_hermitian(1e-10));
+                assert!(dm.validate_physical(1e-10).is_err());
+            }
+        }
+    }
+}

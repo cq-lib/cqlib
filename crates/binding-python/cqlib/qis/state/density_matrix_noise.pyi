@@ -60,6 +60,9 @@ class DensityMatrixNoise:
         Returns:
             A new DensityMatrixNoise instance
 
+        Raises:
+            ValueError: If the dimension is unrepresentable or state allocation fails.
+
         Examples:
             >>> from cqlib.qis.state import DensityMatrixNoise
             >>> # Simulator without noise (ideal simulation)
@@ -304,7 +307,8 @@ class DensityMatrixNoise:
             The expectation value as a real number
 
         Raises:
-            ValueError: If the qubit counts don't match or the observable type is invalid
+            ValueError: If qubit counts differ, the observable type is invalid,
+                the observable is not Hermitian, or its coefficients are non-finite.
         """
         ...
 

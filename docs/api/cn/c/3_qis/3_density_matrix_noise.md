@@ -8,6 +8,8 @@
 
 ### density_matrix_noise_new(num_qubits, noise_model)
 
+状态维度无法表示或状态内存分配失败时返回 `NULL`。支持零比特状态。
+
 ```c
 struct CDensityMatrixNoise *density_matrix_noise_new(uintptr_t num_qubits,
                                                      const struct CNoiseModel *noise_model);
