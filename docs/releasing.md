@@ -2,9 +2,8 @@
 
 ## File Organization
 
-The structure follows Qiskit's separation of entry-point workflows, reusable
-workflows, and tools scripts, without adopting its automated publishing steps
-or modifying project source code, existing tests, or Cargo configuration.
+CQLib separates entry-point workflows, reusable workflows, and tool scripts.
+Publishing is triggered manually through release tags.
 
 | File | Responsibility |
 | --- | --- |
