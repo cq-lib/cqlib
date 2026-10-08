@@ -465,6 +465,16 @@ impl PyHamiltonian {
         }
     }
 
+    /// Implements Python's shallow-copy protocol with an independent value.
+    fn __copy__(&self) -> Self {
+        self.copy()
+    }
+
+    /// Implements Python's deep-copy protocol; all Rust fields are owned values.
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.copy()
+    }
+
     /// Computes the expectation value for a statevector.
     ///
     /// Raises:

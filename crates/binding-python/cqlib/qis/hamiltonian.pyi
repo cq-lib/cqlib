@@ -357,3 +357,11 @@ class Hamiltonian:
             A new Hamiltonian instance with the same terms.
         """
         ...
+
+    def __copy__(self) -> "Hamiltonian":
+        """Return an independent copy via copy.copy()."""
+        ...
+
+    def __deepcopy__(self, memo: dict) -> "Hamiltonian":
+        """Return an independent copy via copy.deepcopy()."""
+        ...

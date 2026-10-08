@@ -99,6 +99,7 @@ class Observable(Protocol):
 - `to_trotter_circuit(time, steps, mode) -> Circuit`：生成 Trotter-Suzuki 分解给出的时间演化线路，用一串 Pauli 旋转逼近 $U(t) = e^{-iHt}$。
 - `to_evolution_circuit(time, steps, mode) -> Circuit`：生成时间演化线路。所有项对易时走精确的单遍分解；存在非对易项时回退到指定的 Trotter 模式与步数。
 - `copy() -> Hamiltonian`：返回副本。
+- 标准库 `copy.copy(h)` 和 `copy.deepcopy(h)` 同样返回项数据独立的副本。
 - `expectation_statevector(sv) -> float`：由态矢量计算期望值。
 - `expectation_density_matrix(dm) -> float`：由密度矩阵计算期望值。
 - `expectation_probs(measurements) -> float`：由测量概率计算期望值。

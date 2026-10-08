@@ -721,3 +721,32 @@ def test_hamiltonian_from_list_rejects_mixed_qubit_counts():
                 (PauliString.from_str("ZZ"), 1.0),
             ]
         )
+
+
+@pytest.mark.parametrize("deep", [False, True])
+@pytest.mark.parametrize("empty", [False, True])
+def test_python_copy_protocols(deep, empty):
+    from copy import copy, deepcopy
+
+    original = Hamiltonian(2)
+    if not empty:
+        original.add_term(PauliString.from_str("ZZ"), 0.5 + 0.25j)
+    duplicate = (deepcopy if deep else copy)(original)
+    assert duplicate is not original
+    assert duplicate == original
+    assert duplicate.num_qubits == 2
+    duplicate.add_term(PauliString.from_str("XX"), 0.3)
+    assert duplicate.num_terms == original.num_terms + 1
+
+
+def test_nested_deepcopy_preserves_aliases_without_sharing_source():
+    from copy import deepcopy
+
+    original = Hamiltonian(1)
+    original.add_term(PauliString.from_str("Z"), 1.0)
+    snapshot = deepcopy({"first": original, "nested": [original]})
+    assert snapshot["first"] is snapshot["nested"][0]
+    assert snapshot["first"] is not original
+    snapshot["first"].scale(2.0)
+    assert original.terms[0][1] == 1.0
+    assert snapshot["first"].terms[0][1] == 2.0
