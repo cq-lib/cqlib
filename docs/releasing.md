@@ -39,9 +39,9 @@ Tags use the Python version to identify a release batch:
 
 - Stable releases: `vX.Y.Z`.
 - Prereleases: `vX.Y.Z-alpha.N`, `vX.Y.Z-beta.N`, or `vX.Y.Z-rc.N`, with N starting at 1.
-- Current tag: `v2.0.0-beta.3`.
-- Current Python source version: `2.0.0-beta3`, normalized to `2.0.0b3` for PEP 440 and wheel filenames.
-- Current Rust/C version: `0.1.0-beta.3`; both inherit the workspace version.
+- Current tag: `v2.0.0-beta.4`.
+- Current Python source version: `2.0.0-beta4`, normalized to `2.0.0b4` for PEP 440 and wheel filenames.
+- Current Rust/C version: `0.1.0-beta.4`; both inherit the workspace version.
 
 Python and Rust/C versions evolve independently and do not need matching
 numbers. The Cargo.toml files at a given tag record the version mapping for that

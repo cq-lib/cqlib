@@ -26,4 +26,4 @@ categories = [
 
 
 [dependencies]
-cqlib-core = { path = "../cqlib-core", version = "0.1.0-beta.3" }
+cqlib-core = { path = "../cqlib-core", version = "0.1.0-beta.4" }
