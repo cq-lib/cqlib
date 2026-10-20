@@ -158,7 +158,9 @@ pub extern "C" fn circuit_to_matrix(
 }
 
 /// Compose another circuit into this one. `qubits_map` maps `other`'s qubits
-/// to this circuit's qubits. NULL map uses identity mapping (merge by ID).
+/// in insertion order to distinct qubits already in this circuit.
+/// NULL or zero-length map uses identity mapping (merge by ID).
+/// Errors leave this circuit unchanged.
 #[unsafe(no_mangle)]
 pub extern "C" fn circuit_compose(
     ptr: *mut CCircuit,

@@ -290,6 +290,52 @@ fn compose_and_add_qubits() {
 }
 
 #[test]
+fn compose_rejects_duplicate_targets_without_mutation() {
+    for width in [1, 2] {
+        let circuit = circuit_new(width);
+        assert_eq!(circuit_h(circuit, 0), 0);
+        let len = circuit_to_matrix_len(circuit, std::ptr::null(), 0);
+        let mut before = vec![0.0; len * 2];
+        assert_eq!(
+            circuit_to_matrix(
+                circuit,
+                std::ptr::null(),
+                0,
+                before.as_mut_ptr(),
+                before.len()
+            ),
+            len
+        );
+        let other = circuit_new(2);
+        assert_eq!(circuit_cx(other, 0, 1), 0);
+        let mapping = [0, 0];
+
+        assert_eq!(
+            circuit_compose(circuit, other, mapping.as_ptr(), mapping.len()),
+            -3
+        );
+
+        assert_eq!(circuit_num_qubits(circuit), width);
+        assert_eq!(circuit_num_operations(circuit), 1);
+        assert_eq!(circuit_num_operations(other), 1);
+        let mut after = vec![0.0; len * 2];
+        assert_eq!(
+            circuit_to_matrix(
+                circuit,
+                std::ptr::null(),
+                0,
+                after.as_mut_ptr(),
+                after.len()
+            ),
+            len
+        );
+        assert_eq!(after, before);
+        circuit_free(other);
+        circuit_free(circuit);
+    }
+}
+
+#[test]
 fn global_phase_operations() {
     let circuit = circuit_new(1);
     assert_eq!(circuit_set_global_phase(circuit, 0.5), 0);

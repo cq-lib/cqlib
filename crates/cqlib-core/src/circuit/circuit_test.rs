@@ -2082,6 +2082,231 @@ fn test_decompose_remaps_classical_data_identity() {
 }
 
 #[test]
+fn compose_rejects_duplicate_targets_without_changing_either_circuit() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    // The mapping is a wire embedding, even for idle or separately used wires.
+    for kind in 0..3 {
+        for width in [1, 2] {
+            let mut destination = Circuit::new(width);
+            destination.rx(q0, "existing").unwrap();
+            destination.set_global_phase(Parameter::symbol("phase"));
+            destination.var(ClassicalType::Bit);
+            destination.measure(q0).unwrap();
+            let mut source = Circuit::new(2);
+            match kind {
+                0 => source.cx(q0, q1).unwrap(),
+                1 => {
+                    source.x(q0).unwrap();
+                    source.h(q1).unwrap();
+                }
+                _ => {}
+            }
+            source.rx(q0, "new_parameter").unwrap();
+            source.var(ClassicalType::Bit);
+            if kind != 2 {
+                source.measure(q1).unwrap();
+            }
+            let before = format!("{destination:?}");
+            let source_before = format!("{source:?}");
+
+            assert!(matches!(
+                destination.compose(&source, Some(&[q0, q0])),
+                Err(CircuitError::DuplicateQubits)
+            ));
+            assert_eq!(format!("{destination:?}"), before);
+            assert_eq!(format!("{source:?}"), source_before);
+        }
+    }
+}
+
+#[test]
+fn compose_errors_leave_all_destination_state_unchanged() {
+    let q0 = Qubit::new(0);
+    let q7 = Qubit::new(7);
+    // Inject malformed storage IR to exercise errors after mapping/parameter preparation.
+    for failure in [
+        "parameter",
+        "qubit",
+        "classical",
+        "phase",
+        "destination_phase",
+    ] {
+        for explicit in [false, true] {
+            let mut destination = Circuit::new(1);
+            destination.rx(q0, "existing").unwrap();
+            destination.set_global_phase(Parameter::from(0.25));
+            let retained_var = destination.var(ClassicalType::Bit);
+            let retained_value = destination.measure(q0).unwrap();
+            let mut source = Circuit::from_qubits(vec![q7]).unwrap();
+            source.rx(q7, "new_parameter").unwrap();
+            source.measure(q7).unwrap();
+            match failure {
+                "parameter" => {
+                    Arc::make_mut(&mut source.data)[0].params[0] = CircuitParam::Index(u32::MAX);
+                }
+                "qubit" => {
+                    Arc::make_mut(&mut source.data)[0].qubits[0] = Qubit::new(99);
+                }
+                "classical" => {
+                    Arc::make_mut(&mut source.data)[1].instruction =
+                        Instruction::ClassicalData(ClassicalDataOp::MeasureBit {
+                            result: ClassicalValue::new(destination.id(), 0, ClassicalType::Bit),
+                        });
+                }
+                "phase" => source.global_phase = CircuitParam::Index(u32::MAX),
+                "destination_phase" => {
+                    // Merging the source parameter must not make a bad old index valid.
+                    destination.global_phase =
+                        CircuitParam::Index(destination.parameters.len() as u32);
+                }
+                _ => unreachable!(),
+            }
+            let before = format!("{destination:?}");
+            let source_before = format!("{source:?}");
+            let mapping = [q0];
+            assert!(
+                destination
+                    .compose(&source, explicit.then_some(&mapping[..]))
+                    .is_err(),
+                "{failure}"
+            );
+            assert_eq!(format!("{destination:?}"), before, "{failure}");
+            assert_eq!(format!("{source:?}"), source_before);
+            destination.validate_classical_var(retained_var).unwrap();
+            destination
+                .store(retained_var, retained_value.expr())
+                .unwrap();
+        }
+    }
+}
+
+#[test]
+fn compose_sparse_permutation_preserves_unitary_parameters_and_phase() {
+    use crate::circuit::test_utils::assert_matrix_approx_eq;
+    use std::collections::HashMap;
+
+    let [q9, q2, q5] = [9, 2, 5].map(Qubit::new);
+    let [q8, q1] = [8, 1].map(Qubit::new);
+    for symbolic_left in [false, true] {
+        for symbolic_right in [false, true] {
+            let left = if symbolic_left {
+                Parameter::symbol("left")
+            } else {
+                Parameter::from(0.25)
+            };
+            let right = if symbolic_right {
+                Parameter::symbol("right")
+            } else {
+                Parameter::from(-0.75)
+            };
+            let mut destination = Circuit::from_qubits(vec![q9, q2, q5]).unwrap();
+            destination.h(q9).unwrap();
+            destination.cx(q9, q5).unwrap();
+            destination.set_global_phase(left.clone());
+            let id = destination.id();
+            let mut definition = Circuit::new(2);
+            definition.ry(Qubit::new(0), "theta").unwrap();
+            definition.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+            let gate = definition.to_gate("rotation_pair").unwrap();
+            let mut source = Circuit::from_qubits(vec![q8, q1]).unwrap();
+            source
+                .append(
+                    gate.clone(),
+                    [q8, q1],
+                    [Parameter::symbol("theta").into()],
+                    Some("pair"),
+                )
+                .unwrap();
+            source.rz(q1, "theta").unwrap();
+            source.set_global_phase(right.clone());
+            let source_before = format!("{source:?}");
+
+            destination.compose(&source, Some(&[q5, q2])).unwrap();
+
+            let mut expected = Circuit::from_qubits(vec![q9, q2, q5]).unwrap();
+            expected.h(q9).unwrap();
+            expected.cx(q9, q5).unwrap();
+            expected
+                .append(
+                    gate,
+                    [q5, q2],
+                    [Parameter::symbol("theta").into()],
+                    Some("pair"),
+                )
+                .unwrap();
+            expected.rz(q2, "theta").unwrap();
+            expected.set_global_phase(left + right);
+            let bindings = Some(HashMap::from([
+                ("theta", 0.731),
+                ("left", -0.4),
+                ("right", 1.2),
+            ]));
+            assert_matrix_approx_eq(
+                &destination
+                    .assign_parameters(&bindings)
+                    .unwrap()
+                    .to_matrix(None)
+                    .unwrap(),
+                &expected
+                    .assign_parameters(&bindings)
+                    .unwrap()
+                    .to_matrix(None)
+                    .unwrap(),
+                1e-12,
+            );
+            assert_eq!(destination.id(), id);
+            assert_eq!(destination.qubits(), vec![q9, q2, q5]);
+            assert_eq!(destination.operations()[2].label.as_deref(), Some("pair"));
+            assert_eq!(format!("{source:?}"), source_before);
+        }
+    }
+}
+
+#[test]
+fn compose_preserves_existing_handles_inside_control_builder() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut destination = Circuit::new(2);
+    let id = destination.id();
+    let retained_var = destination.var(ClassicalType::Bit);
+    let retained_value = destination.measure(q0).unwrap();
+    let mut source = Circuit::new(2);
+    let measured = source.measure(q0).unwrap();
+    source
+        .if_(
+            ClassicalExpr::bit_to_bool(measured.expr()).unwrap(),
+            |body| body.cx(q0, q1),
+        )
+        .unwrap();
+
+    destination
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.compose(&source, Some(&[q1, q0]))?;
+            body.store(retained_var, retained_value.expr())?;
+            body.break_loop()
+        })
+        .unwrap();
+    assert_eq!(destination.id(), id);
+    destination
+        .store(retained_var, retained_value.expr())
+        .unwrap();
+    destination.validate().unwrap();
+    let Instruction::ClassicalControl(ClassicalControlOp::While(op)) =
+        &destination.operations()[1].instruction
+    else {
+        panic!("expected while")
+    };
+    assert_eq!(op.body().operations()[0].qubits.as_slice(), &[q1]);
+    let Instruction::ClassicalControl(ClassicalControlOp::If(op)) =
+        &op.body().operations()[1].instruction
+    else {
+        panic!("expected if")
+    };
+    assert_eq!(op.then_body().operations()[0].qubits.as_slice(), &[q1, q0]);
+}
+
+#[test]
 fn test_compose_basic_with_mapping() {
     // Create qc1 with qubits 1, 3, 5
     let mut qc1 = Circuit::new(0);
