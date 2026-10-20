@@ -987,6 +987,10 @@ fn resolve_param(
     Ok(param)
 }
 
+fn format_parameter(param: &Parameter) -> String {
+    param.to_string().replace('π', "pi")
+}
+
 fn format_params(
     op: &Operation,
     circuit: &Circuit,
@@ -997,8 +1001,7 @@ fn format_params(
     }
     let params = (0..op.params.len())
         .map(|index| {
-            resolve_param(op, index, circuit, param_map)
-                .map(|param| param.to_string().replace("π", "pi"))
+            resolve_param(op, index, circuit, param_map).map(|param| format_parameter(&param))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(format!("({})", params.join(",")))
@@ -1062,22 +1065,22 @@ fn dump_standard_gate(
     match gate {
         StandardGate::X2P => {
             writeln!(output, "// x2p {}", mapped_qs[0])?;
-            writeln!(output, "rx(pi/2) {}", mapped_qs[0])?;
+            writeln!(output, "rx(pi/2) {};", mapped_qs[0])?;
             return Ok(());
         }
         StandardGate::X2M => {
             writeln!(output, "// x2m {}", mapped_qs[0])?;
-            writeln!(output, "rx(-pi/2) {}", mapped_qs[0])?;
+            writeln!(output, "rx(-pi/2) {};", mapped_qs[0])?;
             return Ok(());
         }
         StandardGate::Y2P => {
             writeln!(output, "// y2p {}", mapped_qs[0])?;
-            writeln!(output, "ry(pi/2) {}", mapped_qs[0])?;
+            writeln!(output, "ry(pi/2) {};", mapped_qs[0])?;
             return Ok(());
         }
         StandardGate::Y2M => {
             writeln!(output, "// y2m {}", mapped_qs[0])?;
-            writeln!(output, "ry(-pi/2) {}", mapped_qs[0])?;
+            writeln!(output, "ry(-pi/2) {};", mapped_qs[0])?;
             return Ok(());
         }
         StandardGate::XY2P => {
@@ -1086,10 +1089,10 @@ fn dump_standard_gate(
             let p3 = theta.clone() - Parameter::pi() / 2.0;
             let q_str = &mapped_qs[0];
 
-            writeln!(output, "// xy2p({}) {}", theta, q_str)?;
-            writeln!(output, "rz({}) {}", p1, q_str)?;
-            writeln!(output, "ry(pi/2) {}", q_str)?;
-            writeln!(output, "rz({}) {}", p3, q_str)?;
+            writeln!(output, "// xy2p({}) {}", format_parameter(&theta), q_str)?;
+            writeln!(output, "rz({}) {};", format_parameter(&p1), q_str)?;
+            writeln!(output, "ry(pi/2) {};", q_str)?;
+            writeln!(output, "rz({}) {};", format_parameter(&p3), q_str)?;
             return Ok(());
         }
         StandardGate::XY2M => {
@@ -1098,10 +1101,10 @@ fn dump_standard_gate(
             let m3 = theta.clone() + Parameter::pi() / 2.0;
             let q_str = &mapped_qs[0];
 
-            writeln!(output, "// xy2m({}) {}", theta, q_str)?;
-            writeln!(output, "rz({}) {}", m1, q_str)?;
-            writeln!(output, "ry(pi/2) {}", q_str)?;
-            writeln!(output, "rz({}) {}", m3, q_str)?;
+            writeln!(output, "// xy2m({}) {}", format_parameter(&theta), q_str)?;
+            writeln!(output, "rz({}) {};", format_parameter(&m1), q_str)?;
+            writeln!(output, "ry(pi/2) {};", q_str)?;
+            writeln!(output, "rz({}) {};", format_parameter(&m3), q_str)?;
             return Ok(());
         }
         StandardGate::XY => {
@@ -1110,18 +1113,13 @@ fn dump_standard_gate(
             let lambda: Parameter = Parameter::pi() / 2.0 - theta.clone();
             let q_str = &mapped_qs[0];
 
-            writeln!(
-                output,
-                "// xy({}) {}",
-                theta.to_string().replace("π", "pi"),
-                q_str
-            )?;
+            writeln!(output, "// xy({}) {}", format_parameter(&theta), q_str)?;
             writeln!(
                 output,
                 "u3({},{},{}) {};",
-                Parameter::pi().to_string().replace("π", "pi"),
-                phase.to_string().replace("π", "pi"),
-                lambda.to_string().replace("π", "pi"),
+                format_parameter(&Parameter::pi()),
+                format_parameter(&phase),
+                format_parameter(&lambda),
                 q_str
             )?;
             return Ok(());
@@ -1136,16 +1134,16 @@ fn dump_standard_gate(
             writeln!(
                 output,
                 "// rxy({},{}) {}",
-                theta.to_string().replace("π", "pi"),
-                phi.to_string().replace("π", "pi"),
+                format_parameter(&theta),
+                format_parameter(&phi),
                 q_str
             )?;
             writeln!(
                 output,
                 "u3({},{},{}) {};",
-                theta.to_string().replace("π", "pi"),
-                phase.to_string().replace("π", "pi"),
-                lambda.to_string().replace("π", "pi"),
+                format_parameter(&theta),
+                format_parameter(&phase),
+                format_parameter(&lambda),
                 q_str
             )?;
             return Ok(());
@@ -1475,9 +1473,9 @@ fn operation_to_qasm(
                     let lambda: Parameter = Parameter::pi() / 2.0 - theta;
                     return Ok(format!(
                         "u3({},{},{}) {}",
-                        Parameter::pi().to_string().replace("π", "pi"),
-                        phase.to_string().replace("π", "pi"),
-                        lambda.to_string().replace("π", "pi"),
+                        format_parameter(&Parameter::pi()),
+                        format_parameter(&phase),
+                        format_parameter(&lambda),
                         mapped_qs[0]
                     ));
                 }
@@ -1488,9 +1486,9 @@ fn operation_to_qasm(
                     let lambda: Parameter = Parameter::pi() / 2.0 - phi;
                     return Ok(format!(
                         "u3({},{},{}) {}",
-                        theta.to_string().replace("π", "pi"),
-                        phase.to_string().replace("π", "pi"),
-                        lambda.to_string().replace("π", "pi"),
+                        format_parameter(&theta),
+                        format_parameter(&phase),
+                        format_parameter(&lambda),
                         mapped_qs[0]
                     ));
                 }
