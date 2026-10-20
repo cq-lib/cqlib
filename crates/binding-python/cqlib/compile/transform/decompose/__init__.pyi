@@ -14,8 +14,10 @@ from cqlib.circuit import Circuit, Instruction
 from cqlib.compile.resource import ResourceLimits, ResourcePolicy
 from cqlib.device import Device
 from .. import TransformResult
+from . import block_zxz as block_zxz
 from . import mc_gate as mc_gate
 from . import unitary as unitary
+from .block_zxz import BlockZxzOptions, BlockZxzResult
 
 class TwoQubitUnitaryDecomposeBasis:
     """Output interaction basis for numeric two-qubit unitary synthesis."""
@@ -185,7 +187,20 @@ def decompose_mc_gates_for_device(
     """
     ...
 
+def decompose_block_zxz(
+    matrix: object,
+    atol: float = 1e-10,
+    options: BlockZxzOptions | None = None,
+) -> BlockZxzResult:
+    """Synthesize a ``2^n x 2^n`` unitary into a circuit via Block-ZXZ.
+
+    Uses arXiv:2403.13692 with both Section 5 CNOT optimizations enabled by
+    default. See :mod:`cqlib.compile.transform.decompose.block_zxz`.
+    """
+    ...
+
 __all__ = [
+    "block_zxz",
     "mc_gate",
     "unitary",
     "TwoQubitUnitaryDecomposeBasis",
@@ -198,4 +213,7 @@ __all__ = [
     "decompose_mc_gates",
     "decompose_mc_gates_with_rule_stats",
     "decompose_mc_gates_for_device",
+    "BlockZxzOptions",
+    "BlockZxzResult",
+    "decompose_block_zxz",
 ]

@@ -3,8 +3,9 @@
 This crate exposes a C ABI for `cqlib-core`. The surface now covers circuit
 construction, symbolic parameters, IR conversion (QCIS / QASM2 / QASM3),
 device / topology / layout / noise models, quantum simulators (statevector,
-density matrix, stabilizer), compilation, visualization, and error mitigation
-(ZNE, virtual distillation) — roughly 190 free functions.
+density matrix, stabilizer), compilation, Block-ZXZ arbitrary-unitary
+synthesis (`block_zxz_decompose`), visualization, and error mitigation
+(ZNE, virtual distillation) — roughly 200 free functions.
 
 ## Build
 
@@ -122,3 +123,5 @@ gcc -I crates/binding-c/include \
 
 ./test_circuit        # prints "binding-c circuit tests passed"
 ```
+
+> AI生成

@@ -584,7 +584,7 @@ impl ResourceManager {
 
 fn next_manager_id() -> Result<u64, ResourceError> {
     NEXT_MANAGER_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
         .map_err(|_| ResourceError::CounterOverflow {
             counter: "manager identifier",
         })

@@ -28,6 +28,10 @@ use cqlib_core::compile::transform::decompose::unitary::{
     synthesize_numeric_1q_unitary as core_synthesize_numeric_1q_unitary,
     synthesize_numeric_2q_unitary as core_synthesize_numeric_2q_unitary,
 };
+use cqlib_core::compile::transform::decompose::block_zxz::DecomposeResult;
+use cqlib_core::compile::transform::decompose::block_zxz::engine::{
+    decompose_block_zxz_with_options, DecomposeOptions,
+};
 use cqlib_core::compile::transform::decompose::{
     DecompositionRuleStats, McGateDecomposeConfig, UnitaryDecomposeConfig,
     decompose_mc_gates_with_rule_stats as core_decompose_mc_gates_with_rule_stats,
@@ -1142,4 +1146,140 @@ pub extern "C" fn decompose_unitary_target_cost_of_fixed_operations(
         };
     }
     CqlibError::Ok as i32
+}
+
+// =====  Block-ZXZ synthesis  =====
+//
+// C ABI for Block-ZXZ synthesis of arbitrary unitary matrices
+// (arXiv:2403.13692, with the Section 5 A.1/A.2 CNOT optimizations).
+
+/// Option flag for [`block_zxz_decompose`]: fold each recursion level's two
+/// UCRz side CNOTs into the middle multiplexor (paper A.1; saves two CNOTs
+/// per recursion level).
+pub const BLOCK_ZXZ_OPT_A1: u8 = 1 << 0;
+/// Option flag for [`block_zxz_decompose`]: decompose every two-qubit leaf
+/// but the temporally last one into a 2-CNOT circuit plus a rolling diagonal
+/// remainder (paper A.2; saves `4^(n-2) - 1` CNOTs; automatically disabled
+/// on block-diagonal / controlled inputs unless
+/// [`BLOCK_ZXZ_OPT_A2_FORCE`] is also set).
+pub const BLOCK_ZXZ_OPT_A2: u8 = 1 << 1;
+/// Option flag for [`block_zxz_decompose`]: keep A.2 enabled on
+/// block-diagonal (controlled) inputs.
+pub const BLOCK_ZXZ_OPT_A2_FORCE: u8 = 1 << 2;
+
+/// Upper sanity bound on `num_qubits` accepted by [`block_zxz_decompose`].
+///
+/// Beyond this the `4^n` entry buffer would exceed any plausible caller
+/// allocation, and the recursive synthesis is far beyond practical anyway.
+pub const BLOCK_ZXZ_MAX_QUBITS: usize = 12;
+
+/// Opaque handle around a [`DecomposeResult`].
+pub struct CBlockZxzResult {
+    pub inner: DecomposeResult,
+    pub cx_count: usize,
+}
+
+/// Counts the CX gates of an assembled Block-ZXZ circuit.
+fn count_cx(circuit: &cqlib_core::circuit::Circuit) -> usize {
+    circuit
+        .operations()
+        .iter()
+        .filter(|op| {
+            matches!(&op.instruction, Instruction::Standard(gate) if gate.name() == "CX")
+        })
+        .count()
+}
+
+/// Returns the default option flags: both CNOT optimizations enabled and A.2
+/// kept disabled on block-diagonal inputs (the paper's default pipeline).
+#[unsafe(no_mangle)]
+pub extern "C" fn block_zxz_options_default() -> u8 {
+    BLOCK_ZXZ_OPT_A1 | BLOCK_ZXZ_OPT_A2
+}
+
+/// Synthesizes a `2^n x 2^n` unitary `matrix` (row-major, `4^n` `Complex64`
+/// entries) into a standard-gate circuit via Block-ZXZ decomposition.
+///
+/// For generic random unitaries the default flags yield the paper's Table 1
+/// CX counts (19 for 3 qubits, 95 for 4); flag 0 yields the unoptimized
+/// baseline (24 / 120).
+///
+/// Returns an owned `CBlockZxzResult*` (free with
+/// [`block_zxz_result_free`]), or NULL on NULL input, out-of-range
+/// `num_qubits`, non-unitary or otherwise invalid input.
+#[unsafe(no_mangle)]
+pub extern "C" fn block_zxz_decompose(
+    matrix: *const Complex64,
+    num_qubits: usize,
+    atol: f64,
+    opt_flags: u8,
+) -> *mut CBlockZxzResult {
+    if matrix.is_null() {
+        return std::ptr::null_mut();
+    }
+    if num_qubits == 0 || num_qubits > BLOCK_ZXZ_MAX_QUBITS {
+        return std::ptr::null_mut();
+    }
+    let dim = 1usize << num_qubits;
+    let len = match dim.checked_mul(dim) {
+        Some(len) => len,
+        None => return std::ptr::null_mut(),
+    };
+    let flat = unsafe { std::slice::from_raw_parts(matrix, len).to_vec() };
+    let matrix = match Array2::from_shape_vec((dim, dim), flat) {
+        Ok(matrix) => matrix,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    let options = DecomposeOptions {
+        opt_a1: opt_flags & BLOCK_ZXZ_OPT_A1 != 0,
+        opt_a2: opt_flags & BLOCK_ZXZ_OPT_A2 != 0,
+        opt_a2_force: opt_flags & BLOCK_ZXZ_OPT_A2_FORCE != 0,
+    };
+    match decompose_block_zxz_with_options(&matrix, atol, &options) {
+        Ok(inner) => {
+            let cx_count = count_cx(&inner.circuit);
+            Box::into_raw(Box::new(CBlockZxzResult { inner, cx_count }))
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Frees a Block-ZXZ result. NULL is allowed.
+#[unsafe(no_mangle)]
+pub extern "C" fn block_zxz_result_free(ptr: *mut CBlockZxzResult) {
+    if !ptr.is_null() {
+        unsafe {
+            let _ = Box::from_raw(ptr);
+        }
+    }
+}
+
+/// Returns the number of qubits of the synthesized circuit, or 0 for NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn block_zxz_result_num_qubits(ptr: *const CBlockZxzResult) -> usize {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).inner.circuit.num_qubits() }
+}
+
+/// Returns the number of CX gates in the synthesized circuit, or 0 for NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn block_zxz_result_cx_count(ptr: *const CBlockZxzResult) -> usize {
+    if ptr.is_null() {
+        return 0;
+    }
+    unsafe { (*ptr).cx_count }
+}
+
+/// Returns the synthesized circuit as an owned `CCircuit*` (free with
+/// `circuit_free`). Returns NULL on NULL input.
+#[unsafe(no_mangle)]
+pub extern "C" fn block_zxz_result_circuit(ptr: *const CBlockZxzResult) -> *mut CCircuit {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let circuit = unsafe { (*ptr).inner.circuit.clone() };
+    Box::into_raw(Box::new(CCircuit { inner: circuit }))
 }

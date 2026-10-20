@@ -46,7 +46,7 @@ impl CircuitId {
     /// Allocates a new process-local circuit identity.
     pub fn new() -> Self {
         let id = NEXT_CIRCUIT_ID
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 current.checked_add(1).filter(|next| *next != u64::MAX)
             })
             .unwrap_or_else(|_| panic!("circuit identity space exhausted"));

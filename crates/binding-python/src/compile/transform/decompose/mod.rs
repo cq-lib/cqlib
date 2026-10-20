@@ -11,6 +11,7 @@
 // that they have been altered from the originals.
 
 pub(crate) mod config;
+pub(crate) mod block_zxz;
 mod mc_gate;
 mod pass;
 mod unitary;
@@ -49,6 +50,7 @@ pub(crate) fn register_decompose_module(parent: &Bound<'_, PyModule>) -> PyResul
 
     unitary::register_unitary_module(&m)?;
     mc_gate::register_mc_gate_module(&m)?;
+    block_zxz::register_block_zxz_module(&m)?;
 
     parent.add_submodule(&m)?;
     parent

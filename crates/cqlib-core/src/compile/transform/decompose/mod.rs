@@ -23,6 +23,9 @@
 //! - [`mc_gate`] provides explicit algorithmic synthesis primitives for
 //!   multi-controlled gates, plus the circuit-level resource-aware
 //!   `decompose_mc_gates` entry point.
+//! - [`block_zxz`] synthesizes an arbitrary `2^n x 2^n` unitary matrix into a
+//!   standard-gate circuit via the Block-ZXZ tree decomposition, including
+//!   the paper's Section 5 A.1/A.2 CNOT reductions.
 //!
 //! The workflow-facing adapters [`DecomposeDefinitions`],
 //! [`DecomposeUnitaries`], and [`DecomposeMcGates`] implement
@@ -44,6 +47,7 @@
 //! Directed-coupling legalization and scheduling are separate compiler
 //! concerns.
 
+pub mod block_zxz;
 pub mod definition;
 pub mod mc_gate;
 pub mod rule;
