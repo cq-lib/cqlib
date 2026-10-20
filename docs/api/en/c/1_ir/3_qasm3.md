@@ -84,6 +84,7 @@ The following features produce an explicit error rather than partial degradation
 - Subprograms and externals: `def` subprograms, `extern`
 - Hardware-related: hardware qubits, `output` declarations, and `input` declarations other than angle and float
 - Other statements: `alias`, `pragma`, annotations, legacy declarations
+- Program termination: `end` is explicitly rejected in every scope, including unreachable branches and zero-iteration loops
 - Gate modifiers: `negctrl`, `pow`; `ctrl` and `inv` only work when the target gate has a matching implementation
 - Some standard gates: `ch`, `cp`, `cu`, `cswap`
 - Control flow: `while` over a runtime condition is rejected by semantic checks; `for` only supports static expansion of constant ranges

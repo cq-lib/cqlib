@@ -1,3 +1,7 @@
+[default]
+# Unicode decimal-number category in regular expressions.
+extend-ignore-re = ['\\p\{Nd\}']
+
 [default.extend-words]
 ket = "ket"
 bra = "bra"
