@@ -914,9 +914,9 @@ impl StabilizerState {
 
     /// Applies the √Y gate (Y2P, SY, Ry(π/2)) to qubit `qubit`.
     ///
-    /// Conjugation: X→Z, Y→Y, Z→−X.
+    /// Conjugation U P U†: X→−Z, Y→Y, Z→X.
     /// Rule per row `i`:
-    /// - `phase[i] ^= 2 * (!x[i][qubit] & z[i][qubit])` (flip for Z→−X)
+    /// - `phase[i] ^= 2 * (x[i][qubit] & !z[i][qubit])` (flip for X→−Z)
     /// - swap `x[i][qubit]` ↔ `z[i][qubit]`
     pub fn apply_y2p(&mut self, qubit: usize) -> Result<(), QisError> {
         self.validate_qubit(qubit)?;
@@ -927,7 +927,7 @@ impl StabilizerState {
             let base = row * 2 * rl;
             let x = (self.tableau[base + word] & mask) != 0;
             let z = (self.tableau[base + rl + word] & mask) != 0;
-            if !x && z {
+            if x && !z {
                 self.phases[row] ^= 2;
             }
             // swap x ↔ z
@@ -947,9 +947,9 @@ impl StabilizerState {
 
     /// Applies the √Y† gate (Y2M, SYdg, Ry(−π/2)) to qubit `qubit`.
     ///
-    /// Conjugation: X→−Z, Y→Y, Z→X.
+    /// Conjugation U P U†: X→Z, Y→Y, Z→−X.
     /// Rule per row `i`:
-    /// - `phase[i] ^= 2 * (x[i][qubit] & !z[i][qubit])` (flip for X→−Z)
+    /// - `phase[i] ^= 2 * (!x[i][qubit] & z[i][qubit])` (flip for Z→−X)
     /// - swap `x[i][qubit]` ↔ `z[i][qubit]`
     pub fn apply_y2m(&mut self, qubit: usize) -> Result<(), QisError> {
         self.validate_qubit(qubit)?;
@@ -960,7 +960,7 @@ impl StabilizerState {
             let base = row * 2 * rl;
             let x = (self.tableau[base + word] & mask) != 0;
             let z = (self.tableau[base + rl + word] & mask) != 0;
-            if x && !z {
+            if !x && z {
                 self.phases[row] ^= 2;
             }
             // swap x ↔ z

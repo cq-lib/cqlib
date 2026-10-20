@@ -11,6 +11,228 @@
 // that they have been altered from the originals.
 
 use super::*;
+use crate::qis::{Hamiltonian, Statevector};
+
+const CLIFFORD_GATES: [StandardGate; 15] = [
+    StandardGate::I,
+    StandardGate::H,
+    StandardGate::X,
+    StandardGate::Y,
+    StandardGate::Z,
+    StandardGate::S,
+    StandardGate::SDG,
+    StandardGate::X2P,
+    StandardGate::X2M,
+    StandardGate::Y2P,
+    StandardGate::Y2M,
+    StandardGate::CX,
+    StandardGate::CY,
+    StandardGate::CZ,
+    StandardGate::SWAP,
+];
+
+#[test]
+fn test_clifford_gates_on_complete_pauli_product_eigenstates() {
+    // These six states span the one-qubit operator space. Check every Pauli
+    // observable so opposite rotations cannot hide behind equal Z probabilities.
+    let preparations: [&[StandardGate]; 6] = [
+        &[],
+        &[StandardGate::X],
+        &[StandardGate::H],
+        &[StandardGate::H, StandardGate::Z],
+        &[StandardGate::H, StandardGate::S],
+        &[StandardGate::H, StandardGate::Z, StandardGate::S],
+    ];
+    for gate in CLIFFORD_GATES {
+        let n = gate.num_qubits();
+        let qubits: Vec<_> = (0..n).collect();
+        for input in 0..6usize.pow(n as u32) {
+            let mut state = StabilizerState::new(n);
+            let mut reference = Statevector::new(n);
+            let mut digits = input;
+            for q in 0..n {
+                for &prep in preparations[digits % 6] {
+                    state.apply_standard_gate(prep, &[q], &[]).unwrap();
+                    reference
+                        .apply_unitary_gate(&[q], &prep.matrix(&[]).unwrap())
+                        .unwrap();
+                }
+                digits /= 6;
+            }
+            state.apply_standard_gate(gate, &qubits, &[]).unwrap();
+            reference
+                .apply_unitary_gate(&qubits, &gate.matrix(&[]).unwrap())
+                .unwrap();
+            for mut index in 0..4usize.pow(n as u32) {
+                let mut pauli = PauliString::new(n);
+                for q in 0..n {
+                    pauli.set_pauli(q, [Pauli::I, Pauli::X, Pauli::Y, Pauli::Z][index % 4]);
+                    index /= 4;
+                }
+                let expected = reference
+                    .expectation(&Hamiltonian::from_pauli(pauli.clone()))
+                    .unwrap();
+                let actual = state.pauli_expectation(&pauli).unwrap();
+                assert!(
+                    (actual as f64 - expected).abs() < 1e-10,
+                    "gate={gate:?}, input={input}, observable={pauli}: {actual} != {expected}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_y2_rotations_match_h_z_decompositions_across_word_boundaries() {
+    // Compare both stabilizer and destabilizer rows, including untouched bits
+    // on either side of a packed-word boundary and rows containing Y.
+    let mut initial = StabilizerState::new(66);
+    initial.apply_h(0).unwrap();
+    for q in 1..66 {
+        initial.apply_cx(q - 1, q).unwrap();
+        initial.apply_s(q).unwrap();
+    }
+    for q in [0, 63, 64, 65] {
+        for gate in [StandardGate::Y2P, StandardGate::Y2M] {
+            let mut actual = initial.clone();
+            actual.apply_standard_gate(gate, &[q], &[]).unwrap();
+            let mut expected = initial.clone();
+            // In execution order: Y2P = Z;H, Y2M = H;Z.
+            if gate == StandardGate::Y2P {
+                expected.apply_z(q).unwrap();
+                expected.apply_h(q).unwrap();
+            } else {
+                expected.apply_h(q).unwrap();
+                expected.apply_z(q).unwrap();
+            }
+            assert_eq!(&*actual.tableau, &*expected.tableau, "{gate:?} on {q}");
+            assert_eq!(&*actual.phases, &*expected.phases, "{gate:?} on {q}");
+        }
+    }
+}
+
+#[test]
+fn test_y2_h_interference_probabilities_sampling_and_execution() {
+    use crate::qis::{RuntimeValue, Simulator, sample};
+
+    for (gate, bit) in [(StandardGate::Y2P, false), (StandardGate::Y2M, true)] {
+        let mut circuit = Circuit::new(1);
+        circuit
+            .append(Instruction::Standard(gate), [Qubit::new(0)], [], None)
+            .unwrap();
+        circuit.h(Qubit::new(0)).unwrap();
+        let measured = circuit.measure(Qubit::new(0)).unwrap();
+        let state = StabilizerState::from_circuit(&circuit).unwrap();
+        let expected = if bit { vec![0.0, 1.0] } else { vec![1.0, 0.0] };
+        assert_eq!(state.probabilities().unwrap(), expected, "{gate:?};H");
+        let outcome = Outcome::from_bitstring(if bit { "1" } else { "0" }).unwrap();
+        for result in [
+            state.sample(&measured, 8).unwrap(),
+            sample(&circuit, 8, Some(42), Simulator::Stabilizer, None).unwrap(),
+        ] {
+            assert_eq!(result.counts(), &HashMap::from([(outcome.clone(), 8)]));
+        }
+        let execution = StabilizerState::run_circuit(&circuit).unwrap();
+        assert_eq!(
+            execution.classical.value(measured.value()),
+            Some(&RuntimeValue::Bit(bit))
+        );
+    }
+}
+
+#[test]
+fn test_y2_h_on_bell_state_preserves_expected_signed_correlations() {
+    for (gate, xx, zz, probabilities) in [
+        (StandardGate::Y2P, -1, 1, vec![0.5, 0.0, 0.0, 0.5]),
+        (StandardGate::Y2M, 1, -1, vec![0.0, 0.5, 0.5, 0.0]),
+    ] {
+        let mut circuit = Circuit::new(2);
+        circuit.h(Qubit::new(0)).unwrap();
+        circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+        circuit
+            .append(Instruction::Standard(gate), [Qubit::new(0)], [], None)
+            .unwrap();
+        circuit.h(Qubit::new(0)).unwrap();
+        let state = StabilizerState::from_circuit(&circuit).unwrap();
+        // Y2P;H applies Z to |Phi+>, yielding |Phi->; Y2M;H applies X,
+        // yielding |Psi+>. Their Z distributions and XX/ZZ signs differ.
+        assert_eq!(state.probabilities().unwrap(), probabilities, "{gate:?}");
+        for (name, expected) in [("XX", xx), ("ZZ", zz)] {
+            assert_eq!(
+                state.pauli_expectation(&name.parse().unwrap()).unwrap(),
+                expected
+            );
+        }
+        for shot in state.sample_shots(16) {
+            assert_eq!(shot.is_one(0) == shot.is_one(1), zz == 1);
+        }
+    }
+}
+
+#[test]
+fn test_random_clifford_circuits_match_statevector_probabilities_and_observables() {
+    let mut rng = SmallRng::seed_from_u64(13);
+    for trial in 0..32 {
+        let mut circuit = Circuit::new(5);
+        // Guarantee that both rotations occur on an entangled input in every trial.
+        circuit.h(Qubit::new(0)).unwrap();
+        circuit.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+        circuit.y2p(Qubit::new(0)).unwrap();
+        circuit.y2m(Qubit::new(1)).unwrap();
+        for _ in 0..80 {
+            let gate = CLIFFORD_GATES[rng.random_range(0..CLIFFORD_GATES.len())];
+            let a = rng.random_range(0..5);
+            let b = (a + rng.random_range(1..5)) % 5;
+            circuit
+                .append(
+                    Instruction::Standard(gate),
+                    [Qubit::new(a), Qubit::new(b)]
+                        .into_iter()
+                        .take(gate.num_qubits()),
+                    [],
+                    None,
+                )
+                .unwrap();
+        }
+        let state = StabilizerState::from_circuit(&circuit).unwrap();
+        let reference = Statevector::from_circuit(&circuit).unwrap();
+        for (basis, (actual, expected)) in state
+            .probabilities()
+            .unwrap()
+            .iter()
+            .zip(reference.probabilities())
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() < 1e-10,
+                "trial={trial}, basis={basis}"
+            );
+        }
+        // Generator checks always exercise nonzero expectations; uniformly random
+        // Paulis alone would mostly have zero expectation on five-qubit states.
+        let mut observables = state.get_stabilizers();
+        for _ in 0..20 {
+            let mut pauli = PauliString::new(5);
+            for q in 0..5 {
+                pauli.set_pauli(
+                    q,
+                    [Pauli::I, Pauli::X, Pauli::Y, Pauli::Z][rng.random_range(0..4)],
+                );
+            }
+            observables.push(pauli);
+        }
+        for pauli in observables {
+            let actual = state.pauli_expectation(&pauli).unwrap();
+            let expected = reference
+                .expectation(&Hamiltonian::from_pauli(pauli.clone()))
+                .unwrap();
+            assert!(
+                (actual as f64 - expected).abs() < 1e-10,
+                "trial={trial}, observable={pauli}"
+            );
+        }
+    }
+}
 
 #[test]
 fn test_new_single_qubit() {
@@ -674,7 +896,7 @@ fn test_x2m_four_is_identity() {
     assert_eq!(&*s.phases, &*original.phases);
 }
 
-/// Y2P⁴ = Y2M⁴ = identity.
+/// Y2P⁴ = Y2M⁴ = -I, equivalent to identity on the stabilizer tableau.
 #[test]
 fn test_y2p_four_is_identity() {
     let original = StabilizerState::new(2);
@@ -733,7 +955,7 @@ fn test_x2p_squared_is_x() {
     assert_eq!(&*after_x2p2.phases, &*after_x.phases);
 }
 
-/// Y2P² = Y (two √Y gates give Y gate).
+/// Y2P² = -iY, equivalent to Y on the stabilizer tableau.
 #[test]
 fn test_y2p_squared_is_y() {
     let mut after_y2p2 = StabilizerState::new(2);
