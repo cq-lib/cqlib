@@ -112,6 +112,247 @@ fn assert_qasm_unitary_matches(qasm: &str, circuit: &Circuit, allow_global_phase
     assert_matrix_approx_eq(&actual, &expected, 1e-10);
 }
 
+/// Force extension calls through their emitted definitions instead of the
+/// loader's implicit Cqlib builtins. This also checks the definition bodies.
+fn without_implicit_extension_gates(qasm: &str) -> String {
+    regex::Regex::new(r"\b(crx|cry|rxx|ryy|rzz|rzx|swap|cswap|fsim)\b")
+        .unwrap()
+        .replace_all(qasm, "exported_$1")
+        .into_owned()
+}
+
+fn extension_test_circuit(gate: StandardGate, controlled: bool, values: [f64; 2]) -> Circuit {
+    let instruction = if controlled {
+        Instruction::McGate(Box::new(crate::circuit::gate::MCGate::new(1, gate)))
+    } else {
+        Instruction::Standard(gate)
+    };
+    let mut circuit = Circuit::new(gate.num_qubits() + usize::from(controlled));
+    let params: Vec<ParameterValue> = values[..gate.num_params()]
+        .iter()
+        .copied()
+        .map(Into::into)
+        .collect();
+    circuit
+        .append(instruction, circuit.qubits(), params, None)
+        .unwrap();
+    circuit
+}
+
+fn assert_portable_gate_definition(gate: StandardGate, controlled: bool) {
+    for values in [
+        [0.0, 0.0],
+        [0.731, -1.219],
+        [-std::f64::consts::PI, std::f64::consts::FRAC_PI_2],
+    ] {
+        let circuit = extension_test_circuit(gate, controlled, values);
+        let qasm = dumps(&circuit).unwrap();
+        assert_qasm_unitary_matches(&without_implicit_extension_gates(&qasm), &circuit, false);
+    }
+}
+
+#[test]
+fn portable_qasm2_standard_swap_definition() {
+    assert_portable_gate_definition(StandardGate::SWAP, false);
+}
+
+#[test]
+fn portable_qasm2_standard_fsim_definition() {
+    assert_portable_gate_definition(StandardGate::FSIM, false);
+}
+
+#[test]
+fn portable_qasm2_controlled_rx_definition() {
+    assert_portable_gate_definition(StandardGate::RX, true);
+}
+
+#[test]
+fn portable_qasm2_controlled_ry_definition() {
+    assert_portable_gate_definition(StandardGate::RY, true);
+}
+
+#[test]
+fn portable_qasm2_controlled_swap_definition() {
+    assert_portable_gate_definition(StandardGate::SWAP, true);
+}
+
+#[test]
+fn portable_qasm2_standard_controlled_rotations_still_define_gates() {
+    assert_portable_gate_definition(StandardGate::CRX, false);
+    assert_portable_gate_definition(StandardGate::CRY, false);
+}
+
+#[test]
+fn portable_qasm2_sparse_qubits_preserve_numeric_basis_and_width() {
+    let qubits = [9, 2, 5].map(Qubit::new);
+    let mut circuit = Circuit::from_qubits(qubits.to_vec()).unwrap();
+    circuit.x(qubits[0]).unwrap();
+    circuit.cx(qubits[0], qubits[2]).unwrap();
+    circuit.validate().unwrap();
+
+    let qasm = dumps(&circuit).unwrap();
+    assert_qasm_unitary_matches(&qasm, &circuit, false);
+    let path = unique_temp_path("sparse_qubits");
+    dump(&circuit, &path).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), qasm);
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn portable_qasm2_dense_qubits_in_storage_order_keep_numeric_basis() {
+    let qubits = [2, 0, 1].map(Qubit::new);
+    let mut circuit = Circuit::from_qubits(qubits.to_vec()).unwrap();
+    circuit.x(qubits[0]).unwrap();
+    circuit.cx(qubits[0], qubits[2]).unwrap();
+    assert_qasm_unitary_matches(&dumps(&circuit).unwrap(), &circuit, false);
+}
+
+#[test]
+fn portable_qasm2_sparse_qubits_map_measurement_reset_and_if() {
+    let qubits = [9, 2, 5].map(Qubit::new);
+    let mut circuit = Circuit::from_qubits(qubits.to_vec()).unwrap();
+    circuit.barrier(qubits.to_vec()).unwrap();
+    circuit.reset(qubits[0]).unwrap();
+    let measured = circuit.measure(qubits[2]).unwrap();
+    circuit
+        .if_(
+            ClassicalExpr::bit_to_bool(measured.expr()).unwrap(),
+            |body| {
+                body.x(qubits[1])?;
+                Ok(())
+            },
+        )
+        .unwrap();
+    let qasm = dumps(&circuit).unwrap();
+    assert_qasm_contains_ordered(
+        &qasm,
+        &[
+            "qreg q[3];",
+            "barrier q[2],q[0],q[1];",
+            "reset q[2];",
+            "measure q[1] -> v0[0];",
+            "if (v0 == 1) x q[0];",
+        ],
+    );
+    verify_qasm_roundtrip(&qasm, 3);
+}
+
+#[test]
+fn portable_qasm2_definitions_in_custom_gate_bodies() {
+    for (gate, controlled) in [
+        (StandardGate::RX, true),
+        (StandardGate::RY, true),
+        (StandardGate::SWAP, true),
+        (StandardGate::SWAP, false),
+        (StandardGate::FSIM, false),
+    ] {
+        let inner = extension_test_circuit(gate, controlled, [0.731, -1.219]);
+        let width = inner.num_qubits();
+        let custom = inner.clone().to_gate("wrapped_custom").unwrap();
+        let unitary = UnitaryGate::new("wrapped_unitary", width as u16, 0)
+            .with_circuit(Arc::new(FrozenCircuit::new(inner)))
+            .unwrap();
+        for instruction in [custom, Instruction::UnitaryGate(Box::new(unitary))] {
+            let mut outer = Circuit::new(width);
+            outer
+                .append(instruction, outer.qubits(), std::iter::empty(), None)
+                .unwrap();
+            let qasm = dumps(&outer).unwrap();
+            assert_qasm_unitary_matches(&without_implicit_extension_gates(&qasm), &outer, false);
+        }
+    }
+}
+
+#[test]
+fn portable_qasm2_definitions_in_if_bodies() {
+    for (gate, controlled) in [
+        (StandardGate::RX, true),
+        (StandardGate::RY, true),
+        (StandardGate::SWAP, true),
+        (StandardGate::SWAP, false),
+        (StandardGate::FSIM, false),
+    ] {
+        let inner = extension_test_circuit(gate, controlled, [0.731, -1.219]);
+        let operation = &inner.operations()[0];
+        let mut outer = Circuit::new(inner.num_qubits());
+        let measured = outer.measure(Qubit::new(0)).unwrap();
+        outer
+            .if_(
+                ClassicalExpr::bit_to_bool(measured.expr()).unwrap(),
+                |body| {
+                    body.append(
+                        operation.instruction.clone(),
+                        operation.qubits.iter().copied(),
+                        [0.731, -1.219][..gate.num_params()]
+                            .iter()
+                            .copied()
+                            .map(ParameterValue::from),
+                        None,
+                    )?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let qasm = without_implicit_extension_gates(&dumps(&outer).unwrap());
+        verify_qasm_roundtrip(&qasm, outer.num_qubits());
+        // The extension must be defined before the conditional invocation.
+        assert_qasm_contains_ordered(&qasm, &["gate exported_", "if (v0 == 1) exported_"]);
+    }
+}
+
+#[test]
+fn portable_qasm2_mixed_standard_and_mcgate_define_rotation_once() {
+    let mut circuit = extension_test_circuit(StandardGate::RX, true, [0.731, 0.0]);
+    circuit.crx(Qubit::new(0), Qubit::new(1), -0.2).unwrap();
+    let qasm = dumps(&circuit).unwrap();
+    assert_eq!(qasm.matches("gate crx(").count(), 1, "{qasm}");
+    assert_qasm_unitary_matches(&without_implicit_extension_gates(&qasm), &circuit, false);
+}
+
+#[test]
+fn portable_qasm2_extension_definition_conflicts_are_rejected() {
+    for (name, gate, controlled) in [
+        ("swap", StandardGate::SWAP, false),
+        ("fsim", StandardGate::FSIM, false),
+        ("cswap", StandardGate::SWAP, true),
+    ] {
+        let mut inner = Circuit::new(1);
+        inner.x(Qubit::new(0)).unwrap();
+        let custom = inner.clone().to_gate(name).unwrap();
+        let unitary = UnitaryGate::new(name, 1, 0)
+            .with_circuit(Arc::new(FrozenCircuit::new(inner)))
+            .unwrap();
+        let opaque = UnitaryGate::new(name, 1, 0);
+        for instruction in [
+            custom,
+            Instruction::UnitaryGate(Box::new(unitary)),
+            Instruction::UnitaryGate(Box::new(opaque)),
+        ] {
+            // A custom definition alone must remain valid even if its name
+            // happens to match an unused standard extension.
+            let mut custom_only = Circuit::new(1);
+            custom_only
+                .append(
+                    instruction.clone(),
+                    [Qubit::new(0)],
+                    std::iter::empty(),
+                    None,
+                )
+                .unwrap();
+            assert!(dumps(&custom_only).is_ok());
+
+            let mut circuit = extension_test_circuit(gate, controlled, [0.731, -1.219]);
+            circuit
+                .append(instruction, [Qubit::new(0)], std::iter::empty(), None)
+                .unwrap();
+            assert!(matches!(
+                dumps(&circuit),
+                Err(QasmDumpError::FormatError(message)) if message.contains(name)
+            ));
+        }
+    }
+}
+
 /// Simple contains check (for backwards compatibility)
 fn assert_qasm_contains(qasm: &str, expected_lines: &[&str]) {
     for &line in expected_lines {
