@@ -81,3 +81,20 @@ def test_compose_reports_incompatible_mapping():
 
     with pytest.raises(CircuitError):
         main.compose(other, [0, 2])
+
+
+@pytest.mark.parametrize("width", [1, 2])
+def test_compose_rejects_duplicate_targets_without_mutation(width):
+    main = Circuit(width)
+    main.h(0)
+    before = main.to_matrix().copy()
+    other = Circuit(2)
+    other.cx(0, 1)
+
+    with pytest.raises(CircuitError):
+        main.compose(other, [0, 0])
+
+    assert main.num_qubits == width
+    assert len(main.operations) == 1
+    assert np.allclose(main.to_matrix(), before)
+    assert len(other.operations) == 1

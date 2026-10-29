@@ -638,6 +638,120 @@ fn rejects_out_of_bounds_qubit_index() {
 }
 
 #[test]
+fn rejects_end_in_top_level_and_nested_scopes() {
+    for body in [
+        "end;",
+        "x q; end; x q;",
+        "x q; end;",
+        "{ x q; end; } x q;",
+        "if (true) { x q; end; } x q;",
+        "bool flag = true; if (flag) { x q; end; } x q;",
+        "bool flag = false; if (flag) { x q; } else { end; } x q;",
+        "for uint i in [0:2] { x q; end; } x q;",
+        "while (true) { x q; end; } x q;",
+        "for uint i in [0:2] { if (true) { end; } } x q;",
+        "def stop() { end; } x q;",
+        "uint[2] c = 0; switch (c) { case 0 { end; } default { x q; } }",
+        "uint[2] c = 1; switch (c) { case 0 { x q; } default { end; } }",
+    ] {
+        let source = format!("OPENQASM 3.0; include \"stdgates.inc\"; qubit q; {body}");
+        for loader in [loads, from_str] {
+            let result = loader(&source);
+            assert!(
+                matches!(&result, Err(Qasm3ParseError::UnsupportedFeature(feature)) if feature == "end"),
+                "expected explicit end rejection for {body:?}, got {result:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rejects_end_before_discarding_unreachable_statements() {
+    for body in [
+        "if (false) { end; } x q;",
+        "if (true) { x q; } else { end; }",
+        "for uint i in [1:0] { end; } x q;",
+        "while (false) { end; } x q;",
+        "if (false) { for uint i in [1:0] { end; } } x q;",
+    ] {
+        let source = format!("OPENQASM 3.0; include \"stdgates.inc\"; qubit q; {body}");
+        let result = loads(&source);
+        assert!(
+            matches!(&result, Err(Qasm3ParseError::UnsupportedFeature(feature)) if feature == "end"),
+            "expected explicit end rejection for {body:?}, got {result:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_end_from_file() {
+    let path = unique_temp_path("end");
+    fs::write(
+        &path,
+        "OPENQASM 3.0; include \"stdgates.inc\"; qubit q; x q; end; x q;",
+    )
+    .unwrap();
+    let loaded = load(&path);
+    let aliased = from_path(&path);
+    fs::remove_file(&path).unwrap();
+
+    for result in [loaded, aliased] {
+        assert!(
+            matches!(&result, Err(Qasm3ParseError::UnsupportedFeature(feature)) if feature == "end"),
+            "expected explicit end rejection, got {result:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_end_from_included_file() {
+    let path = unique_temp_path("end_include");
+    let included = path.with_extension("end");
+    fs::write(&included, "if (false) { end; }").unwrap();
+    fs::write(
+        &path,
+        format!(
+            "OPENQASM 3.0; include \"{}\";",
+            included.file_name().unwrap().to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let result = load(&path);
+    // An include path containing the keyword and comments are not statements.
+    fs::write(&included, "// end;\n/* end; */").unwrap();
+    let without_end = load(&path);
+    fs::remove_file(&path).unwrap();
+    fs::remove_file(&included).unwrap();
+
+    assert!(
+        matches!(&result, Err(Qasm3ParseError::UnsupportedFeature(feature)) if feature == "end"),
+        "expected explicit end rejection in include, got {result:?}"
+    );
+    assert_eq!(without_end.unwrap().operations().len(), 0);
+}
+
+#[test]
+fn loads_null_statements_and_end_in_comments_and_identifiers() {
+    let circuit = loads(
+        r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit end_marker;
+        // end;
+        x end_marker;
+        /* if (true) { end; } */
+        ;
+        h end_marker;
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(circuit.operations().len(), 2);
+    assert_standard_gate(&circuit, 0, StandardGate::X, &[0]);
+    assert_standard_gate(&circuit, 1, StandardGate::H, &[0]);
+}
+
+#[test]
 fn rejects_unsupported_standard_gate() {
     assert_err(
         r#"

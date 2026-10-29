@@ -147,6 +147,41 @@ fn frontend_panic_error(payload: Box<dyn std::any::Any + Send>) -> Qasm3ParseErr
     Qasm3ParseError::ParseError(format!("OpenQASM 3 front-end failed: {message}"))
 }
 
+fn reject_end_statements(stmts: &[Stmt]) -> Result<(), Qasm3ParseError> {
+    // Check every scope before constant folding or loop expansion can discard
+    // statements. The circuit IR cannot preserve whole-program termination.
+    let mut pending = vec![stmts];
+    while let Some(stmts) = pending.pop() {
+        for stmt in stmts {
+            match stmt {
+                Stmt::End => return Err(Qasm3ParseError::UnsupportedFeature("end".to_string())),
+                Stmt::Block(block) => pending.push(block.statements()),
+                Stmt::If(op) => {
+                    pending.push(op.then_branch().statements());
+                    if let Some(block) = op.else_branch() {
+                        pending.push(block.statements());
+                    }
+                }
+                Stmt::While(op) => pending.push(op.loop_body().statements()),
+                Stmt::ForStmt(op) => pending.push(op.loop_body().statements()),
+                Stmt::SwitchCaseStmt(op) => {
+                    for case in op.cases() {
+                        pending.push(case.statements());
+                    }
+                    if let Some(stmts) = op.default_block() {
+                        pending.push(stmts);
+                    }
+                }
+                Stmt::GateDefinition(def) => pending.push(def.block().statements()),
+                Stmt::DefStmt(def) => pending.push(def.block().statements()),
+                Stmt::AnnotatedStmt(op) => pending.push(std::slice::from_ref(op.statement())),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 fn prepare_source(source: &str) -> Result<String, Qasm3ParseError> {
     let layout = inspect_source(source)?;
     reject_empty_pragmas(&layout.code_mask)?;
@@ -729,6 +764,7 @@ impl<'a> LoweringContext<'a> {
             )));
         }
 
+        reject_end_statements(program.stmts())?;
         let total_qubits = self.discover_quantum(program.stmts())?;
         self.discover_gates(program.stmts())?;
 
@@ -926,7 +962,8 @@ impl<'a> LoweringContext<'a> {
                 "hardware qubit".to_string(),
             )),
             Stmt::Box => Err(Qasm3ParseError::UnsupportedFeature("box".to_string())),
-            Stmt::End | Stmt::NullStmt => Ok(()),
+            Stmt::End => Err(Qasm3ParseError::UnsupportedFeature("end".to_string())),
+            Stmt::NullStmt => Ok(()),
             Stmt::OldStyleDeclaration => Err(Qasm3ParseError::UnsupportedFeature(
                 "old-style declaration".to_string(),
             )),

@@ -261,6 +261,7 @@ Cqlib 的 QASM3 loader 支持部分可映射到当前 `Circuit` 的控制流：
 | `reset`、`barrier`、`gphase` | 支持 |
 | 自定义 gate | 支持可映射的 gate body |
 | calibration、pulse、extern、hardware qubit、alias | 当前不支持 |
+| 程序终止 `end` | 任何作用域中出现时均明确拒绝，包括不可达分支和零次循环 |
 | 任意复杂 classical arithmetic | 当前不支持无损 lowering |
 | 复杂 lvalue slicing、多维索引 | 当前不支持或仅支持必要子集 |
 

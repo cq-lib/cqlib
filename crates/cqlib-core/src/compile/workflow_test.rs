@@ -3853,3 +3853,195 @@ fn shared_device_workflow_supports_concurrent_mixed_runs() {
         handle.join().unwrap();
     }
 }
+
+#[test]
+fn heterogeneous_native_entanglers_remain_executable_without_fsim_detours() {
+    use crate::device::QubitProp;
+    use StandardGate::*;
+
+    for (basis, singles, edges) in [
+        (
+            vec![U, CZ],
+            [(0.001, 84.0), (0.006, 45.0)],
+            [(0.019, 59.0), (0.016, 293.0)],
+        ),
+        (
+            vec![RY, RZ, CX],
+            [(0.001, 10.0), (0.009, 80.0)],
+            [(0.01, 50.0), (0.03, 200.0)],
+        ),
+    ] {
+        let mut device = Device::bidirectional_line("heterogeneous-native-entangler", 2)
+            .unwrap()
+            .with_native_gates(basis.iter().copied().map(Instruction::Standard).collect())
+            .unwrap();
+        for (q, (error, duration)) in singles.into_iter().enumerate() {
+            let mut prop = QubitProp::new(0.0);
+            for &gate in basis.iter().filter(|gate| gate.num_qubits() == 1) {
+                prop = prop
+                    .with_native_instruction(
+                        InstructionProp::new(Instruction::Standard(gate), error)
+                            .with_length(duration),
+                    )
+                    .unwrap();
+            }
+            device
+                .add_qubit_properties(PhysicalQubit::new(q as u32), prop)
+                .unwrap();
+        }
+        let entangler = *basis.last().unwrap();
+        for ((a, b), (error, duration)) in [(0, 1), (1, 0)].into_iter().zip(edges) {
+            device
+                .add_edge_properties(
+                    PhysicalQubit::new(a),
+                    PhysicalQubit::new(b),
+                    EdgeProp::new()
+                        .with_native_instruction(
+                            InstructionProp::new(Instruction::Standard(entangler), error)
+                                .with_length(duration),
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+        for (a, b) in [(0, 1), (1, 0)] {
+            let mut source = Circuit::new(2);
+            source
+                .append(
+                    Instruction::Standard(entangler),
+                    [Qubit::new(a), Qubit::new(b)],
+                    [],
+                    None,
+                )
+                .unwrap();
+            source.set_global_phase((-0.37).into());
+            device.validate_circuit(&source).unwrap();
+            for mode in [CompileMode::Normal, CompileMode::Enhanced] {
+                let result = compile(
+                    &source,
+                    CompileConfig {
+                        target: CompileTarget::Device(DeviceCompileTarget {
+                            device: device.clone(),
+                            initial_layout: Some(Layout::from_pairs(&[(0, 0), (1, 1)], 2).unwrap()),
+                            seed: Some(7),
+                        }),
+                        ..compile_config(mode)
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{basis:?}/{a}->{b}/{mode:?}: {e}"));
+                device.validate_circuit(&result.circuit).unwrap();
+                assert_eq!(result.circuit.operations().len(), 1);
+                crate::circuit::test_utils::assert_matrix_approx_eq(
+                    &source.to_matrix(Some(&[0, 1])).unwrap(),
+                    &result.circuit.to_matrix(Some(&[0, 1])).unwrap(),
+                    1e-9,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn universal_native_bases_route_on_directed_chain_with_exact_layout_isometry() {
+    use StandardGate::*;
+
+    for native in [
+        vec![U, CX],
+        vec![U, CZ],
+        vec![RY, RZ, CX],
+        vec![RY, RZ, CZ],
+        vec![U, H, CX],
+        vec![RXY, CX],
+        vec![RXY, CZ],
+        vec![RZ, X2P, CZ],
+        vec![RZ, X2M, CX],
+        vec![RZ, Y2P, CX],
+        vec![RZ, Y2M, CZ],
+        vec![RZ, XY2P, CZ],
+        vec![RZ, XY2M, CX],
+    ] {
+        let device = Device::from_edges("native-universality", 4, &[(0, 1), (1, 2), (2, 3)])
+            .unwrap()
+            .with_native_gates(native.iter().copied().map(Instruction::Standard).collect())
+            .unwrap();
+        for (label, pairs) in [
+            ("H", vec![]),
+            ("forward CX", vec![(0, 1)]),
+            ("both directions", vec![(0, 1), (1, 0)]),
+            ("triangle", vec![(0, 1), (1, 2), (2, 0)]),
+            ("mixed", vec![(0, 2), (2, 1), (1, 0)]),
+        ] {
+            let n = if matches!(label, "triangle" | "mixed") {
+                3
+            } else {
+                2
+            };
+            let mut source = Circuit::new(n);
+            if pairs.is_empty() {
+                source.h(Qubit::new(0)).unwrap();
+            }
+            for (a, b) in pairs {
+                source.cx(Qubit::new(a), Qubit::new(b)).unwrap();
+            }
+            if label == "mixed" {
+                source.u(Qubit::new(0), 0.173, -1.239, 0.71).unwrap();
+                source.crz(Qubit::new(0), Qubit::new(2), -0.43).unwrap();
+                source
+                    .fsim(Qubit::new(2), Qubit::new(1), 0.31, -0.27)
+                    .unwrap();
+            }
+            source.set_global_phase((-0.37).into());
+            let expected = source.to_matrix(None).unwrap();
+            for mode in [CompileMode::Normal, CompileMode::Enhanced] {
+                let result = compile(
+                    &source,
+                    CompileConfig {
+                        target: CompileTarget::Device(DeviceCompileTarget {
+                            device: device.clone(),
+                            initial_layout: None,
+                            seed: Some(7),
+                        }),
+                        ..compile_config(mode)
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{native:?}/{label}/{mode:?}: {e}"));
+                device.validate_circuit(&result.circuit).unwrap();
+                let metadata = result.device_metadata.unwrap();
+                let order: Vec<_> = result.circuit.qubits().iter().map(|q| q.index()).collect();
+                let actual = result.circuit.to_matrix(Some(&order)).unwrap();
+                let encode = |state: usize, layout: &Layout| -> usize {
+                    (0..n)
+                        .map(|q| {
+                            let physical = layout
+                                .get_physical(LogicalQubit::new(q as u32))
+                                .unwrap()
+                                .id() as usize;
+                            ((state >> q) & 1) << order.iter().position(|&p| p == physical).unwrap()
+                        })
+                        .sum()
+                };
+                // Every computational input and every physical output,
+                // including outputs with a nonzero unused physical qubit.
+                for column in 0..1 << n {
+                    let logical_rows: HashMap<_, _> = (0..1 << n)
+                        .map(|row| (encode(row, &metadata.final_layout), row))
+                        .collect();
+                    for row in 0..actual.nrows() {
+                        let value = logical_rows
+                            .get(&row)
+                            .map_or(Complex64::new(0.0, 0.0), |&logical| {
+                                expected[[logical, column]]
+                            });
+                        let error = (value
+                            - actual[[row, encode(column, &metadata.initial_layout)]])
+                        .norm();
+                        assert!(
+                            error < 1e-8,
+                            "{native:?}/{label}/{mode:?}: matrix error {error}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

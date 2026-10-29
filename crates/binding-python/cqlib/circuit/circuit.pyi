@@ -638,7 +638,15 @@ class Circuit:
         """
         ...
     def compose(self, other: Circuit, qubits: QubitList | None = ...) -> None:
-        """Append another circuit, optionally remapping its qubits."""
+        """Append another circuit, optionally remapping its qubits in insertion order.
+
+        Explicit targets must be distinct and already present in this circuit.
+        If ``qubits`` is None, merge qubits by ID, appending previously absent IDs.
+        Errors leave this circuit unchanged; existing classical handles remain valid.
+
+        Raises:
+            CircuitError: If the mapping is invalid or stored references cannot be remapped.
+        """
         ...
     def to_matrix(self, qubits_order: list[int] | None = ...) -> NDArray[np.complex128]:
         """Compute the dense numeric unitary matrix.

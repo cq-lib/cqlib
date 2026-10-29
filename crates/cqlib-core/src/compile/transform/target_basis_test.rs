@@ -401,7 +401,7 @@ fn u_fails_for_basis_without_complete_euler_family() {
 
     assert_target_lowering_fails_with(
         &circuit,
-        &[StandardGate::RZ, StandardGate::X2M],
+        &[StandardGate::RZ, StandardGate::Z],
         &["cannot lower", "U"],
     );
 }
@@ -981,6 +981,57 @@ fn target_lowering_uses_compact_qcis_decompositions() {
             assert_matrix_approx_eq(
                 &circuit_to_matrix(&source, None).unwrap(),
                 &circuit_to_matrix(&lowered, None).unwrap(),
+                1e-9,
+            );
+        }
+    }
+}
+
+#[test]
+fn symbolic_u_lowers_to_each_single_polarity_half_rotation_basis() {
+    use StandardGate::*;
+    for half in [X2P, X2M, Y2P, Y2M] {
+        let mut source = Circuit::new(1);
+        source
+            .u(
+                Qubit::new(0),
+                Parameter::symbol("theta"),
+                Parameter::symbol("phi"),
+                Parameter::symbol("lambda"),
+            )
+            .unwrap();
+        source.set_global_phase((-0.37).into());
+        let result = run_target_lowering(&source, &[RZ, half]);
+        assert_only_target_standard_gates(&result, &[RZ, half]);
+        assert!(
+            result.operations().len() <= 5,
+            "{half:?}: expected a compact Euler path"
+        );
+        for (theta, phi, lambda) in [
+            (0.0, 0.0, 0.0),
+            (0.173, -1.239, 0.71),
+            (
+                std::f64::consts::PI,
+                -2.0 * std::f64::consts::PI,
+                4.0 * std::f64::consts::PI,
+            ),
+        ] {
+            let bindings = Some(std::collections::HashMap::from([
+                ("theta", theta),
+                ("phi", phi),
+                ("lambda", lambda),
+            ]));
+            assert_matrix_approx_eq(
+                &source
+                    .assign_parameters(&bindings)
+                    .unwrap()
+                    .to_matrix(None)
+                    .unwrap(),
+                &result
+                    .assign_parameters(&bindings)
+                    .unwrap()
+                    .to_matrix(None)
+                    .unwrap(),
                 1e-9,
             );
         }

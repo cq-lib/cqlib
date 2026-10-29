@@ -143,6 +143,7 @@ The following OpenQASM 3.0 features are not supported in the current implementat
 - Subroutines and external calls: `def` subroutines, `extern`
 - Hardware-related: hardware qubits, `output` declarations, and `input` declarations other than angle and floating-point
 - Other statements: `alias`, `pragma`, annotations, legacy declarations
+- Program termination: `end` is explicitly rejected in every scope, including unreachable branches and zero-iteration loops
 - Gate modifiers: `negctrl`, `pow`; `ctrl` and `inv` are available only when a corresponding implementation exists for the target gate
 - Some standard gates: `ch`, `cp`, `cu`, `cswap`
 - Control flow: a lowering path for `while` exists in the implementation, but loops with a runtime condition are currently rejected by the semantic check; `for` supports only the statically expanded form whose range is constant

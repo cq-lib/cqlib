@@ -2489,6 +2489,8 @@ impl Circuit {
     ///
     /// Parameters that remain symbolic are simplified and re-interned in the
     /// returned circuit. The original circuit is not modified.
+    /// Internal classical references are remapped to the returned circuit's
+    /// identity; handles from the original circuit remain owned by it.
     ///
     /// # Errors
     ///
@@ -2512,6 +2514,29 @@ impl Circuit {
         let mut new_circuit = Circuit::from_qubits(self.qubits())?;
         new_circuit.classical_vars = self.classical_vars.clone();
         new_circuit.classical_values = self.classical_values.clone();
+
+        let var_map = self
+            .classical_vars
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                (
+                    ClassicalVar::new(self.circuit_id, index as u32, *ty),
+                    ClassicalVar::new(new_circuit.circuit_id, index as u32, *ty),
+                )
+            })
+            .collect();
+        let value_map = self
+            .classical_values
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                (
+                    ClassicalValue::new(self.circuit_id, index as u32, *ty),
+                    ClassicalValue::new(new_circuit.circuit_id, index as u32, *ty),
+                )
+            })
+            .collect();
 
         // Map from old parameter index to new CircuitParam (either Fixed or Index)
         let mut index_map: Vec<CircuitParam> = Vec::with_capacity(self.parameters.len());
@@ -2547,20 +2572,23 @@ impl Circuit {
             }
         }
 
-        // Remap operations to use new parameter indices or fixed values
+        // Remap parameter indices and all classical references in the same pass.
         let new_data = Arc::make_mut(&mut new_circuit.data);
         new_data.reserve(self.data.len());
         for op in self.data.iter() {
-            let mut new_op = op.clone();
-            for p in &mut new_op.params {
-                if let CircuitParam::Index(old_idx) = p {
-                    *p = index_map
+            new_data.push(Self::remap_operation(
+                op,
+                &|qubit| Ok(qubit),
+                &|param| match param {
+                    CircuitParam::Index(old_idx) => index_map
                         .get(*old_idx as usize)
                         .cloned()
-                        .ok_or(CircuitError::InvalidParameterIndex(*old_idx))?;
-                }
-            }
-            new_data.push(new_op);
+                        .ok_or(CircuitError::InvalidParameterIndex(*old_idx)),
+                    CircuitParam::Fixed(value) => Ok(CircuitParam::Fixed(*value)),
+                },
+                &var_map,
+                &value_map,
+            )?);
         }
 
         // Remap global phase
@@ -2781,21 +2809,25 @@ impl Circuit {
     /// [`Qubit`] IDs.
     /// Circuit-local classical variables and values from `other` are appended to `self`'s
     /// classical tables, and all classical data/control references inside copied operations are
-    /// remapped to those new local IDs.
+    /// remapped to those new local IDs. The identity of `self` and its existing classical
+    /// handles are preserved. If composition returns an error, `self` is unchanged.
     ///
     /// # Arguments
     ///
     /// * `other` - The circuit to compose into this circuit.
     /// * `qubits_map` - An optional slice mapping qubits from `other` to qubits in `self`.
-    ///   - If `Some(mapping)` is provided, each qubit in `other` (in their natural iteration order)
-    ///     is mapped to the corresponding qubit in `mapping`.
+    ///   - If `Some(mapping)` is provided, each qubit in `other` (in insertion order)
+    ///     is mapped to the corresponding qubit in `mapping`. Target qubits must be distinct,
+    ///     including targets corresponding to idle source qubits.
     ///   - If `None` is provided, qubits are mapped by ID. IDs not already present in `self` are
     ///     appended, while matching IDs reuse the existing qubits.
     ///
     /// # Returns
     ///
     /// * `Ok(())` - If composition succeeds.
-    /// * `Err(CircuitError)` - If the mapping is invalid (wrong length or non-existent qubits).
+    /// * `Err(CircuitError)` - If the mapping has the wrong length, contains duplicate targets
+    ///   ([`CircuitError::DuplicateQubits`]), references non-existent qubits, or stored circuit
+    ///   references cannot be remapped.
     ///
     /// # Examples
     ///
@@ -2834,6 +2866,9 @@ impl Circuit {
                     actual: mapping.len(),
                 });
             }
+            if !Self::check_qubits_unique(mapping) {
+                return Err(CircuitError::DuplicateQubits);
+            }
 
             // Build map and validate target qubits exist in self
             let mut map = HashMap::with_capacity(mapping.len());
@@ -2848,8 +2883,6 @@ impl Circuit {
             // No explicit mapping: merge qubits by ID.
             let mut map = HashMap::with_capacity(other.qubits.len());
             for other_qubit in other.qubits.iter() {
-                // Existing IDs are reused; new IDs preserve `other`'s insertion order.
-                self.qubits.insert(*other_qubit);
                 map.insert(*other_qubit, *other_qubit);
             }
             map
@@ -2875,10 +2908,20 @@ impl Circuit {
             );
         }
 
-        // Merge parameters and build index mapping
+        // Stage only new parameters: remapping and phase resolution can still fail.
+        // Keep the existing registry read-only rather than copying it on each composition.
+        // Staged indices follow the existing entries and remain valid after the final append.
+        let parameter_base = self.parameters.len();
+        let mut new_parameters = IndexSet::new();
+        let mut new_symbols = IndexSet::new();
         let mut param_index_map: Vec<CircuitParam> = Vec::with_capacity(other.parameters.len());
         for param in other.parameters.iter() {
-            let (idx, _) = self.add_parameter(param.clone());
+            let idx = if let Some(idx) = self.parameters.get_index_of(param) {
+                idx
+            } else {
+                new_symbols.extend(param.get_symbols());
+                parameter_base + new_parameters.insert_full(param.clone()).0
+            };
             param_index_map.push(CircuitParam::Index(idx as u32));
         }
 
@@ -2896,56 +2939,32 @@ impl Circuit {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Merge global phase (if both have fixed values, add them; otherwise keep symbolic)
-        self.global_phase = match (self.global_phase.clone(), other.global_phase.clone()) {
+        // Resolve against the original registries. A new source parameter must not make an
+        // invalid pre-existing destination index appear valid in the merged registry.
+        let global_phase = match (&self.global_phase, &other.global_phase) {
             (CircuitParam::Fixed(a), CircuitParam::Fixed(b)) => CircuitParam::Fixed(a + b),
-            (CircuitParam::Fixed(a), CircuitParam::Index(idx)) => {
-                // Add fixed value to symbolic parameter
-                let sym_param = other
+            _ => {
+                let new_expr = self.resolve_parameter(&self.global_phase)?
+                    + other.resolve_parameter(&other.global_phase)?;
+                // Every symbol in the sum already belongs to one of the merged registries.
+                let new_idx = self
                     .parameters
-                    .get_index(idx as usize)
-                    .cloned()
-                    .ok_or(CircuitError::InvalidParameterIndex(idx))?;
-                let new_expr = Parameter::from(a) + sym_param;
-                let (new_idx, _) = self.parameters.insert_full(new_expr);
-                CircuitParam::Index(new_idx as u32)
-            }
-            (CircuitParam::Index(idx), CircuitParam::Fixed(b)) => {
-                // Add symbolic parameter to fixed value
-                let sym_param = self
-                    .parameters
-                    .get_index(idx as usize)
-                    .cloned()
-                    .ok_or(CircuitError::InvalidParameterIndex(idx))?;
-                let new_expr = sym_param + Parameter::from(b);
-                let (new_idx, _) = self.parameters.insert_full(new_expr);
-                CircuitParam::Index(new_idx as u32)
-            }
-            (CircuitParam::Index(idx_a), CircuitParam::Index(idx_b)) => {
-                // Add two symbolic parameters
-                let param_a = self
-                    .parameters
-                    .get_index(idx_a as usize)
-                    .cloned()
-                    .ok_or(CircuitError::InvalidParameterIndex(idx_a))?;
-                let param_b = other
-                    .parameters
-                    .get_index(idx_b as usize)
-                    .cloned()
-                    .ok_or(CircuitError::InvalidParameterIndex(idx_b))?;
-                // param_b needs to be merged into self's parameter set first
-                let (merged_b_idx, _) = self.parameters.insert_full(param_b);
-                let merged_b = self
-                    .parameters
-                    .get_index(merged_b_idx)
-                    .cloned()
-                    .ok_or(CircuitError::InvalidParameterIndex(merged_b_idx as u32))?;
-                let new_expr = param_a + merged_b;
-                let (new_idx, _) = self.parameters.insert_full(new_expr);
+                    .get_index_of(&new_expr)
+                    .unwrap_or_else(|| parameter_base + new_parameters.insert_full(new_expr).0);
                 CircuitParam::Index(new_idx as u32)
             }
         };
 
+        // Commit only after all fallible preparation succeeds. Preserve insertion order and
+        // the active control-builder scope, as well as all existing classical handle IDs.
+        if qubits_map.is_none() {
+            self.qubits.extend(other.qubits.iter().copied());
+        }
+        if !new_parameters.is_empty() {
+            self.parameters.extend(new_parameters);
+        }
+        self.symbols.extend(new_symbols);
+        self.global_phase = global_phase;
         self.classical_vars
             .extend(other.classical_vars.iter().copied());
         self.classical_values
