@@ -24,8 +24,8 @@ use crate::circuit::symbolic_matrix::{circuit_to_symbolic_matrix, evaluate_symbo
 use crate::circuit::test_utils::assert_matrix_approx_eq;
 use crate::circuit::{
     ClassicalControlOp, ClassicalExpr, ClassicalType, ClassicalValue, ClassicalVar, ControlBody,
-    IfOp, Operation, SwitchCase, SwitchOp, ValueClassicalControlOp, ValueControlBody,
-    ValueInstruction, WhileOp, circuit_to_matrix,
+    ExternalControlScope, IfOp, Operation, SwitchCase, SwitchOp, ValueClassicalControlOp,
+    ValueControlBody, ValueInstruction, WhileOp, circuit_to_matrix,
 };
 use crate::qis::{RuntimeValue, StabilizerState, Statevector};
 use smallvec::smallvec;
@@ -2224,6 +2224,193 @@ fn test_control_op_constructor_error_rolls_back_captured_state() {
     assert!(circuit.data.is_empty());
     assert!(circuit.classical_vars.is_empty());
     assert!(circuit.classical_values().is_empty());
+}
+
+fn control_rollback_source() -> Circuit {
+    let mut source = Circuit::from_qubits(vec![Qubit::new(7)]).unwrap();
+    source.rx(Qubit::new(7), "theta").unwrap();
+    source.set_global_phase(Parameter::symbol("phase"));
+    let value = source.measure(Qubit::new(7)).unwrap();
+    let var = source.var(ClassicalType::Bit);
+    source.store(var, value.expr()).unwrap();
+    source
+}
+
+fn control_rollback_error() -> Result<(), CircuitError> {
+    Err(CircuitError::InvalidOperation("stop".into()))
+}
+
+fn assert_failed_control_build_restores_state(
+    circuit: &mut Circuit,
+    build: impl FnOnce(&mut Circuit) -> Result<(), CircuitError>,
+) {
+    let id = circuit.id();
+    let qubits = circuit.qubits();
+    let parameters: Vec<_> = circuit.parameters().iter().cloned().collect();
+    let symbols: Vec<_> = circuit.symbols().iter().cloned().collect();
+    let data = circuit.data.clone();
+    let vars = circuit.classical_vars.clone();
+    let values = circuit.classical_values.clone();
+    let scopes = circuit.control_scope_stack.clone();
+    let phase = circuit.global_phase();
+    let phase_param = circuit.global_phase_param().clone();
+
+    assert!(build(circuit).is_err());
+
+    // Exercise the accessor that panicked when rollback left a dangling index.
+    assert_eq!(circuit.global_phase(), phase);
+    assert_eq!(circuit.global_phase_param(), &phase_param);
+    assert_eq!(circuit.id(), id);
+    assert_eq!(circuit.qubits(), qubits);
+    assert_eq!(
+        circuit.parameters().iter().cloned().collect::<Vec<_>>(),
+        parameters
+    );
+    assert_eq!(
+        circuit.symbols().iter().cloned().collect::<Vec<_>>(),
+        symbols
+    );
+    assert_eq!(circuit.data, data);
+    assert_eq!(circuit.classical_vars, vars);
+    assert_eq!(circuit.classical_values, values);
+    assert_eq!(circuit.control_scope_stack, scopes);
+}
+
+#[test]
+fn test_control_rollback_callback_failure_restores_composed_state_and_existing_handles() {
+    let source = control_rollback_source();
+    for phase in [
+        Parameter::from(0.0),
+        Parameter::from(0.375),
+        Parameter::symbol("old_phase"),
+    ] {
+        let mut circuit =
+            Circuit::from_qubits(vec![Qubit::new(9), Qubit::new(2), Qubit::new(5)]).unwrap();
+        circuit.set_global_phase(phase);
+        circuit.rx(Qubit::new(2), "old_theta").unwrap();
+        let measured = circuit.measure(Qubit::new(9)).unwrap();
+        let var = circuit.var(ClassicalType::Bit);
+        circuit.store(var, measured.expr()).unwrap();
+
+        assert_failed_control_build_restores_state(&mut circuit, |circuit| {
+            circuit.if_(ClassicalExpr::bool_literal(true), |body| {
+                body.compose(&source, None).unwrap();
+                control_rollback_error()
+            })
+        });
+
+        circuit.validate_classical_var(var).unwrap();
+        circuit.store(var, measured.expr()).unwrap();
+        circuit.validate().unwrap();
+    }
+}
+
+#[test]
+fn test_control_rollback_callback_failure_restores_direct_qubit_and_phase_changes() {
+    let mut circuit = Circuit::new(1);
+    assert_failed_control_build_restores_state(&mut circuit, |circuit| {
+        circuit.if_(ClassicalExpr::bool_literal(true), |body| {
+            body.add_qubits(vec![Qubit::new(7)]).unwrap();
+            control_rollback_error()
+        })
+    });
+    for phase in [Parameter::from(0.75), Parameter::symbol("discarded")] {
+        circuit.set_global_phase(0.25.into());
+        assert_failed_control_build_restores_state(&mut circuit, |circuit| {
+            circuit.if_(ClassicalExpr::bool_literal(true), |body| {
+                body.set_global_phase(phase);
+                control_rollback_error()
+            })
+        });
+    }
+}
+
+#[test]
+fn test_control_rollback_outer_failure_restores_state_after_successful_bodies() {
+    let source = control_rollback_source();
+    for failure in ["else", "switch-case", "constructor", "nested-loop"] {
+        let mut circuit = Circuit::new(1);
+        assert_failed_control_build_restores_state(&mut circuit, |circuit| match failure {
+            "else" => circuit.if_else(
+                ClassicalExpr::bool_literal(true),
+                |body| {
+                    body.compose(&source, None).unwrap();
+                    Ok(())
+                },
+                |_| control_rollback_error(),
+            ),
+            "switch-case" => circuit.switch(ClassicalExpr::uint_literal(2, 0).unwrap(), |cases| {
+                cases
+                    .value(0, |body| {
+                        body.compose(&source, None).unwrap();
+                        Ok(())
+                    })
+                    .unwrap();
+                cases.value(1, |_| control_rollback_error())
+            }),
+            "constructor" => circuit.if_(ClassicalExpr::bit_literal(true), |body| {
+                body.compose(&source, None).unwrap();
+                Ok(())
+            }),
+            "nested-loop" => circuit.while_(ClassicalExpr::bool_literal(true), |body| {
+                body.if_(ClassicalExpr::bool_literal(true), |inner| {
+                    inner.compose(&source, None).unwrap();
+                    Ok(())
+                })
+                .unwrap();
+                control_rollback_error()
+            }),
+            _ => unreachable!(),
+        });
+        circuit.validate().unwrap();
+    }
+}
+
+#[test]
+fn test_control_rollback_external_transaction_rollback_restores_state_before_and_after_capture() {
+    let source = control_rollback_source();
+    for capture in [false, true] {
+        let mut circuit = Circuit::new(1);
+        circuit.set_global_phase(Parameter::symbol("old_phase"));
+        assert_failed_control_build_restores_state(&mut circuit, |circuit| {
+            let transaction = circuit.begin_control_body_transaction();
+            circuit.enter_external_control_body(&transaction, ExternalControlScope::Loop);
+            circuit.compose(&source, None).unwrap();
+            if capture {
+                let body = circuit.finish_external_control_body(&transaction);
+                assert_eq!(body.operations().len(), source.operations().len());
+            }
+            circuit.rollback_control_body_transaction(transaction);
+            control_rollback_error()
+        });
+        circuit.validate().unwrap();
+    }
+}
+
+#[test]
+fn test_control_rollback_nested_rollback_preserves_enclosing_loop_state() {
+    let source = control_rollback_source();
+    let mut circuit = Circuit::new(1);
+    circuit
+        .while_(ClassicalExpr::bool_literal(true), |body| {
+            body.add_qubits(vec![Qubit::new(3)])?;
+            body.rx(Qubit::new(3), "outer_theta")?;
+            body.set_global_phase(Parameter::symbol("outer_phase"));
+            assert_failed_control_build_restores_state(body, |body| {
+                body.if_(ClassicalExpr::bool_literal(true), |inner| {
+                    inner.compose(&source, None).unwrap();
+                    control_rollback_error()
+                })
+            });
+            body.continue_loop()
+        })
+        .unwrap();
+
+    assert_eq!(circuit.qubits(), vec![Qubit::new(0), Qubit::new(3)]);
+    assert_eq!(circuit.global_phase(), Parameter::symbol("outer_phase"));
+    assert!(circuit.control_scope_stack.is_empty());
+    assert!(circuit.continue_loop().is_err());
+    circuit.validate().unwrap();
 }
 
 #[test]
