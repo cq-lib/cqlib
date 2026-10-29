@@ -70,7 +70,6 @@ use indexmap::IndexSet;
 use ndarray::Array2;
 use num_complex::Complex64;
 use smallvec::{SmallVec, smallvec};
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -2909,19 +2908,19 @@ impl Circuit {
             );
         }
 
-        // Prepare parameter tables separately: remapping and phase resolution can still fail.
-        // Keep the destination identity and operation list intact rather than cloning a Circuit,
-        // whose Clone implementation creates a new classical handle owner.
-        // Numeric circuits and parameters already interned in the destination need no table copy.
-        let mut parameters = Cow::Borrowed(&self.parameters);
+        // Stage only new parameters: remapping and phase resolution can still fail.
+        // Keep the existing registry read-only rather than copying it on each composition.
+        // Staged indices follow the existing entries and remain valid after the final append.
+        let parameter_base = self.parameters.len();
+        let mut new_parameters = IndexSet::new();
         let mut new_symbols = IndexSet::new();
         let mut param_index_map: Vec<CircuitParam> = Vec::with_capacity(other.parameters.len());
         for param in other.parameters.iter() {
-            let idx = if let Some(idx) = parameters.get_index_of(param) {
+            let idx = if let Some(idx) = self.parameters.get_index_of(param) {
                 idx
             } else {
                 new_symbols.extend(param.get_symbols());
-                parameters.to_mut().insert_full(param.clone()).0
+                parameter_base + new_parameters.insert_full(param.clone()).0
             };
             param_index_map.push(CircuitParam::Index(idx as u32));
         }
@@ -2948,9 +2947,10 @@ impl Circuit {
                 let new_expr = self.resolve_parameter(&self.global_phase)?
                     + other.resolve_parameter(&other.global_phase)?;
                 // Every symbol in the sum already belongs to one of the merged registries.
-                let new_idx = parameters
+                let new_idx = self
+                    .parameters
                     .get_index_of(&new_expr)
-                    .unwrap_or_else(|| parameters.to_mut().insert_full(new_expr).0);
+                    .unwrap_or_else(|| parameter_base + new_parameters.insert_full(new_expr).0);
                 CircuitParam::Index(new_idx as u32)
             }
         };
@@ -2960,8 +2960,8 @@ impl Circuit {
         if qubits_map.is_none() {
             self.qubits.extend(other.qubits.iter().copied());
         }
-        if let Cow::Owned(parameters) = parameters {
-            self.parameters = parameters;
+        if !new_parameters.is_empty() {
+            self.parameters.extend(new_parameters);
         }
         self.symbols.extend(new_symbols);
         self.global_phase = global_phase;

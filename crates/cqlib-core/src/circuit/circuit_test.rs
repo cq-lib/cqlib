@@ -2823,6 +2823,97 @@ fn test_compose_with_parameters() {
 }
 
 #[test]
+fn compose_interns_phase_sum_in_existing_or_new_parameters() {
+    let q0 = Qubit::new(0);
+    for location in ["destination", "source", "phase_only"] {
+        let phi = Parameter::symbol("phi");
+        let psi = Parameter::symbol("psi");
+        let sum = phi.clone() + psi.clone();
+        let mut destination = Circuit::new(1);
+        destination.rx(q0, "existing").unwrap();
+        destination.set_global_phase(phi);
+        if location == "destination" {
+            destination.rz(q0, sum.clone()).unwrap();
+        }
+        let id = destination.id();
+        let retained_var = destination.var(ClassicalType::Bit);
+        let retained_value = destination.measure(q0).unwrap();
+        let mut source = Circuit::new(1);
+        source.rx(q0, "existing").unwrap();
+        source.ry(q0, "new").unwrap();
+        source.rz(q0, "new").unwrap();
+        if location == "source" {
+            source.rx(q0, sum.clone()).unwrap();
+        }
+        source.set_global_phase(psi);
+        let source_before = format!("{source:?}");
+        let operation_base = destination.data.len();
+        let mut expected_parameters = destination.parameters.clone();
+        expected_parameters.extend(source.parameters.iter().cloned());
+        expected_parameters.insert(sum.clone());
+
+        destination.compose(&source, None).unwrap();
+
+        assert_eq!(
+            destination.parameters.iter().collect::<Vec<_>>(),
+            expected_parameters.iter().collect::<Vec<_>>()
+        );
+        assert_eq!(destination.global_phase(), sum);
+        assert_eq!(
+            destination.global_phase_param(),
+            &CircuitParam::Index(expected_parameters.get_index_of(&sum).unwrap() as u32)
+        );
+        assert_eq!(destination.id(), id);
+        assert_eq!(format!("{source:?}"), source_before);
+        for (original, remapped) in source.data.iter().zip(&destination.data[operation_base..]) {
+            for (source_param, mapped_param) in original.params.iter().zip(&remapped.params) {
+                assert_eq!(
+                    source.resolve_parameter(source_param).unwrap(),
+                    destination.resolve_parameter(mapped_param).unwrap()
+                );
+            }
+        }
+        assert_eq!(
+            destination.symbols.iter().cloned().collect::<HashSet<_>>(),
+            HashSet::from(["existing", "new", "phi", "psi"].map(String::from))
+        );
+        destination
+            .store(retained_var, retained_value.expr())
+            .unwrap();
+        destination.validate().unwrap();
+    }
+}
+
+#[test]
+fn compose_repeated_parameters_preserve_indices_and_insertion_order() {
+    let q0 = Qubit::new(0);
+    let mut destination = Circuit::new(1);
+    let mut expected = Circuit::new(1);
+    for i in 0..128 {
+        let theta = Parameter::symbol(&format!("theta_{i}"));
+        let mut source = Circuit::new(1);
+        source.rx(q0, theta.clone()).unwrap();
+        source.ry(q0, "shared").unwrap();
+        destination.compose(&source, None).unwrap();
+        expected.rx(q0, theta).unwrap();
+        expected.ry(q0, "shared").unwrap();
+    }
+
+    assert_eq!(destination, expected);
+    assert_eq!(
+        destination.parameters.iter().collect::<Vec<_>>(),
+        expected.parameters.iter().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        destination.symbols.iter().collect::<Vec<_>>(),
+        expected.symbols.iter().collect::<Vec<_>>()
+    );
+    for (actual, expected) in destination.operations().iter().zip(expected.operations()) {
+        assert_eq!(actual.params, expected.params);
+    }
+}
+
+#[test]
 fn test_compose_preserves_operation_order() {
     // qc1: Bell state preparation
     let mut qc1 = Circuit::new(2);
