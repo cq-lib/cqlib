@@ -975,3 +975,103 @@ fn lowering_wide_sparse_circuit_only_plans_used_qubits() {
     assert!(result.circuit.operations().len() > circuit.operations().len());
     device.validate_circuit(&result.circuit).unwrap();
 }
+
+#[test]
+fn universal_single_qubit_native_bases_preserve_symbolic_gates_and_phase() {
+    use crate::circuit::test_utils::assert_matrix_approx_eq;
+    use StandardGate::*;
+
+    for basis in [
+        vec![U],
+        vec![RXY],
+        vec![RZ, X2P],
+        vec![RZ, X2M],
+        vec![RZ, Y2P],
+        vec![RZ, Y2M],
+        vec![RZ, XY2P],
+        vec![RZ, XY2M],
+    ] {
+        let device = Device::line("single-qubit-basis", 1)
+            .unwrap()
+            .with_native_gates(basis.iter().copied().map(Instruction::Standard).collect())
+            .unwrap();
+        let lowerer = DeviceLowerer::new(&device);
+        // Identity is removed by canonicalization before device lowering.
+        for &gate in StandardGate::all()
+            .iter()
+            .filter(|g| g.num_qubits() == 1 && **g != I)
+        {
+            let mut source = Circuit::new(1);
+            source
+                .append(
+                    Instruction::Standard(gate),
+                    [Qubit::new(0)],
+                    ["theta", "phi", "lambda"]
+                        .into_iter()
+                        .take(gate.num_params())
+                        .map(|name| ParameterValue::Param(Parameter::symbol(name))),
+                    None,
+                )
+                .unwrap();
+            source.set_global_phase(Parameter::symbol("phase"));
+            let lowered = lowerer
+                .transform_resolved(&source, None)
+                .unwrap_or_else(|e| panic!("{gate:?} -> {basis:?}: {e}"))
+                .circuit;
+            device.validate_circuit(&lowered).unwrap();
+            if basis == [U] {
+                assert_eq!(lowered.operations().len(), 1, "{gate:?} must use one U");
+            }
+            assert!(source.symbols().is_subset(lowered.symbols()));
+            for angle in [0.0, PI / 2.0, -PI, 2.0 * PI, -4.0 * PI, 0.173, -1.239] {
+                let bindings = Some(HashMap::from([
+                    ("theta", angle),
+                    ("phi", 0.39 - angle),
+                    ("lambda", -0.71 + 2.0 * angle),
+                    ("phase", -0.37),
+                ]));
+                assert_matrix_approx_eq(
+                    &source
+                        .assign_parameters(&bindings)
+                        .unwrap()
+                        .to_matrix(None)
+                        .unwrap(),
+                    &lowered
+                        .assign_parameters(&bindings)
+                        .unwrap()
+                        .to_matrix(None)
+                        .unwrap(),
+                    1e-9,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn native_u_lowering_respects_local_capability_override() {
+    let mut device = Device::line("local-capability", 2)
+        .unwrap()
+        .with_native_gates(vec![Instruction::Standard(StandardGate::U)])
+        .unwrap();
+    device
+        .add_qubit_properties(
+            PhysicalQubit::new(1),
+            QubitProp::new(0.0)
+                .with_native_instruction(InstructionProp::new(
+                    Instruction::Standard(StandardGate::RZ),
+                    0.0,
+                ))
+                .unwrap(),
+        )
+        .unwrap();
+    let lowerer = DeviceLowerer::new(&device);
+    let mut allowed = Circuit::new(2);
+    allowed.h(Qubit::new(0)).unwrap();
+    device
+        .validate_circuit(&lowerer.transform_resolved(&allowed, None).unwrap().circuit)
+        .unwrap();
+    let mut blocked = Circuit::new(2);
+    blocked.h(Qubit::new(1)).unwrap();
+    assert!(lowerer.transform_resolved(&blocked, None).is_err());
+}
