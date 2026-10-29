@@ -2490,6 +2490,8 @@ impl Circuit {
     ///
     /// Parameters that remain symbolic are simplified and re-interned in the
     /// returned circuit. The original circuit is not modified.
+    /// Internal classical references are remapped to the returned circuit's
+    /// identity; handles from the original circuit remain owned by it.
     ///
     /// # Errors
     ///
@@ -2513,6 +2515,29 @@ impl Circuit {
         let mut new_circuit = Circuit::from_qubits(self.qubits())?;
         new_circuit.classical_vars = self.classical_vars.clone();
         new_circuit.classical_values = self.classical_values.clone();
+
+        let var_map = self
+            .classical_vars
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                (
+                    ClassicalVar::new(self.circuit_id, index as u32, *ty),
+                    ClassicalVar::new(new_circuit.circuit_id, index as u32, *ty),
+                )
+            })
+            .collect();
+        let value_map = self
+            .classical_values
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                (
+                    ClassicalValue::new(self.circuit_id, index as u32, *ty),
+                    ClassicalValue::new(new_circuit.circuit_id, index as u32, *ty),
+                )
+            })
+            .collect();
 
         // Map from old parameter index to new CircuitParam (either Fixed or Index)
         let mut index_map: Vec<CircuitParam> = Vec::with_capacity(self.parameters.len());
@@ -2548,20 +2573,23 @@ impl Circuit {
             }
         }
 
-        // Remap operations to use new parameter indices or fixed values
+        // Remap parameter indices and all classical references in the same pass.
         let new_data = Arc::make_mut(&mut new_circuit.data);
         new_data.reserve(self.data.len());
         for op in self.data.iter() {
-            let mut new_op = op.clone();
-            for p in &mut new_op.params {
-                if let CircuitParam::Index(old_idx) = p {
-                    *p = index_map
+            new_data.push(Self::remap_operation(
+                op,
+                &|qubit| Ok(qubit),
+                &|param| match param {
+                    CircuitParam::Index(old_idx) => index_map
                         .get(*old_idx as usize)
                         .cloned()
-                        .ok_or(CircuitError::InvalidParameterIndex(*old_idx))?;
-                }
-            }
-            new_data.push(new_op);
+                        .ok_or(CircuitError::InvalidParameterIndex(*old_idx)),
+                    CircuitParam::Fixed(value) => Ok(CircuitParam::Fixed(*value)),
+                },
+                &var_map,
+                &value_map,
+            )?);
         }
 
         // Remap global phase

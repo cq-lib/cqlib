@@ -20,13 +20,16 @@ use crate::circuit::gate::{
 };
 use crate::circuit::operation::ValueOperation;
 use crate::circuit::parameter::Parameter;
+use crate::circuit::symbolic_matrix::{circuit_to_symbolic_matrix, evaluate_symbolic_matrix};
+use crate::circuit::test_utils::assert_matrix_approx_eq;
 use crate::circuit::{
     ClassicalControlOp, ClassicalExpr, ClassicalType, ClassicalValue, ClassicalVar, ControlBody,
     IfOp, Operation, SwitchCase, SwitchOp, ValueClassicalControlOp, ValueControlBody,
-    ValueInstruction, WhileOp,
+    ValueInstruction, WhileOp, circuit_to_matrix,
 };
+use crate::qis::{RuntimeValue, StabilizerState, Statevector};
 use smallvec::smallvec;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 use std::sync::Arc;
 
@@ -1239,8 +1242,6 @@ fn test_to_gate_and_circuit_gate() {
 
 #[test]
 fn test_assign_parameters() {
-    use std::collections::HashMap;
-
     let mut circuit = Circuit::new(2);
     let q0 = Qubit::new(0);
     let a = Parameter::symbol("a");
@@ -1304,6 +1305,202 @@ fn test_assign_parameters() {
 }
 
 #[test]
+fn test_assign_parameters_preserves_measurement_execution() {
+    for with_store in [false, true] {
+        let q0 = Qubit::new(0);
+        let mut source = Circuit::new(1);
+        source.rx(q0, "theta").unwrap();
+        source.rz(q0, "phi").unwrap();
+        source.set_global_phase(Parameter::symbol("theta"));
+        let measured = source.measure(q0).unwrap();
+        if with_store {
+            let target = source.var(ClassicalType::Bit);
+            source.store(target, measured.expr()).unwrap();
+        }
+        let before = format!("{source:?}");
+        let full = Some(HashMap::from([("theta", 0.731), ("phi", 0.317)]));
+
+        for bindings in [
+            None,
+            Some(HashMap::new()),
+            Some(HashMap::from([("theta", 0.731)])),
+            full.clone(),
+        ] {
+            let bound = source.assign_parameters(&bindings).unwrap();
+            bound.validate().unwrap();
+            assert_ne!(bound.id(), source.id());
+            assert_eq!(bound.classical_values(), source.classical_values());
+            assert!(matches!(
+                bound.validate_classical_expr(&measured.expr()),
+                Err(CircuitError::ForeignClassicalHandle { .. })
+            ));
+            bound.clone().validate().unwrap();
+            bound.decompose().unwrap().validate().unwrap();
+
+            if bindings.as_ref().is_some_and(|map| map.len() == 1) {
+                assert_eq!(bound.data[0].params[0], CircuitParam::Fixed(0.731));
+                assert_eq!(bound.data[1].params[0], CircuitParam::Index(0));
+                assert_eq!(bound.parameters.len(), 1);
+                assert!(bound.symbols.contains("phi"));
+                assert!(!bound.symbols.contains("theta"));
+                assert_eq!(*bound.global_phase_param(), CircuitParam::Fixed(0.731));
+            }
+
+            let complete = bound.assign_parameters(&full).unwrap();
+            complete.validate().unwrap();
+            assert_ne!(complete.id(), bound.id());
+            let actual = Statevector::from_circuit(&complete).unwrap();
+            let mut expected = Circuit::new(1);
+            expected.rx(q0, 0.731).unwrap();
+            expected.rz(q0, 0.317).unwrap();
+            expected.set_global_phase(Parameter::from(0.731));
+            let expected = Statevector::from_circuit(&expected).unwrap();
+            for (actual, expected) in actual.data().iter().zip(expected.data()) {
+                assert!((*actual - *expected).norm() < 1e-12);
+            }
+            assert_eq!(format!("{source:?}"), before);
+        }
+    }
+}
+
+#[test]
+fn test_assign_parameters_executes_classical_dataflow() {
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    for multibit in [false, true] {
+        let mut source = Circuit::new(2);
+        source.set_global_phase(Parameter::symbol("theta") + Parameter::symbol("phi"));
+        source.x(q0).unwrap();
+        let measured = if multibit {
+            source.measure_bits([q1, q0]).unwrap()
+        } else {
+            source.measure(q0).unwrap()
+        };
+        let first = source.var(measured.ty());
+        let second = source.var(measured.ty());
+        source.store(first, measured.expr()).unwrap();
+        source.store(second, first.expr()).unwrap();
+        let flag = source.var(ClassicalType::Bool);
+        // A nested expression must remap both immutable values and mutable vars.
+        source
+            .store(
+                flag,
+                !ClassicalExpr::eq(second.expr(), measured.expr()).unwrap(),
+            )
+            .unwrap();
+        let before = format!("{source:?}");
+
+        for bindings in [
+            None,
+            Some(HashMap::new()),
+            Some(HashMap::from([("theta", 0.731)])),
+            Some(HashMap::from([("theta", 0.731), ("phi", 0.317)])),
+        ] {
+            let bound = source.assign_parameters(&bindings).unwrap();
+            bound.validate().unwrap();
+            assert_eq!(bound.classical_vars(), source.classical_vars());
+            assert_eq!(bound.classical_values(), source.classical_values());
+            assert!(matches!(
+                bound.validate_classical_var(first),
+                Err(CircuitError::ForeignClassicalHandle { .. })
+            ));
+            // Complete partial/absent bindings before runtime execution.
+            let mut complete = bound
+                .assign_parameters(&Some(HashMap::from([("theta", 0.731), ("phi", 0.317)])))
+                .unwrap();
+            complete.validate().unwrap();
+            let execution = StabilizerState::run_circuit(&complete).unwrap();
+            for operation in complete.operations() {
+                match &operation.instruction {
+                    Instruction::ClassicalData(ClassicalDataOp::MeasureBit { result }) => {
+                        assert_eq!(
+                            execution.classical.value(*result),
+                            Some(&RuntimeValue::Bit(true))
+                        );
+                    }
+                    Instruction::ClassicalData(ClassicalDataOp::MeasureBits { result }) => {
+                        assert_eq!(
+                            execution
+                                .classical
+                                .value(*result)
+                                .unwrap()
+                                .to_bitstring()
+                                .unwrap(),
+                            "10"
+                        );
+                    }
+                    Instruction::ClassicalData(ClassicalDataOp::Store { target, .. }) => {
+                        let actual = execution.classical.var(*target).unwrap();
+                        if target.ty() == ClassicalType::Bool {
+                            assert_eq!(*actual, RuntimeValue::Bool(false));
+                        } else if multibit {
+                            assert_eq!(actual.to_bitstring().unwrap(), "10");
+                        } else {
+                            assert_eq!(*actual, RuntimeValue::Bit(true));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert!(execution.classical.value(measured.value()).is_none());
+            assert!(execution.classical.var(first).is_none());
+            complete.clone().validate().unwrap();
+            complete.decompose().unwrap().validate().unwrap();
+            let fresh = complete.var(ClassicalType::Bit);
+            complete
+                .store(fresh, ClassicalExpr::bit_literal(false))
+                .unwrap();
+            complete.validate().unwrap();
+            assert_eq!(format!("{source:?}"), before);
+        }
+    }
+}
+
+#[test]
+fn test_assign_parameters_remaps_store_without_measurement() {
+    let mut source = Circuit::new(1);
+    let unused = source.var(ClassicalType::Bit);
+    let target = source.var(ClassicalType::Bit);
+    source
+        .store(target, ClassicalExpr::bit_literal(true))
+        .unwrap();
+    for bindings in [None, Some(HashMap::new())] {
+        let bound = source.assign_parameters(&bindings).unwrap();
+        bound.validate().unwrap();
+        assert_ne!(bound.id(), source.id());
+        assert_eq!(bound.classical_vars(), source.classical_vars());
+        let execution = StabilizerState::run_circuit(&bound).unwrap();
+        let Instruction::ClassicalData(ClassicalDataOp::Store {
+            target: bound_target,
+            ..
+        }) = bound.operations()[0].instruction
+        else {
+            panic!("expected Store");
+        };
+        assert_eq!(
+            execution.classical.var(bound_target),
+            Some(&RuntimeValue::Bit(true))
+        );
+        assert!(bound.validate_classical_var(unused).is_err());
+        assert!(execution.classical.var(target).is_none());
+    }
+}
+
+#[test]
+fn test_assign_parameters_still_rejects_classical_control() {
+    let mut source = Circuit::new(1);
+    source
+        .if_(ClassicalExpr::bool_literal(true), |body| {
+            body.rx(Qubit::new(0), "theta")
+        })
+        .unwrap();
+    assert!(matches!(
+        source.assign_parameters(&None),
+        Err(CircuitError::InvalidOperation(_))
+    ));
+}
+
+#[test]
 fn test_parameterized_unitary_appends_fixed_and_symbolic_params() {
     let mut circuit = Circuit::new(1);
     let theta = Parameter::symbol("theta");
@@ -1359,8 +1556,6 @@ fn test_parameterized_unitary_validates_param_count() {
 
 #[test]
 fn test_decompose() {
-    use std::collections::HashMap;
-
     let mut inner = Circuit::new(2);
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);
@@ -1449,9 +1644,6 @@ fn test_decompose() {
 
 #[test]
 fn test_decompose_global_phase_constant_and_empty_definitions() {
-    use crate::circuit::circuit_to_matrix;
-    use crate::circuit::test_utils::assert_matrix_approx_eq;
-
     for (width, has_operations) in [(0, false), (1, false), (1, true), (2, true)] {
         let mut inner = Circuit::new(width);
         inner.set_global_phase(Parameter::from(0.37));
@@ -1509,10 +1701,6 @@ fn test_decompose_global_phase_constant_and_empty_definitions() {
 
 #[test]
 fn test_decompose_global_phase_only_symbols_and_explicit_signature() {
-    use crate::circuit::circuit_to_matrix;
-    use crate::circuit::test_utils::assert_matrix_approx_eq;
-    use std::collections::HashMap;
-
     let mut inner = Circuit::new(1);
     inner.set_global_phase(Parameter::symbol("theta") / 2.0);
     let gate = CircuitGate::with_signature(
@@ -1567,11 +1755,6 @@ fn test_decompose_global_phase_only_symbols_and_explicit_signature() {
 
 #[test]
 fn test_decompose_global_phase_nested_symbolic_and_inverse() {
-    use crate::circuit::circuit_to_matrix;
-    use crate::circuit::symbolic_matrix::{circuit_to_symbolic_matrix, evaluate_symbolic_matrix};
-    use crate::circuit::test_utils::assert_matrix_approx_eq;
-    use std::collections::HashMap;
-
     let a = Parameter::symbol("a");
     let b = Parameter::symbol("b");
     let mut inner = Circuit::from_qubits(vec![Qubit::new(7), Qubit::new(2)]).unwrap();
@@ -2183,9 +2366,6 @@ fn compose_errors_leave_all_destination_state_unchanged() {
 
 #[test]
 fn compose_sparse_permutation_preserves_unitary_parameters_and_phase() {
-    use crate::circuit::test_utils::assert_matrix_approx_eq;
-    use std::collections::HashMap;
-
     let [q9, q2, q5] = [9, 2, 5].map(Qubit::new);
     let [q8, q1] = [8, 1].map(Qubit::new);
     for symbolic_left in [false, true] {
