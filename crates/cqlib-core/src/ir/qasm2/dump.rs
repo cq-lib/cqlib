@@ -69,7 +69,7 @@
 //!   loading the generated OpenQASM 2.0 does not restore that phase.
 
 use crate::circuit::gate::{
-    CircuitGate, ClassicalDataOp, Directive, Instruction, StandardGate, UnitaryGate,
+    CircuitGate, ClassicalDataOp, Directive, Instruction, MCGate, StandardGate, UnitaryGate,
 };
 use crate::circuit::operation::Operation;
 use crate::circuit::parameter::Parameter;
@@ -260,6 +260,9 @@ pub fn to_path<P: AsRef<Path>>(circuit: &Circuit, path: P) -> Result<(), QasmDum
 }
 
 /// Dumps a circuit to a string in OpenQASM 2.0 format.
+///
+/// Top-level qubits are mapped densely in ascending numeric identifier order,
+/// matching [`Circuit::to_matrix`] with its default qubit order.
 pub fn dumps(circuit: &Circuit) -> Result<String, QasmDumpError> {
     let mut output = String::new();
     writeln!(
@@ -285,21 +288,16 @@ pub fn dumps(circuit: &Circuit) -> Result<String, QasmDumpError> {
 
     writeln!(&mut output)?;
 
-    // Pass 0: Collect and output used extended standard gate definitions
-    let mut used_standard_gates = HashSet::new();
-    collect_used_standard_gates(circuit, &mut used_standard_gates);
+    // Pass 0: Collect actual output names, including those emitted by MCGate.
+    let mut used_gate_names = HashSet::new();
+    collect_used_gate_names(circuit, &mut used_gate_names);
 
     let extended_gates = [
-        StandardGate::CRX,
-        StandardGate::CRY,
-        StandardGate::RZZ,
-        StandardGate::RXX,
-        StandardGate::RYY,
-        StandardGate::RZX,
+        "crx", "cry", "rzz", "rxx", "ryy", "rzx", "swap", "fsim", "cswap",
     ];
 
     for gate in extended_gates {
-        if used_standard_gates.contains(&gate)
+        if used_gate_names.contains(gate)
             && let Some(def) = get_extended_gate_definition(gate)
         {
             writeln!(&mut output, "{}", def)?;
@@ -321,6 +319,19 @@ pub fn dumps(circuit: &Circuit) -> Result<String, QasmDumpError> {
         &mut opaque_unitary_gates,
         &mut has_delay,
     )?;
+
+    // A helper definition and a user definition cannot share a QASM name.
+    for name in extended_gates {
+        if used_gate_names.contains(name)
+            && (defined_gates.contains_key(name)
+                || unitary_gate_defs.contains_key(name)
+                || opaque_unitary_gates.contains_key(name))
+        {
+            return Err(QasmDumpError::FormatError(format!(
+                "Gate name '{name}' conflicts with a required OpenQASM 2.0 extension definition"
+            )));
+        }
+    }
 
     // Output CircuitGate definitions
     for gate in defined_gates.values() {
@@ -347,10 +358,13 @@ pub fn dumps(circuit: &Circuit) -> Result<String, QasmDumpError> {
     }
 
     // Pass 2: Main circuit
-    // Map Qubit(i) -> "q[i]"
+    // Numeric identifiers need not be contiguous or match storage order.
+    // Preserve the default matrix basis while keeping the register width N.
     let mut qubit_map: HashMap<Qubit, String> = HashMap::new();
-    for q in circuit.qubits() {
-        qubit_map.insert(q, format!("q[{}]", q.index()));
+    let mut qubits = circuit.qubits();
+    qubits.sort_unstable();
+    for (index, q) in qubits.into_iter().enumerate() {
+        qubit_map.insert(q, format!("q[{index}]"));
     }
 
     // Top-level parameter resolution is direct (Parameter objects are used as is)
@@ -1193,8 +1207,25 @@ fn dump_directive(
     Ok(())
 }
 
+fn qasm2_mc_gate_name(mc_gate: &MCGate) -> Option<&'static str> {
+    match (mc_gate.num_ctrl_qubits(), mc_gate.base_gate()) {
+        (1, StandardGate::X) => Some("cx"),
+        (1, StandardGate::Z) => Some("cz"),
+        (1, StandardGate::Y) => Some("cy"),
+        (1, StandardGate::H) => Some("ch"),
+        (1, StandardGate::RX) => Some("crx"),
+        (1, StandardGate::RY) => Some("cry"),
+        (1, StandardGate::RZ) => Some("crz"),
+        (1, StandardGate::Phase) => Some("cu1"),
+        (1, StandardGate::CX) => Some("ccx"),
+        (1, StandardGate::SWAP) => Some("cswap"),
+        (2, StandardGate::X) => Some("ccx"),
+        _ => None,
+    }
+}
+
 fn dump_mc_gate(
-    mc_gate: &crate::circuit::gate::MCGate,
+    mc_gate: &MCGate,
     op: &Operation,
     circuit: &Circuit,
     output: &mut String,
@@ -1204,25 +1235,12 @@ fn dump_mc_gate(
     let num_ctrl = mc_gate.num_ctrl_qubits();
     let base = mc_gate.base_gate();
 
-    let name = match (num_ctrl, base) {
-        (1, StandardGate::X) => "cx",
-        (1, StandardGate::Z) => "cz",
-        (1, StandardGate::Y) => "cy",
-        (1, StandardGate::H) => "ch",
-        (1, StandardGate::RX) => "crx",
-        (1, StandardGate::RY) => "cry",
-        (1, StandardGate::RZ) => "crz",
-        (1, StandardGate::Phase) => "cu1",
-        (1, StandardGate::CX) => "ccx",
-        (1, StandardGate::SWAP) => "cswap",
-        (2, StandardGate::X) => "ccx",
-        _ => {
-            return Err(QasmDumpError::FormatError(format!(
-                "Unsupported MCGate: {} controls on {}",
-                num_ctrl, base
-            )));
-        }
-    };
+    let name = qasm2_mc_gate_name(mc_gate).ok_or_else(|| {
+        QasmDumpError::FormatError(format!(
+            "Unsupported MCGate: {} controls on {}",
+            num_ctrl, base
+        ))
+    })?;
 
     let params_str = format_params(op, circuit, param_map)?;
     let mapped_qs = map_qubits(op, qubit_map);
@@ -1231,58 +1249,58 @@ fn dump_mc_gate(
     Ok(())
 }
 
-fn collect_used_standard_gates(circuit: &Circuit, used_gates: &mut HashSet<StandardGate>) {
-    collect_used_standard_gates_from_operations(circuit.operations(), used_gates);
+fn collect_used_gate_names(circuit: &Circuit, used_gates: &mut HashSet<&'static str>) {
+    collect_used_gate_names_from_operations(circuit.operations(), used_gates);
 }
 
-fn collect_used_standard_gates_from_operations(
+fn collect_used_gate_names_from_operations(
     operations: &[Operation],
-    used_gates: &mut HashSet<StandardGate>,
+    used_gates: &mut HashSet<&'static str>,
 ) {
     for op in operations {
         match &op.instruction {
             Instruction::Standard(sg) => {
-                used_gates.insert(*sg);
+                used_gates.extend(qasm2_builtin_gate_name(*sg));
+            }
+            Instruction::McGate(mc_gate) => {
+                used_gates.extend(qasm2_mc_gate_name(mc_gate));
             }
             Instruction::CircuitGate(cg) => {
-                collect_used_standard_gates(&cg.circuit.circuit, used_gates);
+                collect_used_gate_names(&cg.circuit.circuit, used_gates);
             }
             Instruction::UnitaryGate(ug) => {
                 if let Some(fc) = ug.circuit() {
-                    collect_used_standard_gates(&fc.circuit, used_gates);
+                    collect_used_gate_names(&fc.circuit, used_gates);
                 }
             }
             Instruction::ClassicalControl(control) => match control {
                 ClassicalControlOp::If(if_op) => {
-                    collect_used_standard_gates_from_operations(
+                    collect_used_gate_names_from_operations(
                         if_op.then_body().operations(),
                         used_gates,
                     );
                     if let Some(body) = if_op.else_body() {
-                        collect_used_standard_gates_from_operations(body.operations(), used_gates);
+                        collect_used_gate_names_from_operations(body.operations(), used_gates);
                     }
                 }
                 ClassicalControlOp::While(while_op) => {
-                    collect_used_standard_gates_from_operations(
+                    collect_used_gate_names_from_operations(
                         while_op.body().operations(),
                         used_gates,
                     );
                 }
                 ClassicalControlOp::For(for_op) => {
-                    collect_used_standard_gates_from_operations(
-                        for_op.body().operations(),
-                        used_gates,
-                    );
+                    collect_used_gate_names_from_operations(for_op.body().operations(), used_gates);
                 }
                 ClassicalControlOp::Switch(switch_op) => {
                     for case in switch_op.cases() {
-                        collect_used_standard_gates_from_operations(
+                        collect_used_gate_names_from_operations(
                             case.body().operations(),
                             used_gates,
                         );
                     }
                     if let Some(body) = switch_op.default() {
-                        collect_used_standard_gates_from_operations(body.operations(), used_gates);
+                        collect_used_gate_names_from_operations(body.operations(), used_gates);
                     }
                 }
                 ClassicalControlOp::Break | ClassicalControlOp::Continue => {}
@@ -1505,25 +1523,12 @@ fn operation_to_qasm(
         Instruction::McGate(mc_gate) => {
             let num_ctrl = mc_gate.num_ctrl_qubits();
             let base = mc_gate.base_gate();
-            let name = match (num_ctrl, base) {
-                (1, StandardGate::X) => "cx",
-                (2, StandardGate::X) => "ccx",
-                (1, StandardGate::Z) => "cz",
-                (1, StandardGate::Y) => "cy",
-                (1, StandardGate::H) => "ch",
-                (1, StandardGate::CX) => "ccx",
-                (1, StandardGate::RX) => "crx",
-                (1, StandardGate::RY) => "cry",
-                (1, StandardGate::RZ) => "crz",
-                (1, StandardGate::SWAP) => "cswap",
-                (1, StandardGate::Phase) => "cu1",
-                _ => {
-                    return Err(QasmDumpError::FormatError(format!(
-                        "Unsupported multi-controlled gate: {}-controlled {:?}",
-                        num_ctrl, base
-                    )));
-                }
-            };
+            let name = qasm2_mc_gate_name(mc_gate).ok_or_else(|| {
+                QasmDumpError::FormatError(format!(
+                    "Unsupported multi-controlled gate: {}-controlled {:?}",
+                    num_ctrl, base
+                ))
+            })?;
             let params_str = format_params(op, circuit, param_map)?;
             let mapped_qs = map_qubits(op, qubit_map);
             Ok(format!("{}{} {}", name, params_str, mapped_qs.join(",")))
@@ -1565,22 +1570,30 @@ fn operation_to_qasm(
     }
 }
 
-fn get_extended_gate_definition(gate: StandardGate) -> Option<&'static str> {
+// Definitions use only the original qelib1.inc, so no implicit extension
+// dependencies (or additional dependency ordering) are needed.
+fn get_extended_gate_definition(gate: &str) -> Option<&'static str> {
     match gate {
-        StandardGate::CRX => {
+        "crx" => {
             Some("gate crx(theta) a,b { h b;rz(theta/2) b; cx a,b; rz(-theta/2) b; cx a,b; h b;}")
         }
-        StandardGate::CRY => {
-            Some("gate cry(theta) a,b { ry(theta/2) b; cx a,b; ry(-theta/2) b; cx a,b; }")
-        }
-        StandardGate::RZZ => Some("gate rzz(theta) a,b { cx a,b; rz(theta) b; cx a,b; }"),
-        StandardGate::RXX => {
-            Some("gate rxx(theta) a,b { h a; h b; cx a,b; rz(theta) b; cx a,b; h a; h b; }")
-        }
-        StandardGate::RYY => Some(
+        "cry" => Some("gate cry(theta) a,b { ry(theta/2) b; cx a,b; ry(-theta/2) b; cx a,b; }"),
+        "rzz" => Some("gate rzz(theta) a,b { cx a,b; rz(theta) b; cx a,b; }"),
+        "rxx" => Some("gate rxx(theta) a,b { h a; h b; cx a,b; rz(theta) b; cx a,b; h a; h b; }"),
+        "ryy" => Some(
             "gate ryy(theta) a,b { rx(pi/2) a; rx(pi/2) b; cx a,b; rz(theta) b; cx a,b; rx(-pi/2) a; rx(-pi/2) b; }",
         ),
-        StandardGate::RZX => Some("gate rzx(theta) a,b { h b; cx a,b; rz(theta) b; cx a,b; h b; }"),
+        "rzx" => Some("gate rzx(theta) a,b { h b; cx a,b; rz(theta) b; cx a,b; h b; }"),
+        "swap" => Some("gate swap a,b { cx a,b; cx b,a; cx a,b; }"),
+        "cswap" => Some("gate cswap c,a,b { cx b,a; ccx c,a,b; cx b,a; }"),
+        // FSIM(theta,phi) = RXX(theta) RYY(theta) CP(-phi), inlined to
+        // keep the definition independent of other extension definitions.
+        "fsim" => Some(concat!(
+            "gate fsim(theta,phi) a,b { ",
+            "h a; h b; cx a,b; rz(theta) b; cx a,b; h a; h b; ",
+            "rx(pi/2) a; rx(pi/2) b; cx a,b; rz(theta) b; cx a,b; ",
+            "rx(-pi/2) a; rx(-pi/2) b; cu1(-phi) a,b; }"
+        )),
         _ => None,
     }
 }
