@@ -14,8 +14,10 @@ from cqlib.circuit import Circuit, Instruction
 from cqlib.compile.resource import ResourceLimits, ResourcePolicy
 from cqlib.device import Device
 from .. import TransformResult
+from . import block_zxz as block_zxz
 from . import mc_gate as mc_gate
 from . import unitary as unitary
+from .block_zxz import BlockZxzDecomposeOptions
 
 class TwoQubitUnitaryDecomposeBasis:
     """Output interaction basis for numeric two-qubit unitary synthesis."""
@@ -56,6 +58,7 @@ class UnitaryDecomposeConfig:
         two_qubit_basis: TwoQubitUnitaryDecomposeBasis | None = None,
         target_basis: list[Instruction | str] | None = None,
         recurse_control_flow: bool = True,
+        block_zxz_options: BlockZxzDecomposeOptions | None = None,
     ) -> None: ...
     @property
     def two_qubit_basis(self) -> TwoQubitUnitaryDecomposeBasis | None:
@@ -76,6 +79,14 @@ class UnitaryDecomposeConfig:
     @property
     def recurse_control_flow(self) -> bool:
         """Whether unitary gates in control-flow bodies are synthesized."""
+        ...
+    @property
+    def block_zxz_options(self) -> BlockZxzDecomposeOptions | None:
+        """Block-ZXZ switches applied to three-or-more-qubit unitary gates.
+
+        ``None`` keeps the defaults: both paper Section 5 optimizations
+        enabled.
+        """
         ...
     def __copy__(self) -> UnitaryDecomposeConfig: ...
     def __deepcopy__(self, memo: dict[int, object]) -> UnitaryDecomposeConfig: ...
@@ -135,7 +146,12 @@ def decompose_unitaries(
     circuit: Circuit,
     config: UnitaryDecomposeConfig | None = None,
 ) -> TransformResult:
-    """Synthesize matrix-backed one- and two-qubit unitary gates.
+    """Synthesize matrix-backed unitary gates.
+
+    One- and two-qubit gates use the configured synthesis targets;
+    three-or-more-qubit gates are synthesized through the recursive
+    Block-ZXZ decomposition (paper arXiv:2403.13692) with the paper's
+    Section 5 CNOT optimizations.
 
     Raises:
         CompilerConfigError: If a unitary is unresolved, invalid, or
@@ -186,6 +202,7 @@ def decompose_mc_gates_for_device(
     ...
 
 __all__ = [
+    "block_zxz",
     "mc_gate",
     "unitary",
     "TwoQubitUnitaryDecomposeBasis",

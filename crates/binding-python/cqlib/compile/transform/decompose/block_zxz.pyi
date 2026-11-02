@@ -62,16 +62,24 @@ def decompose_block_zxz(matrix: ArrayLike, atol: float = 1e-10) -> Circuit:
     the CNOT count meets the paper bound
     ``22/48 * 4^n - 3/2 * 2^n + 5/3`` (n=3 -> 19, n=4 -> 95).
 
+    Numerically degenerate inputs can exceed that bound by at most two CX:
+    when folding the accumulated A.2 diagonal remainder into a two-qubit
+    leaf is not numerically feasible, the remainder is emitted as an
+    explicit diagonal gate instead of failing the decomposition.
+
     Args:
         matrix: Square power-of-two unitary matrix.
-        atol: Absolute tolerance of the unitarity and invariant checks.
+        atol: Absolute tolerance of the unitarity and invariant checks;
+            must be a finite non-negative number.
 
     Returns:
         The assembled :class:`~cqlib.circuit.Circuit`.
 
     Raises:
-        ValueError: If ``matrix`` is not a square power-of-two unitary or a
-            decomposition invariant fails.
+        ValueError: If ``matrix`` is not a square power-of-two unitary (a
+            NaN or infinite entry is rejected up front), if ``atol`` is
+            not a finite non-negative number, or if a decomposition
+            invariant fails.
     """
     ...
 
@@ -89,7 +97,8 @@ def decompose_block_zxz_with_options(
 
     Args:
         matrix: Square power-of-two unitary matrix.
-        atol: Absolute tolerance of the unitarity and invariant checks.
+        atol: Absolute tolerance of the unitarity and invariant checks;
+            must be a finite non-negative number.
         options: Optimization switches; ``None`` selects the fully
             optimized default.
 
@@ -97,8 +106,9 @@ def decompose_block_zxz_with_options(
         The assembled :class:`~cqlib.circuit.Circuit`.
 
     Raises:
-        ValueError: If ``matrix`` is invalid or a decomposition invariant
-            fails.
+        ValueError: If ``matrix`` is invalid (including NaN or infinite
+            entries), if ``atol`` is not a finite non-negative number, or
+            if a decomposition invariant fails.
     """
     ...
 

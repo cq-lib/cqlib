@@ -19,10 +19,11 @@ use super::step1::{assert_square_unitary, is_matrix_diagonal, is_matrix_unitary}
 
 /// Schur-style diagonalization of a unitary matrix; returns `(Q, D)`.
 ///
-/// Mirrors the Python `schur_unitary_diagonalize`.
+/// Mirrors the Python `schur_unitary_diagonalize`. Numeric failures of the
+/// underlying EVD are returned as errors instead of panicking.
 pub fn schur_unitary_diagonalize(matrix: &Cm, atol: f64) -> Result<(Cm, Cm), String> {
     assert_square_unitary(matrix, atol)?;
-    Ok(super::matrix::schur_unitary_diagonalize(matrix))
+    super::matrix::schur_unitary_diagonalize(matrix, atol)
 }
 
 /// Builds the diagonal unitary square root `D` from unit-modulus eigenvalues.

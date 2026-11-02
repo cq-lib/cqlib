@@ -21,6 +21,9 @@ use crate::error::CqlibError;
 use cqlib_core::circuit::{Instruction, ParameterValue, Qubit, StandardGate, ValueOperation};
 use cqlib_core::compile::commutation::CommutationConfig;
 use cqlib_core::compile::resource::{ResourceLimits, ResourcePolicy};
+use cqlib_core::compile::transform::decompose::block_zxz::{
+    self as core_block_zxz, DecomposeOptions as CoreBlockZxzDecomposeOptions,
+};
 use cqlib_core::compile::transform::decompose::mc_gate::decompose_mc_gates_for_device as core_decompose_mc_gates_for_device;
 use cqlib_core::compile::transform::decompose::unitary::{
     KakDecomposition, TwoQubitSynthesisTarget, TwoQubitUnitaryDecomposeBasis,
@@ -91,8 +94,12 @@ pub struct CDecompositionRuleStats {
 pub struct CUnitaryDecomposeConfig {
     /// 1 recurses into control-flow bodies, 0 does not.
     pub recurse_control_flow: u8,
+    /// Block-ZXZ optimization mask applied to three-or-more-qubit unitary
+    /// gates; a bitwise OR of `BLOCK_ZXZ_OPT_*` (see
+    /// `decompose_unitary_config_default` for the fully optimized default).
+    pub block_zxz_options: u8,
     /// Reserved padding to keep the struct layout stable.
-    pub _reserved: [u8; 7],
+    pub _reserved: [u8; 6],
 }
 
 /// C form of [`McGateDecomposeConfig`].
@@ -170,11 +177,16 @@ pub struct CTargetBasisLowerer {
 }
 
 /// Returns the default unitary-decompose configuration by value.
+///
+/// The default enables control-flow recursion and the fully optimized
+/// Block-ZXZ configuration (`BLOCK_ZXZ_OPT_ALL`) for three-or-more-qubit
+/// unitary gates.
 #[unsafe(no_mangle)]
 pub extern "C" fn decompose_unitary_config_default() -> CUnitaryDecomposeConfig {
     CUnitaryDecomposeConfig {
         recurse_control_flow: 1,
-        _reserved: [0; 7],
+        block_zxz_options: BLOCK_ZXZ_OPT_ALL,
+        _reserved: [0; 6],
     }
 }
 
@@ -274,6 +286,11 @@ pub extern "C" fn decompose_expand_definitions(circuit: *const CCircuit) -> *mut
 /// Synthesizes matrix-backed unitary gates of `circuit` and returns the
 /// rebuilt circuit as an owned `CCircuit*` (free with `circuit_free`).
 ///
+/// One- and two-qubit gates use the unconstrained default synthesis
+/// target; three-or-more-qubit gates go through the recursive Block-ZXZ
+/// decomposition with the paper's Section 5 CNOT optimizations, selected
+/// through `config.block_zxz_options`.
+///
 /// Returns NULL on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn decompose_unitaries(
@@ -287,30 +304,35 @@ pub extern "C" fn decompose_unitaries(
 /// pass-local rule-cache statistics to `stats` when it is non-NULL.
 ///
 /// Returns the rebuilt circuit as an owned `CCircuit*` (free with
-/// `circuit_free`), or NULL on error (`stats` is then left untouched).
+/// `circuit_free`), or NULL on error (`stats` is then left untouched). Any
+/// internal numerical failure surfaces as NULL; the calling process is
+/// never aborted.
 #[unsafe(no_mangle)]
 pub extern "C" fn decompose_unitaries_with_rule_stats(
     circuit: *const CCircuit,
     config: CUnitaryDecomposeConfig,
     stats: *mut CDecompositionRuleStats,
 ) -> *mut CCircuit {
-    if circuit.is_null() {
-        return std::ptr::null_mut();
-    }
-    let config = UnitaryDecomposeConfig {
-        two_qubit_target: Default::default(),
-        recurse_control_flow: config.recurse_control_flow != 0,
-    };
-    let circuit = unsafe { &(*circuit).inner };
-    match core_decompose_unitaries_with_rule_stats(circuit, config) {
-        Ok((outcome, rule_stats)) => {
-            write_rule_stats(stats, &rule_stats);
-            Box::into_raw(Box::new(CCircuit {
-                inner: outcome.into_circuit(circuit),
-            }))
+    catch_panic(std::ptr::null_mut(), || {
+        if circuit.is_null() {
+            return std::ptr::null_mut();
         }
-        Err(_) => std::ptr::null_mut(),
-    }
+        let config = UnitaryDecomposeConfig {
+            two_qubit_target: Default::default(),
+            recurse_control_flow: config.recurse_control_flow != 0,
+            block_zxz_options: block_zxz_options_from_mask(config.block_zxz_options),
+        };
+        let circuit = unsafe { &(*circuit).inner };
+        match core_decompose_unitaries_with_rule_stats(circuit, config) {
+            Ok((outcome, rule_stats)) => {
+                write_rule_stats(stats, &rule_stats);
+                Box::into_raw(Box::new(CCircuit {
+                    inner: outcome.into_circuit(circuit),
+                }))
+            }
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
 }
 
 /// Rewrites multi-controlled gates of `circuit` and returns the rebuilt
@@ -1142,4 +1164,251 @@ pub extern "C" fn decompose_unitary_target_cost_of_fixed_operations(
         };
     }
     CqlibError::Ok as i32
+}
+
+// =====  Block-ZXZ decomposition  =====
+
+/// Hard qubit-count cap for Block-ZXZ C entry points, matching the
+/// `MAX_UNITARY_QUBITS` cap of `circuit_unitary` (a 2^21 x 2^21 matrix alone
+/// would need 32 TiB).
+const BLOCK_ZXZ_MAX_DIM: usize = 1usize << 20;
+
+/// Runs `body`, mapping an unwinding panic to `fallback` (by value).
+///
+/// The plain Rust extern C ABI aborts the whole process when a panic
+/// tries to unwind out of the exported function, which would take down
+/// any C caller on a single numerical edge case. Every Block-ZXZ entry
+/// point is guarded so that a genuine bug surfaces as a NULL pointer or
+/// error code instead of a process abort.
+fn catch_panic<T, F: std::ops::FnOnce() -> T>(fallback: T, body: F) -> T {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).unwrap_or(fallback)
+}
+
+/// Block-ZXZ optimization switches, combined by bitwise OR.
+///
+/// The default configuration is [`BLOCK_ZXZ_OPT_ALL`] (both paper Section 5
+/// optimizations enabled). Block-diagonal (controlled-gate) inputs
+/// automatically disable A.2 unless [`BLOCK_ZXZ_OPT_A2_FORCE`] is set.
+/// | Value | Switch                                            |
+/// |-------|---------------------------------------------------|
+/// | 0     | No optimization (unoptimized pipeline)            |
+/// | 1     | A.1: fold UCRz side CNOTs into the middle demux   |
+/// | 2     | A.2: 2-CNOT leaves + rolling diagonal remainders  |
+/// | 4     | Force A.2 on block-diagonal (controlled) inputs   |
+pub const BLOCK_ZXZ_OPT_A1: u8 = 1;
+pub const BLOCK_ZXZ_OPT_A2: u8 = 2;
+pub const BLOCK_ZXZ_OPT_A2_FORCE: u8 = 4;
+/// A.1 + A.2 (the paper's default fully optimized configuration).
+pub const BLOCK_ZXZ_OPT_ALL: u8 = BLOCK_ZXZ_OPT_A1 | BLOCK_ZXZ_OPT_A2;
+
+/// Converts a C option bitmask into the core [`CoreBlockZxzDecomposeOptions`].
+fn block_zxz_options_from_mask(mask: u8) -> CoreBlockZxzDecomposeOptions {
+    CoreBlockZxzDecomposeOptions {
+        opt_a1: mask & BLOCK_ZXZ_OPT_A1 != 0,
+        opt_a2: mask & BLOCK_ZXZ_OPT_A2 != 0,
+        opt_a2_force: mask & BLOCK_ZXZ_OPT_A2_FORCE != 0,
+    }
+}
+
+/// Reads a row-major `dim` by `dim` complex matrix into an owned `Array2`.
+///
+/// The dimension is validated before any memory is read: a non-power-of
+/// two or oversized `dim` is refused instead of attempting a huge copy
+/// that would exhaust memory or read out of bounds of the caller buffer.
+fn block_zxz_matrix_from_c(matrix: *const Complex64, dim: usize) -> Option<Array2<Complex64>> {
+    if matrix.is_null() || dim == 0 {
+        return None;
+    }
+    if dim > BLOCK_ZXZ_MAX_DIM || dim & (dim - 1) != 0 {
+        return None;
+    }
+    let flat = unsafe { std::slice::from_raw_parts(matrix, dim * dim) }.to_vec();
+    Array2::from_shape_vec((dim, dim), flat).ok()
+}
+
+/// Runs the full Block-ZXZ decomposition of a general `2^n x 2^n` unitary
+/// and returns the assembled circuit as an owned `CCircuit*` (free with
+/// `circuit_free`).
+///
+/// `matrix` points at `dim * dim` row-major `Complex64` elements; `dim`
+/// must be a power of two >= 2 and at most 2^20. `options` is a bitwise OR
+/// of `BLOCK_ZXZ_OPT_*` (pass [`BLOCK_ZXZ_OPT_ALL`] for the paper's fully
+/// optimized configuration). Returns NULL on NULL input, an invalid
+/// shape (including a NaN or infinite matrix), a non-unitary matrix, or an
+/// internal numerical failure; the calling process is never aborted.
+///
+/// Numerically degenerate inputs may use up to two extra CX: when folding
+/// the accumulated A.2 diagonal remainder into a two-qubit leaf is not
+/// numerically feasible, the remainder is emitted as an explicit diagonal
+/// gate instead of failing.
+#[unsafe(no_mangle)]
+pub extern "C" fn block_zxz_decompose(
+    matrix: *const Complex64,
+    dim: usize,
+    atol: f64,
+    options: u8,
+) -> *mut CCircuit {
+    catch_panic(std::ptr::null_mut(), || {
+        let Some(matrix) = block_zxz_matrix_from_c(matrix, dim) else {
+            return std::ptr::null_mut();
+        };
+        let options = block_zxz_options_from_mask(options);
+        match core_block_zxz::decompose_block_zxz_with_options(&matrix, atol, &options) {
+            Ok(result) => Box::into_raw(Box::new(CCircuit {
+                inner: result.circuit,
+            })),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Runs Block-ZXZ step 1 and writes the four `dim/2 x dim/2` factors
+/// `A1, A2, B, C` into `out_a1`, `out_a2`, `out_b`, `out_c` (each pointing
+/// at `(dim/2)^2` row-major `Complex64` slots).
+///
+/// Returns 0 on success, -1 on NULL arguments, -6 on an invalid input
+/// matrix (including NaN or infinite elements) or an internal numerical
+/// failure. The calling process is never aborted.
+#[unsafe(no_mangle)]
+pub extern "C" fn block_zxz_step1(
+    matrix: *const Complex64,
+    dim: usize,
+    atol: f64,
+    out_a1: *mut Complex64,
+    out_a2: *mut Complex64,
+    out_b: *mut Complex64,
+    out_c: *mut Complex64,
+) -> i32 {
+    catch_panic(CqlibError::CompilerError as i32, || {
+        if out_a1.is_null() || out_a2.is_null() || out_b.is_null() || out_c.is_null() {
+            return CqlibError::NullPtr as i32;
+        }
+        let Some(matrix) = block_zxz_matrix_from_c(matrix, dim) else {
+            return CqlibError::NullPtr as i32;
+        };
+        match core_block_zxz::block_zxz_step1(&matrix, atol) {
+            Ok((a1, a2, b, c)) => {
+                let half = dim / 2;
+                unsafe {
+                    write_matrix_out(&a1, out_a1, half);
+                    write_matrix_out(&a2, out_a2, half);
+                    write_matrix_out(&b, out_b, half);
+                    write_matrix_out(&c, out_c, half);
+                }
+                CqlibError::Ok as i32
+            }
+            Err(_) => CqlibError::CompilerError as i32,
+        }
+    })
+}
+
+/// Copies an owned square matrix into a caller-provided row-major buffer.
+///
+/// # Safety
+///
+/// `out` must point at `dim * dim` writable `Complex64` slots.
+unsafe fn write_matrix_out(matrix: &Array2<Complex64>, out: *mut Complex64, dim: usize) {
+    let slice = unsafe { std::slice::from_raw_parts_mut(out, dim * dim) };
+    for (slot, value) in slice.iter_mut().zip(matrix.iter()) {
+        *slot = *value;
+    }
+}
+
+/// Demultiplexes a block pair into the factors `V, D, W` and writes them
+/// into `out_v`, `out_d`, `out_w` (each `dim x dim` row-major slots).
+///
+/// The factors satisfy `U0 = V D W` and `U1 = V D† W`. Returns 0 on
+/// success, -1 on NULL arguments, -6 on invalid inputs (including NaN or
+/// infinite elements) or an internal numerical failure. The calling process
+/// is never aborted.
+#[unsafe(no_mangle)]
+pub extern "C" fn block_zxz_demux_pair(
+    u0: *const Complex64,
+    u1: *const Complex64,
+    dim: usize,
+    atol: f64,
+    out_v: *mut Complex64,
+    out_d: *mut Complex64,
+    out_w: *mut Complex64,
+) -> i32 {
+    catch_panic(CqlibError::CompilerError as i32, || {
+        if out_v.is_null() || out_d.is_null() || out_w.is_null() {
+            return CqlibError::NullPtr as i32;
+        }
+        let (Some(u0), Some(u1)) = (
+            block_zxz_matrix_from_c(u0, dim),
+            block_zxz_matrix_from_c(u1, dim),
+        ) else {
+            return CqlibError::NullPtr as i32;
+        };
+        match core_block_zxz::step2::demux_pair(&u0, &u1, atol) {
+            Ok((v, d, w)) => {
+                unsafe {
+                    write_matrix_out(&v, out_v, dim);
+                    write_matrix_out(&d, out_d, dim);
+                    write_matrix_out(&w, out_w, dim);
+                }
+                CqlibError::Ok as i32
+            }
+            Err(_) => CqlibError::CompilerError as i32,
+        }
+    })
+}
+
+/// Expands a `dim x dim` diagonal unitary `D` into its uniformly controlled
+/// `Rz` circuit and returns it as an owned `CCircuit*` (free with
+/// `circuit_free`).
+///
+/// The returned circuit enacts `diag(D, D†)` on `log2(2*dim)` qubits with
+/// the local Gray-code control convention. Returns NULL on NULL input or a
+/// non-diagonal / non-unitary matrix (including NaN or infinite elements).
+/// The calling process is never aborted.
+#[unsafe(no_mangle)]
+pub extern "C" fn block_zxz_ucrz_circuit(
+    d_matrix: *const Complex64,
+    dim: usize,
+    atol: f64,
+) -> *mut CCircuit {
+    catch_panic(std::ptr::null_mut(), || {
+        let Some(d_matrix) = block_zxz_matrix_from_c(d_matrix, dim) else {
+            return std::ptr::null_mut();
+        };
+        match core_block_zxz::ucrz::step3_ucrz_to_circuit(&d_matrix, atol) {
+            Ok(result) => Box::into_raw(Box::new(CCircuit {
+                inner: result.circuit,
+            })),
+            Err(_) => std::ptr::null_mut(),
+        }
+    })
+}
+
+/// Returns the number of `CX` gates in `circuit` (including nested
+/// composite-gate blocks), or 0 for NULL. A guard failure also reports 0;
+/// the calling process is never aborted.
+#[unsafe(no_mangle)]
+pub extern "C" fn block_zxz_cx_count(circuit: *const CCircuit) -> usize {
+    if circuit.is_null() {
+        return 0;
+    }
+    catch_panic(0, || {
+        core_block_zxz::vw::count_cx(unsafe { &(*circuit).inner })
+    })
+}
+
+/// Returns 1 when `matrix` is block-diagonal (a controlled-gate shape)
+/// within `atol`, 0 when it is not (including NaN or infinite elements in
+/// the off-diagonal blocks), -1 on NULL input, and -6 when the input cannot
+/// be evaluated. The calling process is never aborted.
+#[unsafe(no_mangle)]
+pub extern "C" fn block_zxz_is_block_diagonal(
+    matrix: *const Complex64,
+    dim: usize,
+    atol: f64,
+) -> i32 {
+    catch_panic(CqlibError::CompilerError as i32, || {
+        let Some(matrix) = block_zxz_matrix_from_c(matrix, dim) else {
+            return CqlibError::NullPtr as i32;
+        };
+        core_block_zxz::engine::is_block_diagonal(&matrix, atol) as i32
+    })
 }

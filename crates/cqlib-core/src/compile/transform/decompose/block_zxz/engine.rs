@@ -47,11 +47,11 @@ use super::ucrz::{
     step3_ucrz_from_diagonal, synthesize_ucrz_circuit, synthesize_ucrz_circuit_reduced_tail,
     synthesize_ucrz_circuit_reversed_reduced_head,
 };
-use super::vw::{synth_leaf_full, synth_two_cnot_with_diagonal};
+use super::vw::{diagonal_gate_circuit, synth_leaf_full, synth_two_cnot_with_diagonal};
 
 /// Decomposition options (the optimization switches of the paper's
 /// Section 5).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecomposeOptions {
     /// A.1: fold each recursion level's two UCRz side CNOTs into the middle
     /// multiplexer (saves 2 CNOTs per level).
@@ -92,12 +92,19 @@ fn num_qubits_of(unitary: &Array2<Complex64>) -> usize {
 }
 
 /// A node of the recursive decomposition tree.
+///
+/// `RecursiveNode` is boxed because a flat inline layout would inflate every
+/// `Node` to ~1.1 KB, including the far more numerous leaves (there are
+/// `4^(n-2)` of them). `BaseNode` is deliberately kept inline: leaves are the
+/// most common nodes in the tree, so giving each one a heap allocation would
+/// cost more than the extra `Node` width it saves.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum Node {
     /// A 1/2-qubit leaf.
     Base(BaseNode),
     /// A recursion-layer node.
-    Recursive(RecursiveNode),
+    Recursive(Box<RecursiveNode>),
 }
 
 /// A leaf node (the matrix is cached during construction; under A.2 the
@@ -173,15 +180,20 @@ pub fn get_layer_assembly_plan() -> Vec<AssemblyItem> {
 }
 
 /// Returns whether `unitary` is block-diagonal (a controlled-gate shape,
-/// the disable condition for A.2).
+/// the disable condition for A.2). A non-finite off-diagonal element
+/// counts as "not block-diagonal" (NaN comparisons are always false and
+/// would otherwise make a broken matrix pass the `> atol` test).
 pub fn is_block_diagonal(unitary: &Cm, atol: f64) -> bool {
     let n = unitary.nrows();
     let half = n / 2;
     for i in 0..n {
         for j in 0..n {
             let in_offdiag = (i < half) != (j < half);
-            if in_offdiag && unitary[[i, j]].norm() > atol {
-                return false;
+            if in_offdiag {
+                let m = unitary[[i, j]].norm();
+                if !m.is_finite() || m > atol {
+                    return false;
+                }
             }
         }
     }
@@ -356,12 +368,12 @@ pub fn build_block_zxz_tree(
     for (name, sub) in &layer.subunitaries {
         children.push((*name, build_block_zxz_tree(sub, atol, options)?));
     }
-    Ok(Node::Recursive(RecursiveNode {
+    Ok(Node::Recursive(Box::new(RecursiveNode {
         num_qubits: num_qubits_of(unitary),
         input_unitary: unitary.clone(),
         layer,
         children,
-    }))
+    })))
 }
 
 /// Snapshots all two-qubit leaf matrices in circuit execution order
@@ -395,6 +407,17 @@ fn collect_2q_leaf_matrices(node: &Node, out: &mut Vec<Cm>) {
 /// the next leaf's input unchanged. The temporally last leaf uses the full
 /// 0-3 CX adaptive synthesis to absorb the whole accumulated remainder
 /// chain.
+///
+/// Both absorptions can be numerically infeasible: folding a diagonal into a
+/// near-degenerate leaf routinely places the target on a Weyl-chamber
+/// boundary (`c -> 0`), where the shared two-qubit backend's KAK
+/// canonicalization is accurate to about `1e-10` only - while that backend
+/// validates candidates at `1e-10` (`RECONSTRUCTION_EPS` of the KAK module
+/// itself is `1e-7`). Rather than failing the whole decomposition, the chain
+/// then degrades: the leaf is synthesized unchanged and the pending
+/// remainder is emitted as an explicit diagonal gate
+/// ([`diagonal_gate_circuit`]) at the same position, which is exact by
+/// construction at the cost of two extra CX.
 fn run_a2_chain(matrices: &[Cm]) -> Result<Vec<Circuit>, String> {
     use super::matrix::mat_mul;
 
@@ -407,21 +430,61 @@ fn run_a2_chain(matrices: &[Cm]) -> Result<Vec<Circuit>, String> {
 
     for (index, unitary) in matrices.iter().enumerate() {
         let is_last = index + 1 == matrices.len();
-        let target = if is_identity_diagonal(&pending) {
-            unitary.clone()
-        } else {
+        let has_pending = !is_identity_diagonal(&pending);
+        let target = if has_pending {
             mat_mul(unitary, &pending)
+        } else {
+            unitary.clone()
         };
 
         if is_last {
-            circuits.push(synth_leaf_full(&target)?);
-        } else {
-            let synthesis = synth_two_cnot_with_diagonal(&target)?;
-            circuits.push(synthesis.circuit);
-            pending = synthesis.diagonal_out;
+            match synth_leaf_full(&target) {
+                Ok(circuit) => circuits.push(circuit),
+                Err(_) if has_pending => {
+                    // Degraded path: emit the remainder explicitly before the
+                    // leaf (`U_last @ D_pending` applies the remainder first)
+                    // and synthesize the leaf unchanged.
+                    let mut circuit = diagonal_gate_circuit(&pending)?;
+                    let leaf = synth_leaf_full(unitary)?;
+                    circuit.compose(&leaf, None).map_err(|e| e.to_string())?;
+                    circuits.push(circuit);
+                }
+                Err(error) => return Err(error),
+            }
+            continue;
         }
+
+        let synthesis = match synth_two_cnot_with_diagonal(&target) {
+            Ok(synthesis) => TwoCnotChainStep {
+                circuit: synthesis.circuit,
+                diagonal_out: synthesis.diagonal_out,
+            },
+            Err(_) if has_pending => {
+                // Degraded path: emit the remainder explicitly before the
+                // leaf and synthesize the leaf unchanged.
+                let mut circuit = diagonal_gate_circuit(&pending)?;
+                let synthesis = synth_two_cnot_with_diagonal(unitary)?;
+                circuit
+                    .compose(&synthesis.circuit, None)
+                    .map_err(|e| e.to_string())?;
+                TwoCnotChainStep {
+                    circuit,
+                    diagonal_out: synthesis.diagonal_out,
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        circuits.push(synthesis.circuit);
+        pending = synthesis.diagonal_out;
     }
     Ok(circuits)
+}
+
+/// One normalized chain step: the emitted circuit plus the diagonal that
+/// must be transferred to the next leaf.
+struct TwoCnotChainStep {
+    circuit: Circuit,
+    diagonal_out: Cm,
 }
 
 /// The 4x4 identity diagonal.
@@ -448,11 +511,11 @@ fn write_back_leaf_circuits(
 ) -> Result<(), String> {
     match node {
         Node::Base(b) => {
-            if b.num_qubits == 2 {
-                if let Some(circuit) = circuits.next() {
-                    b.circuit = circuit;
-                    b.method = "2q";
-                }
+            if b.num_qubits == 2
+                && let Some(circuit) = circuits.next()
+            {
+                b.circuit = circuit;
+                b.method = "2q";
             }
             Ok(())
         }

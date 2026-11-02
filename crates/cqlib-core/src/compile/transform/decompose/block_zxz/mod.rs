@@ -35,6 +35,13 @@
 //! the paper bound `c_n <= 22/48 * 4^n - 3/2 * 2^n + 5/3`
 //! (n = 3 -> 19, n = 4 -> 95).
 //!
+//! Numerically degenerate inputs may exceed that count by up to two CNOTs:
+//! when folding the accumulated A.2 diagonal remainder into a leaf's
+//! synthesis target is not numerically feasible (see
+//! [`engine::decompose_block_zxz_with_options`]), the remainder is emitted
+//! as an explicit diagonal gate instead of aborting the decomposition.
+//! Correctness is preserved in both paths.
+//!
 //! Leaf (1q/2q) synthesis reuses the crate's [`super::unitary`] module, the
 //! same primitives the Python project reaches through `cqlib`.
 

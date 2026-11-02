@@ -51,6 +51,12 @@
 //! `U_next @ D_out`), where it is absorbed by that leaf's own synthesis. The
 //! temporally last leaf uses the full 0-3 CNOT synthesis to absorb the whole
 //! accumulated remainder.
+//!
+//! Absorption can be numerically infeasible: a remainder-folded target often
+//! sits on a Weyl-chamber boundary, where the shared two-qubit backend's KAK
+//! canonicalization is accurate to only about `1e-10` and its exactness gate
+//! rejects every candidate. [`diagonal_gate_circuit`] provides the exact
+//! escape hatch used by `engine::run_a2_chain` in that case.
 
 use crate::circuit::{Circuit, Parameter, Qubit};
 use crate::compile::transform::decompose::unitary::{
@@ -172,6 +178,71 @@ pub fn synth_two_cnot_with_diagonal(target: &Cm) -> Result<TwoCnotSynthesis, Str
         diagonal_out: eye(4),
         cx_count: baseline_cx,
     })
+}
+
+/// Emits a two-qubit diagonal unitary as standard gates.
+///
+/// For `D = diag(d00, d01, d10, d11)` in basis order `(q1, q0)` (index
+/// `2 q1 + q0`) with unit-modulus entries and phases `phi_ij`, the phase
+/// function of a two-bit diagonal splits into a constant, two local parts
+/// and one interaction part, so
+/// ```text
+/// D = e^{i phi00} * P(alpha; q1) * P(beta; q0) * CP(gamma; q1 -> q0)
+/// ```
+/// with `alpha = phi10 - phi00`, `beta = phi01 - phi00` and
+/// `gamma = phi11 - phi10 - phi01 + phi00` (the interaction). The
+/// controlled phase itself is emitted CX-natively,
+/// `CP(gamma) = P(gamma/2; q1) * P(gamma/2; q0) * CX * P(-gamma/2; q0) * CX`
+/// so the gate costs exactly two CX and the reported CX count stays
+/// truthful; the two `gamma/2` local parts are folded into the `alpha` and
+/// `beta` phases of the construction.
+///
+/// This is the exact remainder gate of the A.2 fallback: when folding the
+/// accumulated diagonal remainder into a leaf's synthesis target is not
+/// numerically feasible, the leaf is synthesized directly and the remainder
+/// is emitted here instead. The overall phase `e^{i phi00}` is dropped, as
+/// only relative phases are observable.
+pub fn diagonal_gate_circuit(d: &Cm) -> Result<Circuit, String> {
+    if d.dim() != (4, 4) {
+        return Err("diagonal gate synthesis requires a 4x4 matrix".into());
+    }
+    let mut phases = [0.0f64; 4];
+    for i in 0..4 {
+        for j in 0..4 {
+            if i != j && d[[i, j]].norm() > 1e-12 {
+                return Err("diagonal gate synthesis requires a diagonal matrix".into());
+            }
+        }
+        let value = d[[i, i]];
+        if !value.re.is_finite() || !value.im.is_finite() {
+            return Err("diagonal gate synthesis requires finite entries".into());
+        }
+        if (value.norm() - 1.0).abs() > 1e-9 {
+            return Err("diagonal gate synthesis requires unit-modulus entries".into());
+        }
+        phases[i] = value.arg();
+    }
+
+    let alpha = phases[2] - phases[0];
+    let beta = phases[1] - phases[0];
+    let gamma = phases[3] - phases[2] - phases[1] + phases[0];
+
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    // CX * Rz(-gamma/2; q0) * CX == diag(1, e^{-i gamma/2}, e^{-i gamma/2}, 1)
+    // up to a global phase (`Rz` is the engine's emitted gate; its own global
+    // phase is irrelevant here).
+    circuit.cx(q1, q0).map_err(|e| e.to_string())?;
+    circuit.rz(q0, -gamma / 2.0).map_err(|e| e.to_string())?;
+    circuit.cx(q1, q0).map_err(|e| e.to_string())?;
+    circuit
+        .rz(q0, beta + gamma / 2.0)
+        .map_err(|e| e.to_string())?;
+    circuit
+        .rz(q1, alpha + gamma / 2.0)
+        .map_err(|e| e.to_string())?;
+    Ok(circuit)
 }
 
 /// Counts `CX` gates in a circuit, including nested composite gates.

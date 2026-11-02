@@ -26,6 +26,21 @@ use numpy::{PyArray2, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+/// The four factor matrices returned by `block_zxz_step1`.
+type Step1Arrays<'py> = (
+    Bound<'py, PyArray2<Complex64>>,
+    Bound<'py, PyArray2<Complex64>>,
+    Bound<'py, PyArray2<Complex64>>,
+    Bound<'py, PyArray2<Complex64>>,
+);
+
+/// The three factor matrices returned by `block_zxz_demux_pair`.
+type DemuxArrays<'py> = (
+    Bound<'py, PyArray2<Complex64>>,
+    Bound<'py, PyArray2<Complex64>>,
+    Bound<'py, PyArray2<Complex64>>,
+);
+
 /// Optimization switches of the paper's Section 5 reductions.
 ///
 /// ``opt_a1`` (paper 5.2 / Eq. 11) folds each recursion level's two UCRz
@@ -88,13 +103,7 @@ impl PyBlockZxzDecomposeOptions {
     }
 
     fn __repr__(&self) -> String {
-        let opt = |value: bool| if value { "True" } else { "False" };
-        format!(
-            "BlockZxzDecomposeOptions(opt_a1={}, opt_a2={}, opt_a2_force={})",
-            opt(self.inner.opt_a1),
-            opt(self.inner.opt_a2),
-            opt(self.inner.opt_a2_force)
-        )
+        self.repr_string()
     }
 
     fn __eq__(&self, other: &Self) -> bool {
@@ -109,6 +118,19 @@ impl PyBlockZxzDecomposeOptions {
 
     fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
         *self
+    }
+}
+
+impl PyBlockZxzDecomposeOptions {
+    /// Formats the options for Python reprs.
+    pub(crate) fn repr_string(&self) -> String {
+        let opt = |value: bool| if value { "True" } else { "False" };
+        format!(
+            "BlockZxzDecomposeOptions(opt_a1={}, opt_a2={}, opt_a2_force={})",
+            opt(self.inner.opt_a1),
+            opt(self.inner.opt_a2),
+            opt(self.inner.opt_a2_force)
+        )
     }
 }
 
@@ -143,9 +165,16 @@ fn circuit_into_py(circuit: Circuit) -> PyCircuit {
 /// the resulting CNOT count meets the paper bound
 /// ``22/48 * 4^n - 3/2 * 2^n + 5/3`` (n=3 -> 19, n=4 -> 95).
 ///
+/// Numerically degenerate inputs can exceed that bound by at most two CX:
+/// when folding the accumulated A.2 diagonal remainder into a two-qubit leaf
+/// is not numerically feasible, the remainder is emitted as an explicit
+/// diagonal gate instead of failing the decomposition.
+///
 /// Raises:
-///     ValueError: If ``matrix`` is not a square power-of-two unitary or a
-///         decomposition invariant fails.
+///     ValueError: If ``matrix`` is not a square power-of-two unitary (a
+///         NaN or infinite entry is rejected up front), if ``atol`` is
+///         not a finite non-negative number, or if a decomposition
+///         invariant fails.
 #[pyfunction(name = "decompose_block_zxz")]
 #[pyo3(signature = (matrix, atol=1e-10))]
 pub fn py_decompose_block_zxz(
@@ -166,8 +195,9 @@ pub fn py_decompose_block_zxz(
 /// ``options.opt_a2_force`` is set (paper Sec. 6.2 constraint).
 ///
 /// Raises:
-///     ValueError: If ``matrix`` is invalid or a decomposition invariant
-///         fails.
+///     ValueError: If ``matrix`` is invalid (including NaN or infinite
+///         entries), if ``atol`` is not a finite non-negative number, or
+///         if a decomposition invariant fails.
 #[pyfunction(name = "decompose_block_zxz_with_options")]
 #[pyo3(signature = (matrix, atol=1e-10, *, options=None))]
 pub fn py_decompose_block_zxz_with_options(
@@ -195,12 +225,7 @@ pub fn py_block_zxz_step1<'py>(
     py: Python<'py>,
     matrix: Bound<'_, PyAny>,
     atol: f64,
-) -> PyResult<(
-    Bound<'py, PyArray2<Complex64>>,
-    Bound<'py, PyArray2<Complex64>>,
-    Bound<'py, PyArray2<Complex64>>,
-    Bound<'py, PyArray2<Complex64>>,
-)> {
+) -> PyResult<Step1Arrays<'py>> {
     let matrix = extract_complex_matrix(py, matrix)?;
     let (a1, a2, b, c) = py
         .detach(move || {
@@ -228,11 +253,7 @@ pub fn py_block_zxz_demux_pair<'py>(
     u0: Bound<'_, PyAny>,
     u1: Bound<'_, PyAny>,
     atol: f64,
-) -> PyResult<(
-    Bound<'py, PyArray2<Complex64>>,
-    Bound<'py, PyArray2<Complex64>>,
-    Bound<'py, PyArray2<Complex64>>,
-)> {
+) -> PyResult<DemuxArrays<'py>> {
     let u0 = extract_complex_matrix(py, u0)?;
     let u1 = extract_complex_matrix(py, u1)?;
     let (v, d, w) = py

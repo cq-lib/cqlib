@@ -30,23 +30,43 @@ pub fn is_matrix_unitary(matrix: &Cm, atol: f64) -> bool {
 }
 
 /// Returns whether `matrix` is diagonal within `atol`.
+///
+/// A non-finite off-diagonal element counts as "not diagonal".
 pub fn is_matrix_diagonal(matrix: &Cm, atol: f64) -> bool {
     let (r, c) = matrix.dim();
     for i in 0..r {
         for j in 0..c {
-            if i != j && matrix[[i, j]].norm() > atol {
-                return false;
+            if i != j {
+                let m = matrix[[i, j]].norm();
+                if !m.is_finite() || m > atol {
+                    return false;
+                }
             }
         }
     }
     true
 }
 
+/// Returns whether every element of `matrix` is finite (neither NaN nor
+/// infinite).
+pub fn has_finite_elements(matrix: &Cm) -> bool {
+    matrix.iter().all(|z| z.re.is_finite() && z.im.is_finite())
+}
+
 /// Validates that the input is a `2^n x 2^n` unitary matrix.
 ///
 /// Mirrors the Python `assert_square_unitary`; returns `Err(String)` on
-/// failure.
+/// failure. Rejects `atol` that is not a finite non-negative number, and
+/// rejects matrices containing NaN or infinite elements before any
+/// numerical decomposition is attempted (a NaN matrix would otherwise
+/// slip past the `U^H U ~ I` comparison because NaN comparisons are always
+/// false, and then poison the SVD/EVD pipeline).
 pub fn assert_square_unitary(matrix: &Cm, atol: f64) -> Result<(), String> {
+    if !atol.is_finite() || atol < 0.0 {
+        return Err(format!(
+            "Tolerance atol must be a finite non-negative number, got {atol}."
+        ));
+    }
     if matrix.ndim() != 2 {
         return Err("Input matrix must be two-dimensional.".into());
     }
@@ -57,6 +77,9 @@ pub fn assert_square_unitary(matrix: &Cm, atol: f64) -> Result<(), String> {
     if !is_power_of_two(rows) {
         return Err("Input matrix dimension must be a power of two.".into());
     }
+    if !has_finite_elements(matrix) {
+        return Err("Input matrix contains NaN or infinite elements.".into());
+    }
     if !is_unitary(matrix, atol) {
         return Err("Input matrix must be unitary.".into());
     }
@@ -66,20 +89,25 @@ pub fn assert_square_unitary(matrix: &Cm, atol: f64) -> Result<(), String> {
 /// Splits `unitary` into four equal blocks along the most significant qubit.
 ///
 /// Mirrors the Python `split_unitary_blocks`; returns `(X, Y, U21, U22)`.
-pub fn split_unitary_blocks(unitary: &Cm) -> (Cm, Cm, Cm, Cm) {
-    assert_square_unitary(unitary, 1e-10).expect("invalid unitary");
+/// The matrix is re-validated with the caller's `atol` (never a hidden
+/// fixed tolerance, which would silently disagree with the public one) and
+/// validation failures are returned as errors instead of panicking.
+pub fn split_unitary_blocks(unitary: &Cm, atol: f64) -> Result<(Cm, Cm, Cm, Cm), String> {
+    assert_square_unitary(unitary, atol)?;
     let dim = unitary.nrows();
     let half = dim / 2;
-    (
+    Ok((
         unitary.slice(s![..half, ..half]).to_owned(),
         unitary.slice(s![..half, half..]).to_owned(),
         unitary.slice(s![half.., ..half]).to_owned(),
         unitary.slice(s![half.., half..]).to_owned(),
-    )
+    ))
 }
 
 /// Polar decomposition through the SVD; returns `(S, U_polar)`.
-pub fn polar_from_svd(matrix: &Cm) -> (Cm, Cm) {
+///
+/// Numeric failures are returned as errors instead of panicking.
+pub fn polar_from_svd(matrix: &Cm) -> Result<(Cm, Cm), String> {
     super::matrix::polar_from_svd(matrix)
 }
 
@@ -94,7 +122,7 @@ pub fn compute_c_from_polar(u_x: &Cm, u_y: &Cm) -> Cm {
 pub fn compute_a1(s_x: &Cm, s_y: &Cm, u_x: &Cm) -> Cm {
     let mut inner = s_x.clone();
     let iy = s_y.mapv(|z| Complex64::new(0.0, 1.0) * z);
-    inner = inner + &iy;
+    inner += &iy;
     mat_mul(&inner, u_x)
 }
 
@@ -137,9 +165,9 @@ pub fn block_zxz_step1(unitary: &Cm, atol: f64) -> Result<(Cm, Cm, Cm, Cm), Stri
         return Err("Block-ZXZ Step 1 expects at least a 2-qubit unitary.".into());
     }
 
-    let (x, y, u21, u22) = split_unitary_blocks(unitary);
-    let (s_x, u_x) = polar_from_svd(&x);
-    let (s_y, u_y) = polar_from_svd(&y);
+    let (x, y, u21, u22) = split_unitary_blocks(unitary, atol)?;
+    let (s_x, u_x) = polar_from_svd(&x)?;
+    let (s_y, u_y) = polar_from_svd(&y)?;
 
     let c = compute_c_from_polar(&u_x, &u_y);
     let a1 = compute_a1(&s_x, &s_y, &u_x);

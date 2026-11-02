@@ -20,9 +20,11 @@
 //! # Supported inputs
 //!
 //! The circuit-facing pass supports fixed numeric one- and two-qubit unitary
-//! matrices. A parameterized matrix is supported only after every argument at
-//! the call site resolves to a finite numeric value. Three-qubit and larger
-//! matrices are rejected explicitly.
+//! matrices, and synthesizes three-or-more-qubit matrices through the
+//! recursive Block-ZXZ engine
+//! ([`block_zxz`](super::block_zxz), arXiv:2403.13692). A parameterized
+//! matrix is supported only after every argument at the call site resolves
+//! to a finite numeric value.
 //!
 //! This module does not expand circuit-backed definitions or adapt gates to
 //! hardware topology. It also does not perform target-basis lowering itself;
