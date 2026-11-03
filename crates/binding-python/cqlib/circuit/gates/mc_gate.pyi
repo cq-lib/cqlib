@@ -53,6 +53,20 @@ class MCGate:
         The inverse of C(U) is C(U†).
         """
         ...
+    def control(self, num_controls: int = ...) -> MCGate:
+        """Return a version with additional control qubits.
+
+        The new controls are aggregated with the existing ones, preserving
+        the base gate and any bound parameters.
+
+        Args:
+            num_controls: Number of additional control qubits (default 1).
+
+        Raises:
+            ValueError: If ``num_controls`` is zero or the total control
+                count overflows the supported range.
+        """
+        ...
     @property
     def num_ctrl_qubits(self) -> int:
         """Number of control qubits."""

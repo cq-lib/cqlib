@@ -604,8 +604,14 @@ impl Statevector {
                     }
                 }
                 Instruction::UnitaryGate(u_gate) => {
+                    // Prefer an attached numeric matrix; otherwise resolve
+                    // symbolic or circuit-backed definitions with this
+                    // operation's parameter values. Both paths yield a
+                    // gate-order matrix (first argument = MSB).
                     if let Some(matrix) = u_gate.matrix() {
                         sv.apply_unitary_gate(&qubit_indices, matrix)?;
+                    } else if let Ok(matrix) = u_gate.matrix_for_params_in_gate_order(&params) {
+                        sv.apply_unitary_gate(&qubit_indices, &matrix)?;
                     } else {
                         return Err(QisError::CircuitError(CircuitError::NoMatrixRepresentation));
                     }

@@ -99,6 +99,27 @@ class UnitaryGate:
             params: Numeric values for each positional parameter.
         """
         ...
+    def control(self, num_controls: int = ...) -> UnitaryGate:
+        """Return a controlled version of this unitary gate.
+
+        The gate's matrix (numeric or symbolic) is embedded into a
+        block-diagonal controlled matrix with the new control qubits as the
+        most-significant bits. Symbolic definitions stay symbolic; concrete
+        matrices are materialized only at circuit execution time.
+
+        Args:
+            num_controls: Number of control qubits to add (default 1).
+
+        Returns:
+            A new ``UnitaryGate`` acting on ``num_controls + num_qubits``
+            qubits; the first ``num_controls`` application qubits are the
+            controls. The label becomes ``ctl_{num_controls}_{label}``.
+
+        Raises:
+            ValueError: If ``num_controls`` is zero.
+            CircuitError: If the gate has no matrix representation to control.
+        """
+        ...
     def __array__(
         self, dtype: Any | None = ..., copy: bool | None = ...
     ) -> NDArray[np.complex128]:

@@ -19,11 +19,13 @@ use crate::circuit::PyStandardGate;
 use crate::circuit::error::{CircuitError as PyCircuitError, ParameterError as PyParameterError};
 use crate::circuit::parameter::PyParameter;
 use crate::utils::hash_value;
+use cqlib_core::circuit::Instruction;
 use cqlib_core::circuit::Parameter;
 use cqlib_core::circuit::error::ParameterError;
 use cqlib_core::circuit::gate::MCGate;
 use num_complex::Complex64;
 use numpy::{PyArray2, ToPyArray};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::{PyResult, pyclass, pymethods};
 use std::fmt;
@@ -142,6 +144,53 @@ impl PyMcGate {
                 "Gate {} is not invertible",
                 self.inner
             ))),
+        }
+    }
+
+    /// Returns a controlled version of this multi-controlled gate.
+    ///
+    /// The new controls are aggregated with the existing ones, preserving the
+    /// bound parameters. Inherent controls of a pre-controlled base gate
+    /// (e.g. ``MCGate(1, CX)``) are counted once, mirroring the core's
+    /// canonicalization.
+    ///
+    /// Args:
+    ///     num_controls: Number of additional control qubits (default 1).
+    ///
+    /// Returns:
+    ///     A new ``MCGate`` over the canonical base gate with the aggregated
+    ///     total control count. Promotable totals keep the same semantics as
+    ///     the equivalent standard gate.
+    ///
+    /// Raises:
+    ///     ValueError: If ``num_controls`` is zero.
+    ///     CircuitError: If the gate cannot be controlled.
+    #[pyo3(signature = (num_controls=1))]
+    pub fn control(&self, num_controls: usize) -> PyResult<Self> {
+        if num_controls == 0 {
+            return Err(PyValueError::new_err(
+                "num_controls must be at least 1; use the gate directly for zero controls",
+            ));
+        }
+        let controlled = Instruction::McGate(Box::new(self.inner.clone()))
+            .control(num_controls)
+            .ok_or_else(|| {
+                PyCircuitError::new_err("multi-controlled gate cannot be controlled".to_string())
+            })?;
+        match controlled {
+            Instruction::McGate(gate) => Ok(Self {
+                inner: *gate,
+                params: self.params.clone(),
+            }),
+            // Promotable totals collapse into a dedicated StandardGate (e.g.
+            // MCGate(1, X).control(1) -> CCX). Keep the MCGate wrapper by
+            // re-attaching the standard form with zero extra controls: its
+            // control count, qubit count, and matrix are identical.
+            Instruction::Standard(std) => Ok(Self {
+                inner: MCGate::new(0, std),
+                params: self.params.clone(),
+            }),
+            _ => unreachable!("control on an MCGate yields an MCGate or Standard"),
         }
     }
 

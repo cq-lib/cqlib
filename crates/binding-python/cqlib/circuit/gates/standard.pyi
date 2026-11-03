@@ -145,11 +145,11 @@ class StandardGate:
         """
         ...
 
-    def control(self, num_controls: int) -> MCGate:
+    def control(self, num_controls: int = ...) -> MCGate:
         """Return a multi-controlled form of this gate.
 
         Args:
-            num_controls: Number of additional control qubits.
+            num_controls: Number of additional control qubits (default 1).
         """
         ...
 

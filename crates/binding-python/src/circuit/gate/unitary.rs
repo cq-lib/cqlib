@@ -20,9 +20,11 @@ use crate::circuit::gate::PyFrozenCircuit;
 use crate::circuit::symbolic_matrix::PySymbolicMatrix;
 use crate::utils::hash_value;
 use cqlib_core::circuit::CircuitError;
+use cqlib_core::circuit::Instruction;
 use cqlib_core::circuit::gate::UnitaryGate;
 use num_complex::Complex64;
 use numpy::{PyArray2, PyArrayMethods};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::{PyResult, Python, pyclass, pymethods};
 use std::sync::Arc;
@@ -177,6 +179,49 @@ impl PyUnitaryGate {
             .matrix_for_params(&params)
             .map(|matrix| PyArray2::from_array(py, matrix.as_ref()))
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    /// Returns a controlled version of this unitary gate.
+    ///
+    /// The gate's matrix (numeric or symbolic) is embedded into a
+    /// block-diagonal controlled matrix with the new control qubits as the
+    /// most-significant bits. Symbolic definitions stay symbolic; concrete
+    /// matrices are materialized only at circuit execution time.
+    ///
+    /// Args:
+    ///     num_controls: Number of control qubits to add (default 1).
+    ///
+    /// Returns:
+    ///     A new ``UnitaryGate`` acting on ``num_controls + num_qubits``
+    ///     qubits; the first ``num_controls`` application qubits are the
+    ///     controls. The label becomes ``ctl_{num_controls}_{label}``.
+    ///
+    /// Raises:
+    ///     ValueError: If ``num_controls`` is zero.
+    ///     CircuitError: If the gate has no matrix representation to control.
+    #[pyo3(signature = (num_controls=1))]
+    fn control(&self, num_controls: usize) -> PyResult<Self> {
+        if num_controls == 0 {
+            return Err(PyValueError::new_err(
+                "num_controls must be at least 1; use the gate directly for zero controls",
+            ));
+        }
+        if self.inner.matrix().is_none()
+            && self.inner.symbolic_matrix().is_none()
+            && self.inner.circuit().is_none()
+        {
+            // Controlling a definition-less gate would yield a matrix-less
+            // result that can never execute; reject it up front.
+            return Err(PyCircuitError::new_err(
+                CircuitError::NoMatrixRepresentation.to_string(),
+            ));
+        }
+        match Instruction::UnitaryGate(Box::new(self.inner.clone())).control(num_controls) {
+            Some(Instruction::UnitaryGate(gate)) => Ok(Self { inner: *gate }),
+            _ => Err(PyCircuitError::new_err(
+                CircuitError::NoMatrixRepresentation.to_string(),
+            )),
+        }
     }
 
     /// Implements the numpy array protocol for numpy 2.0+ compatibility.

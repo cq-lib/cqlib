@@ -421,6 +421,10 @@ impl Instruction {
     /// 2. **Fallback**: If no standard equivalent exists (e.g., $C^3-X$), it returns
     ///    an [`Instruction::McGate`].
     /// 3. **Aggregation**: If the instruction is already an `MCGate`, the new controls are merged into it.
+    /// 4. **Composite gates**: A `CircuitGate` is embedded into a block-diagonal controlled
+    ///    matrix (controls as most-significant bits) and returned as a symbolic
+    ///    [`Instruction::UnitaryGate`]. The wrapped definition stays symbolic; concrete
+    ///    matrices are only materialized at circuit execution time.
     ///
     /// # Arguments
     ///
@@ -430,7 +434,7 @@ impl Instruction {
     ///
     /// - `Some(Instruction)`: The new controlled instruction.
     /// - `None`: If the instruction cannot be controlled (e.g., `Barrier`, `Measure`,
-    ///   or classical control).
+    ///   classical control, or a non-unitary circuit definition).
     pub fn control(&self, num_new_ctrls: usize) -> Option<Instruction> {
         if num_new_ctrls == 0 {
             return Some(self.clone());
@@ -495,7 +499,31 @@ impl Instruction {
 
                 Some(Instruction::UnitaryGate(Box::from(g)))
             }
-            Instruction::CircuitGate(_) => None, // CircuitGate does not support control yet
+            Instruction::CircuitGate(circuit_gate) => {
+                // Guard against bit-shift overflow in the controlled block
+                // embedding; realistic control counts stay far below this.
+                if num_new_ctrls >= usize::BITS as usize {
+                    return None;
+                }
+
+                // Gate-order basis (first application argument = MSB), so the
+                // controlled embedding places the new control qubits at the
+                // most-significant bits, ahead of the composite gate's own
+                // arguments.
+                let base = circuit_gate.symbolic_matrix_in_gate_order().ok()?;
+                let controlled =
+                    crate::circuit::symbolic_matrix::gate::control_matrix(&base, num_new_ctrls);
+                let total_qubits = circuit_gate.num_qubits() + num_new_ctrls;
+                let label = format!("ctl_{}_{}", num_new_ctrls, circuit_gate.name());
+                let unitary = UnitaryGate::new(
+                    label.as_str(),
+                    total_qubits as u16,
+                    circuit_gate.num_params() as u16,
+                )
+                .with_symbolic_matrix(circuit_gate.signature_params().iter().cloned(), controlled)
+                .ok()?;
+                Some(Instruction::UnitaryGate(Box::from(unitary)))
+            }
             Instruction::Directive(_) => None,
             Instruction::ClassicalData(_) => None,
             Instruction::Delay => None,
