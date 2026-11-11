@@ -22,6 +22,7 @@ use crate::circuit::{
     Instruction, Parameter, ParameterValue, Qubit, StandardGate, ValueInstruction, ValueOperation,
 };
 use crate::compile::CompilerError;
+use crate::compile::transform::decompose::block_zxz::DecomposeOptions as BlockZxzDecomposeOptions;
 use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
 use crate::compile::transform::target_basis::TargetBasisSignature;
 use ndarray::Array2;
@@ -161,6 +162,16 @@ pub enum NumericUnitarySynthesisKey {
         target_basis: Option<TargetBasisSignature>,
         fallback_pauli: bool,
     },
+    /// Three-or-more-qubit synthesis through the Block-ZXZ decomposition.
+    ///
+    /// The paper Section 5 optimization switches participate in the key so
+    /// a template synthesized under one configuration is never replayed
+    /// under another.
+    BlockZxz {
+        opt_a1: bool,
+        opt_a2: bool,
+        opt_a2_force: bool,
+    },
 }
 
 impl NumericUnitarySynthesisKey {
@@ -172,6 +183,14 @@ impl NumericUnitarySynthesisKey {
         Self::TwoQubit {
             target_basis: target.cache_signature(),
             fallback_pauli: target.fallback_pauli(),
+        }
+    }
+
+    pub(crate) fn block_zxz(options: &BlockZxzDecomposeOptions) -> Self {
+        Self::BlockZxz {
+            opt_a1: options.opt_a1,
+            opt_a2: options.opt_a2,
+            opt_a2_force: options.opt_a2_force,
         }
     }
 }

@@ -29,6 +29,7 @@ Example::
 """
 
 from ...._native import compile as _compile_module
+from . import block_zxz as block_zxz
 from . import mc_gate as mc_gate
 from . import unitary as unitary
 
@@ -50,6 +51,7 @@ decompose_mc_gates_with_rule_stats = (
 decompose_mc_gates_for_device = _decompose_module.decompose_mc_gates_for_device
 
 __all__ = [
+    "block_zxz",
     "mc_gate",
     "unitary",
     "TwoQubitUnitaryDecomposeBasis",

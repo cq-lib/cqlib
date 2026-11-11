@@ -30,7 +30,7 @@ use std::sync::{Arc, OnceLock};
 /// An immutable, frozen circuit for use in gate definitions.
 ///
 /// `FrozenCircuit` wraps a [`Circuit`] in an immutable container, ensuring
-/// that the circuit definition cannot be modified after creation. This is
+/// that the circuit definition cannot be modified after creation.  This is
 /// essential for maintaining consistency when circuits are used as gate
 /// definitions.
 ///
@@ -52,6 +52,7 @@ pub struct FrozenCircuit {
     used_symbols: Arc<IndexSet<String>>,
     symbolic_matrix_cache: Arc<OnceLock<Arc<SymbolicMatrix>>>,
     storage_order_symbolic_matrix_cache: Arc<OnceLock<Arc<SymbolicMatrix>>>,
+    gate_order_symbolic_matrix_cache: Arc<OnceLock<Arc<SymbolicMatrix>>>,
 }
 
 impl FrozenCircuit {
@@ -74,6 +75,7 @@ impl FrozenCircuit {
             used_symbols,
             symbolic_matrix_cache: Arc::new(OnceLock::new()),
             storage_order_symbolic_matrix_cache: Arc::new(OnceLock::new()),
+            gate_order_symbolic_matrix_cache: Arc::new(OnceLock::new()),
         }
     }
 
@@ -144,6 +146,33 @@ impl FrozenCircuit {
         let _ = self.storage_order_symbolic_matrix_cache.set(matrix.clone());
         Ok(self
             .storage_order_symbolic_matrix_cache
+            .get()
+            .cloned()
+            .unwrap_or(matrix))
+    }
+
+    /// The gate-argument basis used by matrix-backed composite-gate
+    /// construction: the first application argument is the most-significant
+    /// bit, matching standard gate matrices.
+    fn symbolic_matrix_in_gate_order(&self) -> Result<Arc<SymbolicMatrix>, CircuitError> {
+        if let Some(matrix) = self.gate_order_symbolic_matrix_cache.get() {
+            return Ok(matrix.clone());
+        }
+
+        // `circuit_to_symbolic_matrix` takes an LSB-first order, so reversing
+        // the storage order puts the first storage qubit (the first
+        // application argument) at the most-significant bit.
+        let order: Vec<usize> = self
+            .circuit
+            .qubits()
+            .iter()
+            .rev()
+            .map(|q| q.index())
+            .collect();
+        let matrix = Arc::new(circuit_to_symbolic_matrix(&self.circuit, Some(&order))?);
+        let _ = self.gate_order_symbolic_matrix_cache.set(matrix.clone());
+        Ok(self
+            .gate_order_symbolic_matrix_cache
             .get()
             .cloned()
             .unwrap_or(matrix))
@@ -429,6 +458,19 @@ impl CircuitGate {
     /// least-significant matrix bit, matching the first application argument.
     pub fn symbolic_matrix(&self) -> Result<Arc<SymbolicMatrix>, CircuitError> {
         self.circuit.symbolic_matrix_in_storage_order()
+    }
+
+    /// Returns the cached symbolic matrix in gate-argument order.
+    ///
+    /// The first application argument is the most-significant bit, matching
+    /// the convention of standard gate matrices and explicit
+    /// [`UnitaryGate`](crate::circuit::gate::UnitaryGate) matrices. Composite
+    /// controlled-gate construction uses this basis so that prepended
+    /// control qubits line up with the controlled block embedding.
+    pub(crate) fn symbolic_matrix_in_gate_order(
+        &self,
+    ) -> Result<Arc<SymbolicMatrix>, CircuitError> {
+        self.circuit.symbolic_matrix_in_gate_order()
     }
 
     /// Returns the name of this circuit gate.

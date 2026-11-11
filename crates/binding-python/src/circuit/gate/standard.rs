@@ -325,6 +325,10 @@ impl PyStandardGate {
     }
 
     /// Returns a multi-controlled form of this standard gate.
+    ///
+    /// Args:
+    ///     num_controls: Number of control qubits to add (default 1).
+    #[pyo3(signature = (num_controls=1))]
     fn control(&self, num_controls: u8) -> PyMcGate {
         PyMcGate {
             inner: MCGate::new(num_controls, self.inner),

@@ -284,8 +284,15 @@ impl DensityMatrixNoise {
                         }
                     }
                     Instruction::UnitaryGate(u_gate) => {
+                        // Prefer an attached numeric matrix; otherwise resolve
+                        // symbolic or circuit-backed definitions with this
+                        // operation's parameter values. Both paths yield a
+                        // gate-order matrix (first argument = MSB).
                         if let Some(matrix) = u_gate.matrix() {
                             sim.apply_unitary_gate(&qs, matrix)?;
+                            sim.apply_noise(StandardGate::U, &qs)?;
+                        } else if let Ok(matrix) = u_gate.matrix_for_params_in_gate_order(&params) {
+                            sim.apply_unitary_gate(&qs, &matrix)?;
                             sim.apply_noise(StandardGate::U, &qs)?;
                         } else {
                             return Err(QisError::CircuitError(

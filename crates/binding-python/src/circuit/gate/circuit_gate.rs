@@ -19,9 +19,12 @@
 use crate::circuit::bit::PyQubit;
 use crate::circuit::classical::PyClassicalType;
 use crate::circuit::error::CircuitError as PyCircuitError;
+use crate::circuit::gate::PyUnitaryGate;
 use crate::circuit::operation::PyValueOperation;
 use cqlib_core::circuit::Circuit;
+use cqlib_core::circuit::Instruction;
 use cqlib_core::circuit::gate::{CircuitGate, FrozenCircuit};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 /// Immutable circuit definition suitable for use inside a gate.
@@ -217,6 +220,44 @@ impl PyCircuitGate {
             .inverse()
             .map(|inner| Self { inner })
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    /// Returns a controlled version of this composite gate.
+    ///
+    /// The composite definition is embedded into a block-diagonal controlled
+    /// matrix (new control qubits first, most-significant) and wrapped as a
+    /// :class:`~cqlib.circuit.gates.UnitaryGate` whose positional parameter
+    /// signature matches this gate's. The wrapped definition stays symbolic:
+    /// concrete matrices are materialized only when the circuit is executed.
+    ///
+    /// Args:
+    ///     num_controls: Number of control qubits to add (default 1).
+    ///
+    /// Returns:
+    ///     A `UnitaryGate` acting on ``num_controls + num_qubits`` qubits. The
+    ///     first ``num_controls`` application qubits are the controls.
+    ///
+    /// Raises:
+    ///     ValueError: If ``num_controls`` is zero.
+    ///     CircuitError: If the backing circuit is not a unitary definition
+    ///         (e.g. it contains measurement or reset).
+    ///
+    /// Example:
+    ///     bell = bell_circuit.to_gate("Bell").control(1)
+    ///     outer.append_unitary_gate(bell, [control, target0, target1])
+    #[pyo3(signature = (num_controls=1))]
+    fn control(&self, num_controls: usize) -> PyResult<PyUnitaryGate> {
+        if num_controls == 0 {
+            return Err(PyValueError::new_err(
+                "num_controls must be at least 1; append the gate directly for zero controls",
+            ));
+        }
+        match Instruction::CircuitGate(Box::new(self.inner.clone())).control(num_controls) {
+            Some(Instruction::UnitaryGate(gate)) => Ok(PyUnitaryGate::from(*gate)),
+            _ => Err(PyCircuitError::new_err(
+                "controlled composite gate requires a unitary circuit definition".to_string(),
+            )),
+        }
     }
 
     /// Structural equality: name, ordered signature, and defining circuit.

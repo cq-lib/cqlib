@@ -40,7 +40,11 @@ pub fn py_expand_definitions(
     .map_err(compiler_error_to_py_err)
 }
 
-/// Synthesizes matrix-backed one- and two-qubit unitary gates.
+/// Synthesizes matrix-backed unitary gates.
+///
+/// One- and two-qubit gates use the configured synthesis targets;
+/// three-or-more-qubit gates go through the recursive Block-ZXZ
+/// decomposition with the paper's Section 5 CNOT optimizations.
 #[pyfunction(name = "decompose_unitaries")]
 #[pyo3(signature = (circuit, config=None))]
 pub fn py_decompose_unitaries(

@@ -13,10 +13,17 @@
 //! Numeric matrix-backed `UnitaryGate` synthesis.
 //!
 //! This is the circuit-facing entry point for [`super`]. It rebuilds a source
-//! circuit while replacing remaining matrix-backed one- and two-qubit
-//! `UnitaryGate` operations with standard-gate sequences. Definition expansion
+//! circuit while replacing remaining matrix-backed `UnitaryGate` operations
+//! with standard-gate sequences. Definition expansion
 //! is expected to run first: a unitary gate without a matrix representation is
 //! rejected with an error directing the caller to expand definitions.
+//!
+//! Three-or-more-qubit unitary gates are synthesized through the recursive
+//! Block-ZXZ decomposition (Krol & Al-Ars, arXiv:2403.13692) with the paper's
+//! Section 5 CNOT-count optimizations; see
+//! [`crate::compile::transform::decompose::block_zxz`]. The optimization
+//! switches are configurable through
+//! [`UnitaryDecomposeConfig::block_zxz_options`].
 //!
 //! Preserved operations are copied into a fresh circuit instead of retaining
 //! source [`CircuitParam`] indices. Their parameters are resolved against the
@@ -31,9 +38,8 @@
 //!
 //! This pass deliberately leaves ordinary standard gates such as `RX` and `RZ`
 //! unchanged. Target-basis rewrites own that behavior. Its supported input
-//! contract requires finite numeric one- or two-qubit unitary matrices. It
-//! rejects unresolved or non-finite unitary parameters, missing matrices,
-//! invalid matrix shapes, and unitary gates acting on three or more qubits.
+//! contract requires finite numeric unitary matrices. It rejects unresolved or
+//! non-finite unitary parameters, missing matrices, and invalid matrix shapes.
 
 use super::DeviceTwoQubitSynthesisContext;
 use super::two_qubit_kak::kak_decompose;
@@ -50,6 +56,9 @@ use crate::circuit::{
 };
 use crate::compile::CompilerError;
 use crate::compile::transform::analysis::WorkflowCircuitAnalysis;
+use crate::compile::transform::decompose::block_zxz::{
+    DecomposeOptions as BlockZxzDecomposeOptions, decompose_block_zxz_with_options,
+};
 use crate::compile::transform::decompose::rule::{
     DecompositionRuleCache, DecompositionRuleStats, NumericUnitaryRuleRequest,
     NumericUnitarySynthesisKey,
@@ -59,13 +68,15 @@ use crate::compile::transform::transformer::{PassApplicability, WorkflowPass};
 use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
 use ndarray::Array2;
 use num_complex::Complex64;
-use smallvec::smallvec;
+use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::collections::HashMap;
 
 const SYNTHESIS_NAME: &str = "decompose.unitary";
 const ANGLE_EPS: f64 = 1e-12;
 const PHASE_EPS: f64 = 1e-12;
+/// Absolute tolerance used by Block-ZXZ unitarity and invariant checks.
+const BLOCK_ZXZ_ATOL: f64 = 1e-10;
 
 /// Configuration for circuit-level matrix-backed `UnitaryGate` synthesis.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +86,10 @@ pub struct UnitaryDecomposeConfig {
     /// Whether matrix-backed `UnitaryGate` operations inside control-flow
     /// bodies should be synthesized recursively.
     pub recurse_control_flow: bool,
+    /// Block-ZXZ optimization switches applied to three-or-more-qubit
+    /// unitary gates (paper Section 5 reductions). Defaults to the fully
+    /// optimized configuration.
+    pub block_zxz_options: BlockZxzDecomposeOptions,
 }
 
 impl Default for UnitaryDecomposeConfig {
@@ -82,6 +97,7 @@ impl Default for UnitaryDecomposeConfig {
         Self {
             two_qubit_target: TwoQubitSynthesisTarget::default(),
             recurse_control_flow: true,
+            block_zxz_options: BlockZxzDecomposeOptions::default(),
         }
     }
 }
@@ -167,15 +183,20 @@ impl Transformer for DecomposeUnitaries {
 ///
 /// One-qubit matrices are emitted as [`StandardGate::U`] operations when a
 /// non-trivial local gate remains. Two-qubit matrices are emitted according to
-/// [`UnitaryDecomposeConfig::two_qubit_target`]. Synthesized scalar phases are
-/// preserved either as circuit global phase or, within recursively processed
-/// control-flow bodies, as explicit [`StandardGate::GPhase`] operations.
+/// [`UnitaryDecomposeConfig::two_qubit_target`]. Three-or-more-qubit matrices
+/// are synthesized through the recursive Block-ZXZ decomposition (standard
+/// `U`, `RZ`, `CX`, and `H` gates) with the paper's Section 5 optimizations,
+/// configured by [`UnitaryDecomposeConfig::block_zxz_options`]. Synthesized
+/// scalar phases are preserved either as circuit global phase or, within
+/// recursively processed control-flow bodies, as explicit
+/// [`StandardGate::GPhase`] operations.
 ///
 /// # Errors
 ///
 /// Returns [`CompilerError`] if a matrix-backed `UnitaryGate` has non-fixed
-/// parameters, no matrix representation, unsupported arity, invalid qubit
-/// arity, or if the numeric 1q/2q synthesis primitive rejects the matrix.
+/// parameters, no matrix representation, invalid qubit
+/// arity, or if the numeric 1q/2q/Block-ZXZ synthesis primitive rejects the
+/// matrix.
 pub fn decompose_unitaries(
     circuit: &Circuit,
     config: UnitaryDecomposeConfig,
@@ -615,13 +636,50 @@ impl<'a> UnitaryDecomposer<'a> {
                 )?;
                 Ok(decomposition)
             }
-            other => Err(CompilerError::TransformFailed {
-                name: SYNTHESIS_NAME,
-                reason: format!(
-                    "3q+ UnitaryGate synthesis is not supported yet; gate '{}' has {other} qubits",
-                    gate.label()
-                ),
-            }),
+            // Three or more qubits: synthesize through the recursive
+            // Block-ZXZ decomposition (paper arXiv:2403.13692), including
+            // its Section 5 CNOT-count optimizations.
+            other => {
+                let options = self.config.block_zxz_options;
+                let request = NumericUnitaryRuleRequest {
+                    num_qubits: gate.num_qubits(),
+                    matrix: matrix.as_ref(),
+                    synthesis_key: NumericUnitarySynthesisKey::block_zxz(&options),
+                };
+                if let Some((operations, phase_delta)) = self
+                    .rule_cache
+                    .instantiate_numeric_unitary(request.clone(), &operation.qubits)?
+                {
+                    return Ok(Decomposition {
+                        operations,
+                        phase_delta,
+                    });
+                }
+                let result = decompose_block_zxz_with_options(
+                    matrix.as_ref(),
+                    BLOCK_ZXZ_ATOL,
+                    &options,
+                )
+                .map_err(|source| CompilerError::TransformFailed {
+                    name: SYNTHESIS_NAME,
+                    reason: format!(
+                        "Block-ZXZ synthesis failed for UnitaryGate '{}' with {other} qubits: {source}",
+                        gate.label()
+                    ),
+                })?;
+                let decomposition = block_zxz_result_to_decomposition(
+                    &result.circuit,
+                    matrix.as_ref(),
+                    &operation.qubits,
+                )?;
+                self.rule_cache.insert_numeric_unitary(
+                    request,
+                    &operation.qubits,
+                    &decomposition.operations,
+                    decomposition.phase_delta,
+                )?;
+                Ok(decomposition)
+            }
         }
     }
 
@@ -690,6 +748,105 @@ impl<'a> UnitaryDecomposer<'a> {
     }
 }
 
+/// Converts a Block-ZXZ decomposition circuit into pass output.
+///
+/// The Block-ZXZ engine acts on local qubit ids `0..n` in the numeric
+/// LSB-first circuit basis, while a `UnitaryGate` matrix follows the
+/// MSB-first argument order (the first operation qubit is the most
+/// significant basis bit). Local qubit `L` therefore maps to
+/// `operation_qubits[n - 1 - L]`.
+///
+/// The synthesized operations implement `matrix` up to a scalar phase. The
+/// compensating phase is measured against the dense matrices and reported
+/// through [`Decomposition::phase_delta`], matching the contract of the 1q
+/// and 2q synthesis paths (`exp(i * phase_delta) * operations == matrix`).
+fn block_zxz_result_to_decomposition(
+    circuit: &Circuit,
+    matrix: &Array2<Complex64>,
+    operation_qubits: &[Qubit],
+) -> Result<Decomposition, CompilerError> {
+    let num_qubits = operation_qubits.len();
+    let remap = |local: &Qubit| -> Result<Qubit, CompilerError> {
+        let index = local.index();
+        if index >= num_qubits {
+            return Err(CompilerError::TransformFailed {
+                name: SYNTHESIS_NAME,
+                reason: format!(
+                    "Block-ZXZ output references local qubit {index} outside the 0..{num_qubits} argument range"
+                ),
+            });
+        }
+        Ok(operation_qubits[num_qubits - 1 - index])
+    };
+
+    let mut operations = Vec::with_capacity(circuit.operations().len());
+    for operation in circuit.operations() {
+        let Instruction::Standard(gate) = &operation.instruction else {
+            return Err(CompilerError::TransformFailed {
+                name: SYNTHESIS_NAME,
+                reason: format!(
+                    "Block-ZXZ output contains non-standard instruction '{}'; only U/RZ/CX/H gates are expected",
+                    operation.instruction.name()
+                ),
+            });
+        };
+        let qubits: SmallVec<[Qubit; 3]> = operation
+            .qubits
+            .iter()
+            .map(&remap)
+            .collect::<Result<_, _>>()?;
+        let mut params: SmallVec<[ParameterValue; 1]> = SmallVec::new();
+        for param in &operation.params {
+            match param {
+                CircuitParam::Fixed(value) => params.push(ParameterValue::Fixed(*value)),
+                CircuitParam::Index(_) => {
+                    return Err(CompilerError::TransformFailed {
+                        name: SYNTHESIS_NAME,
+                        reason: "Block-ZXZ output contains an unresolved symbolic parameter"
+                            .to_string(),
+                    });
+                }
+            }
+        }
+        operations.push(ValueOperation {
+            instruction: ValueInstruction::from_instruction(Instruction::Standard(*gate)),
+            qubits,
+            params,
+            label: None,
+        });
+    }
+
+    // Measure the compensating global phase. The dense matrix of the
+    // synthesized circuit (global phase included) equals e^{i delta} times
+    // the target matrix; the operations alone therefore equal
+    // e^{i (delta - global_phase)} times the target, and the pass must add
+    // back `global_phase - delta`.
+    let dense = circuit
+        .to_matrix(None)
+        .map_err(|source| CompilerError::TransformFailed {
+            name: SYNTHESIS_NAME,
+            reason: format!("failed to rebuild Block-ZXZ output matrix: {source}"),
+        })?;
+    let global_phase =
+        circuit
+            .global_phase()
+            .evaluate(&None)
+            .map_err(|_| CompilerError::TransformFailed {
+                name: SYNTHESIS_NAME,
+                reason: "Block-ZXZ output carries a non-numeric global phase".to_string(),
+            })?;
+    let mut overlap = Complex64::new(0.0, 0.0);
+    for ((row, col), &value) in matrix.indexed_iter() {
+        overlap += value.conj() * dense[[row, col]];
+    }
+    let phase_delta = global_phase - overlap.arg();
+
+    Ok(Decomposition {
+        operations,
+        phase_delta,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,6 +885,112 @@ mod tests {
             )
             .unwrap(),
             ..Default::default()
+        }
+    }
+
+    /// Deterministic xorshift64* pseudo-random generator (mirrors the
+    /// Block-ZXZ integration and C-binding test helpers).
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed.wrapping_add(0x9E37_79B9_7F4A_7C15))
+        }
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn f64(&mut self) -> f64 {
+            (self.next() >> 11) as f64 / ((1u64 << 53) as f64)
+        }
+        fn gaussian(&mut self) -> f64 {
+            let u1 = self.f64().max(1e-300);
+            let u2 = self.f64();
+            (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+        }
+    }
+
+    /// Generates a deterministic random `num_qubits`-qubit unitary through
+    /// complex Gram-Schmidt orthonormalization (no external crate needed).
+    /// With `seed = 7` the generic (non-block-diagonal, KAK-generic) inputs
+    /// hit the paper's exact CNOT counts: n=3 -> 19 optimized / 24
+    /// unoptimized, n=4 -> 95.
+    fn random_unitary(num_qubits: usize, seed: u64) -> Array2<Complex64> {
+        let dim = 1usize << num_qubits;
+        let mut rng = Rng::new(seed);
+        let source: Vec<Vec<Complex64>> = (0..dim)
+            .map(|_| {
+                (0..dim)
+                    .map(|_| Complex64::new(rng.gaussian(), rng.gaussian()))
+                    .collect()
+            })
+            .collect();
+        // Complex Gram-Schmidt on the columns of `source` -> unitary Q.
+        let one = Complex64::new(1.0, 0.0);
+        let mut q: Vec<Vec<Complex64>> = vec![vec![Complex64::new(0.0, 0.0); dim]; dim];
+        for col in 0..dim {
+            for row in 0..dim {
+                q[col][row] = source[row][col];
+            }
+            for prev in 0..col {
+                let mut proj = Complex64::new(0.0, 0.0);
+                for (reference, current) in q[prev].iter().zip(&q[col]) {
+                    proj += reference.conj() * current;
+                }
+                let basis = q[prev].clone();
+                for row in 0..dim {
+                    q[col][row] -= proj * basis[row];
+                }
+            }
+            let mut norm = 0.0f64;
+            for value in &q[col] {
+                norm += value.norm_sqr();
+            }
+            let norm = norm.sqrt();
+            if norm > 0.0 {
+                for value in &mut q[col] {
+                    *value /= norm;
+                }
+            } else {
+                q[col][col] = one;
+            }
+        }
+        let mut out = Array2::<Complex64>::zeros((dim, dim));
+        for col in 0..dim {
+            for row in 0..dim {
+                out[[row, col]] = q[col][row];
+            }
+        }
+        out
+    }
+
+    /// Counts the standard-gate operations matching `gate`.
+    fn count_standard_gates(circuit: &Circuit, gate: StandardGate) -> usize {
+        circuit
+            .operations()
+            .iter()
+            .filter(|op| matches!(op.instruction, Instruction::Standard(g) if g == gate))
+            .count()
+    }
+
+    /// Asserts that a top-level Block-ZXZ synthesis result only contains
+    /// the gates the engine emits (`U`, `RZ`, `CX`, `H`).
+    fn assert_only_block_zxz_output_gates(circuit: &Circuit) {
+        for operation in circuit.operations() {
+            assert!(
+                matches!(
+                    operation.instruction,
+                    Instruction::Standard(
+                        StandardGate::U | StandardGate::RZ | StandardGate::CX | StandardGate::H
+                    )
+                ),
+                "unexpected non-Block-ZXZ instruction: {:?}",
+                operation.instruction
+            );
         }
     }
 
@@ -1636,16 +1899,206 @@ mod tests {
     }
 
     #[test]
-    fn rejects_three_qubit_unitary_gate() {
+    fn decomposes_three_qubit_unitary_gate() {
         let gate = UnitaryGate::new("custom_3q", 3, 0)
-            .with_matrix(Array2::eye(8))
+            .with_matrix(random_unitary(3, 7))
             .unwrap();
         let mut circuit = Circuit::new(3);
         circuit
             .unitary(gate, vec![Qubit::new(0), Qubit::new(1), Qubit::new(2)])
             .unwrap();
 
-        let err = decompose_unitaries(&circuit, UnitaryDecomposeConfig::default()).unwrap_err();
-        assert!(err.to_string().contains("not supported yet"));
+        let expected = circuit_to_matrix(&circuit, None).unwrap();
+        let decomposed = decompose_unitaries(&circuit, UnitaryDecomposeConfig::default()).unwrap();
+
+        assert_only_block_zxz_output_gates(&decomposed);
+        assert_abs_diff_eq!(
+            expected,
+            circuit_to_matrix(&decomposed, None).unwrap(),
+            epsilon = 1e-9
+        );
+        // Paper Table 1: a generic three-qubit unitary costs 19 CNOTs with
+        // both Section 5 optimizations enabled.
+        assert_eq!(count_standard_gates(&decomposed, StandardGate::CX), 19);
+    }
+
+    #[test]
+    fn decomposes_four_qubit_unitary_gate() {
+        let gate = UnitaryGate::new("custom_4q", 4, 0)
+            .with_matrix(random_unitary(4, 7))
+            .unwrap();
+        let mut circuit = Circuit::new(4);
+        circuit
+            .unitary(
+                gate,
+                vec![Qubit::new(0), Qubit::new(1), Qubit::new(2), Qubit::new(3)],
+            )
+            .unwrap();
+
+        let expected = circuit_to_matrix(&circuit, None).unwrap();
+        let decomposed = decompose_unitaries(&circuit, UnitaryDecomposeConfig::default()).unwrap();
+
+        assert_only_block_zxz_output_gates(&decomposed);
+        assert_abs_diff_eq!(
+            expected,
+            circuit_to_matrix(&decomposed, None).unwrap(),
+            epsilon = 1e-9
+        );
+        // Paper Table 1: a generic four-qubit unitary costs 95 CNOTs.
+        assert_eq!(count_standard_gates(&decomposed, StandardGate::CX), 95);
+    }
+
+    #[test]
+    fn three_qubit_gate_maps_reversed_argument_order() {
+        let gate = UnitaryGate::new("custom_3q", 3, 0)
+            .with_matrix(random_unitary(3, 7))
+            .unwrap();
+        // The first gate argument is the most significant basis bit, so
+        // qubit 2 carries the top matrix row/column index. A wrong local
+        // remap direction cannot reproduce this circuit's matrix.
+        let mut circuit = Circuit::new(3);
+        circuit
+            .unitary(gate, vec![Qubit::new(2), Qubit::new(0), Qubit::new(1)])
+            .unwrap();
+
+        let expected = circuit_to_matrix(&circuit, None).unwrap();
+        let decomposed = decompose_unitaries(&circuit, UnitaryDecomposeConfig::default()).unwrap();
+        assert_abs_diff_eq!(
+            expected,
+            circuit_to_matrix(&decomposed, None).unwrap(),
+            epsilon = 1e-9
+        );
+    }
+
+    #[test]
+    fn reuses_block_zxz_rule_for_identical_matrix() {
+        let gate = UnitaryGate::new("custom_3q", 3, 0)
+            .with_matrix(random_unitary(3, 7))
+            .unwrap();
+        let mut circuit = Circuit::new(3);
+        circuit
+            .unitary(
+                gate.clone(),
+                vec![Qubit::new(0), Qubit::new(1), Qubit::new(2)],
+            )
+            .unwrap();
+        circuit
+            .unitary(gate, vec![Qubit::new(2), Qubit::new(1), Qubit::new(0)])
+            .unwrap();
+
+        let expected = circuit_to_matrix(&circuit, None).unwrap();
+        let (resolved, stats) =
+            decompose_unitaries_with_rule_stats(&circuit, UnitaryDecomposeConfig::default())
+                .unwrap();
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+        assert!(resolved.changed);
+        assert_abs_diff_eq!(
+            expected,
+            circuit_to_matrix(&resolved.circuit, None).unwrap(),
+            epsilon = 1e-9
+        );
+    }
+
+    #[test]
+    fn block_zxz_options_toggle_cx_count() {
+        let gate = UnitaryGate::new("custom_3q", 3, 0)
+            .with_matrix(random_unitary(3, 7))
+            .unwrap();
+        let mut circuit = Circuit::new(3);
+        circuit
+            .unitary(gate, vec![Qubit::new(0), Qubit::new(1), Qubit::new(2)])
+            .unwrap();
+        let expected = circuit_to_matrix(&circuit, None).unwrap();
+
+        let optimized = decompose_unitaries(&circuit, UnitaryDecomposeConfig::default()).unwrap();
+        let unoptimized = decompose_unitaries(
+            &circuit,
+            UnitaryDecomposeConfig {
+                block_zxz_options: BlockZxzDecomposeOptions::none(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Paper Table 1: a generic three-qubit unitary costs 24 CNOTs
+        // unoptimized and 19 with both Section 5 reductions enabled
+        // (A.1 saves 2 CNOTs on the single recursion layer, A.2 saves 3
+        // on the two-qubit leaves).
+        let optimized_cx = count_standard_gates(&optimized, StandardGate::CX);
+        let unoptimized_cx = count_standard_gates(&unoptimized, StandardGate::CX);
+        assert_eq!(optimized_cx, 19);
+        assert_eq!(unoptimized_cx, 24);
+        assert_abs_diff_eq!(
+            expected,
+            circuit_to_matrix(&optimized, None).unwrap(),
+            epsilon = 1e-9
+        );
+        assert_abs_diff_eq!(
+            expected,
+            circuit_to_matrix(&unoptimized, None).unwrap(),
+            epsilon = 1e-9
+        );
+    }
+
+    #[test]
+    fn decomposes_three_qubit_unitary_gate_inside_control_flow() {
+        let phase = Complex64::from_polar(1.0, 0.25);
+        let gate = UnitaryGate::new("phase_3q", 3, 0)
+            .with_matrix(random_unitary(3, 7).mapv(|value| phase * value))
+            .unwrap();
+        let mut circuit = Circuit::new(4);
+        circuit
+            .if_else(
+                ClassicalExpr::bool_literal(true),
+                |body| {
+                    body.append(
+                        Instruction::UnitaryGate(Box::new(gate)),
+                        [Qubit::new(1), Qubit::new(3), Qubit::new(0)],
+                        Vec::<ParameterValue>::new(),
+                        None,
+                    )
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+
+        let decomposed = decompose_unitaries(&circuit, UnitaryDecomposeConfig::default()).unwrap();
+        assert!(decomposed.global_phase().is_zero());
+        let Instruction::ClassicalControl(ClassicalControlOp::If(op)) =
+            &decomposed.operations()[0].instruction
+        else {
+            panic!("expected if operation");
+        };
+        let body = op.then_body();
+        assert!(matches!(
+            body.operations()[0].instruction,
+            Instruction::Standard(StandardGate::GPhase)
+        ));
+        for operation in body.operations() {
+            assert!(
+                !matches!(operation.instruction, Instruction::UnitaryGate(_)),
+                "3q unitary gate was not synthesized inside the control-flow body"
+            );
+            for qubit in &operation.qubits {
+                assert!(
+                    [1usize, 3, 0].contains(&qubit.index()),
+                    "synthesized operation leaked outside the gate qubits"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_non_unitary_three_qubit_matrix() {
+        // Gate construction rejects non-unitary matrices (UNITARITY_EPS
+        // matches the pass synthesis tolerance), so a scaled identity can
+        // never reach the Block-ZXZ synthesis path.
+        let matrix = Array2::<Complex64>::eye(8).mapv(|value| value * Complex64::new(2.0, 0.0));
+        let err = UnitaryGate::new("scaled_3q", 3, 0)
+            .with_matrix(matrix)
+            .unwrap_err();
+        assert!(matches!(err, CircuitError::InvalidOperation(_)));
+        assert!(err.to_string().contains("Matrix is not unitary"));
     }
 }

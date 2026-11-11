@@ -813,6 +813,60 @@ pub extern "C" fn circuit_circuit_gate(
         .map_or(-3, |_| 0)
 }
 
+/// Append a controlled composite gate.
+///
+/// Adds `controls_len` control qubits to the circuit-defined `gate` and
+/// appends the result. The operation's qubit list is `controls` followed by
+/// `targets` (controls are the most-significant bits, matching
+/// `circuit_multi_control`); `targets` map positionally onto the gate's own
+/// arguments and `params` bind positionally to its parameter signature. The
+/// controlled gate stays symbolic: concrete matrices are materialized only
+/// when the circuit is executed. Returns 0 on success, -1 on NULL input,
+/// -2 on out-of-bounds qubits, -3 when the definition is not unitary or the
+/// arity mismatches, -8 on a zero control count.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub extern "C" fn circuit_gate_control(
+    ptr: *mut CCircuit,
+    gate: *const CCircuitGate,
+    controls: *const u32,
+    controls_len: usize,
+    targets: *const u32,
+    targets_len: usize,
+    params: *const *const CParameter,
+    params_len: usize,
+) -> i32 {
+    if ptr.is_null() || gate.is_null() {
+        return -1;
+    }
+    if controls_len == 0 {
+        return -8;
+    }
+    let wrapper = unsafe { &mut *ptr };
+    let controls = match checked_qubits(&wrapper.inner, controls, controls_len) {
+        Ok(controls) => controls,
+        Err(code) => return code,
+    };
+    let targets = match checked_qubits(&wrapper.inner, targets, targets_len) {
+        Ok(targets) => targets,
+        Err(code) => return code,
+    };
+    let params = match param_ptrs_to_values(params, params_len) {
+        Ok(params) => params,
+        Err(code) => return code,
+    };
+    let instruction = Instruction::CircuitGate(Box::new(unsafe { (*gate).inner.clone() }));
+    let Some(controlled) = instruction.control(controls_len) else {
+        return -3;
+    };
+    let mut qubits = controls;
+    qubits.extend(targets);
+    wrapper
+        .inner
+        .append(controlled, qubits, params, None)
+        .map_or(-3, |_| 0)
+}
+
 /// Append a multi-controlled standard gate.
 ///
 /// `gate_name` is a standard-gate name ("X", "RX", "SWAP", ...; the same
