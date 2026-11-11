@@ -39,9 +39,10 @@
 //! solvable), hence `T` lies in the 2-CNOT class.
 //!
 //! Synthesis contract (see `engine::run_a2_chain`):
-//! `D_out @ circuit == target` up to global phase, where `circuit`
-//! implements `T = D @ target` and `D_out = e^{i phi_T} @ D^-1` - a pure
-//! diagonal phase matrix acting on qubits `(q1, q0)`.
+//! `D_out @ circuit.to_matrix() == target`, where the circuit stores its
+//! synthesis global phase internally (so `to_matrix()` equals
+//! `T = D @ target` exactly) and `D_out = D^-1` - a pure diagonal phase
+//! matrix acting on qubits `(q1, q0)`.
 //!
 //! Migration legality: within the assembled Block-ZXZ/A.1 circuit the
 //! non-leaf gates are only `Rz(top)`, `CX(ctrl < top -> top)` and `H(top)`.
@@ -125,9 +126,11 @@ pub struct TwoCnotSynthesis {
     /// 2-CNOT (or fewer) circuit that implements `target` together with
     /// [`diagonal_out`](Self::diagonal_out).
     pub circuit: Circuit,
-    /// Diagonal remainder `D_out = e^{i phi_T} D^-1` acting on qubits
+    /// Diagonal remainder `D_out = D^-1` acting on qubits
     /// `(q1, q0)` on the temporally later side (left end of the matrix
-    /// product), satisfying `D_out @ circuit == target` up to global phase.
+    /// product), satisfying `D_out @ circuit.to_matrix() == target`
+    /// exactly (the circuit carries its synthesis global phase
+    /// internally).
     pub diagonal_out: Cm,
     /// Number of CX gates actually used by this synthesis.
     pub cx_count: usize,
@@ -135,11 +138,13 @@ pub struct TwoCnotSynthesis {
 
 /// Decomposes `target` into a 2-CNOT circuit plus a pure diagonal remainder.
 ///
-/// Synthesis contract: `D_out @ circuit == target` up to global phase. The
-/// remainder is a unit-modulus diagonal matrix; if `target` already lies in
-/// the 2-CNOT class (e.g. local or controlled structure), or if the
-/// closed-form construction unexpectedly fails numerically, the full
-/// synthesis is returned with an identity remainder.
+/// Synthesis contract: `D_out @ circuit.to_matrix() == target` exactly -
+/// the circuit stores the synthesis global phase internally, so the
+/// remainder must not re-apply it. The remainder is a unit-modulus diagonal
+/// matrix; if `target` already lies in the 2-CNOT class (e.g. local or
+/// controlled structure), or if the closed-form construction unexpectedly
+/// fails numerically, the full synthesis is returned with an identity
+/// remainder.
 pub fn synth_two_cnot_with_diagonal(target: &Cm) -> Result<TwoCnotSynthesis, String> {
     // Baseline synthesis (3 CNOTs or fewer) - always a correct fallback.
     let baseline = synthesize_for_matrix(target)?;
@@ -154,16 +159,18 @@ pub fn synth_two_cnot_with_diagonal(target: &Cm) -> Result<TwoCnotSynthesis, Str
     }
 
     // SMB construction: T = D @ target lies in the 2-CNOT class and the
-    // remainder D_out = e^{i phi_T} D^-1 is purely diagonal.
+    // remainder D_out = D^-1 is purely diagonal.
     let d = two_cnot_phase_diagonal(target);
     let t = mat_mul(&d, target);
-    let (circuit, global_phase) = synthesize_for_matrix(&t)?;
+    // The circuit carries the synthesis global phase internally
+    // (`to_matrix()` already equals `T`), so the remainder must be exactly
+    // `D^-1`: multiplying the phase back in would double-count it.
+    let (circuit, _) = synthesize_for_matrix(&t)?;
     let cx = count_cx(&circuit);
     if cx <= 2 {
-        let phase = Complex64::from_polar(1.0, global_phase);
-        let mut d_out = adjoint(&d); // D diagonal unitary => D^-1 = D^H
-        d_out.mapv_inplace(|v| v * phase);
-        // D_out @ circuit == e^{i phi_T} D^-1 T == D^-1 D target == target.
+        // D diagonal unitary => D^-1 = D^H, and
+        // D_out @ circuit == D^-1 T == D^-1 D target == target.
+        let d_out = adjoint(&d);
         return Ok(TwoCnotSynthesis {
             circuit,
             diagonal_out: d_out,
@@ -266,8 +273,10 @@ pub fn count_cx(circuit: &Circuit) -> usize {
 }
 
 /// Synthesizes a 4x4 unitary on qubits `[1, 0]` in the Cx basis (consistent
-/// with the whole engine); returns `(circuit, global_phase)` with
-/// `e^{i phi} circuit == matrix`.
+/// with the whole engine); returns `(circuit, global_phase)` where the
+/// circuit stores `global_phase` internally, so `circuit.to_matrix() ==
+/// matrix` exactly (the bare gate product alone implements `e^{-i phi}
+/// matrix`).
 fn synthesize_for_matrix(matrix: &Cm) -> Result<(Circuit, f64), String> {
     let synthesis = synthesize_numeric_2q_unitary(
         matrix,
@@ -290,4 +299,98 @@ fn synthesize_for_matrix(matrix: &Cm) -> Result<(Circuit, f64), String> {
 pub fn synth_leaf_full(target: &Cm) -> Result<Circuit, String> {
     let (circuit, _) = synthesize_for_matrix(target)?;
     Ok(circuit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::circuit::gate::StandardGate;
+    use crate::compile::transform::decompose::block_zxz::matrix::max_abs_diff;
+    use ndarray::linalg::kron;
+
+    /// Builds a standard-gate matrix as an owned `Cm`.
+    fn gate_matrix(gate: StandardGate, params: &[f64]) -> Cm {
+        gate.matrix(params).unwrap().into_owned()
+    }
+
+    /// A generic two-qubit unitary in the 3-CNOT Weyl class: asymmetric
+    /// locals around a fully general Cartan core (all three coordinates
+    /// nonzero and far from any Weyl boundary).
+    fn generic_three_cnot_target() -> Cm {
+        let k1l = gate_matrix(StandardGate::U, &[0.2, -0.4, 0.9]);
+        let k1r = gate_matrix(StandardGate::U, &[1.0, 0.8, -0.7]);
+        let k2l = gate_matrix(StandardGate::U, &[0.7, -0.5, 0.1]);
+        let k2r = gate_matrix(StandardGate::U, &[0.3, 0.6, -0.2]);
+        let core = mat_mul(
+            &gate_matrix(StandardGate::RXX, &[-0.62]),
+            &mat_mul(
+                &gate_matrix(StandardGate::RYY, &[-0.34]),
+                &gate_matrix(StandardGate::RZZ, &[0.16]),
+            ),
+        );
+        mat_mul(&kron(&k1l, &k1r), &mat_mul(&core, &kron(&k2l, &k2r)))
+    }
+
+    /// A purely local (0-CNOT) two-qubit unitary.
+    fn local_product_target() -> Cm {
+        let left = gate_matrix(StandardGate::U, &[0.3, -0.4, 0.5]);
+        let right = gate_matrix(StandardGate::U, &[0.7, 0.2, -0.6]);
+        kron(&left, &right)
+    }
+
+    #[test]
+    fn smb_branch_satisfies_exact_remainder_contract() {
+        let target = generic_three_cnot_target();
+
+        let synthesis = synth_two_cnot_with_diagonal(&target).unwrap();
+
+        // The SMB branch must actually run: two CX and a non-identity
+        // diagonal remainder (the baseline and fallback branches return
+        // the identity).
+        assert_eq!(synthesis.cx_count, 2);
+        assert!(max_abs_diff(&synthesis.diagonal_out, &eye(4)) > 1.0e-6);
+
+        // A.2 contract: D_out @ circuit.to_matrix() == target EXACTLY,
+        // global phase included - the circuit stores the phase internally,
+        // so the remainder must be the plain D^-1 with no phase factor.
+        let dense = synthesis.circuit.to_matrix(None).unwrap();
+        let product = mat_mul(&synthesis.diagonal_out, &dense);
+        assert!(
+            max_abs_diff(&product, &target) <= 1.0e-9,
+            "max |D_out @ circuit - target| = {}",
+            max_abs_diff(&product, &target)
+        );
+    }
+
+    #[test]
+    fn smb_branch_circuit_realizes_diagonal_folded_target_exactly() {
+        let target = generic_three_cnot_target();
+        let d = two_cnot_phase_diagonal(&target);
+        let folded = mat_mul(&d, &target);
+
+        // The premise of D_out = D^-1: the synthesis circuit carries the
+        // global phase internally, so its dense matrix equals T = D @ target
+        // exactly, not merely up to phase.
+        let synthesis = synth_two_cnot_with_diagonal(&target).unwrap();
+        let dense = synthesis.circuit.to_matrix(None).unwrap();
+        assert!(
+            max_abs_diff(&dense, &folded) <= 1.0e-9,
+            "max |circuit - D @ target| = {}",
+            max_abs_diff(&dense, &folded)
+        );
+    }
+
+    #[test]
+    fn baseline_branch_returns_identity_remainder() {
+        let target = local_product_target();
+
+        let synthesis = synth_two_cnot_with_diagonal(&target).unwrap();
+
+        assert_eq!(synthesis.cx_count, 0);
+        assert!(max_abs_diff(&synthesis.diagonal_out, &eye(4)) <= 1.0e-12);
+
+        let dense = synthesis.circuit.to_matrix(None).unwrap();
+        let product = mat_mul(&synthesis.diagonal_out, &dense);
+        assert!(max_abs_diff(&product, &target) <= 1.0e-9);
+    }
 }

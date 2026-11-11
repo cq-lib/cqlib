@@ -400,9 +400,11 @@ fn collect_2q_leaf_matrices(node: &Node, out: &mut Vec<Cm>) {
 ///
 /// The `i`-th leaf's synthesis target is `U_i @ D_in` (`D_in` is the
 /// upstream remainder, initially the identity); the synthesis obeys
-/// `D_out @ circuit == U_i @ D_in` up to global phase. The remainder
-/// `D_out` is a pure diagonal matrix (the inverse phase of the SMB
-/// `two_cnot_phase_diagonal` construction plus a global phase) and commutes
+/// `D_out @ circuit.to_matrix() == U_i @ D_in` exactly - the leaf circuits
+/// carry their synthesis global phases internally, so no phase is folded
+/// into the rolling remainder. The remainder
+/// `D_out` is a pure diagonal matrix (the inverse of the SMB
+/// `two_cnot_phase_diagonal` construction) and commutes
 /// with every non-leaf gate (Rz/CX/H on higher qubits), so it transfers to
 /// the next leaf's input unchanged. The temporally last leaf uses the full
 /// 0-3 CX adaptive synthesis to absorb the whole accumulated remainder
