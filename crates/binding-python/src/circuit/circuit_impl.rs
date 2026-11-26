@@ -1007,7 +1007,9 @@ impl PyCircuit {
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
 
-    /// Appends another circuit, optionally remapping its qubits.
+    /// Appends another circuit, optionally remapping its qubits in source insertion order.
+    /// Explicit targets must be distinct and already present in this circuit.
+    /// Errors leave this circuit unchanged; existing classical handles remain valid.
     #[pyo3(signature = (other, qubits=None))]
     fn compose(&mut self, other: &PyCircuit, qubits: Option<PyIntListOrQubitList>) -> PyResult<()> {
         let qubits = qubits.map(Vec::from);

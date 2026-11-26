@@ -44,11 +44,11 @@ Returns `int32_t`: 0 on success; -1 (`ptr` NULL); -8 (`copies` less than 2).
 
 ### virtual_distillation_build_circuit(ptr)
 
-Builds the copy-swap circuit used by the virtual distillation protocol: the base circuit is first decomposed into gates, then prepared `copies` times side by side — copy `i` is shifted onto the qubit range starting at `i × base width`, with no overlap between copies — and finally a `SWAP` is inserted bitwise between the first copy and each of the other copies.
+Builds the copy-swap circuit used by the virtual distillation protocol (a Hadamard-test circuit): the base circuit is first decomposed into gates, then prepared `copies` times side by side — copy `i` is shifted onto the qubit range starting at `i × base width`, with no overlap between copies — then one ancillary qubit (the last qubit) is prepared in `|+⟩` by a Hadamard gate, and finally a ladder of `SWAP`s between adjacent copies, each controlled by the ancillary qubit (CSWAP), implements the derangement of the copies.
 
 - `ptr` (`const struct CVirtualDistillation *`): the virtual distillation handle.
 
-The circuit width is `copies × base width` (the base width being the width of the decomposed circuit); the operation count is `copies` copies of the base operations plus `(copies - 1) × base width` `SWAP` gates.
+The circuit width is `copies × base width + 1` (the base width being the width of the decomposed circuit; the last qubit is the ancillary qubit); the operation count is `copies` copies of the base operations plus one `H` and `(copies - 1) × base width` controlled `SWAP` gates.
 
 Returns `struct CCircuit *`: an owned handle of the copy-swap circuit, freed with `circuit_free`; NULL when `ptr` is NULL or construction fails.
 
@@ -56,11 +56,11 @@ Returns `struct CCircuit *`: an owned handle of the copy-swap circuit, freed wit
 
 ## Numerator and Denominator
 
-The estimator callback distinguishes the two circuits through the `hamiltonian` parameter: the numerator circuit carries the observable, the denominator circuit has none.
+The estimator callback receives a non-NULL `hamiltonian` for both circuits and tells them apart by content: the numerator observable acts on the first copy's qubits and carries `X` on the ancillary qubit; the denominator observable carries only `X` on the ancillary qubit (identities elsewhere).
 
 ### virtual_distillation_run_numerator_circuit(ptr, hamiltonian, shots, estimator, out_mean, out_variance)
 
-Runs the numerator circuit through the estimator callback to estimate `Tr(O ρ^M)`. The estimator receives the copy-swap circuit, a Hamiltonian expanded to the full copy-swap width, and `shots`. Expansion rule: the original Pauli terms keep their qubit indices, phases and coefficients; the new higher-index qubits are padded with `Z`.
+Runs the numerator circuit through the estimator callback to estimate `Tr(O ρ^M)`. The estimator receives the copy-swap circuit, a Hamiltonian expanded to the full copy-swap width, and `shots`. Expansion rule: the original Pauli terms keep their qubit indices (i.e. they act on the first copy), phases and coefficients; the remaining copies are padded with `I`, and an `X` is appended on the ancillary qubit (the last qubit).
 
 - `ptr` (`const struct CVirtualDistillation *`): the virtual distillation handle.
 - `hamiltonian` (`const struct CHamiltonian *`): the observable; its qubit count must match the base circuit width, see [Hamiltonian](../3_qis/7_hamiltonian.md) for construction.
@@ -73,7 +73,7 @@ Returns `int32_t`: 0 on success; -1 (`ptr`, `hamiltonian`, `out_mean` or `out_va
 
 ### virtual_distillation_run_denominator_circuit(ptr, shots, estimator, out_mean, out_variance)
 
-Runs the denominator circuit through the estimator callback to estimate `Tr(ρ^M)`. The estimator receives the copy-swap circuit, a NULL Hamiltonian, and `shots`.
+Runs the denominator circuit through the estimator callback to estimate `Tr(ρ^M)`. The estimator receives the copy-swap circuit, a Hamiltonian with `X` on the ancillary qubit (the last qubit) and identities elsewhere, and `shots`.
 
 - `ptr` (`const struct CVirtualDistillation *`): the virtual distillation handle.
 - `shots` (`uintptr_t`): the shot count forwarded to the estimator.
@@ -85,7 +85,7 @@ Returns `int32_t`: 0 on success; -1 (`ptr`, `out_mean` or `out_variance` NULL); 
 
 ### virtual_distillation_build_copy_swap_circuit(ptr)
 
-Constructs the copy-swap circuit from the base circuit: the base circuit is first decomposed into gates, then prepared `copies` times side by side — copy `i` is shifted onto the qubit range starting at `i × base width`, with no overlap between copies — and finally a `SWAP` is inserted bitwise between the first copy and each of the other copies. The circuit width is `copies × base width` (the base width being the width of the decomposed circuit); the operation count is `copies` copies of the base operations plus `(copies - 1) × base width` `SWAP` gates.
+Constructs the copy-swap circuit from the base circuit: the base circuit is first decomposed into gates, then prepared `copies` times side by side — copy `i` is shifted onto the qubit range starting at `i × base width`, with no overlap between copies — then one ancillary qubit (the last qubit) is prepared in `|+⟩` by a Hadamard gate, and finally a ladder of `SWAP`s between adjacent copies, each controlled by the ancillary qubit, implements the derangement of the copies. The circuit width is `copies × base width + 1` (the base width being the width of the decomposed circuit); the operation count is `copies` copies of the base operations plus one `H` and `(copies - 1) × base width` controlled `SWAP` gates.
 
 - `ptr` (`const struct CVirtualDistillation *`): the virtual distillation handle.
 
@@ -119,20 +119,21 @@ The variance is combined with a first-order Taylor approximation, assuming the n
 #include <stdio.h>
 #include "cqlib_c.h"
 
-/* The numerator circuit carries the observable, the denominator does not */
+/* Both the numerator and the denominator carry a Hamiltonian — the
+   numerator acts on the first copy's qubits and carries X on the
+   ancillary qubit, the denominator carries only X on the ancillary
+   qubit; simulate the circuit exactly and evaluate the observable */
 static void estimate(const struct CCircuit *circuit,
                      const struct CHamiltonian *hamiltonian,
                      uintptr_t shots,
                      double *expectation,
                      double *variance) {
-    if (hamiltonian != NULL) {
-        *expectation = 1.5;
-        *variance = 0.25;
-    } else {
-        *expectation = 2.0;
-        *variance = 1.0;
-    }
-    (void)circuit;
+    struct CStatevector *sv = statevector_from_circuit(circuit);
+    double value = 0.0;
+    statevector_expectation(sv, hamiltonian, &value);
+    statevector_free(sv);
+    *expectation = value;
+    *variance = 0.0;
     (void)shots;
 }
 
@@ -142,13 +143,13 @@ int main(void) {
     circuit_x(qc, 0);
     struct CVirtualDistillation *vd = virtual_distillation_new(qc, 2);
 
-    /* Copy-swap circuit: width = 2 × 1 = 2 */
+    /* Copy-swap circuit: width = 2 × 1 + 1 = 3 */
     struct CCircuit *copy_swap = virtual_distillation_build_circuit(vd);
 
     struct CPauliString *z = pauli_string_parse("Z");
     struct CHamiltonian *obs = hamiltonian_from_pauli(z);  /* takes ownership of z */
 
-    /* mu_vd = 1.5 / 2.0 = 0.75 */
+    /* For rho = |1><1|: numerator Tr(Z rho^2) = -1, denominator Tr(rho^2) = 1 */
     double mean = 0.0, variance = 0.0;
     virtual_distillation_run_vd(vd, obs, 3, 2, estimate, &mean, &variance);
     printf("VD estimate: %f\n", mean);

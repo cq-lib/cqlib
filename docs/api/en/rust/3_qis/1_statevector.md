@@ -32,7 +32,10 @@ Methods:
 
 ### Construction and amplitude access
 
+`new` panic when the dimension is unrepresentable or state allocation fails. Use the corresponding `try_*` constructor to handle these errors. Zero-qubit states are supported.
+
 - `fn new(num_qubits: usize) -> Self`: construct the `|0...0>` state with the first component set to 1 and the rest 0.
+- `fn try_new(num_qubits: usize) -> Result<Self, QisError>`: construct the ground state, returning `QisError::InvalidParameterValue` for an unrepresentable dimension or `QisError::UnsupportedOperation` when state allocation fails.
 - `fn from_state(num_qubits: usize, initial_state: Vec<Complex64>) -> Result<Self, QisError>`: construct from the given amplitudes; the length must equal `2^num_qubits` and the state must already be normalized.
 - `fn data(&self) -> &[Complex64]`: read all amplitudes as a shared slice.
 - `fn data_mut(&mut self) -> &mut [Complex64]`: read all amplitudes as a mutable slice; modification may break normalization.

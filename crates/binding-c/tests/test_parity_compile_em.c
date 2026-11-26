@@ -64,7 +64,8 @@ static void test_copy_swap_circuit(void) {
 
     CCircuit* copy_swap = virtual_distillation_build_copy_swap_circuit(vd);
     assert(copy_swap != NULL);
-    assert(circuit_num_qubits(copy_swap) == 2);
+    /* copies (2) * base width (1) + 1 ancilla qubit. */
+    assert(circuit_num_qubits(copy_swap) == 3);
     assert(circuit_num_operations(copy_swap) > 0);
     circuit_free(copy_swap);
 

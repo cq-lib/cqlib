@@ -351,16 +351,34 @@ impl Statevector {
     /// assert_eq!(sv.num_qubits, 2);
     /// assert_eq!(sv.data().len(), 4); // 2^2 amplitudes
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the dimension is unrepresentable or allocation fails.
+    /// Use [`Self::try_new`] to receive an error instead.
     pub fn new(num_qubits: usize) -> Self {
-        let size = 1 << num_qubits;
+        Self::try_new(num_qubits).expect("cannot allocate statevector")
+    }
+
+    /// Creates the ground state, returning an error for an unrepresentable
+    /// dimension or a failed allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QisError::InvalidParameterValue`] for an unrepresentable
+    /// dimension, or [`QisError::UnsupportedOperation`] if allocation fails.
+    pub fn try_new(num_qubits: usize) -> Result<Self, QisError> {
+        let size = super::checked_state_len(num_qubits, false)?;
         // 64-byte aligned allocation — zero-initialised (all amplitudes = 0+0i).
-        let mut data = AlignedBuffer::<Complex64>::new_zeroed(size);
+        let mut data = AlignedBuffer::<Complex64>::try_new_zeroed(size).ok_or_else(|| {
+            QisError::UnsupportedOperation("statevector allocation failed".into())
+        })?;
         data[0] = Complex64::new(1.0, 0.0); // |0...0⟩
-        Statevector {
+        Ok(Statevector {
             data,
             num_qubits,
             qubit_map: None,
-        }
+        })
     }
 
     /// Creates a statevector from initial amplitudes with normalization check.
@@ -389,7 +407,7 @@ impl Statevector {
     /// let sv = Statevector::from_state(2, amps);
     /// ```
     pub fn from_state(num_qubits: usize, initial_state: Vec<Complex64>) -> Result<Self, QisError> {
-        let size = 1 << num_qubits;
+        let size = super::checked_state_len(num_qubits, false)?;
         if initial_state.len() != size {
             return Err(QisError::InvalidStateDimension(initial_state.len()));
         }
@@ -397,12 +415,14 @@ impl Statevector {
         // summing many amplitudes accumulates floating-point roundoff.
         let norm: f64 = initial_state.iter().map(|c| c.norm_sqr()).sum();
         let tolerance = 1e-10 * (size.max(1) as f64);
-        if (norm - 1.0).abs() >= tolerance {
+        if !norm.is_finite() || (norm - 1.0).abs() >= tolerance {
             return Err(QisError::NotNormalized);
         }
 
         // Copy caller-provided Vec into 64-byte aligned buffer.
-        let mut data = AlignedBuffer::<Complex64>::new_zeroed(size);
+        let mut data = AlignedBuffer::<Complex64>::try_new_zeroed(size).ok_or_else(|| {
+            QisError::UnsupportedOperation("statevector allocation failed".into())
+        })?;
         data.as_mut_slice().copy_from_slice(&initial_state);
         Ok(Statevector {
             data,
@@ -444,13 +464,14 @@ impl Statevector {
     /// let sv = Statevector::from_circuit(&circuit).unwrap();
     /// ```
     pub fn from_circuit(circuit: &Circuit) -> Result<Self, QisError> {
-        let mut sv = Statevector::new(circuit.num_qubits());
+        let mut sv = Statevector::try_new(circuit.num_qubits())?;
         sv.apply_circuit(circuit)?;
         Ok(sv)
     }
 
     /// Applies a quantum circuit to this statevector in-place.
     ///
+    /// The circuit's resolved global phase is applied, retaining nonzero residuals.
     /// Once bound to circuit qubit IDs, subsequent circuits must have the same
     /// IDs in the same order. The mapping is committed only on success; gates
     /// completed before an error are not rolled back.
@@ -500,6 +521,15 @@ impl Statevector {
         // Decompose circuit to basic gates
         let circuit = circuit.decompose()?;
         super::validate_terminal_measurements(&circuit)?;
+        let global_phase = circuit
+            .global_phase()
+            .evaluate(&None)
+            .map_err(|_| QisError::CircuitError(CircuitError::SymbolicParameterError))?;
+        if !global_phase.is_finite() {
+            return Err(QisError::InvalidParameterValue(
+                "circuit global phase must be finite".into(),
+            ));
+        }
         let sv = self;
 
         let qubit_map = super::prepare_qubit_map(&circuit.qubits(), &sv.qubit_map)?;
@@ -546,44 +576,31 @@ impl Statevector {
                     let num_controls = mc_gate.num_ctrl_qubits();
                     let base_gate = mc_gate.base_gate();
 
-                    if num_controls == 1 {
-                        // Single-controlled gate
-                        let control = qubit_indices[0];
-                        let target = qubit_indices[1];
-                        match base_gate {
-                            StandardGate::X => sv.apply_cx(control, target)?,
-                            StandardGate::Y => sv.apply_cy(control, target)?,
-                            StandardGate::Z => sv.apply_cz(control, target)?,
-                            StandardGate::RX => {
-                                let theta = params[0];
-                                sv.apply_crx(control, target, theta)?;
-                            }
-                            StandardGate::RY => {
-                                let theta = params[0];
-                                sv.apply_cry(control, target, theta)?;
-                            }
-                            StandardGate::RZ => {
-                                let theta = params[0];
-                                sv.apply_crz(control, target, theta)?;
-                            }
-                            _ => {
-                                let matrix = mc_gate.matrix(&params).map_err(|_| {
-                                    QisError::CircuitError(CircuitError::NoMatrixRepresentation)
-                                })?;
-                                sv.apply_unitary_gate(&qubit_indices, &matrix)?;
-                            }
+                    match (num_controls, *base_gate) {
+                        (0, StandardGate::GPhase) => {
+                            sv.apply_standard_gate(*base_gate, &qubit_indices, &params)?
                         }
-                    } else if num_controls == 2 && *base_gate == StandardGate::X {
-                        // Toffoli gate
-                        let c0 = qubit_indices[0];
-                        let c1 = qubit_indices[1];
-                        let target = qubit_indices[2];
-                        sv.apply_ccx(c0, c1, target)?;
-                    } else {
-                        let matrix = mc_gate.matrix(&params).map_err(|_| {
-                            QisError::CircuitError(CircuitError::NoMatrixRepresentation)
-                        })?;
-                        sv.apply_unitary_gate(&qubit_indices, &matrix)?;
+                        (1, StandardGate::X) => sv.apply_cx(qubit_indices[0], qubit_indices[1])?,
+                        (1, StandardGate::Y) => sv.apply_cy(qubit_indices[0], qubit_indices[1])?,
+                        (1, StandardGate::Z) => sv.apply_cz(qubit_indices[0], qubit_indices[1])?,
+                        (1, StandardGate::RX) => {
+                            sv.apply_crx(qubit_indices[0], qubit_indices[1], params[0])?
+                        }
+                        (1, StandardGate::RY) => {
+                            sv.apply_cry(qubit_indices[0], qubit_indices[1], params[0])?
+                        }
+                        (1, StandardGate::RZ) => {
+                            sv.apply_crz(qubit_indices[0], qubit_indices[1], params[0])?
+                        }
+                        (2, StandardGate::X) => {
+                            sv.apply_ccx(qubit_indices[0], qubit_indices[1], qubit_indices[2])?
+                        }
+                        _ => {
+                            let matrix = mc_gate.matrix(&params).map_err(|_| {
+                                QisError::CircuitError(CircuitError::NoMatrixRepresentation)
+                            })?;
+                            sv.apply_unitary_gate(&qubit_indices, &matrix)?;
+                        }
                     }
                 }
                 Instruction::UnitaryGate(u_gate) => {
@@ -624,6 +641,7 @@ impl Statevector {
             }
         }
 
+        sv.apply_gphase(global_phase)?;
         sv.qubit_map = Some(qubit_map);
         Ok(())
     }
@@ -2668,7 +2686,7 @@ impl Statevector {
     /// # Arguments
     /// * `phi` - Phase angle
     pub fn apply_gphase(&mut self, phi: f64) -> Result<(), QisError> {
-        if phi.abs() < 1e-15 {
+        if phi == 0.0 {
             return Ok(());
         }
         let phase = Complex64::from_polar(1.0, phi);

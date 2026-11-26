@@ -120,6 +120,8 @@ assert plot_state_paulivec(state) == plot_state_paulivec(density)
 
 计算量子态在 Pauli 基下的期望值，并渲染成柱状图。
 
+默认标签遵循 `PauliString`：最高位在左，qubit 0 在最右侧。例如，两比特态的 `IX` 表示 qubit 0 上的 X。启用 `reverse_bits` 仅反转每个标签中的字符顺序，对应的期望值不变。
+
 参数：
 
 - `state` (`QuantumState`)：待渲染的量子态。

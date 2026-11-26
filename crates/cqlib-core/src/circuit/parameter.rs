@@ -40,7 +40,323 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::str::FromStr;
-use symb_anafis::{Expr, Simplify, parse, symb};
+use symb_anafis::{Expr, Simplify, parse, symb, visitor::ExprView};
+
+// The engine's map() treats polynomials as opaque and visits rebuilt nodes.
+// Walk the public view instead: it exposes polynomial terms, and replacement
+// expressions are returned immediately without being traversed themselves.
+fn substitute_parameter_expr<'a>(expr: &Expr, lookup: &impl Fn(&str) -> Option<&'a Expr>) -> Expr {
+    match expr.view() {
+        ExprView::Number(_) => expr.clone(),
+        ExprView::Symbol(name) => lookup(&name).cloned().unwrap_or_else(|| expr.clone()),
+        ExprView::Sum(children) | ExprView::Product(children) => {
+            let mapped: Vec<_> = children
+                .iter()
+                .map(|child| substitute_parameter_expr(child, lookup))
+                .collect();
+            if children.iter().zip(&mapped).all(|(a, b)| a.as_ref() == b) {
+                return expr.clone();
+            }
+
+            // Smart sum/product constructors can prune tiny coefficients.
+            // Construct a template of distinct function calls first, then use
+            // map() only on that template, whose children have no polynomials.
+            // Inserted expressions never pass through the smart constructors.
+            let slots = (0..mapped.len())
+                .map(|i| Expr::func("__cqlib_substitution_slot", Expr::number(i as f64)))
+                .collect();
+            let template = if matches!(expr.view(), ExprView::Sum(_)) {
+                Expr::sum(slots)
+            } else {
+                Expr::product(slots)
+            };
+            let slots = match template.view() {
+                ExprView::Sum(slots) | ExprView::Product(slots) => slots.into_owned(),
+                _ => return mapped.into_iter().next().unwrap_or(template),
+            };
+            // Match in template order so reconstruction preserves the original
+            // child order even if construction sorted the placeholder nodes.
+            let replacements: HashMap<_, _> = slots
+                .into_iter()
+                .map(|slot| (*slot).clone())
+                .zip(mapped)
+                .collect();
+            template.map(|node| {
+                replacements
+                    .get(node)
+                    .cloned()
+                    .unwrap_or_else(|| node.clone())
+            })
+        }
+        ExprView::Div(lhs, rhs) => {
+            let a = substitute_parameter_expr(lhs, lookup);
+            let b = substitute_parameter_expr(rhs, lookup);
+            if &a == lhs && &b == rhs {
+                expr.clone()
+            } else {
+                div_parameter_expr(a, b)
+            }
+        }
+        ExprView::Pow(base, exponent) => {
+            let a = substitute_parameter_expr(base, lookup);
+            let b = substitute_parameter_expr(exponent, lookup);
+            if &a == base && &b == exponent {
+                expr.clone()
+            } else {
+                Expr::pow_static(a, b)
+            }
+        }
+        ExprView::Function { name, args } => {
+            let mapped: Vec<_> = args
+                .iter()
+                .map(|arg| substitute_parameter_expr(arg, lookup))
+                .collect();
+            if args.iter().zip(&mapped).all(|(a, b)| a.as_ref() == b) {
+                expr.clone()
+            } else {
+                Expr::func_multi(name, mapped)
+            }
+        }
+        ExprView::Derivative { inner, var, order } => {
+            let mapped = substitute_parameter_expr(inner, lookup);
+            if &mapped == inner {
+                expr.clone()
+            } else {
+                Expr::derivative(mapped, var, order)
+            }
+        }
+    }
+}
+
+// Integral coefficients in the exactly representable integer range cannot
+// trigger the engine's near-zero/near-one pruning. Ordinary sums of symbols
+// therefore avoid coefficient collection and expression rebuilding entirely.
+fn needs_affine_protection(expr: &Expr) -> bool {
+    match expr.view() {
+        ExprView::Number(value) => value.fract() != 0.0 || value.abs() > (1u64 << 53) as f64,
+        ExprView::Sum(children) | ExprView::Product(children) => {
+            children.iter().any(|child| needs_affine_protection(child))
+        }
+        ExprView::Div(numerator, denominator) => {
+            needs_affine_protection(numerator)
+                || denominator.as_number().is_some_and(|value| {
+                    value != 0.0 && needs_affine_protection(&Expr::number(1.0 / value))
+                })
+        }
+        _ => false,
+    }
+}
+
+type AffineCoefficients = HashMap<Option<Expr>, f64>;
+
+// Coefficients are collected once per input, using hashed symbol keys. Building
+// a replacement AST is deferred until the engine actually changes a coefficient.
+fn affine_coefficients(inputs: &[(&Expr, f64)]) -> Option<AffineCoefficients> {
+    fn collect(expr: &Expr, scale: f64, terms: &mut AffineCoefficients) -> Option<()> {
+        match expr.view() {
+            ExprView::Number(value) => *terms.entry(None).or_default() += scale * value,
+            ExprView::Symbol(_) => *terms.entry(Some(expr.clone())).or_default() += scale,
+            ExprView::Sum(children) => {
+                for child in children.iter() {
+                    collect(child, scale, terms)?;
+                }
+            }
+            ExprView::Product(children) => {
+                let mut scale = scale;
+                let mut symbolic = None;
+                for child in children.iter() {
+                    if let Some(value) = child.as_number() {
+                        scale *= value;
+                    } else if symbolic.replace(child).is_some() {
+                        return None;
+                    }
+                }
+                if let Some(child) = symbolic {
+                    collect(child, scale, terms)?;
+                } else {
+                    *terms.entry(None).or_default() += scale;
+                }
+            }
+            ExprView::Div(numerator, denominator) => {
+                let divisor = denominator.as_number()?;
+                if divisor == 0.0 {
+                    return None;
+                }
+                collect(numerator, scale / divisor, terms)?;
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
+    let mut terms = HashMap::new();
+    for (expr, scale) in inputs {
+        collect(expr, *scale, &mut terms)?;
+    }
+    if terms.values().any(|coefficient| !coefficient.is_finite()) {
+        return None;
+    }
+    terms.retain(|_, coefficient| *coefficient != 0.0);
+    Some(terms)
+}
+
+fn weighted_symbol(symbol: Expr, coefficient: f64) -> Expr {
+    if coefficient == 0.0 {
+        return Expr::number(0.0);
+    }
+    if coefficient == 1.0 {
+        return symbol;
+    }
+    let product = Expr::product(vec![Expr::number(coefficient), symbol.clone()]);
+    if let ExprView::Product(factors) = product.view()
+        && factors
+            .iter()
+            .any(|factor| factor.as_number() == Some(coefficient))
+    {
+        return product;
+    }
+    // Public map() reconstructs products without approximate numeric pruning.
+    // If construction rounded a near-unit coefficient, insert its exact value
+    // into a non-unit product template after construction.
+    Expr::product(vec![Expr::number(2.0), symbol]).map(|factor| {
+        if factor.as_number() == Some(2.0) {
+            Expr::number(coefficient)
+        } else {
+            factor.clone()
+        }
+    })
+}
+
+fn affine_expr(terms: &AffineCoefficients) -> Expr {
+    // Construct a sum of distinct unit-weight symbols before inserting weights,
+    // preventing automatic polynomial conversion from deleting small terms.
+    let unit_sum = Expr::sum(
+        terms
+            .keys()
+            .map(|symbol| symbol.clone().unwrap_or_else(|| Expr::number(1.0)))
+            .collect(),
+    );
+    unit_sum.map(|node| {
+        if node.as_number() == Some(1.0) {
+            Expr::number(terms.get(&None).copied().unwrap_or(1.0))
+        } else if matches!(node.view(), ExprView::Symbol(_)) {
+            weighted_symbol(
+                node.clone(),
+                terms.get(&Some(node.clone())).copied().unwrap_or(1.0),
+            )
+        } else {
+            node.clone()
+        }
+    })
+}
+
+fn preserve_affine(expected: Option<AffineCoefficients>, fallback: Expr) -> Expr {
+    match expected {
+        Some(expected) if expected.keys().all(Option::is_none) => {
+            Expr::number(expected.get(&None).copied().unwrap_or(0.0))
+        }
+        Some(expected) if affine_coefficients(&[(&fallback, 1.0)]).as_ref() != Some(&expected) => {
+            affine_expr(&expected)
+        }
+        _ => fallback,
+    }
+}
+
+fn add_parameter_expr(lhs: Expr, rhs: Expr) -> Expr {
+    if let (Some(a), Some(b)) = (lhs.as_number(), rhs.as_number()) {
+        return Expr::number(a + b);
+    }
+    if !needs_affine_protection(&lhs) && !needs_affine_protection(&rhs) {
+        return lhs + rhs;
+    }
+    let affine = affine_coefficients(&[(&lhs, 1.0), (&rhs, 1.0)]);
+    preserve_affine(affine, lhs + rhs)
+}
+
+fn sub_parameter_expr(lhs: Expr, rhs: Expr) -> Expr {
+    if let (Some(a), Some(b)) = (lhs.as_number(), rhs.as_number()) {
+        return Expr::number(a - b);
+    }
+    if !needs_affine_protection(&lhs) && !needs_affine_protection(&rhs) {
+        return lhs - rhs;
+    }
+    let affine = affine_coefficients(&[(&lhs, 1.0), (&rhs, -1.0)]);
+    preserve_affine(affine, lhs - rhs)
+}
+
+// The common rotation-angle case needs neither a coefficient map nor a second
+// symbolic operation. Handle one weighted symbol directly, including rescaling.
+fn scaled_symbol(expr: &Expr, scale: f64) -> Option<Expr> {
+    let (symbol, coefficient) = match expr.view() {
+        ExprView::Symbol(_) => (expr.clone(), scale),
+        ExprView::Product(children) if children.len() == 2 => {
+            let (number, symbol) = if let Some(number) = children[0].as_number() {
+                (number, &children[1])
+            } else {
+                (children[1].as_number()?, &children[0])
+            };
+            if !matches!(symbol.view(), ExprView::Symbol(_)) {
+                return None;
+            }
+            ((**symbol).clone(), number * scale)
+        }
+        _ => return None,
+    };
+    coefficient
+        .is_finite()
+        .then(|| weighted_symbol(symbol, coefficient))
+}
+
+fn mul_parameter_expr(lhs: Expr, rhs: Expr) -> Expr {
+    if let (Some(a), Some(b)) = (lhs.as_number(), rhs.as_number()) {
+        return Expr::number(a * b);
+    }
+    let affine = if let Some(scale) = lhs.as_number() {
+        if let Some(expr) = scaled_symbol(&rhs, scale) {
+            return expr;
+        }
+        if !needs_affine_protection(&lhs) && !needs_affine_protection(&rhs) {
+            return lhs * rhs;
+        }
+        affine_coefficients(&[(&rhs, scale)])
+    } else if let Some(scale) = rhs.as_number() {
+        if let Some(expr) = scaled_symbol(&lhs, scale) {
+            return expr;
+        }
+        if !needs_affine_protection(&lhs) && !needs_affine_protection(&rhs) {
+            return lhs * rhs;
+        }
+        affine_coefficients(&[(&lhs, scale)])
+    } else {
+        None
+    };
+    preserve_affine(affine, lhs * rhs)
+}
+
+fn div_parameter_expr(lhs: Expr, rhs: Expr) -> Expr {
+    if let (Some(a), Some(b)) = (lhs.as_number(), rhs.as_number())
+        && b != 0.0
+    {
+        return Expr::number(a / b);
+    }
+    let affine = if let Some(divisor) = rhs.as_number().filter(|value| *value != 0.0) {
+        affine_coefficients(&[(&lhs, 1.0)]).and_then(|mut terms| {
+            // Divide coefficients directly: the reciprocal of a subnormal
+            // divisor can overflow even when the quotient is representable.
+            for coefficient in terms.values_mut() {
+                *coefficient /= divisor;
+            }
+            if terms.values().any(|coefficient| !coefficient.is_finite()) {
+                return None;
+            }
+            terms.retain(|_, coefficient| *coefficient != 0.0);
+            Some(terms)
+        })
+    } else {
+        None
+    };
+    preserve_affine(affine, lhs / rhs)
+}
 
 /// A symbolic or numeric parameter used to represent gate angles and other
 /// continuous values in a quantum circuit.
@@ -261,6 +577,11 @@ impl Parameter {
     ///
     /// Simplification is performed in a domain-safe mode to avoid invalid
     /// transformations (e.g. taking the log of a potentially negative number).
+    /// For affine sums, scalar products and division by numeric constants,
+    /// nonzero `f64` coefficients and cancellation results are preserved without
+    /// tolerance pruning. Numeric literals are retained exactly. Floating-point
+    /// rounding, overflow and underflow still apply. Parsing and general
+    /// nonlinear simplification use the symbolic engine's own numeric policy.
     ///
     /// # Examples
     ///
@@ -273,8 +594,16 @@ impl Parameter {
     /// assert_eq!(simplified.to_string(), "θ");
     /// ```
     pub fn simplify(&self) -> Result<Self, ParameterError> {
+        if self.expr.as_number().is_some() {
+            return Ok(self.clone());
+        }
+        let affine = needs_affine_protection(&self.expr)
+            .then(|| affine_coefficients(&[(&self.expr, 1.0)]))
+            .flatten();
         let expr = Simplify::new().domain_safe(true).simplify(&self.expr)?;
-        Ok(Self { expr })
+        Ok(Self {
+            expr: preserve_affine(affine, expr),
+        })
     }
 
     /// Returns the numeric value of this parameter without symbolic
@@ -292,10 +621,11 @@ impl Parameter {
 
     /// Returns the canonical storage form of this parameter expression.
     ///
-    /// The parameter is first simplified. If the simplified expression has no
-    /// free symbols, it is evaluated to a concrete finite value and rebuilt as
-    /// a numeric parameter. This also normalizes `-0.0` to `0.0`, giving circuit
-    /// operation storage a stable representation for equivalent constants.
+    /// A constant expression is evaluated before symbolic simplification. If
+    /// simplification eliminates all symbols, the result is also evaluated and
+    /// rebuilt as a finite numeric parameter. This also normalizes `-0.0` to
+    /// `0.0`, giving circuit operation storage a stable representation for
+    /// equivalent constants.
     ///
     /// Symbolic expressions are returned in their simplified form. This method
     /// does not intern symbolic parameters into any circuit; use
@@ -308,6 +638,11 @@ impl Parameter {
     /// Returns [`ParameterError`] if simplification fails, a constant expression
     /// cannot be evaluated, or the evaluated constant is not finite.
     pub fn canonicalized(&self) -> Result<Self, ParameterError> {
+        // Evaluate constant expressions before any approximate symbolic rewrite.
+        if self.get_symbols().is_empty() {
+            let value = self.evaluate(&None)?;
+            return Ok(Parameter::from(if value == 0.0 { 0.0 } else { value }));
+        }
         let simplified = self.simplify()?;
 
         if simplified.get_symbols().is_empty() {
@@ -525,6 +860,7 @@ impl Parameter {
 
     /// Substitutes every occurrence of `symbol` in this expression with
     /// `param`, returning the resulting expression.
+    /// The inserted expression is not visited again; the original is unchanged.
     ///
     /// # Examples
     ///
@@ -539,7 +875,9 @@ impl Parameter {
     pub fn replace(&self, symbol: &str, param: impl Into<Self>) -> Self {
         let p: Self = param.into();
         Self {
-            expr: self.expr.substitute(symbol, &p.expr),
+            expr: substitute_parameter_expr(&self.expr, &|name| {
+                (name == symbol).then_some(&p.expr)
+            }),
         }
     }
 
@@ -566,12 +904,13 @@ impl Parameter {
             .map(|_| symbol)
     }
 
-    /// Substitutes every bound symbol in this expression and simplifies when possible.
+    /// Simultaneously substitutes bound symbols and simplifies when possible.
+    ///
+    /// Replacement expressions are inserted as-is, without applying other
+    /// bindings to them. The result is independent of binding iteration order,
+    /// and the original expression is unchanged.
     pub fn substitute_many(&self, bindings: &HashMap<String, Parameter>) -> Self {
-        let mut substituted = self.clone();
-        for (symbol, value) in bindings {
-            substituted = substituted.replace(symbol, value.clone());
-        }
+        let substituted = self.substitute_many_simultaneous(bindings);
         substituted.simplify().unwrap_or(substituted)
     }
 
@@ -586,15 +925,8 @@ impl Parameter {
         if bindings.is_empty() {
             return self.clone();
         }
-        let replacements = bindings
-            .iter()
-            .map(|(symbol, replacement)| (Self::symbol(symbol).expr, &replacement.expr))
-            .collect::<Vec<_>>();
-        Self::new(self.expr.map(|node| {
-            replacements
-                .iter()
-                .find(|(symbol, _)| node == symbol)
-                .map_or_else(|| node.clone(), |(_, replacement)| (*replacement).clone())
+        Self::new(substitute_parameter_expr(&self.expr, &|name| {
+            bindings.get(name).map(|replacement| &replacement.expr)
         }))
     }
 
@@ -812,7 +1144,8 @@ impl From<i32> for Parameter {
 /// type `$t` in both directions (e.g. `Parameter + f64` and `f64 + Parameter`).
 ///
 /// The implementation converts `$t` to `Parameter` via `Parameter::from`, extracts the
-/// underlying `Expr`, and delegates to the corresponding `Expr` operator.
+/// underlying `Expr`, and preserves affine coefficients before falling back to
+/// the corresponding symbolic engine operator.
 macro_rules! impl_ops_for_type {
     ($t:ty) => {
         // Parameter + T
@@ -822,8 +1155,8 @@ macro_rules! impl_ops_for_type {
                 Self {
                     // 1. `Parameter::from(rhs)` converts the primitive to `Parameter`.
                     // 2. `.expr` unwraps the underlying `Expr` node.
-                    // 3. `self.expr + ...` invokes `symb_anafis`'s `Add` impl.
-                    expr: self.expr + Parameter::from(rhs).expr,
+                    // 3. Preserve affine coefficients before general symbolic addition.
+                    expr: add_parameter_expr(self.expr, Parameter::from(rhs).expr),
                 }
             }
         }
@@ -833,7 +1166,7 @@ macro_rules! impl_ops_for_type {
             type Output = Parameter;
             fn add(self, rhs: Parameter) -> Self::Output {
                 Parameter {
-                    expr: Parameter::from(self).expr + rhs.expr,
+                    expr: add_parameter_expr(Parameter::from(self).expr, rhs.expr),
                 }
             }
         }
@@ -843,7 +1176,7 @@ macro_rules! impl_ops_for_type {
             type Output = Parameter;
             fn sub(self, rhs: $t) -> Self::Output {
                 Self {
-                    expr: self.expr - Parameter::from(rhs).expr,
+                    expr: sub_parameter_expr(self.expr, Parameter::from(rhs).expr),
                 }
             }
         }
@@ -853,7 +1186,7 @@ macro_rules! impl_ops_for_type {
             type Output = Parameter;
             fn sub(self, rhs: Parameter) -> Self::Output {
                 Parameter {
-                    expr: Parameter::from(self).expr - rhs.expr,
+                    expr: sub_parameter_expr(Parameter::from(self).expr, rhs.expr),
                 }
             }
         }
@@ -863,7 +1196,7 @@ macro_rules! impl_ops_for_type {
             type Output = Parameter;
             fn mul(self, rhs: $t) -> Self::Output {
                 Self {
-                    expr: self.expr * Parameter::from(rhs).expr,
+                    expr: mul_parameter_expr(self.expr, Parameter::from(rhs).expr),
                 }
             }
         }
@@ -873,7 +1206,7 @@ macro_rules! impl_ops_for_type {
             type Output = Parameter;
             fn mul(self, rhs: Parameter) -> Self::Output {
                 Parameter {
-                    expr: Parameter::from(self).expr * rhs.expr,
+                    expr: mul_parameter_expr(Parameter::from(self).expr, rhs.expr),
                 }
             }
         }
@@ -883,7 +1216,7 @@ macro_rules! impl_ops_for_type {
             type Output = Parameter;
             fn div(self, rhs: $t) -> Self::Output {
                 Self {
-                    expr: self.expr / Parameter::from(rhs).expr,
+                    expr: div_parameter_expr(self.expr, Parameter::from(rhs).expr),
                 }
             }
         }
@@ -893,7 +1226,7 @@ macro_rules! impl_ops_for_type {
             type Output = Parameter;
             fn div(self, rhs: Parameter) -> Self::Output {
                 Parameter {
-                    expr: Parameter::from(self).expr / rhs.expr,
+                    expr: div_parameter_expr(Parameter::from(self).expr, rhs.expr),
                 }
             }
         }
@@ -919,15 +1252,15 @@ impl_ops_for_type!(u32);
 /// Cloning `Expr` is inexpensive because `symb_anafis` uses reference-counted
 /// node sharing internally.
 macro_rules! impl_binary_op_ref {
-    ($($trait:ident, $method:ident),* $(,)?) => {
+    ($($trait:ident, $method:ident, $expr_method:ident);* $(;)?) => {
         $(
             // 1. Parameter op Parameter — both sides consumed.
             impl $trait<Parameter> for Parameter {
                 type Output = Parameter;
                 fn $method(self, rhs: Parameter) -> Self::Output {
                     Parameter {
-                        // Delegate directly to the underlying `Expr` operator.
-                        expr: self.expr.$method(rhs.expr),
+                        // Preserve affine coefficients before general symbolic arithmetic.
+                        expr: $expr_method(self.expr, rhs.expr),
                     }
                 }
             }
@@ -939,7 +1272,7 @@ macro_rules! impl_binary_op_ref {
                     Parameter {
                         // `Expr::clone` is cheap — the tree uses Arc-based
                         // node sharing inside `symb_anafis`.
-                        expr: self.expr.clone().$method(rhs.expr.clone()),
+                        expr: $expr_method(self.expr.clone(), rhs.expr.clone()),
                     }
                 }
             }
@@ -949,7 +1282,7 @@ macro_rules! impl_binary_op_ref {
                 type Output = Parameter;
                 fn $method(self, rhs: &'a Parameter) -> Self::Output {
                     Parameter {
-                        expr: self.expr.$method(rhs.expr.clone()),
+                        expr: $expr_method(self.expr, rhs.expr.clone()),
                     }
                 }
             }
@@ -959,7 +1292,7 @@ macro_rules! impl_binary_op_ref {
                 type Output = Parameter;
                 fn $method(self, rhs: Parameter) -> Self::Output {
                     Parameter {
-                        expr: self.expr.clone().$method(rhs.expr),
+                        expr: $expr_method(self.expr.clone(), rhs.expr),
                     }
                 }
             }
@@ -968,10 +1301,10 @@ macro_rules! impl_binary_op_ref {
 }
 
 impl_binary_op_ref! {
-    Add, add,
-    Sub, sub,
-    Mul, mul,
-    Div, div,
+    Add, add, add_parameter_expr;
+    Sub, sub, sub_parameter_expr;
+    Mul, mul, mul_parameter_expr;
+    Div, div, div_parameter_expr;
 }
 
 // Implement Neg for owned Parameter
@@ -979,7 +1312,7 @@ impl Neg for Parameter {
     type Output = Parameter;
     fn neg(self) -> Self::Output {
         Parameter {
-            expr: self.expr.neg(),
+            expr: mul_parameter_expr(Expr::number(-1.0), self.expr),
         }
     }
 }
@@ -989,7 +1322,7 @@ impl Neg for &Parameter {
     type Output = Parameter;
     fn neg(self) -> Self::Output {
         Parameter {
-            expr: self.expr.clone().neg(),
+            expr: mul_parameter_expr(Expr::number(-1.0), self.expr.clone()),
         }
     }
 }

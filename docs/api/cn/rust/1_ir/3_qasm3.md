@@ -99,6 +99,7 @@ use cqlib_core::ir::{qasm3_load, qasm3_loads, qasm3_dump, qasm3_dumps};
 - 子程序与外部调用：`def` 子程序、`extern`
 - 硬件相关：硬件量子比特、`output` 声明，以及除角度与浮点以外的 `input` 声明
 - 其它语句：`alias`、`pragma`、注解、旧式声明
+- 程序终止：`end`；任何作用域中出现时均明确拒绝，包括不可达分支和零次循环
 - 门修饰符：`negctrl`、`pow`；`ctrl` 与 `inv` 仅在目标门存在对应实现时可用
 - 部分标准门：`ch`、`cp`、`cu`、`cswap`
 - 控制流：`while` 在实现中存在下降路径，但运行时条件的循环当前会被语义检查拒绝；`for` 只支持范围为常量的静态展开形式

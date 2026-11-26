@@ -24,7 +24,9 @@
 //!
 //! The returned coordinates satisfy the Weyl chamber convention
 //! `pi/4 >= a >= b >= |c|`, with the additional boundary convention that
-//! `c >= 0` when `a = pi/4`. The compiler-facing lowering lives in
+//! `c >= 0` when `a = pi/4`. Coordinates within floating-point roundoff of
+//! that wall are normalized to `a = pi/4` before selecting its representative.
+//! The compiler-facing lowering lives in
 //! `unitary_2q.rs`; this file owns only the numerical decomposition contract.
 //!
 //! The implementation validates finite 4x4 input, the intermediate symmetric
@@ -49,6 +51,10 @@ const UNITARY_EPS: f64 = 1e-8;
 const RECONSTRUCTION_EPS: f64 = 1e-7;
 const AUTONNE_EPS: f64 = 10.0 * UNITARY_EPS;
 const KRON_RANK_EPS: f64 = 1e-8;
+// Angle extraction and folding accumulate a small number of f64 rounding
+// errors. This allowance is deliberately independent of input unitarity and
+// reconstruction tolerances: genuine interior coordinates may have c < 0.
+const WEYL_BOUNDARY_EPS: f64 = 32.0 * f64::EPSILON;
 
 static B_RAW: [[Complex64; 4]; 4] = [
     [c(1.0, 0.0), c(0.0, 1.0), c(0.0, 0.0), c(0.0, 0.0)],
@@ -301,7 +307,7 @@ pub fn kak_decompose(matrix: &Array2<Complex64>) -> Result<KakDecomposition, Com
         global_phase -= FRAC_PI_2;
     }
 
-    let decomp = KakDecomposition {
+    let mut decomp = KakDecomposition {
         global_phase,
         k1l,
         k1r,
@@ -312,10 +318,31 @@ pub fn kak_decompose(matrix: &Array2<Complex64>) -> Result<KakDecomposition, Com
         c: cs[2],
     };
 
+    canonicalize_weyl_boundary(&mut decomp);
     validate_weyl_chamber(decomp.a, decomp.b, decomp.c)?;
     validate_local_su2(&decomp)?;
     validate_reconstruction(matrix, &decomp)?;
     Ok(decomp)
+}
+
+fn canonicalize_weyl_boundary(decomp: &mut KakDecomposition) {
+    if (decomp.a - FRAC_PI_4).abs() <= WEYL_BOUNDARY_EPS {
+        // For unitary local factors, snapping by delta changes the matrix's
+        // spectral norm by 2*|sin(delta/2)| <= |delta|. Restrict this change to
+        // roundoff; the final reconstruction is still checked against input.
+        decomp.a = FRAC_PI_4;
+        if decomp.c < 0.0 {
+            // Write C(a,b,c) = exp(i*(a*XX+b*YY+c*ZZ)). Pauli multiplication
+            // and exp(i*pi*XX/2) = i*XX give the boundary identity
+            // C(pi/4,b,c) = -i*(iX ⊗ iZ)*C(pi/4,b,-c)*(I ⊗ iY).
+            // All three local multipliers are in SU(2).
+            decomp.k1l = decomp.k1l.dot(&*IPX_MATRIX);
+            decomp.k1r = decomp.k1r.dot(&*IPZ_MATRIX);
+            decomp.k2r = IPY_MATRIX.dot(&decomp.k2r);
+            decomp.global_phase -= FRAC_PI_2;
+            decomp.c = -decomp.c;
+        }
+    }
 }
 
 fn validate_weyl_chamber(a: f64, b: f64, c: f64) -> Result<(), CompilerError> {
@@ -337,9 +364,11 @@ fn validate_weyl_chamber(a: f64, b: f64, c: f64) -> Result<(), CompilerError> {
             c.abs()
         )));
     }
-    if (a - FRAC_PI_4).abs() < eps && c < -eps {
+    // Boundary normalization sets a exactly to this constant. An epsilon band
+    // here would incorrectly reject valid interior points with negative c.
+    if a == FRAC_PI_4 && c < 0.0 {
         return Err(kak_failed(format!(
-            "Weyl chamber violation: a=pi/4 but c={c} < 0"
+            "Weyl chamber violation: a={a} on pi/4 wall but c={c} < 0"
         )));
     }
     Ok(())
@@ -768,6 +797,7 @@ fn decompose_two_qubit_product_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::test_utils::kak_boundary_matrix;
     use approx::assert_abs_diff_eq;
     use ndarray::linalg::kron;
 
@@ -813,6 +843,76 @@ mod tests {
             decomp.c,
             decomp.b
         );
+        if decomp.a == FRAC_PI_4 {
+            assert!(
+                decomp.c >= 0.0,
+                "negative c={} on the a=pi/4 wall",
+                decomp.c
+            );
+        }
+    }
+
+    #[test]
+    fn weyl_boundary_reported_matrix_preserves_full_reconstruction() {
+        for phase in [0.0, -1.1, FRAC_PI_4, FRAC_PI_2, PI, 2.7] {
+            let matrix =
+                kak_boundary_matrix().mapv(|value| value * Complex64::from_polar(1.0, phase));
+            let decomp = kak_decompose(&matrix).unwrap();
+            assert_eq!(decomp.a, FRAC_PI_4);
+            assert!(decomp.c > 0.0);
+            assert_weyl_chamber(&decomp);
+            validate_local_su2(&decomp).unwrap();
+            assert!(max_entry_diff(&matrix, &reconstructed_from_kak(&decomp)) < 1e-12);
+        }
+    }
+
+    #[test]
+    fn weyl_boundary_distinguishes_roundoff_from_interior_coordinates() {
+        let left = kron(
+            &StandardGate::RY.matrix(&[0.7]).unwrap(),
+            &StandardGate::RZ.matrix(&[-0.4]).unwrap(),
+        );
+        let right = kron(
+            &StandardGate::RX.matrix(&[-1.1]).unwrap(),
+            &StandardGate::RY.matrix(&[0.3]).unwrap(),
+        );
+        for delta in [0.0, 4.0 * f64::EPSILON, 1e-12, 1e-10, 5e-9, 2e-8] {
+            for sign in [-1.0, 1.0] {
+                for c in [-0.03, 0.03, -1e-12, 1e-12] {
+                    let a = FRAC_PI_4 + sign * delta;
+                    let rxx = StandardGate::RXX.matrix(&[-2.0 * a]).unwrap();
+                    let ryy = StandardGate::RYY.matrix(&[-0.4]).unwrap();
+                    let rzz = StandardGate::RZZ.matrix(&[-2.0 * c]).unwrap();
+                    let matrix = left
+                        .dot(&rxx.dot(&ryy.dot(&rzz.dot(&right))))
+                        .mapv(|value| value * Complex64::from_polar(1.0, 0.37));
+                    let decomp = kak_decompose(&matrix).unwrap();
+                    assert_weyl_chamber(&decomp);
+                    validate_local_su2(&decomp).unwrap();
+                    if delta <= 4.0 * f64::EPSILON {
+                        assert_eq!(decomp.a, FRAC_PI_4);
+                        assert!(decomp.c >= 0.0);
+                    } else {
+                        assert!(decomp.a < FRAC_PI_4);
+                        let expected_c = if sign < 0.0 { c } else { -c };
+                        assert_eq!(decomp.c.is_sign_negative(), expected_c.is_sign_negative());
+                        assert!((decomp.a - (FRAC_PI_4 - delta)).abs() < 1e-14);
+                    }
+                    assert!(max_entry_diff(&matrix, &reconstructed_from_kak(&decomp)) < 1e-12);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn weyl_boundary_validator_accepts_negative_c_in_the_interior() {
+        for distance in [1e-12, 1e-10, 5e-9, 2e-8] {
+            validate_weyl_chamber(FRAC_PI_4 - distance, 0.2, -0.03).unwrap();
+        }
+        assert!(validate_weyl_chamber(FRAC_PI_4, 0.2, -0.03).is_err());
+        assert!(validate_weyl_chamber(FRAC_PI_4, 0.2, -1e-12).is_err());
+        assert!(validate_weyl_chamber(FRAC_PI_4 + 1e-6, 0.2, 0.03).is_err());
+        assert!(validate_weyl_chamber(0.3, 0.2, 0.25).is_err());
     }
 
     #[test]

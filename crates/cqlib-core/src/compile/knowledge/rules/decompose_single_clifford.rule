@@ -168,3 +168,8 @@ rule decompose_y2m_to_x2m {
     match { Y2M 0 }
     rewrite { RZ(-π/2) 0, X2M 0, RZ(π/2) 0 }
 }
+
+rule decompose_h_to_u {
+    match { H 0 }
+    rewrite { U(π/2, 0, π) 0 }
+}

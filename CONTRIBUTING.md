@@ -63,7 +63,7 @@ Keep common changes scoped to the relevant module when possible, and avoid combi
 The project currently requires:
 
 - Rust 1.89+
-- Python 3.10+
+- Python 3.11+
 - A C 11+ toolchain for C binding development
 
 We recommend using `rustup` for Rust toolchains and a Python virtual environment for Python dependencies.

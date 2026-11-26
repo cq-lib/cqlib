@@ -347,3 +347,30 @@ fn test_extrapolate_api_exponential() {
         .unwrap();
     assert!((extrapolated - a).abs() < 1e-10);
 }
+
+#[test]
+fn folding_preserves_full_matrix_including_global_phase() {
+    use crate::circuit::Parameter;
+    for gates in [false, true] {
+        let mut c = Circuit::from_qubits(vec![Qubit::new(5)]).unwrap();
+        c.set_global_phase(Parameter::from(0.37));
+        if gates {
+            c.h(Qubit::new(5)).unwrap();
+            c.t(Qubit::new(5)).unwrap();
+        }
+        let expected = c.to_matrix(None).unwrap();
+        let zne = ZNEMitigation::new(c, vec![0, 1, 2]);
+        let selected = [Instruction::Standard(StandardGate::H)];
+        for selection in [None, Some(selected.as_slice()), Some([].as_slice())] {
+            for folded in zne.fold_circuits(selection).unwrap() {
+                let actual = folded.to_matrix(None).unwrap();
+                assert!(
+                    actual
+                        .iter()
+                        .zip(expected.iter())
+                        .all(|(a, b)| (*a - *b).norm() < 1e-12)
+                );
+            }
+        }
+    }
+}

@@ -23,6 +23,63 @@ fn eval(ptr: *const CParameter, bindings: &str) -> f64 {
 }
 
 #[test]
+fn param_substitution_swaps_symbols_simultaneously() {
+    let x = param_symbol(cstr("x").as_ptr());
+    let y = param_symbol(cstr("y").as_ptr());
+    let expression = param_parse(cstr("x + 2*y").as_ptr());
+    let name_x = cstr("x");
+    let name_y = cstr("y");
+    for (names, values) in [
+        (
+            [name_x.as_ptr(), name_y.as_ptr()],
+            [y.cast_const(), x.cast_const()],
+        ),
+        (
+            [name_y.as_ptr(), name_x.as_ptr()],
+            [x.cast_const(), y.cast_const()],
+        ),
+    ] {
+        for _ in 0..100 {
+            let result = param_substitute_many(expression, names.as_ptr(), values.as_ptr(), 2);
+            assert!(!result.is_null());
+            let value = eval(result, "x:1,y:3");
+            param_free(result);
+            assert_eq!(value, 5.0);
+        }
+    }
+    assert_eq!(eval(expression, "x:1,y:3"), 7.0);
+    for ptr in [x, y, expression] {
+        param_free(ptr);
+    }
+}
+
+#[test]
+fn param_substitution_reaches_polynomial_symbols() {
+    let x = param_symbol(cstr("x").as_ptr());
+    let y = param_symbol(cstr("y").as_ptr());
+    let square = param_mul(x, x);
+    let sum = param_add(square, x);
+    let one = param_from_double(1.0);
+    let expression = param_add(sum, one);
+    let name = cstr("x");
+    let replaced = param_replace(expression, name.as_ptr(), y);
+    let substituted = param_substitute_many(
+        expression,
+        [name.as_ptr()].as_ptr(),
+        [y.cast_const()].as_ptr(),
+        1,
+    );
+    for result in [replaced, substituted] {
+        assert!(!result.is_null());
+        assert_eq!(eval(result, "y:2"), 7.0);
+        param_free(result);
+    }
+    for ptr in [x, y, square, sum, one, expression] {
+        param_free(ptr);
+    }
+}
+
+#[test]
 fn param_construction_and_constants() {
     let theta = param_symbol(cstr("theta").as_ptr());
     assert!(!theta.is_null());

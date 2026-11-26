@@ -60,6 +60,38 @@ fn scaled_constant_expressions_remain_param() {
 }
 
 #[test]
+fn small_symbolic_scales_survive_canonicalization_and_substitution() {
+    let input = ParameterValue::Param(Parameter::symbol("theta"));
+    for factor in [1e-16, -1e-16, 1e-12 / 512.0, f64::from_bits(1)] {
+        let ParameterValue::Param(scaled) = input.scaled(factor) else {
+            panic!("symbolic input must remain Param");
+        };
+        let canonical = scaled.canonicalized().unwrap();
+        assert!(canonical.get_symbols().contains("theta"));
+        assert_eq!(
+            canonical
+                .evaluate(&Some(HashMap::from([("theta", 1.0)])))
+                .unwrap(),
+            factor
+        );
+
+        let renamed = canonical.replace("theta", Parameter::symbol("time"));
+        let rescaled = ParameterValue::Param(renamed).scaled(-0.5);
+        let ParameterValue::Param(rescaled) = rescaled else {
+            unreachable!()
+        };
+        let canonical = rescaled.canonicalized().unwrap();
+        let expected = factor * -0.5;
+        assert_eq!(
+            canonical
+                .evaluate(&Some(HashMap::from([("time", 1e16)])))
+                .unwrap(),
+            expected * 1e16
+        );
+    }
+}
+
+#[test]
 fn scaled_rejects_non_finite_factors_for_both_variants() {
     for input in [
         ParameterValue::Fixed(2.0),

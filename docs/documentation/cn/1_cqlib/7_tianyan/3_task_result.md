@@ -92,8 +92,8 @@ for result in partial_results:
 
 ```python
 results = task.wait(
-    timeout_secs=120.0,
-    poll_interval_secs=5.0,
+    timeout=120.0,
+    poll_interval=5.0,
 )
 
 for result in results:
@@ -106,8 +106,8 @@ for result in results:
 
 | 参数 | 说明 |
 |---|---|
-| `timeout_secs` | 最大等待秒数 |
-| `poll_interval_secs` | 轮询间隔秒数，默认 `5.0` |
+| `timeout` | 最大等待秒数 |
+| `poll_interval` | 轮询间隔秒数，默认 `5.0` |
 
 `wait()` 在阻塞等待时会释放 Python GIL，因此不会阻塞其他 Python 线程运行。
 
@@ -117,8 +117,8 @@ for result in results:
 
 ```python
 raw_results = task.wait_raw(
-    timeout_secs=120.0,
-    poll_interval_secs=5.0,
+    timeout=120.0,
+    poll_interval=5.0,
 )
 ```
 
@@ -180,7 +180,7 @@ print(len(task.task_ids))  # 120
 | 现象 | 常见原因 | 处理方式 |
 |---|---|---|
 | 提交失败 | 后端不可用、QCIS 格式错误、API Key 无效或网络问题 | 检查 `backend.status`、QCIS 文本和认证状态 |
-| `wait` 超时 | 队列等待时间长或任务未完成 | 增大 `timeout_secs`，或改用 `status()` 分批查询 |
+| `wait` 超时 | 队列等待时间长或任务未完成 | 增大 `timeout`，或改用 `status()` 分批查询 |
 | 返回结果少于提交线路数 | 使用了 `status()`，它只返回已完成结果 | 使用 `wait()` 等待全部完成 |
 | counts 为空 | 平台结果尚未完成或解析失败 | 检查任务状态和原始错误信息 |
 | 概率和 counts 不一致 | 概率由 counts 归一化得到，矫正模式可能改变 counts | 对比 `wait()` 和 `wait_raw()` |

@@ -72,32 +72,27 @@ Returns `int32_t`: 0 on success; -1 (`ptr`, `out_expectation` or `out_variance` 
 
 ## Example
 
-A complete flow with the virtual distillation method (the callback branches on the numerator circuit carrying the observable vs. the denominator circuit having none, see the [module overview](0_overview.md)):
+A complete flow with the virtual distillation method (both the numerator and the denominator callbacks receive a non-NULL Hamiltonian, see the [module overview](0_overview.md)):
 
 ```c
 #include <stdio.h>
 #include "cqlib_c.h"
 
-/* Estimator callback: the numerator circuit carries the observable
-   (exact simulation); the denominator circuit has none */
+/* Estimator callback: both the numerator and the denominator carry a
+   Hamiltonian (the numerator acts on the first copy's qubits and carries
+   X on the ancillary qubit; the denominator carries only X on the
+   ancillary qubit) — simulate the circuit exactly and evaluate it */
 static void estimate(const struct CCircuit *circuit,
                      const struct CHamiltonian *hamiltonian,
                      uintptr_t shots,
                      double *expectation,
                      double *variance) {
-    if (hamiltonian != NULL) {
-        struct CStatevector *sv = statevector_from_circuit(circuit);
-        double value = 0.0;
-        statevector_expectation(sv, hamiltonian, &value);
-        statevector_free(sv);
-        *expectation = value;
-        *variance = 0.0;
-    } else {
-        /* Denominator Tr(rho^M): estimated from measurement outcomes by a
-           sampling estimator; a sample value is returned here */
-        *expectation = 1.0;
-        *variance = 0.0;
-    }
+    struct CStatevector *sv = statevector_from_circuit(circuit);
+    double value = 0.0;
+    statevector_expectation(sv, hamiltonian, &value);
+    statevector_free(sv);
+    *expectation = value;
+    *variance = 0.0;
     (void)shots;
 }
 

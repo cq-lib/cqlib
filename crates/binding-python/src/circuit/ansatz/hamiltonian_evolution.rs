@@ -361,8 +361,9 @@ impl From<PyPauliEvolutionAnsatz> for PauliEvolutionAnsatz {
 impl PyPauliEvolutionAnsatz {
     /// Creates a new ``PauliEvolutionAnsatz`` from a Hamiltonian.
     ///
-    /// The Hamiltonian is automatically **simplified** (phases absorbed, duplicate
-    /// terms merged, near-zero terms removed) before any further processing.
+    /// The Hamiltonian is normalized (phases absorbed and duplicate terms merged).
+    /// Imaginary residuals with magnitude <= 1e-10 are projected to zero; larger
+    /// ones are rejected. Every nonzero real coefficient is retained.
     ///
     /// Default strategy is :meth:`EvolutionStrategy.auto` with ``steps=1``.
     ///

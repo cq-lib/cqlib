@@ -445,7 +445,8 @@ pub extern "C" fn param_replace(
     box_param(unsafe { (*a).inner.replace(symbol, replacement) })
 }
 
-/// Substitute several symbols in one call and simplify the result.
+/// Simultaneously substitute symbols and simplify the result. Replacement
+/// expressions are not substituted again; the original parameter is unchanged.
 /// `names` and `values` are parallel arrays of length `len`. Returns a new
 /// parameter, or NULL on NULL input, non-UTF-8 names or NULL elements.
 #[unsafe(no_mangle)]

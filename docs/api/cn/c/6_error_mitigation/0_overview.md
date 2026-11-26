@@ -56,7 +56,7 @@ typedef void (*CEstimatorFn)(const struct CCircuit *circuit,
 
 - **指针有效期**：`circuit`、`hamiltonian` 及全部出参指针仅在回调执行期间有效；回调返回后不得继续使用，也不得保存到回调之外。
 - **hamiltonian 所有权**：`hamiltonian` 句柄归库所有，回调不得释放它。回调收到的哈密顿量可能已按流程需要扩展到折叠/拷贝线路的宽度。
-- **出参写入**：回调必须通过 `expectation` 写入期望值；方差已知时写入 `variance`，未知时写入 NaN。虚拟蒸馏的分母电路估计中 `hamiltonian` 为 NULL，回调按无可观测量处理。
+- **出参写入**：回调必须通过 `expectation` 写入期望值；方差已知时写入 `variance`，未知时写入 NaN。虚拟蒸馏的分子与分母估计都会传入非 NULL 的 `hamiltonian`：分子可观测量作用在第 0 份副本的比特上并在辅助比特上携带 `X`，分母可观测量只在辅助比特上携带 `X`（其余比特为恒等）。
 - **shots 语义**：`shots` 为 0 表示「未指定」，回调自行决定采样规模；非 0 时为调用方建议的采样数。
 
 回调内部可自由调用模拟器接口（如 [态矢量](../3_qis/1_statevector.md) 的 `statevector_from_circuit` + `statevector_expectation`）完成估计。

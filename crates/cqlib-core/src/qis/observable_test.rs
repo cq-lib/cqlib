@@ -390,3 +390,162 @@ fn test_empty_hamiltonian_variance_is_zero() {
 fn test_variance_tiny_negative_roundoff_clamps_to_zero() {
     assert_close(finalize_variance(-VARIANCE_TOLERANCE / 2.0).unwrap(), 0.0);
 }
+
+#[test]
+fn nonhermitian_observables_are_rejected_even_at_zero_expectation() {
+    let sv = Statevector::new(1);
+    let dm = DensityMatrix::new(1);
+    let probs = HashMap::from([("0".to_string(), 1.0)]);
+    for label in ["iZ", "-iI", "iX"] {
+        let p: PauliString = label.parse().unwrap();
+        let h = Hamiltonian::from_pauli(p.clone());
+        let measurements = vec![(p.clone(), probs.clone())];
+        for obs in [&p as &dyn Observable, &h as &dyn Observable] {
+            assert!(matches!(
+                obs.expectation_statevector(&sv),
+                Err(QisError::NotHermitian)
+            ));
+            assert!(matches!(
+                obs.expectation_density_matrix(&dm),
+                Err(QisError::NotHermitian)
+            ));
+            assert!(matches!(
+                obs.expectation_probs(&measurements),
+                Err(QisError::NotHermitian)
+            ));
+        }
+        assert!(matches!(p.expectation(&probs), Err(QisError::NotHermitian)));
+    }
+}
+
+#[test]
+fn hermiticity_is_checked_after_phase_and_duplicate_merging() {
+    let sv = Statevector::new(1);
+    let dm = DensityMatrix::new(1);
+    let probs = vec![(
+        "Z".parse().unwrap(),
+        HashMap::from([("0".to_string(), 1.0)]),
+    )];
+    for terms in [
+        vec![("iZ", Complex64::new(0.0, -1.0))],
+        vec![
+            ("Z", Complex64::new(1.0, 2.0)),
+            ("Z", Complex64::new(0.0, -2.0)),
+        ],
+        vec![("Z", Complex64::new(1e-11, 0.0))],
+    ] {
+        let h = Hamiltonian::from_list(
+            terms
+                .iter()
+                .map(|(p, c)| (p.parse().unwrap(), *c))
+                .collect(),
+        )
+        .unwrap();
+        let expected = if terms[0].1.re == 1e-11 { 1e-11 } else { 1.0 };
+        for actual in [
+            h.expectation_statevector(&sv).unwrap(),
+            h.expectation_density_matrix(&dm).unwrap(),
+            h.expectation_probs(&probs).unwrap(),
+        ] {
+            assert!((actual - expected).abs() < 1e-14);
+        }
+    }
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let h =
+            Hamiltonian::from_list(vec![("Z".parse().unwrap(), Complex64::new(bad, 0.0))]).unwrap();
+        assert!(matches!(
+            h.expectation_statevector(&sv),
+            Err(QisError::InvalidParameterValue(_))
+        ));
+        assert!(matches!(
+            h.expectation_density_matrix(&dm),
+            Err(QisError::InvalidParameterValue(_))
+        ));
+        assert!(matches!(
+            h.expectation_probs(&probs),
+            Err(QisError::InvalidParameterValue(_))
+        ));
+    }
+    let h = Hamiltonian::from_pauli("iZZ".parse().unwrap());
+    assert!(matches!(
+        h.expectation_statevector(&sv),
+        Err(QisError::QubitMismatch { .. })
+    ));
+}
+
+#[test]
+fn hermiticity_tolerance_and_merged_overflow() {
+    for (imaginary, valid) in [(0.5e-10, true), (2e-10, false)] {
+        let h =
+            Hamiltonian::from_list(vec![("Z".parse().unwrap(), Complex64::new(1.0, imaginary))])
+                .unwrap();
+        assert_eq!(
+            h.expectation_statevector(&Statevector::new(1)).is_ok(),
+            valid
+        );
+        assert_eq!(
+            h.expectation_density_matrix(&DensityMatrix::new(1)).is_ok(),
+            valid
+        );
+    }
+    let h = Hamiltonian::from_list(vec![
+        ("Z".parse().unwrap(), Complex64::new(f64::MAX, 0.0));
+        2
+    ])
+    .unwrap();
+    assert!(matches!(
+        h.expectation_statevector(&Statevector::new(1)),
+        Err(QisError::InvalidParameterValue(_))
+    ));
+}
+
+#[test]
+fn variance_validates_coefficients_before_merging_and_retains_small_terms() {
+    let sv = Statevector::new(1);
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        for coeff in [Complex64::new(bad, 0.0), Complex64::new(0.0, bad)] {
+            let h = Hamiltonian::from_list(vec![("Z".parse().unwrap(), coeff)]).unwrap();
+            assert!(matches!(
+                h.variance_statevector(&sv),
+                Err(QisError::InvalidParameterValue(_))
+            ));
+        }
+    }
+    let h = Hamiltonian::from_list(vec![
+        ("Z".parse().unwrap(), Complex64::new(f64::MAX, 0.0));
+        2
+    ])
+    .unwrap();
+    assert!(matches!(
+        h.variance_statevector(&sv),
+        Err(QisError::InvalidParameterValue(_))
+    ));
+    for terms in [
+        vec![("iX", Complex64::new(0.0, -1.0))],
+        vec![
+            ("X", Complex64::new(1.0, 2.0)),
+            ("X", Complex64::new(0.0, -2.0)),
+        ],
+    ] {
+        let h = Hamiltonian::from_list(
+            terms
+                .into_iter()
+                .map(|(p, c)| (p.parse().unwrap(), c))
+                .collect(),
+        )
+        .unwrap();
+        assert!((h.variance_statevector(&sv).unwrap() - 1.0).abs() < 1e-12);
+    }
+    let h =
+        Hamiltonian::from_list(vec![("X".parse().unwrap(), Complex64::new(1e-11, 0.0))]).unwrap();
+    assert!((h.variance_statevector(&sv).unwrap() - 1e-22).abs() < 1e-34);
+    let invalid = Hamiltonian::from_pauli("iZ".parse().unwrap());
+    assert!(matches!(
+        invalid.variance_statevector(&sv),
+        Err(QisError::NotHermitian)
+    ));
+    assert!(matches!(
+        invalid.variance_statevector(&Statevector::new(2)),
+        Err(QisError::QubitMismatch { .. })
+    ));
+}

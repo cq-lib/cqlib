@@ -233,9 +233,15 @@ pub fn py_kak_decompose(py: Python<'_>, matrix: Bound<'_, PyAny>) -> PyResult<Py
         .map_err(compiler_error_to_py_err)
 }
 
-fn extract_complex_matrix(py: Python<'_>, matrix: Bound<'_, PyAny>) -> PyResult<Array2<Complex64>> {
+pub(super) fn extract_complex_matrix(
+    py: Python<'_>,
+    matrix: Bound<'_, PyAny>,
+) -> PyResult<Array2<Complex64>> {
     let numpy = py.import("numpy")?;
-    let array = numpy.call_method1("array", (matrix, "complex128"))?;
+    // Require both C-contiguous layout and alignment so non-element-multiple
+    // byte strides (e.g. 40-byte row stride for 16-byte Complex64) and
+    // unaligned C-contiguous buffers are normalized before ndarray reads them.
+    let array = numpy.call_method1("require", (matrix, "complex128", ["C", "A"]))?;
     let array = array.cast_into::<PyArray2<Complex64>>().map_err(|_| {
         PyTypeError::new_err("matrix must be convertible to a two-dimensional complex128 array")
     })?;

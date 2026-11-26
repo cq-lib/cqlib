@@ -261,6 +261,7 @@ Recommended principle: if a circuit is mainly used for cross-toolchain exchange,
 | `reset`, `barrier`, `gphase` | Supported |
 | Custom gate | Supported for a mappable gate body |
 | calibration, pulse, extern, hardware qubit, alias | Currently not supported |
+| Program termination `end` | Explicitly rejected in every scope, including unreachable branches and zero-iteration loops |
 | Arbitrary complex classical arithmetic | Lossless lowering is currently not supported |
 | Complex lvalue slicing, multi-dimensional indexing | Currently not supported, or only the necessary subset is supported |
 

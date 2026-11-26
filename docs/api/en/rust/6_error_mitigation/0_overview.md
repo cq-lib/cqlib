@@ -24,7 +24,7 @@ This module does not include a simulation or execution backend; all mitigation m
 pub type Estimator<'a> = dyn Fn(&Circuit, Option<&Hamiltonian>, Option<usize>) -> (f64, f64) + 'a;
 ```
 
-The parameters are, in order, the circuit to execute, the observable to estimate and the number of shots, and the return value is `(expectation value, variance)`. A denominator circuit carries no observable, so the second parameter is `None`; `ZNEMitigation::run_em_sequence` does not specify a number of shots, so the third parameter is `None`. Public methods uniformly accept it as `&Estimator<'_>`, that is, the trait object reference `&dyn Fn(&Circuit, Option<&Hamiltonian>, Option<usize>) -> (f64, f64)`, and both closures and function items can be passed by reference directly. Only virtual distillation uses the variance in the return value; zero-noise extrapolation takes only the expectation value.
+The parameters are, in order, the circuit to execute, the observable to estimate and the number of shots, and the return value is `(expectation value, variance)`. Virtual distillation passes a concrete observable for both the numerator and the denominator — the denominator observable is `X` on the ancillary qubit of the copy-swap circuit; `ZNEMitigation::run_em_sequence` does not specify a number of shots, so the third parameter is `None`. Public methods uniformly accept it as `&Estimator<'_>`, that is, the trait object reference `&dyn Fn(&Circuit, Option<&Hamiltonian>, Option<usize>) -> (f64, f64)`, and both closures and function items can be passed by reference directly. Only virtual distillation uses the variance in the return value; zero-noise extrapolation takes only the expectation value.
 
 ### Mitigation pipeline state
 
@@ -100,8 +100,8 @@ assert_eq!(mitigated.expectation, 0.5);
 | **Gate folding** | A construction that rewrites a circuit as `U -> U (U† U)^level`; folding only the specified gates is called selective folding. |
 | **Virtual distillation** | A method that estimates `Tr(O ρ^M) / Tr(ρ^M)` through copies and a copy-swap circuit, where `M` is the number of copies. |
 | **Copy** | The number of copies of the base circuit prepared in parallel in virtual distillation; the minimum is 2. |
-| **copy-swap circuit** | A circuit that places multiple copies of the base circuit side by side on non-overlapping qubit ranges and inserts a bitwise SWAP between the first copy and each of the others; its width equals the number of copies multiplied by the width of the base circuit. |
-| **Numerator circuit / denominator circuit** | The two statistics circuits of virtual distillation. The numerator circuit carries the expanded observable; the denominator circuit carries no observable, and the estimator receives `None`. |
+| **copy-swap circuit** | A circuit that places multiple copies of the base circuit side by side on non-overlapping qubit ranges, prepares one trailing ancillary qubit in `|+⟩` with a Hadamard gate, and applies a ladder of bitwise SWAPs between adjacent copies, all controlled by the ancillary qubit; its width equals the number of copies multiplied by the width of the base circuit, plus one. |
+| **Numerator circuit / denominator circuit** | The two statistics circuits of virtual distillation. The numerator circuit carries the expanded observable (the original observable on the first copy and `X` on the ancillary qubit); the denominator circuit carries `X` on the ancillary qubit with identities elsewhere. |
 | **Mitigation pipeline** | The sequential flow represented by `ErrorMitigation`: `new` creates it, `run` collects the raw data, and `get_mitigated` performs the method-specific post-processing. |
 
 ---
@@ -159,7 +159,8 @@ let mut mitigation = ErrorMitigation::new(
 )
 .unwrap();
 
-// 分子线路带可观测量，分母线路不带
+// 分子与分母都携带可观测量：分子在第 0 份副本的比特上有非恒等 Pauli，
+// 分母只有辅助比特上的 X
 mitigation
     .run(
         &hamiltonian,
@@ -168,7 +169,12 @@ mitigation
             shots_denominator: 2,
         },
         &|_circuit, hamiltonian_arg, shots| {
-            if hamiltonian_arg.is_some() {
+            let observable = hamiltonian_arg.unwrap();
+            let is_numerator = observable
+                .terms
+                .iter()
+                .any(|(term, _)| term.get_pauli(0) != Pauli::I);
+            if is_numerator {
                 assert_eq!(shots, Some(3));
                 (1.5, 0.25)
             } else {
@@ -232,13 +238,18 @@ let hamiltonian = Hamiltonian::from_list(vec![(pauli, Complex64::new(1.0, 0.0))]
 
 let vd = VirtualDistillation::new(Circuit::new(1), 2).unwrap();
 
-// 两份基底线路加一对逐比特 SWAP
+// 两份基底线路加 1 个辅助比特：辅助比特上的 H 与一次受控 SWAP
 let copy_swap = vd.build_copy_swap_circuit().unwrap();
-assert_eq!(copy_swap.width(), 2);
+assert_eq!(copy_swap.width(), 3);
 
 let (mu_vd, var_vd) = vd
     .run_vd(&hamiltonian, 3, 2, &|_circuit, hamiltonian_arg, shots| {
-        if hamiltonian_arg.is_some() {
+        let observable = hamiltonian_arg.unwrap();
+        let is_numerator = observable
+            .terms
+            .iter()
+            .any(|(term, _)| term.get_pauli(0) != Pauli::I);
+        if is_numerator {
             assert_eq!(shots, Some(3));
             (1.5, 0.25)
         } else {

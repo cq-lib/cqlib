@@ -166,6 +166,61 @@ fn test_density_matrix_partial_trace() {
 }
 
 #[test]
+fn density_matrix_duplicate_gate_targets_preserve_state() {
+    let dm = density_matrix_new(2);
+    assert!(!dm.is_null());
+    assert_eq!(density_matrix_apply_h(dm, 0), 0);
+    let mut before = vec![num_complex::Complex64::default(); 16];
+    assert_eq!(density_matrix_data(dm, before.as_mut_ptr(), 16), 0);
+    for q in [0, 1] {
+        assert_eq!(density_matrix_apply_cx(dm, q, q), -8);
+        assert_eq!(density_matrix_apply_cz(dm, q, q), -8);
+        let mut after = before.clone();
+        assert_eq!(density_matrix_data(dm, after.as_mut_ptr(), 16), 0);
+        assert_eq!(after, before);
+    }
+    assert_eq!(density_matrix_apply_cx(dm, 0, 1), 0);
+    density_matrix_free(dm);
+}
+
+#[test]
+fn density_matrix_duplicate_kraus_targets_preserve_state() {
+    let state: Vec<_> = (1..=4)
+        .map(|i| num_complex::Complex64::new(i as f64 / 30.0_f64.sqrt(), 0.0))
+        .collect();
+    let dm = density_matrix_from_state(2, state.as_ptr(), state.len());
+    assert!(!dm.is_null());
+    let vector = [4.0, -1.0, 2.0, 3.0];
+    let operator: Vec<_> = (0..4)
+        .flat_map(|r| {
+            (0..4).map(move |c| {
+                num_complex::Complex64::new(
+                    if r == c { 1.0 } else { 0.0 } - 2.0 * vector[r] * vector[c] / 30.0,
+                    0.0,
+                )
+            })
+        })
+        .collect();
+    let mut before = vec![num_complex::Complex64::default(); 16];
+    assert_eq!(density_matrix_data(dm, before.as_mut_ptr(), 16), 0);
+    for q in [0, 1] {
+        let targets = [q, q];
+        assert_eq!(
+            density_matrix_apply_kraus(dm, operator.as_ptr(), 1, 4, targets.as_ptr(), 2),
+            -8
+        );
+        let mut after = before.clone();
+        assert_eq!(density_matrix_data(dm, after.as_mut_ptr(), 16), 0);
+        assert_eq!(after, before);
+    }
+    assert_eq!(
+        density_matrix_apply_kraus(dm, operator.as_ptr(), 1, 4, [0, 1].as_ptr(), 2),
+        0
+    );
+    density_matrix_free(dm);
+}
+
+#[test]
 fn test_stabilizer_new_and_clifford() {
     let ss = stabilizer_new(2);
     assert!(!ss.is_null());

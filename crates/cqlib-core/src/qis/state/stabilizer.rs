@@ -914,9 +914,9 @@ impl StabilizerState {
 
     /// Applies the √Y gate (Y2P, SY, Ry(π/2)) to qubit `qubit`.
     ///
-    /// Conjugation: X→Z, Y→Y, Z→−X.
+    /// Conjugation U P U†: X→−Z, Y→Y, Z→X.
     /// Rule per row `i`:
-    /// - `phase[i] ^= 2 * (!x[i][qubit] & z[i][qubit])` (flip for Z→−X)
+    /// - `phase[i] ^= 2 * (x[i][qubit] & !z[i][qubit])` (flip for X→−Z)
     /// - swap `x[i][qubit]` ↔ `z[i][qubit]`
     pub fn apply_y2p(&mut self, qubit: usize) -> Result<(), QisError> {
         self.validate_qubit(qubit)?;
@@ -927,7 +927,7 @@ impl StabilizerState {
             let base = row * 2 * rl;
             let x = (self.tableau[base + word] & mask) != 0;
             let z = (self.tableau[base + rl + word] & mask) != 0;
-            if !x && z {
+            if x && !z {
                 self.phases[row] ^= 2;
             }
             // swap x ↔ z
@@ -947,9 +947,9 @@ impl StabilizerState {
 
     /// Applies the √Y† gate (Y2M, SYdg, Ry(−π/2)) to qubit `qubit`.
     ///
-    /// Conjugation: X→−Z, Y→Y, Z→X.
+    /// Conjugation U P U†: X→Z, Y→Y, Z→−X.
     /// Rule per row `i`:
-    /// - `phase[i] ^= 2 * (x[i][qubit] & !z[i][qubit])` (flip for X→−Z)
+    /// - `phase[i] ^= 2 * (!x[i][qubit] & z[i][qubit])` (flip for Z→−X)
     /// - swap `x[i][qubit]` ↔ `z[i][qubit]`
     pub fn apply_y2m(&mut self, qubit: usize) -> Result<(), QisError> {
         self.validate_qubit(qubit)?;
@@ -960,7 +960,7 @@ impl StabilizerState {
             let base = row * 2 * rl;
             let x = (self.tableau[base + word] & mask) != 0;
             let z = (self.tableau[base + rl + word] & mask) != 0;
-            if x && !z {
+            if !x && z {
                 self.phases[row] ^= 2;
             }
             // swap x ↔ z
@@ -1662,20 +1662,16 @@ impl StabilizerState {
                 Instruction::Standard(gate) => {
                     state.apply_clifford_gate(*gate, &qubit_indices, &params)?;
                 }
-                Instruction::McGate(mc) if mc.num_ctrl_qubits() == 1 => {
-                    let ctrl = qubit_indices[0];
-                    let tgt = qubit_indices[1];
-                    match mc.base_gate() {
-                        StandardGate::X => state.apply_cx(ctrl, tgt)?,
-                        StandardGate::Y => state.apply_cy(ctrl, tgt)?,
-                        StandardGate::Z => state.apply_cz(ctrl, tgt)?,
-                        g => {
-                            return Err(QisError::UnsupportedOperation(format!(
-                                "Controlled-{g} is not a Clifford gate"
-                            )));
-                        }
+                Instruction::McGate(mc) if mc.num_ctrl_qubits() == 1 => match mc.base_gate() {
+                    StandardGate::X => state.apply_cx(qubit_indices[0], qubit_indices[1])?,
+                    StandardGate::Y => state.apply_cy(qubit_indices[0], qubit_indices[1])?,
+                    StandardGate::Z => state.apply_cz(qubit_indices[0], qubit_indices[1])?,
+                    g => {
+                        return Err(QisError::UnsupportedOperation(format!(
+                            "Controlled-{g} is not supported in stabilizer simulation"
+                        )));
                     }
-                }
+                },
                 Instruction::McGate(mc) => {
                     return Err(QisError::UnsupportedOperation(format!(
                         "{}-controlled gates are not supported in stabilizer simulation",

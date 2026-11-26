@@ -21,6 +21,7 @@ qubits and parameters to form a complete circuit operation.
 import numpy as np
 from numpy.typing import NDArray
 from .bit import Qubit
+from .classical_data import ClassicalDataOp
 from .control_flow import ClassicalControlOp
 from .gates import CircuitGate, Directive, MCGate, StandardGate, UnitaryGate
 from .parameter import Parameter
@@ -99,6 +100,34 @@ class Instruction:
     def directive(self) -> Directive | None:
         """The :class:`Directive` if this is a directive instruction."""
         ...
+    @property
+    def mc_gate(self) -> MCGate | None:
+        """The :class:`MCGate` if this is an mc-gate instruction.
+
+        The returned gate carries no bound parameters: parameters belong to
+        the operation (``Operation.params`` / ``ValueOperation.params``), not
+        to the instruction.
+        """
+        ...
+    @property
+    def unitary_gate(self) -> UnitaryGate | None:
+        """The :class:`UnitaryGate` if this is a unitary instruction.
+
+        Parameters of a parametric unitary belong to the operation, not to
+        the instruction.
+        """
+        ...
+    @property
+    def circuit_gate(self) -> CircuitGate | None:
+        """The :class:`CircuitGate` if this is a circuit-gate instruction.
+
+        Parameters belong to the operation, not to the instruction.
+        """
+        ...
+    @property
+    def classical_data(self) -> ClassicalDataOp | None:
+        """The :class:`ClassicalDataOp` if this is a classical-data instruction."""
+        ...
     def __str__(self) -> str: ...
     def __copy__(self) -> Instruction: ...
     def __deepcopy__(self, memo: dict) -> Instruction: ...
@@ -151,6 +180,33 @@ class ValueInstruction:
     @property
     def directive(self) -> Directive | None:
         """The :class:`Directive` if this is a directive instruction."""
+        ...
+    @property
+    def mc_gate(self) -> MCGate | None:
+        """The :class:`MCGate` if this is an mc-gate instruction.
+
+        The returned gate carries no bound parameters: parameters belong to
+        the operation (``ValueOperation.params``), not to the instruction.
+        """
+        ...
+    @property
+    def unitary_gate(self) -> UnitaryGate | None:
+        """The :class:`UnitaryGate` if this is a unitary instruction.
+
+        Parameters of a parametric unitary belong to the operation, not to
+        the instruction.
+        """
+        ...
+    @property
+    def circuit_gate(self) -> CircuitGate | None:
+        """The :class:`CircuitGate` if this is a circuit-gate instruction.
+
+        Parameters belong to the operation, not to the instruction.
+        """
+        ...
+    @property
+    def classical_data(self) -> ClassicalDataOp | None:
+        """The :class:`ClassicalDataOp` if this is a classical-data instruction."""
         ...
     @property
     def instruction(self) -> Instruction | None:

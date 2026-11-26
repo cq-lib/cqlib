@@ -667,6 +667,21 @@ fn test_eof_bell_states() {
 }
 
 #[test]
+fn test_eof_clamps_concurrence_roundoff_before_square_root() {
+    for c in [1.0, 1.0 + f64::EPSILON, 1.0 + 8.0 * f64::EPSILON] {
+        let eof = super::entanglement_of_formation_from_concurrence(c);
+        assert_eq!(eof, 1.0, "concurrence={c}, entropy={eof}");
+    }
+    for c in [0.0, -f64::EPSILON] {
+        assert_eq!(super::entanglement_of_formation_from_concurrence(c), 0.0);
+    }
+    // An interior value still uses the binary entropy formula: C=0.6 gives x=0.9.
+    let expected = -0.9_f64 * 0.9_f64.log2() - 0.1_f64 * 0.1_f64.log2();
+    let actual = super::entanglement_of_formation_from_concurrence(0.6);
+    assert!((actual - expected).abs() < 1e-14);
+}
+
+#[test]
 fn test_eof_separable_states() {
     // Separable states have EOF = 0
     let dm = DensityMatrix::new(2);
@@ -745,4 +760,106 @@ fn test_eof_concurrence_relationship() {
 
     assert!(c_sep.abs() < EPSILON);
     assert!(eof_sep.abs() < EPSILON);
+}
+
+#[test]
+fn formation_entropy_of_rotated_maximally_entangled_state() {
+    let state = vec![
+        Complex64::new(-0.5917562523120286, -0.14345273890626087),
+        Complex64::new(0.12739228627789673, 0.3361800930257551),
+        Complex64::new(-0.06600502193827436, 0.35339664207352467),
+        Complex64::new(-0.5571108451004554, 0.2457267928442915),
+    ];
+    let dm = DensityMatrix::from_state(2, state).unwrap();
+    let eof = entanglement_of_formation(&dm).unwrap();
+    assert!(
+        eof.is_finite() && (0.0..=1.0).contains(&eof),
+        "entropy={eof}"
+    );
+    // Square roots amplify O(epsilon) noise in zero eigenvalues to O(sqrt(epsilon)).
+    // Eigensolver backends differ in the sign of this noise on rank-one states.
+    let tolerance = 8.0 * f64::EPSILON.sqrt();
+    assert!(
+        (eof - 1.0).abs() < tolerance,
+        "entropy={eof}, tolerance={tolerance}"
+    );
+}
+
+#[test]
+fn renyi_extreme_orders_and_small_positive_eigenvalues() {
+    for n in 1..=3 {
+        let dm = DensityMatrix::maximally_mixed(n);
+        for alpha in [
+            0.1,
+            1.0 - 1e-12,
+            1.0,
+            1.0 + 1e-12,
+            2000.0,
+            f64::MAX,
+            f64::INFINITY,
+        ] {
+            assert!(
+                (renyi_entropy(&dm, alpha).unwrap() - n as f64).abs() < 1e-10,
+                "n={n}, alpha={alpha}"
+            );
+            assert!(renyi_entropy(&DensityMatrix::new(n), alpha).unwrap().abs() < 1e-10);
+        }
+    }
+    let dm = DensityMatrix::from_density_matrix_state(
+        1,
+        vec![(1.0 - 1e-14).into(), 0.0.into(), 0.0.into(), 1e-14.into()],
+    )
+    .unwrap();
+    assert!(
+        (renyi_entropy(&dm, 0.1).unwrap() - 0.06257881098503021).abs() < 1e-12,
+        "got {}",
+        renyi_entropy(&dm, 0.1).unwrap()
+    );
+    assert!(renyi_entropy(&dm, f64::NAN).is_err());
+}
+
+#[test]
+fn renyi_entropy_of_nondiagonal_pure_state_is_zero() {
+    let state = [1.0, 2.0, 3.0, 4.0]
+        .map(|v| Complex64::new(v / 30.0_f64.sqrt(), 0.0))
+        .to_vec();
+    let dm = DensityMatrix::from_state(2, state).unwrap();
+    for alpha in [0.01, 0.1, 0.5, 1.0, 2.0, f64::INFINITY] {
+        let actual = renyi_entropy(&dm, alpha).unwrap();
+        assert!(actual.abs() < 1e-10, "alpha={alpha}, entropy={actual}");
+    }
+}
+
+#[test]
+fn renyi_entropy_preserves_rank_deficient_spectrum_under_unitary_rotation() {
+    // The first two columns of the four-dimensional Fourier matrix are
+    // orthonormal, so this state has spectrum [0.8, 0.2, 0, 0].
+    let column = [
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 1.0),
+        Complex64::new(-1.0, 0.0),
+        Complex64::new(0.0, -1.0),
+    ];
+    let mut rho = Vec::new();
+    let mut diagonal = vec![Complex64::new(0.0, 0.0); 16];
+    diagonal[0] = 0.8.into();
+    diagonal[5] = 0.2.into();
+    for i in 0..4 {
+        for j in 0..4 {
+            rho.push((Complex64::new(0.8, 0.0) + 0.2 * column[i] * column[j].conj()) / 4.0);
+        }
+    }
+    for data in [diagonal, rho] {
+        let dm = DensityMatrix::from_density_matrix_state(2, data).unwrap();
+        for alpha in [0.01, 0.1, 0.5, 1.0, 2.0, f64::INFINITY] {
+            let expected = if alpha == 1.0 {
+                -0.8_f64 * 0.8_f64.log2() - 0.2_f64 * 0.2_f64.log2()
+            } else if alpha == f64::INFINITY {
+                -0.8_f64.log2()
+            } else {
+                (0.8_f64.powf(alpha) + 0.2_f64.powf(alpha)).log2() / (1.0 - alpha)
+            };
+            assert!((renyi_entropy(&dm, alpha).unwrap() - expected).abs() < 1e-10);
+        }
+    }
 }

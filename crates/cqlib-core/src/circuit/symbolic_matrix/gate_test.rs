@@ -11,7 +11,7 @@
 // that they have been altered from the originals.
 
 use super::*;
-use crate::circuit::gate::{FrozenCircuit, UnitaryGate};
+use crate::circuit::gate::{FrozenCircuit, MCGate, UnitaryGate};
 use crate::circuit::symbolic_matrix::gate::{
     apply_gate_to_matrix, apply_standard_gate_to_matrix, circuit_to_symbolic_matrix,
     standard_gate_symbolic_matrix,
@@ -34,6 +34,117 @@ fn assert_standard_gate_matches(gate: StandardGate, params: &[f64]) {
     let evaluated = evaluate_symbolic_matrix(&symbolic, &None).unwrap();
     let expected = gate.matrix(params).unwrap();
     assert_matrix_approx_eq(&evaluated, expected.as_ref(), 1e-10);
+}
+
+#[test]
+fn test_gphase_symbolic_gate_and_controls_match_scalar_formula() {
+    let theta = Parameter::symbol("theta");
+    for controls in 0..=2 {
+        let base =
+            standard_gate_symbolic_matrix(StandardGate::GPhase, std::slice::from_ref(&theta))
+                .unwrap();
+        assert_eq!(base.dim(), (1, 1));
+        let matrix = control_matrix(&base, controls);
+        let dim = 1 << controls;
+        assert_eq!(matrix.dim(), (dim, dim));
+        for angle in [0.0, 0.37, -0.51, PI] {
+            let bindings = HashMap::from([("theta", angle)]);
+            let actual = evaluate_symbolic_matrix(&matrix, &Some(bindings)).unwrap();
+            let mut expected = Array2::eye(dim);
+            expected[[dim - 1, dim - 1]] = Complex64::from_polar(1.0, angle);
+            assert_matrix_approx_eq(&actual, &expected, 1e-12);
+        }
+    }
+}
+
+#[test]
+fn test_gphase_symbolic_markers_accumulate_across_numeric_runs() {
+    for num_qubits in [0, 1, 3] {
+        let mut circuit = Circuit::new(num_qubits);
+        if num_qubits > 0 {
+            circuit.h(Qubit::new(0)).unwrap();
+        }
+        for phase in [Parameter::from(-0.21), Parameter::symbol("theta")] {
+            circuit
+                .append(
+                    Instruction::Standard(StandardGate::GPhase),
+                    [] as [Qubit; 0],
+                    [phase.into()],
+                    None,
+                )
+                .unwrap();
+        }
+        if num_qubits > 0 {
+            circuit
+                .rz(Qubit::new(0), Parameter::symbol("alpha"))
+                .unwrap();
+        }
+        circuit
+            .append(
+                Instruction::Standard(StandardGate::GPhase),
+                [] as [Qubit; 0],
+                [0.12.into()],
+                None,
+            )
+            .unwrap();
+        circuit.set_global_phase(Parameter::from(0.17));
+        let symbolic = circuit_to_symbolic_matrix(&circuit, None).unwrap();
+        let mut baseline = Circuit::new(num_qubits);
+        if num_qubits > 0 {
+            baseline.h(Qubit::new(0)).unwrap();
+            baseline.rz(Qubit::new(0), Parameter::from(0.23)).unwrap();
+        }
+        let baseline = circuit_to_matrix(&baseline, None).unwrap();
+        for theta in [0.0, 0.37, -0.51, PI] {
+            let bindings = HashMap::from([("theta", theta), ("alpha", 0.23)]);
+            let actual = evaluate_symbolic_matrix(&symbolic, &Some(bindings)).unwrap();
+            let expected = &baseline * Complex64::from_polar(1.0, theta - 0.21 + 0.12 + 0.17);
+            assert_matrix_approx_eq(&actual, &expected, 1e-12);
+        }
+    }
+}
+
+#[test]
+fn test_gphase_symbolic_controlled_circuit_with_constant_and_symbolic_params() {
+    for controls in [vec![], vec![2usize], vec![2, 0]] {
+        for phase in [Parameter::from(0.37), Parameter::symbol("theta")] {
+            let mut circuit = Circuit::new(3);
+            circuit.h(Qubit::new(1)).unwrap();
+            circuit
+                .multi_control(
+                    StandardGate::GPhase,
+                    controls.iter().map(|&q| Qubit::new(q as u32)),
+                    [] as [Qubit; 0],
+                    [phase.into()],
+                )
+                .unwrap();
+            for order in [[0, 1, 2], [2, 0, 1]] {
+                let spectator_bit = order.iter().position(|&q| q == 1).unwrap();
+                let mask = controls.iter().fold(0, |mask, control| {
+                    mask | (1 << order.iter().position(|q| q == control).unwrap())
+                });
+                let symbolic = circuit_to_symbolic_matrix(&circuit, Some(&order)).unwrap();
+                let bindings = HashMap::from([("theta", 0.37)]);
+                let actual = evaluate_symbolic_matrix(&symbolic, &Some(bindings)).unwrap();
+                let mut expected = Array2::zeros((8, 8));
+                for row in 0..8 {
+                    for col in 0..8 {
+                        if (row ^ col) & !(1 << spectator_bit) == 0 {
+                            let sign = if row & col & (1 << spectator_bit) != 0 {
+                                -1.0
+                            } else {
+                                1.0
+                            };
+                            let angle = if row & mask == mask { 0.37 } else { 0.0 };
+                            expected[[row, col]] =
+                                Complex64::from_polar(1.0, angle) * sign / std::f64::consts::SQRT_2;
+                        }
+                    }
+                }
+                assert_matrix_approx_eq(&actual, &expected, 1e-12);
+            }
+        }
+    }
 }
 
 #[test]
@@ -796,6 +907,202 @@ fn test_substitution_cross_dependency() {
 }
 
 #[test]
+fn test_circuit_gate_storage_order_constant_symbolic_matrix() {
+    for order in [[7, 2], [1, 0], [2, 7], [0, 1]] {
+        let order = order.map(Qubit::new);
+        let mut inner = Circuit::from_qubits(order.to_vec()).unwrap();
+        inner.x(order[0]).unwrap();
+        let gate = inner.to_gate("StoredOrderX").unwrap();
+        for targets in [[4, 9], [9, 4]] {
+            let targets = targets.map(Qubit::new);
+            let mut circuit = Circuit::from_qubits(vec![Qubit::new(9), Qubit::new(4)]).unwrap();
+            circuit.append(gate.clone(), targets, [], None).unwrap();
+            let mut expected = Circuit::from_qubits(vec![Qubit::new(9), Qubit::new(4)]).unwrap();
+            expected.x(targets[0]).unwrap();
+            for output_order in [None, Some([9, 4].as_slice())] {
+                let symbolic = circuit_to_symbolic_matrix(&circuit, output_order).unwrap();
+                let evaluated = evaluate_symbolic_matrix(&symbolic, &None).unwrap();
+                assert_matrix_approx_eq(
+                    &evaluated,
+                    &circuit_to_matrix(&expected, output_order).unwrap(),
+                    1e-10,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_circuit_gate_storage_order_nested_parameterized_inverse() {
+    for middle_order in [None, Some([0, 1]), Some([5, 1])] {
+        let mut body = Circuit::from_qubits(vec![Qubit::new(7), Qubit::new(2)]).unwrap();
+        body.rx(Qubit::new(7), Parameter::symbol("theta")).unwrap();
+        body.cx(Qubit::new(7), Qubit::new(2)).unwrap();
+        if let Some(order) = middle_order {
+            let gate = body.to_gate("Inner").unwrap();
+            body = Circuit::from_qubits(order.map(Qubit::new).to_vec()).unwrap();
+            body.append(
+                gate,
+                order.map(Qubit::new),
+                [ParameterValue::from(Parameter::symbol("theta"))],
+                None,
+            )
+            .unwrap();
+        }
+        let mut outer = Circuit::new(2);
+        outer
+            .append(
+                body.to_gate("Body").unwrap(),
+                [Qubit::new(0), Qubit::new(1)],
+                [ParameterValue::from(Parameter::symbol("x"))],
+                None,
+            )
+            .unwrap();
+        for inverse in [false, true] {
+            let circuit = if inverse {
+                outer.inverse().unwrap()
+            } else {
+                outer.clone()
+            };
+            let symbolic = circuit_to_symbolic_matrix(&circuit, None).unwrap();
+            for angle in [0.37, -0.61] {
+                let bindings = Some(HashMap::from([("x", angle)]));
+                let bound = circuit.assign_parameters(&bindings).unwrap();
+                let mut expected = Circuit::new(2);
+                expected.rx(Qubit::new(0), angle).unwrap();
+                expected.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+                if inverse {
+                    expected = expected.inverse().unwrap();
+                }
+                let expected_matrix = circuit_to_matrix(&expected, None).unwrap();
+                assert_matrix_approx_eq(
+                    &evaluate_symbolic_matrix(&symbolic, &bindings).unwrap(),
+                    &expected_matrix,
+                    1e-10,
+                );
+                assert_matrix_approx_eq(
+                    &circuit_to_matrix(&bound, None).unwrap(),
+                    &expected_matrix,
+                    1e-10,
+                );
+                assert_matrix_approx_eq(
+                    &circuit_to_matrix(&bound.decompose().unwrap(), None).unwrap(),
+                    &expected_matrix,
+                    1e-10,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_circuit_gate_storage_order_cache_isolation() {
+    use crate::circuit::gate::CircuitGate;
+
+    let mut inner = Circuit::from_qubits(vec![Qubit::new(7), Qubit::new(2)]).unwrap();
+    inner.rx(Qubit::new(7), Parameter::symbol("theta")).unwrap();
+    inner.cx(Qubit::new(7), Qubit::new(2)).unwrap();
+    let frozen = FrozenCircuit::new(inner.clone());
+    let gate = CircuitGate::new("Cached", frozen.clone()).unwrap();
+    // Materializing either cache first must not determine the other's basis.
+    for gate_first in [false, true] {
+        let frozen = if gate_first {
+            FrozenCircuit::new(inner.clone())
+        } else {
+            frozen.clone()
+        };
+        let gate = if gate_first {
+            CircuitGate::new("Cached", frozen.clone()).unwrap()
+        } else {
+            gate.clone()
+        };
+        if gate_first {
+            gate.symbolic_matrix().unwrap();
+        } else {
+            frozen.symbolic_matrix().unwrap();
+        }
+        let gate_matrix = gate.symbolic_matrix().unwrap();
+        assert!(Arc::ptr_eq(
+            &gate_matrix,
+            &gate.clone().symbolic_matrix().unwrap()
+        ));
+        assert_eq!(frozen, FrozenCircuit::new(inner.clone()));
+        let bindings = Some(HashMap::from([("theta", 0.37)]));
+        let assigned = inner.assign_parameters(&bindings).unwrap();
+        assert_matrix_approx_eq(
+            &evaluate_symbolic_matrix(&gate_matrix, &bindings).unwrap(),
+            &circuit_to_matrix(&assigned, Some(&[7, 2])).unwrap(),
+            1e-10,
+        );
+        let default_matrix = frozen.symbolic_matrix().unwrap();
+        assert!(Arc::ptr_eq(
+            &default_matrix,
+            &frozen.symbolic_matrix().unwrap()
+        ));
+        assert_matrix_approx_eq(
+            &evaluate_symbolic_matrix(&default_matrix, &bindings).unwrap(),
+            &circuit_to_matrix(&assigned, None).unwrap(),
+            1e-10,
+        );
+        // Circuit-backed UnitaryGate keeps its existing numeric-sorted basis.
+        let unitary = UnitaryGate::new("Frozen", 2, 1)
+            .with_circuit(Arc::new(frozen))
+            .unwrap();
+        let mut unitary_circuit = Circuit::new(2);
+        unitary_circuit
+            .append(
+                Instruction::UnitaryGate(Box::new(unitary)),
+                [Qubit::new(0), Qubit::new(1)],
+                [ParameterValue::from(Parameter::symbol("x"))],
+                None,
+            )
+            .unwrap();
+        let mut unitary_expected = Circuit::new(2);
+        unitary_expected.rx(Qubit::new(1), 0.37).unwrap();
+        unitary_expected.cx(Qubit::new(1), Qubit::new(0)).unwrap();
+        let bindings = Some(HashMap::from([("x", 0.37)]));
+        let expected = circuit_to_matrix(&unitary_expected, None).unwrap();
+        assert_matrix_approx_eq(
+            &evaluate_symbolic_matrix(
+                &circuit_to_symbolic_matrix(&unitary_circuit, None).unwrap(),
+                &bindings,
+            )
+            .unwrap(),
+            &expected,
+            1e-10,
+        );
+        assert_matrix_approx_eq(
+            &circuit_to_matrix(&unitary_circuit.assign_parameters(&bindings).unwrap(), None)
+                .unwrap(),
+            &expected,
+            1e-10,
+        );
+        let mut circuit = Circuit::new(2);
+        let mut expected = Circuit::new(2);
+        for (targets, scale) in [([0, 1], 1.0), ([1, 0], 2.0)] {
+            circuit
+                .append(
+                    Instruction::CircuitGate(Box::new(gate.clone())),
+                    targets.map(Qubit::new),
+                    [ParameterValue::from(Parameter::symbol("x") * scale)],
+                    None,
+                )
+                .unwrap();
+            expected.rx(Qubit::new(targets[0]), 0.37 * scale).unwrap();
+            expected
+                .cx(Qubit::new(targets[0]), Qubit::new(targets[1]))
+                .unwrap();
+        }
+        let symbolic = circuit_to_symbolic_matrix(&circuit, None).unwrap();
+        assert_matrix_approx_eq(
+            &evaluate_symbolic_matrix(&symbolic, &bindings).unwrap(),
+            &circuit_to_matrix(&expected, None).unwrap(),
+            1e-10,
+        );
+    }
+}
+
+#[test]
 fn test_frozen_circuit_symbolic_matrix_cache_reuses_arc() {
     let mut inner = Circuit::new(1);
     inner.rx(Qubit::new(0), Parameter::symbol("theta")).unwrap();
@@ -1173,6 +1480,82 @@ fn test_mcgate_parametric_symbolic_matrix_matches_numeric() {
     let expected = circuit_to_matrix(&bound, None).unwrap();
 
     assert_matrix_approx_eq(&evaluated, &expected, 1e-10);
+}
+
+#[test]
+fn test_mcgate_zero_added_controls_preserves_symbolic_controlled_rotations() {
+    for gate in [StandardGate::CRX, StandardGate::CRY, StandardGate::CRZ] {
+        let mut circuit = Circuit::new(2);
+        circuit
+            .append(
+                Instruction::McGate(Box::new(MCGate::new(0, gate))),
+                [Qubit::new(0), Qubit::new(1)],
+                [ParameterValue::from(Parameter::symbol("theta"))],
+                None,
+            )
+            .unwrap();
+        let symbolic = circuit_to_symbolic_matrix(&circuit, Some(&[1, 0])).unwrap();
+        assert_eq!(symbolic.dim(), (4, 4));
+        for theta in [0.0, 0.37, -0.51, PI] {
+            let bindings = HashMap::from([("theta", theta)]);
+            let actual = evaluate_symbolic_matrix(&symbolic, &Some(bindings)).unwrap();
+            let expected = gate.matrix(&[theta]).unwrap();
+            assert_matrix_approx_eq(&actual, expected.as_ref(), 1e-12);
+        }
+    }
+}
+
+#[test]
+fn test_mcgate_inherent_controls_symbolic_matrix_matches_bound_numeric() {
+    for gate in [StandardGate::CRX, StandardGate::CRY, StandardGate::CRZ] {
+        for added_controls in 0..=2 {
+            let mc_gate = MCGate::new(added_controls, gate);
+            assert_eq!(mc_gate.num_ctrl_qubits(), added_controls as usize + 1);
+            let num_qubits = mc_gate.num_qubits() + 1;
+            let qubit_ids = [9usize, 2, 17, 5, 30][..num_qubits].to_vec();
+            let qubits: Vec<Qubit> = qubit_ids.iter().map(|&id| Qubit::new(id as u32)).collect();
+            // Leave a spectator between gate operands in the circuit's stored order.
+            let operands: Vec<Qubit> = qubits
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &qubit)| (index != 1).then_some(qubit))
+                .collect();
+            for reverse in [false, true] {
+                let mut operands = operands.clone();
+                if reverse {
+                    operands.reverse();
+                }
+                let mut circuit = Circuit::from_qubits(qubits.clone()).unwrap();
+                circuit.h(operands[0]).unwrap();
+                circuit.x(qubits[1]).unwrap();
+                circuit
+                    .append(
+                        Instruction::McGate(Box::new(mc_gate.clone())),
+                        operands.clone(),
+                        [ParameterValue::from(Parameter::symbol("theta"))],
+                        None,
+                    )
+                    .unwrap();
+                circuit.rz(*operands.last().unwrap(), 0.23).unwrap();
+                for order in [None, Some(qubit_ids.as_slice())] {
+                    let symbolic = circuit_to_symbolic_matrix(&circuit, order).unwrap();
+                    let dim = 1 << num_qubits;
+                    assert_eq!(symbolic.dim(), (dim, dim));
+                    for theta in [0.0, 0.37, -0.51, PI] {
+                        let bindings = HashMap::from([("theta", theta)]);
+                        let actual =
+                            evaluate_symbolic_matrix(&symbolic, &Some(bindings.clone())).unwrap();
+                        let bound = circuit.assign_parameters(&Some(bindings)).unwrap();
+                        let expected = circuit_to_matrix(&bound, order).unwrap();
+                        assert_matrix_approx_eq(&actual, &expected, 1e-12);
+                        let constant_symbolic = circuit_to_symbolic_matrix(&bound, order).unwrap();
+                        let constant = evaluate_symbolic_matrix(&constant_symbolic, &None).unwrap();
+                        assert_matrix_approx_eq(&constant, &expected, 1e-12);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]

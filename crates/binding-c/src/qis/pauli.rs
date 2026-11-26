@@ -13,8 +13,9 @@
 //! C ABI for `PauliString` and single-qubit Pauli operators.
 
 use crate::error::CqlibError;
+use crate::qis::algebra::{dense_matrix_dim, dense_matrix_len};
 use crate::qis::{CPauliString, qis_err_code};
-use cqlib_core::qis::{Pauli, PauliString};
+use cqlib_core::qis::{Hamiltonian, Pauli, PauliString};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -184,22 +185,22 @@ pub extern "C" fn pauli_string_to_string(ptr: *const CPauliString) -> *mut c_cha
     }
 }
 
-/// Flatten the dense matrix representation into `buffer`.
-///
-/// The matrix has dimensions `2^N × 2^N` and is stored in row-major order
-/// as `Complex64` values. Use `pauli_string_matrix_len` first to obtain
-/// the side length (`2^N`). Returns 0 on success.
+/// Return the side length (`2^N`) of the row-major dense matrix, or 0 for
+/// NULL or an unrepresentable side length. A representable side does not
+/// guarantee that the complete dense matrix can be allocated.
 #[unsafe(no_mangle)]
 pub extern "C" fn pauli_string_matrix_len(ptr: *const CPauliString) -> usize {
     if ptr.is_null() {
         return 0;
     }
     let wrapper = unsafe { &*ptr };
-    1usize << wrapper.inner.num_qubits
+    dense_matrix_dim(wrapper.inner.num_qubits).unwrap_or(0)
 }
 
 /// Copy the dense matrix into `buffer` (row-major, `Complex64` values).
 /// `len` must equal `pauli_string_matrix_len(ptr) * pauli_string_matrix_len(ptr)`.
+/// Returns -7 for unrepresentable dense allocation size or allocation failure,
+/// -8 for an incorrect buffer length. Errors leave the buffer unchanged.
 #[unsafe(no_mangle)]
 pub extern "C" fn pauli_string_matrix(
     ptr: *const CPauliString,
@@ -210,14 +211,19 @@ pub extern "C" fn pauli_string_matrix(
         return CqlibError::NullPtr as i32;
     }
     let wrapper = unsafe { &*ptr };
-    let matrix = wrapper.inner.to_matrix();
-    let dim = 1usize << wrapper.inner.num_qubits;
-    if matrix.len() != len || len != dim * dim {
+    let Some(expected_len) = dense_matrix_len(wrapper.inner.num_qubits) else {
+        return CqlibError::SimulationError as i32;
+    };
+    if len != expected_len {
         return CqlibError::InvalidParam as i32;
     }
-    let flat: Vec<num_complex::Complex64> = matrix.iter().cloned().collect();
+    let matrix = match Hamiltonian::from_pauli(wrapper.inner.clone()).to_matrix() {
+        Ok(matrix) => matrix,
+        Err(err) => return qis_err_code(&err),
+    };
+    // Checked core conversion returns a contiguous row-major matrix.
     unsafe {
-        std::ptr::copy_nonoverlapping(flat.as_ptr(), buffer, len);
+        std::ptr::copy_nonoverlapping(matrix.as_ptr(), buffer, len);
     }
     0
 }

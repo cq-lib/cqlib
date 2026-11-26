@@ -76,6 +76,8 @@ Failure scenarios: same as [plot_bloch_multivector](#plot_bloch_multivectorstate
 
 Plots Pauli-basis expectation values as a bar chart. Labels are tensor products of `I`, `X`, `Y`, `Z`, for `4^n` bars in total where `n` is the qubit count; non-negative and negative bars use different colors. Rotated x-axis labels are drawn only when the bar count does not exceed `64`.
 
+By default, labels follow `PauliString`: the highest-index qubit is on the left and qubit 0 is on the right. For example, `IX` measures X on qubit 0 of a two-qubit state. Enabling `reverse_bits` reverses the characters in each label without changing the corresponding expectation value.
+
 ```c
 char *plot_state_paulivec(const struct CStatevector *state,
                           const struct CStatePlotOptions *options);

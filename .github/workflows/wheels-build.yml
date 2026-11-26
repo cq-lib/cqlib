@@ -43,7 +43,7 @@ jobs:
       - uses: actions/setup-python@v6
         if: runner.os != 'Linux'
         with:
-          python-version: '3.10'
+          python-version: '3.11'
       - name: Set up native build tools
         if: runner.os != 'Linux'
         run: |
@@ -66,27 +66,18 @@ jobs:
             -e PLATFORM -e RUSTUP_TOOLCHAIN -e CARGO_PROFILE_DEV_DEBUG \
             -e CARGO_PROFILE_TEST_DEBUG -e CARGO_INCREMENTAL -e CARGO_BUILD_JOBS \
             "$IMAGE" bash -euo pipefail -c '
-              export PATH="/opt/python/cp310-cp310/bin:$HOME/.cargo/bin:$PATH"
+              export PATH="/opt/python/cp311-cp311/bin:$HOME/.cargo/bin:$PATH"
               export CARGO_TARGET_DIR=/tmp/cqlib-manylinux-target
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh
               sh /tmp/rustup.sh -y --profile minimal --default-toolchain "$RUSTUP_TOOLCHAIN"
               python -m pip install maturin==1.14.1 packaging==25.0 tomli==2.2.1 cmake==3.31.6
               cargo test --locked -p cqlib-core -p binding-c -p cqlib
               python tools/ci.py release --platform "$PLATFORM"
-              for version in 311 312 313 314; do
+              for version in 312 313 314 315; do
                 /opt/python/cp$version-cp$version/bin/python -m pip install packaging==25.0
                 /opt/python/cp$version-cp$version/bin/python tools/ci.py wheel-test
               done
             '
-      - uses: actions/setup-python@v6
-        if: runner.os != 'Linux'
-        with:
-          python-version: '3.11'
-      - name: Test the same wheel on Python 3.11
-        if: runner.os != 'Linux'
-        run: |
-          python -m pip install packaging==25.0
-          python tools/ci.py wheel-test
       - uses: actions/setup-python@v6
         if: runner.os != 'Linux'
         with:
@@ -114,6 +105,15 @@ jobs:
         run: |
           python -m pip install packaging==25.0
           python tools/ci.py wheel-test
+      - uses: actions/setup-python@v6
+        if: runner.os != 'Linux'
+        with:
+          python-version: '3.15'
+      - name: Test the same wheel on Python 3.15
+        if: runner.os != 'Linux'
+        run: |
+          python -m pip install packaging==25.0
+          python tools/ci.py wheel-test
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ github.ref_name }}-${{ matrix.platform }}
@@ -131,7 +131,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.10'
+          python-version: '3.11'
       - name: Install build tools
         run: |
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update

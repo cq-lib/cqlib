@@ -71,7 +71,13 @@ delay_inst = Instruction.delay()
 | `is_classical_data` | `bool` | 是否为经典数据相关指令。 |
 | `is_delay` | `bool` | 是否为延迟指令。 |
 | `standard_gate` | `StandardGate / None` | 当指令为标准门时，返回内部标准门对象。 |
+| `mc_gate` | `MCGate / None` | 当指令为多控制门时，返回内部 `MCGate` 对象。 |
+| `unitary_gate` | `UnitaryGate / None` | 当指令为用户自定义酉门时，返回内部 `UnitaryGate` 对象。 |
+| `circuit_gate` | `CircuitGate / None` | 当指令为子线路复合门时，返回内部 `CircuitGate` 对象。 |
 | `directive` | `Directive / None` | 当指令为 `Directive` 时，返回内部 directive 对象。 |
+| `classical_data` | `ClassicalDataOp / None` | 当指令为经典数据操作时，返回内部 `ClassicalDataOp` 对象。 |
+
+这些 payload 访问器返回的门对象不携带绑定参数：参数属于 operation 层（见 `ValueOperation.params`），返回门的参数列表恒为空。注意 `Instruction` 不提供 `classical_control` payload 访问器：存储层控制流操作内联了线路内部句柄，其内容只能在构造层通过 `ValueInstruction.classical_control` 读取。
 
 ---
 
@@ -98,7 +104,11 @@ delay_inst = Instruction.delay()
 | `instruction_type` | `str` | 指令类别，取值与 `Instruction.instruction_type` 一致；包裹控制流时为 `"classical_control"`。 |
 | `is_standard` / `is_mcgate` / `is_unitary` / `is_circuit_gate` / `is_directive` / `is_classical_data` / `is_delay` | `bool` | 与 `Instruction` 同名的类别判定属性；包裹控制流时均为 `False`。 |
 | `standard_gate` | `StandardGate / None` | 当包裹的是标准门指令时，返回内部标准门对象。 |
+| `mc_gate` | `MCGate / None` | 当包裹的是多控制门指令时，返回内部 `MCGate` 对象。 |
+| `unitary_gate` | `UnitaryGate / None` | 当包裹的是用户自定义酉门指令时，返回内部 `UnitaryGate` 对象。 |
+| `circuit_gate` | `CircuitGate / None` | 当包裹的是子线路复合门指令时，返回内部 `CircuitGate` 对象。 |
 | `directive` | `Directive / None` | 当包裹的是 `Directive` 指令时，返回内部 directive 对象。 |
+| `classical_data` | `ClassicalDataOp / None` | 当包裹的是经典数据指令时，返回内部 `ClassicalDataOp` 对象。 |
 
 ---
 

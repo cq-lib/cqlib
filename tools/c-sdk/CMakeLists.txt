@@ -28,30 +28,33 @@ else()
 endif()
 
 foreach(kind static shared)
-    add_executable(test_${kind} test_circuit.c)
-    target_include_directories(test_${kind} PRIVATE "${CQLIB_SDK_ROOT}/include")
-    target_link_libraries(test_${kind} PRIVATE cqlib_${kind})
-    # The C tests put API calls inside assert(); retain them even in Release.
-    if(MSVC)
-        target_compile_options(test_${kind} PRIVATE /UNDEBUG)
-    else()
-        target_compile_options(test_${kind} PRIVATE -UNDEBUG)
-    endif()
-    if(WIN32)
-        target_link_libraries(test_${kind} PRIVATE
-            ntdll ws2_32 bcrypt userenv advapi32)
-    elseif(APPLE)
-        target_link_libraries(test_${kind} PRIVATE c++ "-framework CoreFoundation")
-    else()
-        target_link_libraries(test_${kind} PRIVATE pthread dl m)
-    endif()
-    set_target_properties(test_${kind} PROPERTIES
-        BUILD_RPATH "${CQLIB_SDK_ROOT}/lib")
-    add_test(NAME c_${kind} COMMAND test_${kind})
+    foreach(suite circuit qis_algebra density_matrix_targets)
+        set(test_target test_${suite}_${kind})
+        add_executable(${test_target} test_${suite}.c)
+        set_target_properties(${test_target} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES)
+        target_include_directories(${test_target} PRIVATE "${CQLIB_SDK_ROOT}/include")
+        target_link_libraries(${test_target} PRIVATE cqlib_${kind})
+        # The C tests put API calls inside assert(); retain them even in Release.
+        if(MSVC)
+            target_compile_options(${test_target} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${test_target} PRIVATE -UNDEBUG)
+        endif()
+        if(WIN32)
+            target_link_libraries(${test_target} PRIVATE
+                ntdll ws2_32 bcrypt userenv advapi32)
+        elseif(APPLE)
+            target_link_libraries(${test_target} PRIVATE c++ "-framework CoreFoundation")
+        else()
+            target_link_libraries(${test_target} PRIVATE pthread dl m)
+        endif()
+        set_target_properties(${test_target} PROPERTIES
+            BUILD_RPATH "${CQLIB_SDK_ROOT}/lib")
+        add_test(NAME c_${suite}_${kind} COMMAND ${test_target})
+        if(WIN32 AND kind STREQUAL "shared")
+            add_custom_command(TARGET ${test_target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:cqlib_shared>" "$<TARGET_FILE_DIR:${test_target}>")
+        endif()
+    endforeach()
 endforeach()
-
-if(WIN32)
-    add_custom_command(TARGET test_shared POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "$<TARGET_FILE:cqlib_shared>" "$<TARGET_FILE_DIR:test_shared>")
-endif()

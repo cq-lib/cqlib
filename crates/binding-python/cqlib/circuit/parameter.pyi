@@ -123,7 +123,10 @@ class Parameter:
         ...
 
     def substitute(self, bindings: dict[str, Parameter]) -> Parameter:
-        """Substitute multiple symbols and simplify the resulting expression."""
+        """Substitute simultaneously and simplify, without revisiting replacements.
+
+        The original parameter is unchanged.
+        """
         ...
 
     def provably_equal(self, other: Parameter, tolerance: float = 1e-12) -> bool:

@@ -1,11 +1,11 @@
 # Hamiltonian and Observable
 
-`cqlib_core::qis::hamiltonian`  
+`cqlib_core::qis::hamiltonian`
 `cqlib_core::qis::observable`
 
-This page covers the observable `Hamiltonian`, formed by Pauli strings and complex coefficients, and the unified interface `Observable` trait for computing expectation values.
+This page covers the operator `Hamiltonian`, formed by Pauli strings and complex coefficients, and the unified `Observable` trait for computing real expectation values.
 
-`Hamiltonian` is a sparse representation of a $2^N \times 2^N$ matrix, of the form $H = \sum_k c_k P_k$, where $c_k$ is a complex coefficient and $P_k$ is an $N$-qubit Pauli string. The same structure serves both as the Hamiltonian of a physical interpretation and as an arbitrary observable whose expectation value is needed.
+`Hamiltonian` is a sparse representation of a $2^N \times 2^N$ matrix, of the form $H = \sum_k c_k P_k$, where $c_k$ is a complex coefficient and $P_k$ is an $N$-qubit Pauli string. The type permits non-Hermitian operators; real expectation and unitary evolution methods additionally check Hermiticity.
 
 ## Import
 
@@ -46,10 +46,59 @@ Fields:
 - `fn simplify(&mut self)`: simplify the term list. The operation has two steps: absorb the internal phase of each `PauliString` into the coefficient, normalizing all Pauli strings to `Phase::Plus`; then group by the X and Z component vectors and merge the coefficients of identical operators. Coefficients whose absolute value is smaller than $10^{-10}$ are discarded.
 - `fn scale(&mut self, factor: Complex64)`: multiply the coefficients of all terms by the same complex factor.
 
+### Checked Pauli-sum algebra
+
+The fallible interfaces below validate register widths, X/Z bit-vector lengths, finite coefficients and coefficient products/accumulations. Returned operators have phases absorbed, terms sorted deterministically by Z then X vectors, duplicates merged and only exact zeros removed. They do not use the default pruning threshold of `simplify()`.
+
+| Interface | Meaning |
+| --- | --- |
+| `identity(num_qubits) -> Self` | Identity on the declared register; scalar one at zero qubits. |
+| `from_terms(num_qubits, terms) -> Result<Self, QisError>` | Checked construction from an `IntoIterator` of `(PauliString, Complex64)`; empty input retains the declared width. |
+| `try_add(&self, other: &Self)` / `try_sub(&self, other: &Self)` | Same-width addition/subtraction returning `Result<Self, QisError>`, without modifying inputs. |
+| `try_mul(&self, other: &Self) -> Result<Self, QisError>` | Matrix product $AB$: the right operand acts first. Results may be non-Hermitian. |
+| `scaled(&self, factor: Complex64) -> Result<Self, QisError>` | Returns a scaled operator; checks the factor even for zero input. |
+| `adjoint(&self) -> Result<Self, QisError>` | Conjugates coefficients after phase normalization to obtain $A^\dagger$. |
+| `normalized(&self) -> Result<Self, QisError>` | Validates, absorbs phases, merges terms and removes only exact zeros. |
+| `chop(&mut self, atol: f64) -> Result<(), QisError>` | Merges first, then removes coefficients with complex magnitude `≤ atol`; leaves the original unchanged on failure. |
+| `equiv(&self, other: &Self, atol: f64) -> Result<bool, QisError>` | Checks whether every normalized coefficient of $A-B$ has magnitude `≤ atol`. |
+| `is_hermitian(&self, atol: f64) -> Result<bool, QisError>` | Equivalent to `equiv` against the adjoint; does not project coefficients to real values. |
+| `tensor(&self, other: &Self) -> Result<Self, QisError>` | $A\otimes B$: B occupies low qubits, A high qubits. |
+| `remap_qubits(&self, mapping: &[usize], target_width: usize) -> Result<Self, QisError>` | `mapping[source] = destination`; permutations and embeddings insert I at unused positions. |
+
+Tolerances must be finite and nonnegative. `equiv` uses a per-coefficient tolerance, not a matrix operator-norm bound. Different widths return `QubitMismatch`; registers are never implicitly expanded. `is_hermitian` measures $A-A^\dagger$, bounding twice the imaginary coefficient magnitude after normalization, as for `FermionicOp`. The existing `normalized_hermitian()` has a separate consumer contract: imaginary magnitudes up to `1e-10` are projected to real values, while every nonzero real coefficient is retained.
+
+`remap_qubits` requires a mapping of the source width with distinct destinations below `target_width`, including for zero/identity operators. It is not a fermionic mode permutation or a partial trace. Zero operators retain register widths. Sparse operations support more than 64 qubits; multiplication can still expand to the product of the input term counts.
+
+When a tensor product or embedding requires Pauli terms, widths beyond BitVec's representable length return `UnsupportedOperation` before its length assertion can panic. Zero operators require no bit vectors and can retain larger declared widths.
+
+```rust
+use cqlib_core::qis::{Hamiltonian, QisError};
+use num_complex::Complex64;
+
+let x = Hamiltonian::from_pauli("X".parse()?);
+let z = Hamiltonian::from_pauli("Z".parse()?);
+let sum = x.try_add(&z)?;
+assert!(sum.try_mul(&sum)?.equiv(&Hamiltonian::identity(1).scaled(2.0.into())?, 0.0)?);
+
+let xz = x.try_mul(&z)?; // XZ = -iY
+let minus_i_y = Hamiltonian::from_terms(1, [("Y".parse()?, Complex64::new(0.0, -1.0))])?;
+assert!(xz.equiv(&minus_i_y, 0.0)?);
+assert!(!xz.is_hermitian(0.0)?);
+
+// [X,Z], and X ⊗ Z: the rightmost character is qubit zero.
+let commutator = xz.try_sub(&z.try_mul(&x)?)?;
+assert!(commutator.equiv(&minus_i_y.scaled(2.0.into())?, 0.0)?);
+assert!(x.tensor(&z)?.equiv(&Hamiltonian::from_pauli("XZ".parse()?), 0.0)?);
+assert!(x.remap_qubits(&[2], 3)?.equiv(&Hamiltonian::from_pauli("XII".parse()?), 0.0)?);
+# Ok::<(), QisError>(())
+```
+
+Legacy `Add`, `scale`, `simplify` and constructors retain their contracts; prefer the checked interfaces for new callers. `PartialEq` compares stored structure: operators with different term orders, duplicates or phase distributions may be algebraically equivalent but unequal. Use `equiv` for that comparison.
+
 ### Queries and conversion
 
 - `fn all_terms_commute(&self) -> bool`: determine whether all Pauli terms commute pairwise. When true, $e^{-iHt}$ can be decomposed term by term into an exact evolution.
-- `fn to_matrix(&self) -> Result<Array2<Complex64>, QisError>`: return a dense $2^N \times 2^N$ matrix. When the qubit count of any term is inconsistent with `num_qubits`, `QisError::QubitMismatch` is returned. An empty operator returns the zero matrix of the corresponding dimension.
+- `fn to_matrix(&self) -> Result<Array2<Complex64>, QisError>`: validate and return a dense $2^N \times 2^N$ matrix. Empty operators produce the corresponding zero matrix; zero-qubit input produces a 1×1 matrix. Dimensions, element count and byte count are checked before allocation. Size overflow or reservation failure returns `UnsupportedOperation`; malformed terms and nonfinite coefficients (including matrix-entry accumulation overflow) return the corresponding errors. Requires $O(4^N)$ memory and is intended for small systems.
 - `fn to_trotter_circuit(&self, time: f64, steps: usize, mode: TrotterMode) -> Result<Circuit, QisError>`: see [Trotter Evolution](8_evolution.md).
 - `fn to_evolution_circuit(&self, time: f64, steps: usize, mode: TrotterMode) -> Result<Circuit, QisError>`: see [Trotter Evolution](8_evolution.md).
 
@@ -174,6 +223,8 @@ pub trait Observable {
 ### Default methods
 
 - `fn variance_statevector(&self, sv: &Statevector) -> Result<f64, QisError>`: compute the pure-state variance $\text{Var}(O) = \langle O^2 \rangle - \langle O \rangle^2$. The default implementation in the trait returns `QisError::UnsupportedOperation`; an observable that supports variance computation must override this method.
+
+Real expectation and variance methods validate Hermiticity after merging phases and repeated terms, without pruning small nonzero coefficients. Non-finite original or merged coefficients return `QisError::InvalidParameterValue`; non-Hermitian operators return `QisError::NotHermitian`.
 
 ### Implementors
 

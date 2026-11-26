@@ -132,13 +132,15 @@ Returns: 1 when they commute; 0 otherwise; -1 for NULL handles; -8 when the qubi
 
 ### pauli_string_matrix_len(ptr)
 
-Returns the side length of the dense matrix (`2^N`); 0 for NULL.
+Returns the side length of the dense matrix (`2^N`); 0 for NULL or an unrepresentable side length.
 
 ### pauli_string_matrix(ptr, buffer, len)
 
 Copies the `2^N × 2^N` dense matrix into `buffer` in row-major order (`Complex64` values). `len` must equal `pauli_string_matrix_len(ptr) * pauli_string_matrix_len(ptr)`.
 
-Returns: 0 on success; -1 for NULL pointers; -8 when `len` does not match the matrix element count.
+Returns: 0 on success; -1 for NULL pointers; -7 for unrepresentable element/byte counts or allocation failure; -8 when `len` does not match the matrix element count. Errors leave the buffer unchanged.
+
+A representable side does not guarantee the complete matrix can be allocated. Check for overflow before computing `dim * dim`.
 
 ---
 
@@ -169,6 +171,7 @@ Returns: 0 on success; -1 when `ptr` or `out` is NULL, or when either array is N
 ## Example
 
 ```c
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "cqlib_c.h"
@@ -191,6 +194,11 @@ int main(void) {
     char *text = pauli_string_to_string(ps);        /* "+XZI" */
     struct CPauliString *zz = pauli_string_parse("ZZI");
     int32_t commutes = pauli_string_commutes_with(ps, zz);  /* 0 (X and Z anticommute on qubit 2) */
+
+    printf("%s: qubits=%" PRIuPTR ", p2=%u, p0=%u\n", text, n,
+           (unsigned)p2, (unsigned)p0);
+    printf("x_mask=%" PRIuPTR ", z_mask=%" PRIuPTR ", commutes=%" PRId32 "\n",
+           x_mask, z_mask, commutes);
 
     /* 4. Two-step read of the 8x8 dense matrix */
     uintptr_t dim = pauli_string_matrix_len(ps);    /* 8 */

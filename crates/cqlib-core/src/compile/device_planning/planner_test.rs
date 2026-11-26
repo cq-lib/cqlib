@@ -568,3 +568,82 @@ fn direction_template_preserves_exact_ordered_qargs() {
         &[PhysicalQubit::new(1)]
     );
 }
+
+#[test]
+fn single_qubit_rule_expansion_stays_bounded_with_heterogeneous_calibrations() {
+    use StandardGate::*;
+    let library = RuleLibrary::builtin_rules().unwrap();
+    for basis in [
+        vec![U, CZ],
+        vec![U, CX],
+        vec![RY, RZ, CX],
+        vec![RY, RZ, CZ],
+        vec![RXY, CX],
+        vec![RZ, X2P, CZ],
+        vec![RZ, X2M, CX],
+        vec![RZ, Y2P, CX],
+        vec![RZ, Y2M, CZ],
+        vec![RZ, XY2P, CZ],
+        vec![RZ, XY2M, CX],
+    ] {
+        for profile in 0..4 {
+            let mut device = Device::bidirectional_line("single-qubit-expansion-budget", 2)
+                .unwrap()
+                .with_native_gates(basis.iter().copied().map(Instruction::Standard).collect())
+                .unwrap();
+            for (q, (error, duration)) in [(0, (0.001, 84.0)), (1, (0.006, 45.0))] {
+                let mut properties = QubitProp::new(0.0);
+                for &gate in basis.iter().filter(|gate| gate.num_qubits() == 1) {
+                    let scale = 1.0 + profile as f64;
+                    let mut native =
+                        InstructionProp::new(Instruction::Standard(gate), error * scale);
+                    if profile != 3 {
+                        native = native.with_length(duration / scale);
+                    }
+                    properties = properties.with_native_instruction(native).unwrap();
+                }
+                device
+                    .add_qubit_properties(PhysicalQubit::new(q), properties)
+                    .unwrap();
+            }
+            for (a, b, error, duration) in [(0, 1, 0.019, 59.0), (1, 0, 0.016, 293.0)] {
+                let mut native =
+                    InstructionProp::new(Instruction::Standard(*basis.last().unwrap()), error);
+                if profile != 2 {
+                    native = native.with_length(duration * (1.0 + profile as f64));
+                }
+                device
+                    .add_edge_properties(
+                        PhysicalQubit::new(a),
+                        PhysicalQubit::new(b),
+                        EdgeProp::new().with_native_instruction(native).unwrap(),
+                    )
+                    .unwrap();
+            }
+            let roots = [state(SWAP, &[0, 1]), state(SWAP, &[1, 0])];
+            let planner = build_planner_with_budget(
+                &device,
+                library,
+                roots.clone(),
+                PlannerBudget {
+                    max_frontier_size_per_state: 32,
+                    max_total_plan_nodes: 5_000,
+                    max_total_generated_candidates: 20_000,
+                },
+            )
+            .unwrap_or_else(|error| panic!("{basis:?}, profile={profile}: {error}"));
+            for root in roots {
+                assert!(
+                    planner.selected_plan_for(&root).is_some(),
+                    "{basis:?}: {root:?}"
+                );
+            }
+            eprintln!(
+                "basis={basis:?}, profile={profile}, nodes={}, candidates={}, frontier={}",
+                planner.nodes.len(),
+                planner.generated_candidates,
+                planner.frontiers.iter().map(Vec::len).max().unwrap_or(0)
+            );
+        }
+    }
+}

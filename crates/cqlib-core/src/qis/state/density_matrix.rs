@@ -151,7 +151,7 @@ impl DensityMatrix {
         Ok(())
     }
 
-    /// Validates that two qubit indices are within bounds.
+    /// Validates that two qubit indices are within bounds and distinct.
     #[inline]
     fn validate_two_qubits(&self, q0: usize, q1: usize) -> Result<(), QisError> {
         if self.num_qubits == 0 {
@@ -171,10 +171,15 @@ impl DensityMatrix {
                 max: self.num_qubits.saturating_sub(1),
             });
         }
+        if q0 == q1 {
+            return Err(QisError::InvalidParameterValue(format!(
+                "Duplicate qubit index {q0} in gate operation"
+            )));
+        }
         Ok(())
     }
 
-    /// Validates that all qubit indices in a slice are within bounds.
+    /// Validates that all qubit indices in a slice are within bounds and distinct.
     #[inline]
     fn validate_qubits(&self, qubits: &[usize]) -> Result<(), QisError> {
         if self.num_qubits == 0 {
@@ -190,6 +195,13 @@ impl DensityMatrix {
                 });
             }
         }
+        for (i, &q) in qubits.iter().enumerate() {
+            if qubits[..i].contains(&q) {
+                return Err(QisError::InvalidParameterValue(format!(
+                    "Duplicate qubit index {q} in gate operation"
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -197,17 +209,35 @@ impl DensityMatrix {
     ///
     /// # Arguments
     /// * `num_qubits` - Number of qubits in the system.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the dimension is unrepresentable or allocation fails.
+    /// Use [`Self::try_new`] to receive an error instead.
     pub fn new(num_qubits: usize) -> Self {
-        let size = 1 << (2 * num_qubits);
-        let mut data = vec![Complex64::new(0.0, 0.0); size];
-        if size > 0 {
-            data[0] = Complex64::new(1.0, 0.0);
-        }
-        Self {
+        Self::try_new(num_qubits).expect("cannot allocate density matrix")
+    }
+
+    /// Creates the ground state, returning an error for an unrepresentable
+    /// dimension or a failed allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QisError::InvalidParameterValue`] for an unrepresentable
+    /// dimension, or [`QisError::UnsupportedOperation`] if allocation fails.
+    pub fn try_new(num_qubits: usize) -> Result<Self, QisError> {
+        let size = super::checked_state_len(num_qubits, true)?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(size).map_err(|_| {
+            QisError::UnsupportedOperation("density matrix allocation failed".into())
+        })?;
+        data.resize(size, Complex64::new(0.0, 0.0));
+        data[0] = Complex64::new(1.0, 0.0);
+        Ok(Self {
             data,
             num_qubits,
             qubit_map: None,
-        }
+        })
     }
 
     /// Creates the maximally mixed state $I / 2^N$.
@@ -218,18 +248,29 @@ impl DensityMatrix {
     ///
     /// Like every dense density-matrix constructor, this allocates $O(4^N)$
     /// complex values.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the dimension is unrepresentable or allocation fails.
+    /// Use [`Self::try_maximally_mixed`] to receive an error instead.
     pub fn maximally_mixed(num_qubits: usize) -> Self {
-        let dim = 1 << num_qubits;
-        let mut data = vec![Complex64::new(0.0, 0.0); dim * dim];
+        Self::try_maximally_mixed(num_qubits).expect("cannot allocate density matrix")
+    }
+
+    /// Fallible variant of [`Self::maximally_mixed`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QisError::InvalidParameterValue`] for an unrepresentable
+    /// dimension, or [`QisError::UnsupportedOperation`] if allocation fails.
+    pub fn try_maximally_mixed(num_qubits: usize) -> Result<Self, QisError> {
+        let mut state = Self::try_new(num_qubits)?;
+        let dim = 1usize << num_qubits;
         let probability = Complex64::new(1.0 / dim as f64, 0.0);
         for index in 0..dim {
-            data[index * dim + index] = probability;
+            state.data[index * dim + index] = probability;
         }
-        Self {
-            data,
-            num_qubits,
-            qubit_map: None,
-        }
+        Ok(state)
     }
 
     /// Creates a density matrix from an initial statevector (pure state).
@@ -244,17 +285,17 @@ impl DensityMatrix {
     /// Returns [`QisError::InvalidStateDimension`] if the `initial_state` length is
     /// incorrect, or [`QisError::NotNormalized`] if it is not normalized.
     pub fn from_state(num_qubits: usize, initial_state: Vec<Complex64>) -> Result<Self, QisError> {
-        let dim = 1 << num_qubits;
+        super::checked_state_len(num_qubits, true)?;
+        let dim = 1usize << num_qubits;
         if initial_state.len() != dim {
             return Err(QisError::InvalidStateDimension(initial_state.len()));
         }
         let norm: f64 = initial_state.iter().map(|c| c.norm_sqr()).sum();
-        if (norm - 1.0).abs() >= 1e-10 {
+        if !norm.is_finite() || (norm - 1.0).abs() >= 1e-10 {
             return Err(QisError::NotNormalized);
         }
 
-        let size = 1 << (2 * num_qubits);
-        let mut data = vec![Complex64::new(0.0, 0.0); size];
+        let mut data = Self::try_new(num_qubits)?.data;
 
         let kernel = |(i, chunk): (usize, &mut [Complex64])| {
             let alpha_i = initial_state[i];
@@ -293,7 +334,7 @@ impl DensityMatrix {
         num_qubits: usize,
         dm_state: Vec<Complex64>,
     ) -> Result<Self, QisError> {
-        let size = 1 << (2 * num_qubits);
+        let size = super::checked_state_len(num_qubits, true)?;
         if dm_state.len() != size {
             return Err(QisError::InvalidStateDimension(dm_state.len()));
         }
@@ -337,7 +378,7 @@ impl DensityMatrix {
     /// * `Ok(DensityMatrix)` - The resulting density matrix after execution.
     /// * `Err(QisError)` - If the circuit contains unsupported operations.
     pub fn from_circuit(circuit: &Circuit) -> Result<Self, QisError> {
-        let mut dm = DensityMatrix::new(circuit.num_qubits());
+        let mut dm = DensityMatrix::try_new(circuit.num_qubits())?;
         dm.apply_circuit(circuit)?;
         Ok(dm)
     }
@@ -435,30 +476,31 @@ impl DensityMatrix {
                     let num_controls = mc_gate.num_ctrl_qubits();
                     let base_gate = mc_gate.base_gate();
 
-                    if num_controls == 1 {
-                        let control = qubit_indices[0];
-                        let target = qubit_indices[1];
-                        match base_gate {
-                            StandardGate::X => dm.apply_cx(control, target)?,
-                            StandardGate::Y => dm.apply_cy(control, target)?,
-                            StandardGate::Z => dm.apply_cz(control, target)?,
-                            StandardGate::RX => dm.apply_crx(control, target, params[0])?,
-                            StandardGate::RY => dm.apply_cry(control, target, params[0])?,
-                            StandardGate::RZ => dm.apply_crz(control, target, params[0])?,
-                            _ => {
-                                let matrix = mc_gate.matrix(&params).map_err(|_| {
-                                    QisError::CircuitError(CircuitError::NoMatrixRepresentation)
-                                })?;
-                                dm.apply_unitary_gate(&qubit_indices, &matrix)?;
-                            }
+                    match (num_controls, *base_gate) {
+                        (0, StandardGate::GPhase) => {
+                            dm.apply_standard_gate(*base_gate, &qubit_indices, &params)?
                         }
-                    } else if num_controls == 2 && *base_gate == StandardGate::X {
-                        dm.apply_ccx(qubit_indices[0], qubit_indices[1], qubit_indices[2])?;
-                    } else {
-                        let matrix = mc_gate.matrix(&params).map_err(|_| {
-                            QisError::CircuitError(CircuitError::NoMatrixRepresentation)
-                        })?;
-                        dm.apply_unitary_gate(&qubit_indices, &matrix)?;
+                        (1, StandardGate::X) => dm.apply_cx(qubit_indices[0], qubit_indices[1])?,
+                        (1, StandardGate::Y) => dm.apply_cy(qubit_indices[0], qubit_indices[1])?,
+                        (1, StandardGate::Z) => dm.apply_cz(qubit_indices[0], qubit_indices[1])?,
+                        (1, StandardGate::RX) => {
+                            dm.apply_crx(qubit_indices[0], qubit_indices[1], params[0])?
+                        }
+                        (1, StandardGate::RY) => {
+                            dm.apply_cry(qubit_indices[0], qubit_indices[1], params[0])?
+                        }
+                        (1, StandardGate::RZ) => {
+                            dm.apply_crz(qubit_indices[0], qubit_indices[1], params[0])?
+                        }
+                        (2, StandardGate::X) => {
+                            dm.apply_ccx(qubit_indices[0], qubit_indices[1], qubit_indices[2])?
+                        }
+                        _ => {
+                            let matrix = mc_gate.matrix(&params).map_err(|_| {
+                                QisError::CircuitError(CircuitError::NoMatrixRepresentation)
+                            })?;
+                            dm.apply_unitary_gate(&qubit_indices, &matrix)?;
+                        }
                     }
                 }
                 Instruction::UnitaryGate(u_gate) => {
@@ -573,13 +615,25 @@ impl DensityMatrix {
     ///
     /// # Arguments
     /// * `num_qubits` - Number of qubits in the system.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the dimension is unrepresentable or allocation fails.
+    /// Use [`Self::try_zeros`] to receive an error instead.
     pub fn zeros(num_qubits: usize) -> Self {
-        let size = 1 << (2 * num_qubits);
-        Self {
-            data: vec![Complex64::new(0.0, 0.0); size],
-            num_qubits,
-            qubit_map: None,
-        }
+        Self::try_zeros(num_qubits).expect("cannot allocate density matrix")
+    }
+
+    /// Fallible variant of [`Self::zeros`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QisError::InvalidParameterValue`] for an unrepresentable
+    /// dimension, or [`QisError::UnsupportedOperation`] if allocation fails.
+    pub fn try_zeros(num_qubits: usize) -> Result<Self, QisError> {
+        let mut state = Self::try_new(num_qubits)?;
+        state.data[0] = Complex64::new(0.0, 0.0);
+        Ok(state)
     }
 
     /// Computes the trace of the density matrix.
@@ -611,6 +665,13 @@ impl DensityMatrix {
     /// # Returns
     /// `true` if the matrix is Hermitian within the specified tolerance.
     pub fn is_hermitian(&self, tol: f64) -> bool {
+        if self
+            .data
+            .iter()
+            .any(|v| !v.re.is_finite() || !v.im.is_finite())
+        {
+            return false;
+        }
         let dim = 1 << self.num_qubits;
         for i in 0..dim {
             for j in 0..i {

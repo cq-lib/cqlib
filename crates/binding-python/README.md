@@ -10,7 +10,7 @@ mitigation, and visualization.
 
 ## Installation
 
-Cqlib requires Python 3.10 or later.
+Cqlib requires Python 3.11 or later.
 
 Install the latest pre-release from PyPI:
 
@@ -50,7 +50,7 @@ bound = circuit.assign_parameters({"theta": 0.5})
 
 ## Supported environments
 
-- Python 3.10 or later on CPython
+- CPython 3.11–3.15 with the GIL enabled
 - Linux, macOS, and Windows
 - Type information is included for static type checkers
 

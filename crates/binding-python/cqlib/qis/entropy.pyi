@@ -38,8 +38,9 @@ def renyi_entropy(dm: DensityMatrix, alpha: float) -> float:
     The Rényi entropy is defined as :math:`S_\\alpha(\\rho) = \\frac{1}{1-\\alpha} \\log_2(\\text{Tr}(\\rho^\\alpha))`.
 
     Special cases:
-        - When ``alpha -> 1``: Approaches Von Neumann entropy.
+        - When ``alpha = 1``: Returns Von Neumann entropy.
         - When ``alpha = 2``: Collision entropy.
+        - When ``alpha = +inf``: Min-entropy.
 
     Args:
         dm (DensityMatrix): The density matrix representing the quantum state.
@@ -49,7 +50,13 @@ def renyi_entropy(dm: DensityMatrix, alpha: float) -> float:
         float: The Rényi entropy in bits (base-2 logarithm).
 
     Raises:
-        ValueError: If `alpha <= 0` or if eigendecomposition fails.
+        ValueError: If alpha is NaN or <= 0, eigendecomposition fails,
+            or no positive spectrum remains.
+
+    Notes:
+        Non-diagonal spectra discard eigenvalues at or below
+        dimension * machine epsilon * largest eigenvalue as numerical zeros.
+        Diagonal spectra retain all positive entries.
     """
     ...
 

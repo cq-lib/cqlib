@@ -72,23 +72,6 @@ pub fn verify_circuit(circuit: &Circuit, mode: VerifyMode<'_>) -> Result<(), Com
     verify_parameter_finite(&global_phase, "global phase")?;
     if matches!(mode, VerifyMode::Output { .. }) {
         verify_parameter_canonical(&global_phase, circuit.global_phase_param(), "global phase")?;
-        // A canonicalization round accumulates a zero phase contribution for
-        // every retained root operation. The expression engine can normalize
-        // a tiny numeric residue while constructing that sum even when the
-        // residue alone is already a canonical numeric parameter. Reject that
-        // representation here so the verified fast path is a true fixed point.
-        if !circuit.operations().is_empty() && !global_phase.is_canonical_positive_zero() {
-            let accumulated = (global_phase.clone() + Parameter::from(0.0))
-                .canonicalized()
-                .map_err(|error| {
-                    CompilerError::Circuit(crate::circuit::CircuitError::InvalidParameter(error))
-                })?;
-            if accumulated != global_phase {
-                return Err(CompilerError::InvariantViolation(
-                    "global phase is not in accumulator-normal form".to_string(),
-                ));
-            }
-        }
     }
     verify_operations(circuit, circuit.operations(), "root", mode)?;
 

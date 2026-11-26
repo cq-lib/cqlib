@@ -99,9 +99,11 @@ Returns: 1 when all terms commute; 0 otherwise; -1 for NULL.
 
 ### hamiltonian_to_matrix_len(ptr) / hamiltonian_to_matrix(ptr, buffer, len)
 
-Two-step read of the dense matrix: `*_len` returns the side length `2^N` (0 for NULL), and the fill function copies the `2^N × 2^N` matrix into `buffer` in row-major order (`Complex64` values). `len` must equal the square of the side length.
+Two-step read of the dense matrix: `*_len` returns the side length `2^N` (0 for NULL or an unrepresentable side length), and the fill function copies the `2^N × 2^N` matrix into `buffer` in row-major order (`Complex64` values). `len` must equal the square of the side length.
 
-Returns (fill function): 0 on success; -1 for NULL pointers; -8 when `len` does not match the matrix element count.
+Returns (fill function): 0 on success; -1 for NULL pointers; -7 for unrepresentable element/byte counts or allocation failure; -8 when `len` does not match the matrix element count. Errors leave the buffer unchanged.
+
+A representable side does not guarantee the complete matrix can be allocated. Check for overflow before computing `dim * dim`.
 
 ---
 
@@ -212,6 +214,7 @@ Returns: a new `CCircuit*` on success (free with `circuit_free`); NULL on NULL i
 ## Example
 
 ```c
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "cqlib_c.h"
@@ -230,6 +233,8 @@ int main(void) {
     uintptr_t nq = hamiltonian_num_qubits(ham);       /* 2 */
     uintptr_t nt = hamiltonian_num_terms(ham);        /* 2 */
     int32_t commute = hamiltonian_all_terms_commute(ham);  /* 1 (single-qubit terms commute) */
+    printf("qubits=%" PRIuPTR ", terms=%" PRIuPTR ", commute=%" PRId32 "\n",
+           nq, nt, commute);
     hamiltonian_simplify(ham);
 
     /* 3. Two-step read of the 4x4 dense matrix */
@@ -280,3 +285,86 @@ int main(void) {
 ```
 
 Hamiltonians serve as observables in the error-mitigation workflows (see [Zero-Noise Extrapolation](../6_error_mitigation/1_zne.md) and [Virtual Distillation](../6_error_mitigation/2_virtual_distillation.md)); their expectation values can be computed directly with the statevector simulator (see [Statevector](1_statevector.md)).
+
+
+## Checked sparse Pauli algebra
+
+`CHamiltonian` also represents general non-Hermitian sparse operators. These new functions follow the error/output conventions of the [fermionic binding](10_fermion.md): success is 0, object outputs are independent handles delivered through `**out`, and errors leave outputs and inputs unchanged. Input Pauli handles are borrowed and copied. Legacy consuming `from_pauli`, in-place `scale` and approximate-pruning `simplify` remain unchanged.
+
+```c
+typedef struct CHamiltonianTerm {
+    const CPauliString *pauli;
+    Complex64 coefficient;
+} CHamiltonianTerm;
+
+int32_t hamiltonian_identity(size_t num_qubits, CHamiltonian **out);
+
+int32_t hamiltonian_from_terms(size_t num_qubits,
+                               const CHamiltonianTerm *terms,
+                               size_t len,
+                               CHamiltonian **out);
+
+int32_t hamiltonian_copy(const CHamiltonian *ptr, CHamiltonian **out);
+
+int32_t hamiltonian_normalized(const CHamiltonian *ptr, CHamiltonian **out);
+
+int32_t hamiltonian_normalized_hermitian(const CHamiltonian *ptr, CHamiltonian **out);
+
+int32_t hamiltonian_add(const CHamiltonian *left,
+                        const CHamiltonian *right,
+                        CHamiltonian **out);
+
+int32_t hamiltonian_sub(const CHamiltonian *left,
+                        const CHamiltonian *right,
+                        CHamiltonian **out);
+
+int32_t hamiltonian_mul(const CHamiltonian *left,
+                        const CHamiltonian *right,
+                        CHamiltonian **out);
+
+int32_t hamiltonian_scaled(const CHamiltonian *ptr,
+                           Complex64 factor,
+                           CHamiltonian **out);
+
+int32_t hamiltonian_adjoint(const CHamiltonian *ptr, CHamiltonian **out);
+
+int32_t hamiltonian_tensor(const CHamiltonian *left,
+                           const CHamiltonian *right,
+                           CHamiltonian **out);
+
+int32_t hamiltonian_remap_qubits(const CHamiltonian *ptr,
+                                 const size_t *mapping,
+                                 size_t len,
+                                 size_t target_width,
+                                 CHamiltonian **out);
+
+int32_t hamiltonian_chop(CHamiltonian *ptr, double atol);
+
+int32_t hamiltonian_equiv(const CHamiltonian *left,
+                          const CHamiltonian *right,
+                          double atol,
+                          uint8_t *out);
+
+int32_t hamiltonian_is_hermitian(const CHamiltonian *ptr, double atol, uint8_t *out);
+
+int32_t hamiltonian_get_term(const CHamiltonian *ptr,
+                             size_t index,
+                             CPauliString **out_pauli,
+                             Complex64 *out_coefficient);
+```
+
+| Functions | Behavior |
+| --- | --- |
+| `identity/from_terms` | Identity supports scalar one on zero qubits; empty terms retain width. Batch construction validates widths/coefficients, absorbs Pauli phases, merges duplicates and removes only exact zeros. |
+| `copy/get_term` | Independent storage copies. get_term returns a stored Pauli copy and coefficient without normalizing; free the Pauli with pauli_string_free. Zero-width Paulis are valid. Bad indices return -2. |
+| `normalized` | Validated, exactly merged copy without near-zero pruning. |
+| `normalized_hermitian` | After normalization, projects imaginary parts of magnitude <=1e-10 to zero; larger parts return -8. Retains every nonzero real coefficient. |
+| `add/sub/mul/scaled/adjoint` | Call core checked methods; validate input/result coefficients. Nonfinite values and overflow return -8. Binary arithmetic requires equal widths; mul applies the right operand first. |
+| `tensor` | Left tensor right; right occupies low qubits. Widths add; arithmetic width overflow returns -8. |
+| `remap_qubits` | mapping[source]=destination; length equals input width; destinations are unique and less than target_width. Unused qubits are identity. This is not a fermionic permutation. |
+| `chop` | Normalize in place then remove coefficients with magnitude <=atol; failure is atomic. |
+| `equiv/is_hermitian` | Write 0/1. atol must be finite/nonnegative; 0 is exact. equiv requires equal widths; Hermiticity compares with the adjoint without projection. |
+
+Free object results with `hamiltonian_free`; supply an empty, valid output slot. Required NULL pointers return -1; invalid parameters, widths, coefficients or tolerances return -8. Unrepresentable materialized Pauli widths in identity/tensor/remap return -7. Zero sums may retain larger widths without materializing bit vectors.
+
+atol is a coefficient tolerance. On normalized sums, `is_hermitian` bounds `2*abs(imag) <= atol`; this is independent of the projection threshold in `normalized_hermitian`. Sparse algebra builds no dense matrix and never implicitly calls legacy simplify.

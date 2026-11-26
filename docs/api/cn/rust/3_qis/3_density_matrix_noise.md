@@ -35,7 +35,10 @@ pub struct DensityMatrixNoise {
 
 ### 构造与线路对接
 
+`new` 在维度无法表示或状态内存分配失败时会 panic。需要处理错误时使用对应的 `try_*` 构造函数。支持零比特状态。
+
 - `fn new(num_qubits: usize, noise_model: Option<NoiseModel>) -> Self`：按比特数与噪声模型构造，初始态为 `|0...0><0...0|`。
+- `fn try_new(num_qubits: usize, noise_model: Option<NoiseModel>) -> Result<Self, QisError>`：构造基态；维度无法表示时返回 `QisError::InvalidParameterValue`，状态内存分配失败时返回 `QisError::UnsupportedOperation`。
 - `fn from_circuit(circuit: &Circuit, noise_model: Option<NoiseModel>) -> Result<Self, QisError>`：执行线路并返回模拟器；线路会先被分解为基础门，噪声在每个门之后施加。
 - `fn apply_circuit(&mut self, circuit: &Circuit) -> Result<(), QisError>`：把线路原地作用到当前模拟器上，噪声按已配置的模型施加。
 
@@ -84,7 +87,7 @@ pub struct DensityMatrixNoise {
 模拟器把「量子态的噪声」与「读出的噪声」分开表达：前者作用于密度矩阵本身，后者只改变报告出来的概率分布。
 
 - `fn probabilities(&self) -> Vec<f64>`：返回密度矩阵对角元，即各计算基态的测量概率。包含已经施加的门噪声，不含读出噪声。
-- `fn probabilities_with_readout(&self, qubits: &[usize]) -> Result<Vec<f64>, QisError>`：在 `probabilities` 的基础上，对 `qubits` 中列出的比特施加读出噪声。
+- `fn probabilities_with_readout(&self, qubits: &[usize]) -> Result<Vec<f64>, QisError>`：`qubits` 为施加读出误差的存储位置；绑定线路后，按这些位置对应的线路比特 ID 查询噪声模型，未绑定时 ID 与位置相同。返回完整的 `2^num_qubits` 项概率数组，保持存储位序；空选择不施加读出误差。位置越界时返回 `QisError::IndexOutOfBounds`，即使未配置噪声模型。
 - `fn probs(&self, measurement: &Measurement) -> Result<HashMap<Outcome, f64>, QisError>`：返回 `Measurement` 选定的边缘概率分布，不含读出噪声。
 - `fn probs_with_readout(&self, measurement: &Measurement) -> Result<HashMap<Outcome, f64>, QisError>`：在 `probs` 的基础上，对 `measurement.qubits()` 施加读出噪声。
 

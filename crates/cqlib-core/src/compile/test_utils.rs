@@ -25,6 +25,38 @@ use std::sync::Arc;
 
 const EPSILON: f64 = 1e-9;
 
+/// The reported unitary whose Cartan coordinates lie on the a=pi/4 wall.
+pub(crate) fn kak_boundary_matrix() -> ndarray::Array2<num_complex::Complex64> {
+    use num_complex::Complex64;
+
+    ndarray::array![
+        [
+            Complex64::new(-0.14755155196621783, 0.08535345227001921),
+            Complex64::new(-0.015112015359785388, -0.026124324914469213),
+            Complex64::new(-4.3021142204224816e-16, 0.06601980439593577),
+            Complex64::new(-0.9826870609532827, 2.7755575615628914e-16),
+        ],
+        [
+            Complex64::new(-0.006212290419590961, -0.010739262071974568),
+            Complex64::new(-0.3589338503302527, 0.2076307761864266),
+            Complex64::new(0.9070757873156866, -5.412337245047638e-16),
+            Complex64::new(-6.245004513516506e-16, -0.07152302867497204),
+        ],
+        [
+            Complex64::new(-0.9706933646378622, 2.7755575615628914e-17),
+            Complex64::new(2.6020852139652106e-18, -0.15594957493615416),
+            Complex64::new(0.03569705171577718, -0.061709927849413246),
+            Complex64::new(0.1457506851638859, 0.08431171332109447),
+        ],
+        [
+            Complex64::new(7.112366251504909e-17, -0.16894909068671718),
+            Complex64::new(-0.8960049266516804, -3.608224830031759e-16),
+            Complex64::new(-0.35455306241796475, -0.20509664240745978),
+            Complex64::new(-0.014674445936026376, 0.02536789332498595),
+        ],
+    ]
+}
+
 pub(super) fn build_device_synthesis_context(
     device: &Device,
     circuit: &Circuit,

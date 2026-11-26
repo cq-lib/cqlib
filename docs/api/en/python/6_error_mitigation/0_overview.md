@@ -30,7 +30,7 @@ The unified pipeline selects the execution path by method:
 Neither method executes the input circuit directly; both first construct a family of mitigation circuits:
 
 - Zero-noise extrapolation expands the circuit according to the fold level. Global folding rewrites the circuit as `U -> U (U† U)^level`, so that the circuit depth grows with the level; selective folding performs the same expansion only on operations whose instruction name matches the given gate set, leaving the other operations as they are. When the level is `0` the mitigation circuit is a copy of the input circuit.
-- Virtual distillation copies the circuit `copies` times and inserts SWAPs qubit-wise, yielding a copy-swap circuit of `copies` times the width. The numerator and the denominator are executed on the same circuit, differing only in the observable passed to the callback: the denominator is `None` and the numerator is the `Hamiltonian` expanded by the number of copies.
+- Virtual distillation copies the circuit `copies` times, appends one ancillary qubit prepared in `|+⟩` by a Hadamard gate, and applies SWAPs between adjacent copies controlled by the ancillary qubit, yielding a copy-swap circuit of `copies` times the width plus 1. The numerator and the denominator are executed on the same circuit, differing only in the observable passed to the callback: the numerator receives the `Hamiltonian` expanded to the full width (the original observable on the first copy ⊗ `X` on the ancillary qubit), and the denominator receives the `Hamiltonian` with only `X` on the ancillary qubit.
 
 ### Data flow
 
@@ -104,9 +104,9 @@ The call order is constrained by the object itself: each `ErrorMitigation` insta
 | **Selective folding** | Folding applied only to operations whose instruction name matches `gate_set`, leaving the other operations as they are. |
 | **Extrapolation method** | The fitting model that extrapolates expectation values at different noise factors to the zero-noise point, including the polynomial and exponential kinds. |
 | **Copies** | The number of copies of the density matrix in virtual distillation, given by `copies`, with a minimum of 2. |
-| **copy-swap circuit** | The mitigation circuit obtained by copying the input circuit `copies` times and inserting SWAPs qubit-wise. |
-| **Numerator circuit** | The copy-swap circuit execution used to estimate `Tr(O ρ^M)`, with the observable being the `Hamiltonian` expanded by the number of copies. |
-| **Denominator circuit** | The copy-swap circuit execution used to estimate `Tr(ρ^M)`, with the observable being `None`. |
+| **copy-swap circuit** | The mitigation circuit obtained by copying the input circuit `copies` times, appending one ancillary qubit prepared by a Hadamard gate, and applying ancilla-controlled SWAPs between adjacent copies qubit-wise. |
+| **Numerator circuit** | The copy-swap circuit execution used to estimate `Tr(O ρ^M)`, with the observable being the `Hamiltonian` expanded to the full width (the original observable on the first copy ⊗ `X` on the ancillary qubit). |
+| **Denominator circuit** | The copy-swap circuit execution used to estimate `Tr(ρ^M)`, with the observable being `X` on the ancillary qubit (identities elsewhere). |
 | **estimator** | The callback provided by the caller, which executes one mitigation circuit and returns an `(expectation value, variance)` pair. |
 | **Unified pipeline** | The sequential flow carried by `ErrorMitigation`: `run()` collects the estimates and `get_mitigated()` performs post-processing. |
 
@@ -190,13 +190,20 @@ hamiltonian = Hamiltonian.from_list([(PauliString.from_str("Z"), 1.0)])
 
 vd = VirtualDistillation(circuit, 2)
 copy_swap = vd.build_copy_swap_circuit()
-print(copy_swap.width)  # 2
+print(copy_swap.width)  # 3 = copies * base_width + 1
 
 
 def estimator(run_circuit, observable, shots):
-    if observable is None:
-        return (2.0, 1.0)   # 分母：Tr(ρ^M)
-    return (1.5, 0.25)      # 分子：Tr(O ρ^M)
+    # 分子与分母都携带观测量：分子在第 0 份副本的比特上有非恒等 Pauli，
+    # 分母只有辅助比特（最后一个比特）上的 X
+    is_numerator = any(
+        qubit < observable.num_qubits - 1
+        for term, _ in observable.terms
+        for qubit in term.support()
+    )
+    if is_numerator:
+        return (1.5, 0.25)      # 分子：Tr(O ρ^M)
+    return (2.0, 1.0)           # 分母：Tr(ρ^M)
 
 
 expectation, variance = vd.run_vd(
@@ -229,9 +236,14 @@ hamiltonian = Hamiltonian.from_list([(PauliString.from_str("Z"), 1.0)])
 
 
 def estimator(run_circuit, observable, shots):
-    if observable is None:
-        return (2.0, 1.0)
-    return (1.5, 0.25)
+    is_numerator = any(
+        qubit < observable.num_qubits - 1
+        for term, _ in observable.terms
+        for qubit in term.support()
+    )
+    if is_numerator:
+        return (1.5, 0.25)
+    return (2.0, 1.0)
 
 
 mitigation = ErrorMitigation(

@@ -32,7 +32,10 @@ pub struct Statevector {
 
 ### 构造与振幅访问
 
+`new` 在维度无法表示或状态内存分配失败时会 panic。需要处理错误时使用对应的 `try_*` 构造函数。支持零比特状态。
+
 - `fn new(num_qubits: usize) -> Self`：构造 `|0...0>` 态，首分量置 1，其余为 0。
+- `fn try_new(num_qubits: usize) -> Result<Self, QisError>`：构造基态；维度无法表示时返回 `QisError::InvalidParameterValue`，状态内存分配失败时返回 `QisError::UnsupportedOperation`。
 - `fn from_state(num_qubits: usize, initial_state: Vec<Complex64>) -> Result<Self, QisError>`：用给定振幅构造，要求长度等于 `2^num_qubits` 且已经归一化。
 - `fn data(&self) -> &[Complex64]`：按共享切片读取全部振幅。
 - `fn data_mut(&mut self) -> &mut [Complex64]`：按可变切片读取全部振幅；改写可能破坏归一化。

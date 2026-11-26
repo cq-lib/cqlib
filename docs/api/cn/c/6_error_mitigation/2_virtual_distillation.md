@@ -44,11 +44,11 @@
 
 ### virtual_distillation_build_circuit(ptr)
 
-构造虚拟蒸馏协议使用的 copy-swap 线路：先对基底线路做门分解，再把基底线路并排准备 `copies` 份——第 `i` 份整体平移到从 `i × 基底宽度` 开始的比特区间，各份之间互不重叠——最后在首份与其他每一份之间逐比特插入 `SWAP`。
+构造虚拟蒸馏协议使用的 copy-swap 线路（Hadamard-test 线路）：先对基底线路做门分解，再把基底线路并排准备 `copies` 份——第 `i` 份整体平移到从 `i × 基底宽度` 开始的比特区间，各份之间互不重叠——然后在末尾的辅助比特（最后一个比特）上施加 `H` 门制备到 `|+⟩`，最后在相邻副本之间施加由辅助比特控制的 `SWAP` 梯（CSWAP），实现各副本的轮换（derangement）。
 
 - `ptr` (`const struct CVirtualDistillation *`)：虚拟蒸馏句柄。
 
-线路宽度为 `copies × 基底宽度`（基底宽度取分解后线路的宽度）；操作数为 `copies` 份基底操作加上 `(copies - 1) × 基底宽度` 个 `SWAP`。
+线路宽度为 `copies × 基底宽度 + 1`（基底宽度取分解后线路的宽度，最后一个比特是辅助比特）；操作数为 `copies` 份基底操作加上 1 个 `H` 与 `(copies - 1) × 基底宽度` 个受控 `SWAP`。
 
 返回 `struct CCircuit *`：copy-swap 线路的 owned 句柄，用 `circuit_free` 释放；`ptr` 为 NULL 或构造失败时返回 NULL。
 
@@ -56,11 +56,11 @@
 
 ## 分子与分母
 
-估计器回调通过 `hamiltonian` 参数区分两种线路：分子线路带可观测量，分母线路无可观测量。
+估计器回调在两种线路上都会收到非 NULL 的 `hamiltonian`，按内容区分：分子可观测量作用在第 0 份副本的比特上并在辅助比特上携带 `X`；分母可观测量只在辅助比特上携带 `X`（其余为恒等）。
 
 ### virtual_distillation_run_numerator_circuit(ptr, hamiltonian, shots, estimator, out_mean, out_variance)
 
-通过估计器回调执行分子线路，估计 `Tr(O ρ^M)`。估计器收到 copy-swap 线路、扩展到 copy-swap 全宽的哈密顿量与 `shots`。扩展规则：原 Pauli 项保持比特索引、相位与系数不变，新增的高索引比特上补 `Z`。
+通过估计器回调执行分子线路，估计 `Tr(O ρ^M)`。估计器收到 copy-swap 线路、扩展到 copy-swap 全宽的哈密顿量与 `shots`。扩展规则：原 Pauli 项保持比特索引（即作用在第 0 份副本上）、相位与系数不变，其余副本补恒等 `I`，并在辅助比特（最后一个比特）上追加 `X`。
 
 - `ptr` (`const struct CVirtualDistillation *`)：虚拟蒸馏句柄。
 - `hamiltonian` (`const struct CHamiltonian *`)：可观测量，比特数须与基底线路宽度一致，构造方式见 [哈密顿量](../3_qis/7_hamiltonian.md)。
@@ -73,7 +73,7 @@
 
 ### virtual_distillation_run_denominator_circuit(ptr, shots, estimator, out_mean, out_variance)
 
-通过估计器回调执行分母线路，估计 `Tr(ρ^M)`。估计器收到 copy-swap 线路、NULL 哈密顿量与 `shots`。
+通过估计器回调执行分母线路，估计 `Tr(ρ^M)`。估计器收到 copy-swap 线路、辅助比特（最后一个比特）上为 `X` 且其余比特为恒等的哈密顿量，以及 `shots`。
 
 - `ptr` (`const struct CVirtualDistillation *`)：虚拟蒸馏句柄。
 - `shots` (`uintptr_t`)：转发给估计器的 shot 数。
@@ -85,7 +85,7 @@
 
 ### virtual_distillation_build_copy_swap_circuit(ptr)
 
-从基底线路构造 copy-swap 线路：先对基底线路做门分解，再把基底线路并排准备 `copies` 份——第 `i` 份整体平移到从 `i × 基底宽度` 开始的比特区间，各份之间互不重叠——最后在首份与其他每一份之间逐比特插入 `SWAP`。线路宽度为 `copies × 基底宽度`（基底宽度取分解后线路的宽度）；操作数为 `copies` 份基底操作加上 `(copies - 1) × 基底宽度` 个 `SWAP`。
+从基底线路构造 copy-swap 线路：先对基底线路做门分解，再把基底线路并排准备 `copies` 份——第 `i` 份整体平移到从 `i × 基底宽度` 开始的比特区间，各份之间互不重叠——然后在末尾的辅助比特（最后一个比特）上施加 `H` 门制备到 `|+⟩`，最后在相邻副本之间施加由辅助比特控制的 `SWAP` 梯，实现各副本的轮换。线路宽度为 `copies × 基底宽度 + 1`（基底宽度取分解后线路的宽度）；操作数为 `copies` 份基底操作加上 1 个 `H` 与 `(copies - 1) × 基底宽度` 个受控 `SWAP`。
 
 - `ptr` (`const struct CVirtualDistillation *`)：虚拟蒸馏句柄。
 
@@ -119,20 +119,19 @@
 #include <stdio.h>
 #include "cqlib_c.h"
 
-/* 分子线路带可观测量，分母线路不带 */
+/* 分子与分母都携带哈密顿量——分子作用在第 0 份副本的比特上并在辅助
+   比特上携带 X，分母只在辅助比特上携带 X；精确模拟线路并求可观测量期望 */
 static void estimate(const struct CCircuit *circuit,
                      const struct CHamiltonian *hamiltonian,
                      uintptr_t shots,
                      double *expectation,
                      double *variance) {
-    if (hamiltonian != NULL) {
-        *expectation = 1.5;
-        *variance = 0.25;
-    } else {
-        *expectation = 2.0;
-        *variance = 1.0;
-    }
-    (void)circuit;
+    struct CStatevector *sv = statevector_from_circuit(circuit);
+    double value = 0.0;
+    statevector_expectation(sv, hamiltonian, &value);
+    statevector_free(sv);
+    *expectation = value;
+    *variance = 0.0;
     (void)shots;
 }
 
@@ -142,13 +141,13 @@ int main(void) {
     circuit_x(qc, 0);
     struct CVirtualDistillation *vd = virtual_distillation_new(qc, 2);
 
-    /* copy-swap 线路：宽度 = 2 × 1 = 2 */
+    /* copy-swap 线路：宽度 = 2 × 1 + 1 = 3 */
     struct CCircuit *copy_swap = virtual_distillation_build_circuit(vd);
 
     struct CPauliString *z = pauli_string_parse("Z");
     struct CHamiltonian *obs = hamiltonian_from_pauli(z);  /* takes ownership of z */
 
-    /* mu_vd = 1.5 / 2.0 = 0.75 */
+    /* 对 rho = |1><1|：分子 Tr(Z rho^2) = -1，分母 Tr(rho^2) = 1 */
     double mean = 0.0, variance = 0.0;
     virtual_distillation_run_vd(vd, obs, 3, 2, estimate, &mean, &variance);
     printf("VD estimate: %f\n", mean);

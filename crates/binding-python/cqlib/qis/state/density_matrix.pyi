@@ -59,6 +59,9 @@ class DensityMatrix:
         Returns:
             A new DensityMatrix instance in the ground state
 
+        Raises:
+            ValueError: If the dimension is unrepresentable or state allocation fails.
+
         Examples:
             >>> dm = DensityMatrix(2)  # |00⟩⟨00| state
         """
@@ -572,7 +575,8 @@ class DensityMatrix:
             The expectation value as a real number
 
         Raises:
-            ValueError: If the qubit counts don't match or the observable type is invalid
+            ValueError: If qubit counts differ, the observable type is invalid,
+                the observable is not Hermitian, or its coefficients are non-finite.
         """
         ...
 

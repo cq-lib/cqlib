@@ -16,7 +16,9 @@ use crate::circuit::gate::StandardGate;
 use crate::circuit::symbolic_matrix::{
     SymbolicComplex, standard_gate_symbolic_matrix, symbolic_eye,
 };
+use crate::circuit::test_utils::assert_matrix_approx_eq;
 use crate::circuit::{Circuit, Parameter, Qubit};
+use crate::compile::transform::decompose::expand_definitions;
 use ndarray::array;
 use num_complex::Complex64;
 
@@ -644,5 +646,254 @@ fn test_custom_unitary_in_composite_circuit() {
             let expected = if i == j { c(1.0, 0.0) } else { c(0.0, 0.0) };
             assert!((product[[i, j]] - expected).norm() < 1e-10);
         }
+    }
+}
+
+/// Check complete operators, including spectator qubits and nested CircuitGate
+/// definitions, against an independently constructed positional reference.
+fn assert_circuit_definition_order(transform: impl Fn(&Circuit) -> Circuit) {
+    let mut inner = Circuit::from_qubits(vec![Qubit::new(2), Qubit::new(0)]).unwrap();
+    inner.x(Qubit::new(2)).unwrap();
+    let gate = UnitaryGate::new("asymmetric_x", 2, 0)
+        .with_circuit(Arc::new(FrozenCircuit::new(inner)))
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let mut expected = Circuit::new(2);
+    expected.x(Qubit::new(1)).unwrap();
+    let expected = circuit_to_matrix(&expected, None).unwrap();
+    assert_matrix_approx_eq(
+        &circuit_to_matrix(&circuit, None).unwrap(),
+        &expected,
+        1e-12,
+    );
+    assert_matrix_approx_eq(
+        &circuit_to_matrix(&transform(&circuit), None).unwrap(),
+        &expected,
+        1e-12,
+    );
+
+    let mut leaf = Circuit::from_qubits(vec![Qubit::new(4), Qubit::new(1)]).unwrap();
+    leaf.h(Qubit::new(4)).unwrap();
+    leaf.cx(Qubit::new(4), Qubit::new(1)).unwrap();
+    let leaf = leaf.to_gate("storage_order_leaf").unwrap();
+
+    for order in [[9, 2, 5], [5, 9, 2], [2, 5, 9]] {
+        let mut inner = Circuit::from_qubits(order.map(Qubit::new).to_vec()).unwrap();
+        inner.rx(Qubit::new(9), 0.37).unwrap();
+        inner.ry(Qubit::new(2), -0.51).unwrap();
+        inner.cx(Qubit::new(5), Qubit::new(9)).unwrap();
+        inner.cx(Qubit::new(9), Qubit::new(2)).unwrap();
+        inner.rz(Qubit::new(5), 0.29).unwrap();
+        inner
+            .append(leaf.clone(), [Qubit::new(9), Qubit::new(5)], [], None)
+            .unwrap();
+        // Explicit matrices use MSB-first qargs. Reverse the definition's
+        // numeric order when also supplying an equivalent matrix representation.
+        let explicit_matrix = circuit_to_matrix(&inner, Some(&[9, 5, 2])).unwrap();
+        let gate = UnitaryGate::new("numeric_order_unitary", 3, 0)
+            .with_circuit(Arc::new(FrozenCircuit::new(inner)))
+            .unwrap();
+        for with_matrix in [false, true] {
+            let gate = if with_matrix {
+                gate.clone().with_matrix(explicit_matrix.clone()).unwrap()
+            } else {
+                gate.clone()
+            };
+            for args in [
+                [0, 2, 3],
+                [0, 3, 2],
+                [2, 0, 3],
+                [2, 3, 0],
+                [3, 0, 2],
+                [3, 2, 0],
+            ] {
+                let [a, b, c] = args.map(Qubit::new);
+                let mut circuit = Circuit::new(4);
+                circuit.unitary(gate.clone(), vec![a, b, c]).unwrap();
+                let mut expected = Circuit::new(4);
+                expected.rx(c, 0.37).unwrap();
+                expected.ry(a, -0.51).unwrap();
+                expected.cx(b, c).unwrap();
+                expected.cx(c, a).unwrap();
+                expected.rz(b, 0.29).unwrap();
+                expected.h(c).unwrap();
+                expected.cx(c, b).unwrap();
+                let expected = circuit_to_matrix(&expected, None).unwrap();
+                assert_matrix_approx_eq(
+                    &circuit_to_matrix(&circuit, None).unwrap(),
+                    &expected,
+                    1e-12,
+                );
+                assert_matrix_approx_eq(
+                    &circuit_to_matrix(&transform(&circuit), None).unwrap(),
+                    &expected,
+                    1e-12,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn circuit_definition_order_survives_expansion() {
+    assert_circuit_definition_order(|circuit| expand_definitions(circuit).unwrap());
+}
+
+#[test]
+fn circuit_definition_order_survives_qasm2() {
+    assert_circuit_definition_order(|circuit| {
+        crate::ir::qasm2::load::loads(&crate::ir::qasm2::dump::dumps(circuit).unwrap()).unwrap()
+    });
+}
+
+#[test]
+fn circuit_definition_order_survives_qasm3() {
+    assert_circuit_definition_order(|circuit| {
+        crate::ir::qasm3::load::loads(&crate::ir::qasm3::dump::dumps(circuit).unwrap()).unwrap()
+    });
+}
+
+#[test]
+fn circuit_definition_order_survives_compilation() {
+    use crate::compile::resource::ResourcePolicy;
+    use crate::compile::{CompileConfig, CompileMode, CompileTarget, compile};
+    for mode in [CompileMode::Normal, CompileMode::Enhanced] {
+        assert_circuit_definition_order(|circuit| {
+            compile(
+                circuit,
+                CompileConfig {
+                    mode,
+                    target: CompileTarget::Logical,
+                    resource_policy: ResourcePolicy::default(),
+                },
+            )
+            .unwrap()
+            .circuit
+        });
+    }
+}
+
+#[test]
+fn circuit_definition_order_preserves_device_layout_and_basis() {
+    use crate::compile::resource::ResourcePolicy;
+    use crate::compile::{CompileConfig, CompileMode, CompileTarget, DeviceCompileTarget, compile};
+    use crate::device::{Device, Layout};
+
+    let mut inner = Circuit::from_qubits(vec![Qubit::new(2), Qubit::new(0)]).unwrap();
+    inner.x(Qubit::new(2)).unwrap();
+    inner.cx(Qubit::new(2), Qubit::new(0)).unwrap();
+    let gate = UnitaryGate::new("device_unitary", 2, 0)
+        .with_circuit(Arc::new(FrozenCircuit::new(inner)))
+        .unwrap();
+    let mut circuit = Circuit::new(2);
+    circuit
+        .unitary(gate, vec![Qubit::new(0), Qubit::new(1)])
+        .unwrap();
+    let device = Device::line("unitary-ports", 2)
+        .unwrap()
+        .with_native_gates(vec![
+            StandardGate::X.into(),
+            StandardGate::H.into(),
+            StandardGate::CX.into(),
+        ])
+        .unwrap();
+    let layout = Layout::from_pairs(&[(0, 1), (1, 0)], 2).unwrap();
+    // Internal 2 -> argument 1 -> physical 0. The CX direction is native on
+    // the device even though its logical arguments are in reverse order.
+    let mut expected = Circuit::new(2);
+    expected.x(Qubit::new(0)).unwrap();
+    expected.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    for mode in [CompileMode::Normal, CompileMode::Enhanced] {
+        let result = compile(
+            &circuit,
+            CompileConfig {
+                mode,
+                target: CompileTarget::Device(DeviceCompileTarget {
+                    device: device.clone(),
+                    initial_layout: Some(layout.clone()),
+                    seed: Some(47),
+                }),
+                resource_policy: ResourcePolicy::default(),
+            },
+        )
+        .unwrap();
+        device.validate_circuit(&result.circuit).unwrap();
+        let metadata = result.device_metadata.unwrap();
+        assert_eq!(metadata.initial_layout, layout);
+        assert_eq!(metadata.final_layout, layout);
+        assert_matrix_approx_eq(
+            &circuit_to_matrix(&result.circuit, None).unwrap(),
+            &circuit_to_matrix(&expected, None).unwrap(),
+            1e-9,
+        );
+    }
+}
+
+#[test]
+fn circuit_definition_order_preserves_nested_symbolic_parameters_and_phase() {
+    use crate::circuit::symbolic_matrix::{circuit_to_symbolic_matrix, evaluate_symbolic_matrix};
+    let mut inner = Circuit::from_qubits(vec![Qubit::new(2), Qubit::new(0)]).unwrap();
+    inner.rx(Qubit::new(2), Parameter::symbol("theta")).unwrap();
+    inner.cx(Qubit::new(2), Qubit::new(0)).unwrap();
+    inner.set_global_phase(Parameter::symbol("theta") * 0.25);
+    let gate = UnitaryGate::new("symbolic_unitary", 2, 1)
+        .with_circuit(Arc::new(FrozenCircuit::new(inner)))
+        .unwrap();
+    let mut middle = Circuit::from_qubits(vec![Qubit::new(7), Qubit::new(3)]).unwrap();
+    middle
+        .unitary_with_params(
+            gate,
+            vec![Qubit::new(3), Qubit::new(7)],
+            [Parameter::symbol("alpha").into()],
+        )
+        .unwrap();
+    let wrapper = middle.to_gate("storage_order_wrapper").unwrap();
+    let mut circuit = Circuit::new(3);
+    circuit
+        .append(
+            wrapper,
+            [Qubit::new(2), Qubit::new(0)],
+            [crate::circuit::ParameterValue::Param(
+                Parameter::symbol("t") + 0.1_f64,
+            )],
+            None,
+        )
+        .unwrap();
+    let mut expected = Circuit::new(3);
+    expected
+        .rx(Qubit::new(2), Parameter::symbol("t") + 0.1)
+        .unwrap();
+    expected.cx(Qubit::new(2), Qubit::new(0)).unwrap();
+    expected.set_global_phase((Parameter::symbol("t") + 0.1) * 0.25);
+
+    // Build the nested symbolic matrix before expansion, exercising numeric-order
+    // UnitaryGate and storage-order CircuitGate caches in the same expression.
+    let symbolic = circuit_to_symbolic_matrix(&circuit, None).unwrap();
+    let expanded = expand_definitions(&circuit).unwrap();
+    let expanded_symbolic = circuit_to_symbolic_matrix(&expanded, None).unwrap();
+    for value in [0.0, 0.37, -0.51] {
+        let bindings = Some(HashMap::from([("t", value)]));
+        let expected =
+            circuit_to_matrix(&expected.assign_parameters(&bindings).unwrap(), None).unwrap();
+        assert_matrix_approx_eq(
+            &evaluate_symbolic_matrix(&symbolic, &bindings).unwrap(),
+            &expected,
+            1e-12,
+        );
+        assert_matrix_approx_eq(
+            &evaluate_symbolic_matrix(&expanded_symbolic, &bindings).unwrap(),
+            &expected,
+            1e-12,
+        );
+        let bound = circuit.assign_parameters(&bindings).unwrap();
+        assert_matrix_approx_eq(&circuit_to_matrix(&bound, None).unwrap(), &expected, 1e-12);
+        assert_matrix_approx_eq(
+            &circuit_to_matrix(&expand_definitions(&bound).unwrap(), None).unwrap(),
+            &expected,
+            1e-12,
+        );
     }
 }

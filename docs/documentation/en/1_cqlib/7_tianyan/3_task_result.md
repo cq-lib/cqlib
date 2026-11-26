@@ -92,8 +92,8 @@ Suitable for implementing polling logic manually, or for refreshing task status 
 
 ```python
 results = task.wait(
-    timeout_secs=120.0,
-    poll_interval_secs=5.0,
+    timeout=120.0,
+    poll_interval=5.0,
 )
 
 for result in results:
@@ -106,8 +106,8 @@ Parameter description:
 
 | Parameter | Description |
 |---|---|
-| `timeout_secs` | Maximum number of seconds to wait |
-| `poll_interval_secs` | Polling interval in seconds, default `5.0` |
+| `timeout` | Maximum number of seconds to wait |
+| `poll_interval` | Polling interval in seconds, default `5.0` |
 
 `wait()` releases the Python GIL while blocking, so it does not block other Python threads from running.
 
@@ -117,8 +117,8 @@ By default, `wait()` decides whether to apply readout error correction according
 
 ```python
 raw_results = task.wait_raw(
-    timeout_secs=120.0,
-    poll_interval_secs=5.0,
+    timeout=120.0,
+    poll_interval=5.0,
 )
 ```
 
@@ -180,7 +180,7 @@ It is recommended to check the following before submission:
 | Symptom | Common cause | Handling |
 |---|---|---|
 | Submission fails | Backend unavailable, QCIS format error, invalid API Key or network problem | Check `backend.status`, the QCIS text and the authentication status |
-| `wait` times out | Long queue wait time or the task has not completed | Increase `timeout_secs`, or use `status()` to query in batches |
+| `wait` times out | Long queue wait time or the task has not completed | Increase `timeout`, or use `status()` to query in batches |
 | Fewer results returned than submitted circuits | `status()` was used, which returns only completed results | Use `wait()` to wait for all of them to complete |
 | counts is empty | The platform result has not completed or parsing failed | Check the task status and the raw error message |
 | Probabilities and counts are inconsistent | Probabilities are normalized from counts, and the correction mode may change counts | Compare `wait()` with `wait_raw()` |

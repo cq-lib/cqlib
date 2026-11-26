@@ -26,6 +26,7 @@ use crate::compile::transform::analysis::WorkflowCircuitAnalysis;
 use crate::compile::transform::rebuild::{CircuitRebuildContext, ClassicalRemap};
 use crate::compile::transform::transformer::{PassApplicability, WorkflowPass};
 use crate::compile::transform::{CircuitAnalysis, TransformOutcome, Transformer};
+use indexmap::IndexSet;
 use smallvec::{SmallVec, smallvec};
 use std::collections::{HashMap, HashSet};
 
@@ -172,6 +173,8 @@ impl<'a> DefinitionExpander<'a> {
                 self.expand_definition(
                     gate.name(),
                     definition.circuit(),
+                    &definition.circuit().qubits(),
+                    gate.signature_params(),
                     gate.num_qubits(),
                     gate.num_params(),
                     operation,
@@ -186,9 +189,13 @@ impl<'a> DefinitionExpander<'a> {
             Instruction::UnitaryGate(gate) => {
                 if let Some(definition) = gate.circuit().as_ref() {
                     self.changed = true;
+                    // Circuit-backed unitaries use the cached live-symbol order,
+                    // matching UnitaryGate::matrix_for_params.
                     self.expand_definition(
                         gate.label(),
                         definition.circuit(),
+                        &definition.qubits_in_numeric_order(),
+                        definition.used_symbols(),
                         gate.num_qubits() as usize,
                         gate.num_params() as usize,
                         operation,
@@ -240,6 +247,8 @@ impl<'a> DefinitionExpander<'a> {
         &mut self,
         name: &str,
         definition: &Circuit,
+        definition_qubits: &[Qubit],
+        signature_params: &IndexSet<String>,
         expected_qubits: usize,
         expected_params: usize,
         operation: &Operation,
@@ -269,11 +278,10 @@ impl<'a> DefinitionExpander<'a> {
             )));
         }
 
-        let definition_symbols = definition.symbols();
-        if definition_symbols.len() != expected_params {
+        if signature_params.len() != expected_params {
             return Err(CompilerError::InvariantViolation(format!(
-                "definition '{name}' signature has {expected_params} parameters but backing circuit has {} symbols",
-                definition_symbols.len()
+                "definition '{name}' expects {expected_params} parameters but its signature has {} parameters",
+                signature_params.len()
             )));
         }
 
@@ -284,12 +292,13 @@ impl<'a> DefinitionExpander<'a> {
         // nested definition must receive a fresh binding table instead of a
         // merged parent table. Merging would make equal symbol names in nested
         // definitions accidentally capture outer bindings.
-        let mut next_symbol_bindings = HashMap::with_capacity(definition_symbols.len());
-        for (symbol, value) in definition_symbols.iter().zip(resolved_params) {
+        // Only the call signature defines positional bindings. Live dependencies
+        // may omit unused formals, and the circuit registry may retain stale symbols.
+        let mut next_symbol_bindings = HashMap::with_capacity(signature_params.len());
+        for (symbol, value) in signature_params.iter().zip(resolved_params) {
             next_symbol_bindings.insert(symbol.clone(), value);
         }
 
-        let definition_qubits = definition.qubits();
         if definition_qubits.len() != expected_qubits {
             return Err(CompilerError::InvariantViolation(format!(
                 "definition '{name}' signature has {expected_qubits} qubits but backing circuit has {} qubits",
@@ -599,8 +608,9 @@ fn fresh_temp_symbol(index: usize, symbol: &str, occupied: &mut HashSet<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::circuit::ParameterValue;
     use crate::circuit::gate::{FrozenCircuit, UnitaryGate};
+    use crate::circuit::test_utils::assert_matrix_approx_eq;
+    use crate::circuit::{CircuitGate, ParameterValue, circuit_to_matrix};
     use crate::circuit::{ClassicalDataOp, ClassicalExpr};
     use crate::compile::transform::TransformerTestExt;
     use ndarray::array;
@@ -704,6 +714,192 @@ mod tests {
         let bindings = HashMap::from([("gamma", 2.0), ("delta", 3.0)]);
         assert_eq!(rx_param.evaluate(&Some(bindings.clone())).unwrap(), 2.0);
         assert_eq!(rz_param.evaluate(&Some(bindings)).unwrap(), 6.0);
+    }
+
+    #[test]
+    fn expands_circuit_gate_using_declared_parameter_signature() {
+        let q0 = Qubit::new(0);
+        let mut expected = Circuit::new(1);
+        expected.rx(q0, -0.2).unwrap();
+        expected.rz(q0, 0.7).unwrap();
+        expected.set_global_phase(Parameter::from(-1.6));
+        let expected_matrix = circuit_to_matrix(&expected, None).unwrap();
+
+        for stale_registry in [false, true] {
+            for unused_formal in [false, true] {
+                let mut definition = Circuit::new(1);
+                if stale_registry {
+                    definition.add_parameter(Parameter::symbol("stale"));
+                }
+                definition.rx(q0, Parameter::symbol("theta")).unwrap();
+                definition.rz(q0, Parameter::symbol("phi")).unwrap();
+                definition
+                    .set_global_phase(Parameter::symbol("theta") - Parameter::symbol("phi") * 2.0);
+
+                let mut signature = vec!["phi".to_string(), "theta".to_string()];
+                let mut args = vec![ParameterValue::from(0.7), ParameterValue::from(-0.2)];
+                if unused_formal {
+                    signature.insert(0, "unused".to_string());
+                    args.insert(0, ParameterValue::from(11.0));
+                }
+                let gate = CircuitGate::with_signature(
+                    "declared",
+                    FrozenCircuit::new(definition),
+                    signature,
+                )
+                .unwrap();
+                let mut circuit = Circuit::new(1);
+                circuit.circuit_gate(gate, vec![q0], args).unwrap();
+
+                let expanded = expand_definitions(&circuit).unwrap();
+                assert_eq!(expanded.operations().len(), 2);
+                for actual in [&circuit, &circuit.decompose().unwrap(), &expanded] {
+                    assert_matrix_approx_eq(
+                        &circuit_to_matrix(actual, None).unwrap(),
+                        &expected_matrix,
+                        1e-12,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn expands_inferred_signatures_without_removed_operation_symbols() {
+        let q0 = Qubit::new(0);
+        let mut definition = Circuit::new(1);
+        definition.rx(q0, Parameter::symbol("removed")).unwrap();
+        definition.remove_operation(0).unwrap();
+        definition.rx(q0, Parameter::symbol("theta")).unwrap();
+        definition.rz(q0, Parameter::symbol("phi")).unwrap();
+        let circuit_gate = definition.clone().to_gate("inferred").unwrap();
+        let unitary_gate = UnitaryGate::new("inferred_unitary", 1, 2)
+            .with_circuit(Arc::new(FrozenCircuit::new(definition)))
+            .unwrap();
+
+        let mut expected = Circuit::new(1);
+        expected.rx(q0, 0.7).unwrap();
+        expected.rz(q0, -0.2).unwrap();
+        let expected_matrix = circuit_to_matrix(&expected, None).unwrap();
+        for gate in [
+            circuit_gate,
+            Instruction::UnitaryGate(Box::new(unitary_gate)),
+        ] {
+            let mut circuit = Circuit::new(1);
+            circuit
+                .append(
+                    gate,
+                    [q0],
+                    [ParameterValue::from(0.7), ParameterValue::from(-0.2)],
+                    None,
+                )
+                .unwrap();
+            let expanded = expand_definitions(&circuit).unwrap();
+            for actual in [&circuit, &expanded] {
+                assert_matrix_approx_eq(
+                    &circuit_to_matrix(actual, None).unwrap(),
+                    &expected_matrix,
+                    1e-12,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn expands_phase_only_definition_with_unused_formal() {
+        let mut definition = Circuit::new(1);
+        definition.set_global_phase(Parameter::symbol("phase"));
+        let gate = CircuitGate::with_signature(
+            "phase_only",
+            FrozenCircuit::new(definition),
+            ["unused".to_string(), "phase".to_string()],
+        )
+        .unwrap();
+        let mut circuit = Circuit::new(1);
+        circuit
+            .append(
+                Instruction::CircuitGate(Box::new(gate)),
+                [Qubit::new(0)],
+                [ParameterValue::from(11.0), ParameterValue::from(0.7)],
+                None,
+            )
+            .unwrap();
+        let expanded = expand_definitions(&circuit).unwrap();
+        assert!(expanded.operations().is_empty());
+        assert!((expanded.global_phase().evaluate(&None).unwrap() - 0.7).abs() < 1e-12);
+        assert_matrix_approx_eq(
+            &circuit_to_matrix(&expanded, None).unwrap(),
+            &circuit_to_matrix(&circuit, None).unwrap(),
+            1e-12,
+        );
+    }
+
+    #[test]
+    fn expands_nested_signatures_with_simultaneous_symbolic_arguments() {
+        let q0 = Qubit::new(0);
+        let theta = Parameter::symbol("theta");
+        let phi = Parameter::symbol("phi");
+        let mut leaf = Circuit::new(1);
+        leaf.rx(q0, theta.clone()).unwrap();
+        leaf.rz(q0, phi.clone()).unwrap();
+        leaf.set_global_phase(theta.clone() + phi.clone() * 2.0);
+        let leaf_gate = CircuitGate::with_signature(
+            "leaf",
+            FrozenCircuit::new(leaf),
+            ["unused".to_string(), "phi".to_string(), "theta".to_string()],
+        )
+        .unwrap();
+
+        let mut middle = Circuit::new(1);
+        middle
+            .append(
+                Instruction::CircuitGate(Box::new(leaf_gate)),
+                [q0],
+                [
+                    ParameterValue::from(11.0),
+                    ParameterValue::from(theta.clone() + 1.0),
+                    ParameterValue::from(phi.clone() - 0.5),
+                ],
+                None,
+            )
+            .unwrap();
+        let middle_gate = CircuitGate::with_signature(
+            "middle",
+            FrozenCircuit::new(middle),
+            ["phi".to_string(), "theta".to_string()],
+        )
+        .unwrap();
+        let mut circuit = Circuit::new(1);
+        circuit
+            .append(
+                Instruction::CircuitGate(Box::new(middle_gate)),
+                [q0],
+                [
+                    ParameterValue::from(theta.clone()),
+                    ParameterValue::from(phi.clone()),
+                ],
+                None,
+            )
+            .unwrap();
+
+        let mut expected = Circuit::new(1);
+        expected.rx(q0, theta.clone() - 0.5).unwrap();
+        expected.rz(q0, phi.clone() + 1.0).unwrap();
+        expected.set_global_phase(theta - 0.5 + (phi + 1.0) * 2.0);
+        let expanded = expand_definitions(&circuit).unwrap();
+        for (theta, phi) in [(0.2, 0.8), (-0.4, 0.1)] {
+            let bindings = Some(HashMap::from([("theta", theta), ("phi", phi)]));
+            let expected_matrix =
+                circuit_to_matrix(&expected.assign_parameters(&bindings).unwrap(), None).unwrap();
+            for actual in [&circuit, &expanded] {
+                let bound = actual.assign_parameters(&bindings).unwrap();
+                assert_matrix_approx_eq(
+                    &circuit_to_matrix(&bound, None).unwrap(),
+                    &expected_matrix,
+                    1e-12,
+                );
+            }
+        }
     }
 
     #[test]
@@ -894,15 +1090,27 @@ mod tests {
     #[test]
     fn expands_definitions_in_control_flow_body_with_body_local_phase() {
         let mut inner = Circuit::new(1);
-        inner.set_global_phase(Parameter::from(0.5));
+        inner.set_global_phase(Parameter::symbol("phase"));
         inner.x(Qubit::new(0)).unwrap();
-        let gate = inner.to_gate("phase_x").unwrap();
+        let gate = CircuitGate::with_signature(
+            "phase_x",
+            FrozenCircuit::new(inner),
+            ["unused".to_string(), "phase".to_string()],
+        )
+        .unwrap();
 
         let mut circuit = Circuit::new(2);
         circuit
             .if_else(
                 ClassicalExpr::bool_literal(true),
-                |body| body.append(gate, [Qubit::new(1)], [], None),
+                |body| {
+                    body.append(
+                        Instruction::CircuitGate(Box::new(gate)),
+                        [Qubit::new(1)],
+                        [ParameterValue::from(11.0), ParameterValue::from(0.5)],
+                        None,
+                    )
+                },
                 |_body| Ok(()),
             )
             .unwrap();
@@ -920,6 +1128,14 @@ mod tests {
             then_body[0].instruction,
             Instruction::Standard(StandardGate::GPhase)
         ));
+        assert!(
+            (op_param(&expanded, &then_body[0].params[0])
+                .evaluate(&None)
+                .unwrap()
+                - 0.5)
+                .abs()
+                < 1e-12
+        );
         assert!(matches!(
             then_body[1].instruction,
             Instruction::Standard(StandardGate::X)

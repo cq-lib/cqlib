@@ -161,7 +161,7 @@ When the `RunArgs` passed to `run()` do not match the method given at constructi
 
 Zero-noise extrapolation: `run()` constructs the mitigation circuits according to the configured fold levels, calls the callback once per circuit, with the observable being the `Hamiltonian` passed in and the number of shots taken from `RunArgs.zne(shots=...)`. Only the 1st element of the pair returned by the callback is used, and the variance is discarded. `get_mitigated()` fits the extrapolation input, and the `variance` of the result is `None`.
 
-Virtual distillation: `run()` first constructs the copy-swap circuit, then calls the callback twice on the same circuit — the numerator first, then the denominator. The numerator receives the observable expanded by the number of copies and `shots_numerator`, and the denominator receives `None` and `shots_denominator`. `get_mitigated()` computes the ratio according to the combination formula of [Virtual distillation](2_virtual_distillation.md), and the `variance` of the result has a value.
+Virtual distillation: `run()` first constructs the copy-swap circuit, then calls the callback twice on the same circuit — the numerator first, then the denominator. The numerator receives the observable expanded to the full width (the original observable on the first copy ⊗ `X` on the ancillary qubit) and `shots_numerator`, and the denominator receives the observable with only `X` on the ancillary qubit and `shots_denominator`. `get_mitigated()` computes the ratio according to the combination formula of [Virtual distillation](2_virtual_distillation.md), and the `variance` of the result has a value.
 
 ### Example
 

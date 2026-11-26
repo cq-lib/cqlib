@@ -22,6 +22,7 @@ use crate::circuit::{
     Instruction, Parameter, ParameterValue, Qubit, StandardGate, ValueInstruction, ValueOperation,
 };
 use crate::compile::CompilerError;
+use crate::compile::transform::decompose::BlockZxzDecomposeOptions;
 use crate::compile::transform::decompose::unitary::TwoQubitSynthesisTarget;
 use crate::compile::transform::target_basis::TargetBasisSignature;
 use ndarray::Array2;
@@ -157,6 +158,11 @@ pub struct NumericUnitaryRuleRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NumericUnitarySynthesisKey {
     OneQubit,
+    /// Matrix-backed multi-qubit synthesis, including its absolute tolerance.
+    BlockZxz {
+        options: BlockZxzDecomposeOptions,
+        atol_bits: u64,
+    },
     TwoQubit {
         target_basis: Option<TargetBasisSignature>,
         fallback_pauli: bool,
@@ -623,5 +629,65 @@ mod tests {
                 inserts: 1,
             }
         );
+    }
+
+    #[test]
+    fn block_zxz_cache_keys_include_each_option_tolerance_and_matrix_bits() {
+        let matrix = Array2::<Complex64>::eye(8);
+        let phased = &matrix * Complex64::from_polar(1., 0.23);
+        let options = BlockZxzDecomposeOptions::default();
+        let request = |matrix, options, atol: f64| NumericUnitaryRuleRequest {
+            num_qubits: 3,
+            matrix,
+            synthesis_key: NumericUnitarySynthesisKey::BlockZxz {
+                options,
+                atol_bits: atol.to_bits(),
+            },
+        };
+        let qubits = [Qubit::new(2), Qubit::new(0), Qubit::new(1)];
+        let mut cache = DecompositionRuleCache::default();
+        cache
+            .insert_numeric_unitary(request(&matrix, options, 1e-10), &qubits, &[], 0.37)
+            .unwrap();
+        for different in [
+            request(
+                &matrix,
+                BlockZxzDecomposeOptions {
+                    opt_a1: false,
+                    ..options
+                },
+                1e-10,
+            ),
+            request(
+                &matrix,
+                BlockZxzDecomposeOptions {
+                    opt_a2: false,
+                    ..options
+                },
+                1e-10,
+            ),
+            request(
+                &matrix,
+                BlockZxzDecomposeOptions {
+                    opt_a2_force: true,
+                    ..options
+                },
+                1e-10,
+            ),
+            request(&matrix, options, 1e-11),
+            request(&phased, options, 1e-10),
+        ] {
+            assert!(
+                cache
+                    .instantiate_numeric_unitary(different, &qubits)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let (_, phase) = cache
+            .instantiate_numeric_unitary(request(&matrix, options, 1e-10), &qubits)
+            .unwrap()
+            .unwrap();
+        assert_eq!(phase, 0.37);
     }
 }

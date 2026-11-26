@@ -111,6 +111,7 @@ print(bound.used_symbols)            # []
 | `ClassicalVar` | [Classical / Control Flow](9_classical_control_flow.md) | 可变经典存储句柄，由 `Circuit.var()` 创建。 |
 | `ClassicalValue` | [Classical / Control Flow](9_classical_control_flow.md) | 不可变经典值，通常由测量产生。 |
 | `Measurement` | [Classical / Control Flow](9_classical_control_flow.md) | 测量回执，包含测量值和被测量的量子比特顺序。 |
+| `ClassicalDataOp` | [Classical / Control Flow](9_classical_control_flow.md) | 经典数据操作的指令形式（变量写入或测量结果写入），通过 `Instruction.classical_data` 获得。 |
 | `ClassicalExpr` | [Classical / Control Flow](9_classical_control_flow.md) | 类型化经典表达式 AST，用于条件、比较、位抽取和表达式组合。 |
 | `ClassicalControlOp` | [Classical / Control Flow](9_classical_control_flow.md) | 结构化控制流 IR，包含 `if`、`while`、`for`、`switch`、`break` 和 `continue`。 |
 | `ValueControlBody` | [Classical / Control Flow](9_classical_control_flow.md) | 构造层控制流体，包含若干 `ValueOperation`。 |

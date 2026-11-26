@@ -113,6 +113,71 @@ fn two_qubit_op_count(circuit: &Circuit) -> usize {
 }
 
 #[test]
+fn weyl_boundary_resynthesis_improves_a_valid_interior_block() {
+    use crate::circuit::test_utils::assert_matrix_approx_eq;
+    use crate::circuit::{Parameter, circuit_to_matrix};
+
+    let q0 = Qubit::new(0);
+    let q1 = Qubit::new(1);
+    let mut circuit = Circuit::new(2);
+    circuit
+        .rxx(q0, q1, -2.0 * (std::f64::consts::FRAC_PI_4 - 5e-9))
+        .unwrap();
+    circuit.ryy(q0, q1, -0.4).unwrap();
+    circuit.rzz(q0, q1, 0.06).unwrap();
+    for _ in 0..2 {
+        circuit.cx(q0, q1).unwrap();
+        circuit.cx(q0, q1).unwrap();
+    }
+    circuit.set_global_phase(Parameter::from(0.37));
+    let expected = circuit_to_matrix(&circuit, None).unwrap();
+    let (generic, stats) =
+        resynthesize_two_qubit_blocks_with_cache_budget(&circuit, cx_config(), 4096).unwrap();
+    assert!(generic.changed);
+    assert!(two_qubit_op_count(&generic.circuit) < two_qubit_op_count(&circuit));
+    assert_eq!(stats.kak_failed_hits, 0);
+    assert_matrix_approx_eq(
+        &circuit_to_matrix(&generic.circuit, None).unwrap(),
+        &expected,
+        1e-9,
+    );
+
+    let device = Device::bidirectional_line("boundary", 2)
+        .unwrap()
+        // Cost source and replacement on a device that can execute both.
+        .with_native_gates(vec![
+            Instruction::Standard(StandardGate::U),
+            Instruction::Standard(StandardGate::CX),
+            Instruction::Standard(StandardGate::RXX),
+            Instruction::Standard(StandardGate::RYY),
+            Instruction::Standard(StandardGate::RZZ),
+        ])
+        .unwrap();
+    for placement in [
+        DeviceSynthesisPlacement::PreLayoutEnvelope,
+        DeviceSynthesisPlacement::ExactPhysical,
+    ] {
+        let context = build_device_synthesis_context(&device, &circuit, placement).unwrap();
+        let (result, stats) = resynthesize_two_qubit_blocks_with_device_cache_budget(
+            &circuit,
+            cx_config(),
+            context,
+            4096,
+        )
+        .unwrap();
+        assert!(result.changed, "placement={placement:?}, stats={stats:?}");
+        assert!(two_qubit_op_count(&result.circuit) < two_qubit_op_count(&circuit));
+        assert_eq!(stats.kak_failed_hits, 0);
+        assert_matrix_approx_eq(
+            &circuit_to_matrix(&result.circuit, None).unwrap(),
+            &expected,
+            1e-9,
+        );
+        device.validate_circuit(&result.circuit).unwrap();
+    }
+}
+
+#[test]
 fn cancels_adjacent_cx_pair() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);

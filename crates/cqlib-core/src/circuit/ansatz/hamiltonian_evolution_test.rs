@@ -26,7 +26,7 @@ use ndarray::Array2;
 use num_complex::Complex64;
 
 use crate::circuit::ansatz::Ansatz;
-use crate::circuit::circuit_to_matrix;
+use crate::circuit::circuit_to_matrix::circuit_to_matrix;
 use crate::qis::evolution::TrotterMode;
 use crate::qis::hamiltonian::Hamiltonian;
 
@@ -84,6 +84,120 @@ fn circuit_matrix_at_t(
     bindings.insert(t_name, t_val);
     let bound = circuit.assign_parameters(&Some(bindings)).unwrap();
     circuit_to_matrix(&bound, None).unwrap()
+}
+
+#[test]
+fn small_coefficients_survive_symbolic_evolution_and_trotter_scaling() {
+    for coefficient in [1e-16, 1e-12, -1e-16] {
+        for pauli in ["Z", "I", "X", "Y"] {
+            let h = Hamiltonian::from_list(vec![(
+                pauli.parse().unwrap(),
+                Complex64::new(coefficient, 0.0),
+            )])
+            .unwrap();
+            let time = 1.0 / coefficient;
+            let expected = matrix_exp_iht(&hamiltonian_matrix(&h), time);
+            for strategy in [
+                EvolutionStrategy::Exact,
+                EvolutionStrategy::Auto { steps: 512 },
+                EvolutionStrategy::Trotter {
+                    mode: TrotterMode::FirstOrder,
+                    steps: 512,
+                },
+                EvolutionStrategy::Trotter {
+                    mode: TrotterMode::SecondOrder,
+                    steps: 512,
+                },
+                EvolutionStrategy::Trotter {
+                    mode: TrotterMode::Randomized(7),
+                    steps: 512,
+                },
+            ] {
+                let ansatz = PauliEvolutionAnsatz::new(h.clone())
+                    .unwrap()
+                    .with_strategy(strategy.clone());
+                let circuit = ansatz.build_circuit("small").unwrap();
+                assert_eq!(circuit.symbols().len(), ansatz.num_parameters());
+                assert!(circuit.symbols().contains("small_t"));
+                // An incomplete binding must preserve the time dependence too.
+                let partial = circuit.assign_parameters(&Some(HashMap::new())).unwrap();
+                assert!(partial.symbols().contains("small_t"));
+                let bound = partial
+                    .assign_parameters(&Some(HashMap::from([("small_t", time)])))
+                    .unwrap();
+                assert!(frob_dist(&circuit_to_matrix(&bound, None).unwrap(), &expected) < 1e-10);
+                let actual = circuit_matrix_at_t(&ansatz, "small", "small_t", time);
+                assert!(
+                    frob_dist(&actual, &expected) < 1e-10,
+                    "{pauli}, coefficient={coefficient}, strategy={strategy:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn imaginary_residuals_are_projected_before_ansatz_zero_check() {
+    for pauli in ["I", "Z"] {
+        let h = Hamiltonian::from_list(vec![(pauli.parse().unwrap(), Complex64::new(0.0, 1e-12))])
+            .unwrap();
+        assert!(matches!(
+            PauliEvolutionAnsatz::new(h),
+            Err(crate::qis::QisError::InvalidParameterValue(_))
+        ));
+    }
+
+    // Real parts cancel, leaving only an accepted imaginary roundoff residual.
+    let h = Hamiltonian::from_list(vec![
+        ("Z".parse().unwrap(), Complex64::new(1.0, 1e-12)),
+        ("Z".parse().unwrap(), Complex64::new(-1.0, 0.0)),
+    ])
+    .unwrap();
+    assert!(PauliEvolutionAnsatz::new(h).is_err());
+
+    // Projection must retain even a very small nonzero real generator.
+    let h =
+        Hamiltonian::from_list(vec![("Z".parse().unwrap(), Complex64::new(1e-16, 1e-12))]).unwrap();
+    let ansatz = PauliEvolutionAnsatz::new(h).unwrap();
+    assert_eq!(ansatz.hamiltonian.terms[0].1, Complex64::new(1e-16, 0.0));
+    let actual = circuit_matrix_at_t(&ansatz, "residual", "residual_t", 1e16);
+    let expected = matrix_exp_iht(&hamiltonian_matrix(&ansatz.hamiltonian), 1e16);
+    assert!(frob_dist(&actual, &expected) < 1e-12);
+}
+
+#[test]
+fn mapped_small_number_operator_retains_time_and_global_phase() {
+    use crate::qis::fermion::{FermionToQubitMapper, FermionicOp, JordanWignerMapper};
+
+    let op = FermionicOp::number(1, 0)
+        .unwrap()
+        .scaled(Complex64::new(1e-16, 0.0))
+        .unwrap();
+    let h = JordanWignerMapper::new().map_operator(&op).unwrap();
+    let ansatz = PauliEvolutionAnsatz::new(h).unwrap();
+    let actual = circuit_matrix_at_t(&ansatz, "number", "number_t", 1e16);
+    // exp(-i n): vacuum has phase 1 and the occupied state has phase exp(-i).
+    let mut expected = Array2::<Complex64>::eye(2);
+    expected[[1, 1]] = Complex64::new(0.0, -1.0).exp();
+    assert!(frob_dist(&actual, &expected) < 1e-12);
+}
+
+#[test]
+fn small_noncommuting_auto_evolution_matches_numeric_trotter() {
+    let h = Hamiltonian::from_list(vec![
+        ("X".parse().unwrap(), Complex64::new(1e-12, 0.0)),
+        ("Z".parse().unwrap(), Complex64::new(-1e-12, 0.0)),
+    ])
+    .unwrap();
+    let numeric = h
+        .to_trotter_circuit(1e12, 512, TrotterMode::FirstOrder)
+        .unwrap();
+    let expected = circuit_to_matrix(&numeric, None).unwrap();
+    let ansatz = PauliEvolutionAnsatz::new(h)
+        .unwrap()
+        .with_strategy(EvolutionStrategy::Auto { steps: 512 });
+    let actual = circuit_matrix_at_t(&ansatz, "auto", "auto_t", 1e12);
+    assert!(frob_dist(&actual, &expected) < 1e-12);
 }
 
 #[test]

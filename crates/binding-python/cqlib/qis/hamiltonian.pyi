@@ -10,7 +10,7 @@
 # copyright notice, and modified files need to carry a notice indicating
 # that they have been altered from the originals.
 
-from typing import List, Tuple, Union, final, Sequence, Dict
+from typing import List, Tuple, Union, final, Sequence, Dict, Iterable
 
 import numpy as np
 
@@ -180,6 +180,52 @@ class Hamiltonian:
         """Returns ``True`` if all Pauli terms mutually commute."""
         ...
 
+    @staticmethod
+    def from_terms(
+        num_qubits: int,
+        terms: Iterable[tuple[PauliString, complex | float | int]],
+    ) -> Hamiltonian:
+        """Validate, absorb phases and merge duplicates, removing exact zeros only."""
+        ...
+
+    def normalized(self) -> Hamiltonian:
+        """Return a validated, merged copy without numerical truncation."""
+        ...
+
+    def normalized_hermitian(self) -> Hamiltonian:
+        """Normalize and project imaginary residuals <= 1e-10; reject larger ones."""
+        ...
+
+    def add(self, other: Hamiltonian) -> Hamiltonian:
+        """Return a validated, merged sum; legacy + and += retain concatenation."""
+        ...
+
+    def scaled(self, factor: complex | float | int) -> Hamiltonian: ...
+    def adjoint(self) -> Hamiltonian: ...
+    def chop(self, *, atol: float = 0.0) -> None:
+        """Normalize and truncate by complex magnitude, in place and atomically."""
+        ...
+
+    def equiv(self, other: Hamiltonian, *, atol: float = 0.0) -> bool: ...
+    def is_hermitian(self, *, atol: float = 0.0) -> bool:
+        """Compare with adjoint; coefficient criterion is 2*abs(imag) <= atol."""
+        ...
+
+    def tensor(self, other: Hamiltonian) -> Hamiltonian:
+        """Return self tensor other, placing other on low qubits."""
+        ...
+
+    def remap_qubits(self, mapping: Sequence[int], target_width: int) -> Hamiltonian:
+        """Embed mapping[source] = destination, with identity on unused targets."""
+        ...
+
+    def __sub__(self, other: Hamiltonian, /) -> Hamiltonian: ...
+    def __mul__(self, other: Hamiltonian | complex | float | int, /) -> Hamiltonian:
+        """Operator product AB (B acts first), or scalar multiplication."""
+        ...
+
+    def __rmul__(self, other: complex | float | int, /) -> Hamiltonian: ...
+    def __neg__(self) -> Hamiltonian: ...
     def to_matrix(self) -> np.ndarray:
         """Computes the dense matrix representation as a NumPy array.
 
@@ -206,6 +252,10 @@ class Hamiltonian:
 
         Returns:
             The real expectation value.
+
+        Raises:
+            ValueError: If the observable is not Hermitian or input dimensions differ.
+            ValueError: If original or merged coefficients are non-finite.
         """
         ...
 
@@ -217,6 +267,10 @@ class Hamiltonian:
 
         Returns:
             The real expectation value.
+
+        Raises:
+            ValueError: If the observable is not Hermitian or input dimensions differ.
+            ValueError: If original or merged coefficients are non-finite.
         """
         ...
 
@@ -231,10 +285,15 @@ class Hamiltonian:
 
         Returns:
             The real expectation value.
+
+        Raises:
+            ValueError: If the observable is not Hermitian, input dimensions differ,
+                or no compatible measurement basis is available.
+            ValueError: If original or merged coefficients are non-finite.
         """
         ...
 
-    def __add__(self, other: "Hamiltonian") -> "Hamiltonian":
+    def __add__(self, other: "Hamiltonian", /) -> "Hamiltonian":
         """Adds two Hamiltonians together.
 
         Note: This performs a simple lazy concatenation of the term lists.
@@ -260,7 +319,7 @@ class Hamiltonian:
         """
         ...
 
-    def __iadd__(self, other: "Hamiltonian") -> "Hamiltonian":
+    def __iadd__(self, other: "Hamiltonian", /) -> "Hamiltonian":
         """In-place addition of another Hamiltonian.
 
         Args:
@@ -274,7 +333,7 @@ class Hamiltonian:
         """
         ...
 
-    def __eq__(self, other: object) -> bool:
+    def __eq__(self, other: object, /) -> bool:
         """Checks if two Hamiltonians are equal."""
         ...
 
@@ -332,7 +391,8 @@ class Hamiltonian:
         """Computes the variance for a statevector.
 
         Raises:
-            ValueError: If the Hamiltonian is not Hermitian or qubit counts differ.
+            ValueError: If the Hamiltonian is not Hermitian, qubit counts differ,
+                or original or merged coefficients are non-finite.
         """
         ...
 
@@ -343,3 +403,13 @@ class Hamiltonian:
             A new Hamiltonian instance with the same terms.
         """
         ...
+
+    def __copy__(self) -> "Hamiltonian":
+        """Return an independent copy via copy.copy()."""
+        ...
+
+    def __deepcopy__(self, memo: dict) -> "Hamiltonian":
+        """Return an independent copy via copy.deepcopy()."""
+        ...
+
+__all__ = ["Hamiltonian"]

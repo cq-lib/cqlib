@@ -20,6 +20,37 @@ use num_complex::Complex64;
 use std::f64::consts::PI;
 
 #[test]
+fn duplicate_targets_leave_noisy_density_matrix_unchanged() {
+    let mut model = NoiseModel::new();
+    model
+        .add_two_qubit_error(
+            StandardGate::CX,
+            Qubit::new(0),
+            Qubit::new(2),
+            TwoQubitNoise::CorrelatedPauli {
+                op_q0: Pauli::X,
+                op_q1: Pauli::X,
+                p: 0.2,
+            },
+        )
+        .unwrap();
+    let mut initial = DensityMatrixNoise::new(3, Some(model));
+    initial.apply_h(0).unwrap();
+    initial.apply_s(0).unwrap();
+    for gate in [StandardGate::CX, StandardGate::CZ] {
+        for q in 0..3 {
+            let mut sim = initial.clone();
+            assert!(matches!(
+                sim.apply_standard_gate_noise(gate, &[q, q], &[]),
+                Err(QisError::InvalidParameterValue(msg))
+                    if msg.contains(&format!("Duplicate qubit index {q} "))
+            ));
+            assert_eq!(sim.state.data(), initial.state.data());
+        }
+    }
+}
+
+#[test]
 fn test_bit_flip_noise() {
     let mut noise_model = NoiseModel::new();
     noise_model
@@ -1177,6 +1208,146 @@ fn test_native_gates_amplitude_damping() {
 }
 
 #[test]
+fn test_readout_uses_circuit_ids_at_selected_storage_positions() {
+    use crate::device::Outcome;
+
+    for ids in [[0, 1, 2], [2, 0, 1], [2, 5, 9], [9, 2, 5]] {
+        for basis in 0..8 {
+            for (noise_position, &noise_id) in ids.iter().enumerate() {
+                let mut circuit =
+                    Circuit::from_qubits(ids.iter().copied().map(Qubit::new).collect()).unwrap();
+                for (position, &id) in ids.iter().enumerate() {
+                    if basis & (1 << position) != 0 {
+                        circuit.x(Qubit::new(id)).unwrap();
+                    }
+                }
+                let receipt = circuit.measure(Qubit::new(noise_id)).unwrap();
+                let mut model = NoiseModel::new();
+                model
+                    .add_readout_error(
+                        Qubit::new(noise_id),
+                        ReadoutError {
+                            p_0_given_1: 0.2,
+                            p_1_given_0: 0.7,
+                        },
+                    )
+                    .unwrap();
+                let sim = DensityMatrixNoise::from_circuit(&circuit, Some(model)).unwrap();
+                let original = sim.state.data().to_vec();
+                let bit = (basis >> noise_position) & 1;
+                let flip_probability = if bit == 0 { 0.7 } else { 0.2 };
+
+                for selection in 0..8 {
+                    let positions: Vec<_> = (0..3)
+                        .rev()
+                        .filter(|&position| selection & (1 << position) != 0)
+                        .collect();
+                    let mut expected = [0.0; 8];
+                    expected[basis] = 1.0;
+                    if selection & (1 << noise_position) != 0 {
+                        expected[basis] = 1.0 - flip_probability;
+                        expected[basis ^ (1 << noise_position)] = flip_probability;
+                    }
+                    let actual = sim.probabilities_with_readout(&positions).unwrap();
+                    assert_eq!(actual.len(), expected.len());
+                    for (actual, expected) in actual.iter().zip(&expected) {
+                        assert!(
+                            (actual - expected).abs() < 1e-12,
+                            "IDs={ids:?}, basis={basis}, noise_position={noise_position}, positions={positions:?}: {actual} != {expected}"
+                        );
+                    }
+                }
+
+                let marginal = sim.probs_with_readout(&receipt).unwrap();
+                let p_one = if bit == 0 { 0.7 } else { 0.8 };
+                assert!((marginal[&Outcome::from_bitstring("1").unwrap()] - p_one).abs() < 1e-12);
+                assert_eq!(sim.state.data(), original.as_slice());
+            }
+        }
+    }
+}
+
+#[test]
+fn test_readout_combines_mapped_errors_without_reordering_full_probabilities() {
+    use crate::device::Outcome;
+
+    let mut circuit =
+        Circuit::from_qubits(vec![Qubit::new(9), Qubit::new(2), Qubit::new(5)]).unwrap();
+    circuit.x(Qubit::new(9)).unwrap();
+    let receipt = circuit
+        .measure_bits([Qubit::new(2), Qubit::new(9)])
+        .unwrap();
+    let mut model = NoiseModel::new();
+    for (id, p_0_given_1, p_1_given_0) in [(9, 0.1, 0.2), (2, 0.3, 0.4)] {
+        model
+            .add_readout_error(
+                Qubit::new(id),
+                ReadoutError {
+                    p_0_given_1,
+                    p_1_given_0,
+                },
+            )
+            .unwrap();
+    }
+    let sim = DensityMatrixNoise::from_circuit(&circuit, Some(model)).unwrap();
+    let expected = [0.06, 0.54, 0.04, 0.36, 0.0, 0.0, 0.0, 0.0];
+    for positions in [&[0, 1][..], &[1, 0], &[2, 1, 0]] {
+        let actual = sim.probabilities_with_readout(positions).unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-12);
+        }
+    }
+    let marginal = sim.probs_with_readout(&receipt).unwrap();
+    for (bits, probability) in [("00", 0.06), ("10", 0.54), ("01", 0.04), ("11", 0.36)] {
+        assert!((marginal[&Outcome::from_bitstring(bits).unwrap()] - probability).abs() < 1e-12);
+    }
+    assert_eq!(
+        sim.probabilities(),
+        vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    );
+}
+
+#[test]
+fn test_readout_validates_positions_independently_of_noise_model() {
+    let mut model = NoiseModel::new();
+    model
+        .add_readout_error(
+            Qubit::new(9),
+            ReadoutError {
+                p_0_given_1: 0.0,
+                p_1_given_0: 1.0,
+            },
+        )
+        .unwrap();
+    for noise_model in [None, Some(NoiseModel::new()), Some(model)] {
+        for bound in [false, true] {
+            let mut sim = DensityMatrixNoise::new(2, noise_model.clone());
+            if bound {
+                let circuit = Circuit::from_qubits(vec![Qubit::new(9), Qubit::new(2)]).unwrap();
+                sim.apply_circuit(&circuit).unwrap();
+            }
+            for index in [2, 9, usize::MAX] {
+                assert!(matches!(
+                    sim.probabilities_with_readout(&[0, index]),
+                    Err(QisError::IndexOutOfBounds { index: actual, max: 1 }) if actual == index
+                ));
+            }
+            assert_eq!(
+                sim.probabilities_with_readout(&[]).unwrap(),
+                sim.probabilities()
+            );
+        }
+        let sim = DensityMatrixNoise::new(0, noise_model);
+        assert_eq!(sim.probabilities_with_readout(&[]).unwrap(), vec![1.0]);
+        assert!(matches!(
+            sim.probabilities_with_readout(&[0]),
+            Err(QisError::IndexOutOfBounds { index: 0, max: 0 })
+        ));
+    }
+}
+
+#[test]
 fn test_apply_readout_noise_out_of_bounds() {
     let mut sim = DensityMatrixNoise::new(2, Some(NoiseModel::new()));
     sim.apply_h(0).unwrap();
@@ -1458,4 +1629,289 @@ fn test_ccx_with_noise_model_does_not_panic() {
         probs[7] > 0.0,
         "CCX should produce support on |111>, got {probs:?}"
     );
+}
+
+#[test]
+fn pauli_probability_boundary_preserves_simulation_trace() {
+    let noise = SingleQubitNoise::Pauli {
+        px: 0.3,
+        py: 0.6,
+        pz: 0.1,
+    };
+    let mut model = NoiseModel::new();
+    model
+        .add_single_qubit_error(StandardGate::X, Qubit::new(0), noise)
+        .unwrap();
+    let mut sim = DensityMatrixNoise::new(1, Some(model));
+    sim.apply_x(0).unwrap();
+    assert!((sim.probabilities()[0] - 0.9).abs() < 1e-12);
+    assert!((sim.probabilities().iter().sum::<f64>() - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn gate_noise_uses_original_labels_and_operand_order() {
+    for ids in [[0, 1], [5, 12], [12, 5]] {
+        let qs = ids.map(Qubit::new);
+        let mut circuit = Circuit::from_qubits(qs.to_vec()).unwrap();
+        circuit.x(qs[0]).unwrap();
+        let mut model = NoiseModel::new();
+        model
+            .add_single_qubit_error(StandardGate::X, qs[0], SingleQubitNoise::BitFlip(1.0))
+            .unwrap();
+        let mut sim = DensityMatrixNoise::from_circuit(&circuit, Some(model)).unwrap();
+        assert!((sim.probabilities()[0] - 1.0).abs() < 1e-12);
+        sim.apply_x(0).unwrap();
+        assert!((sim.probabilities()[0] - 1.0).abs() < 1e-12);
+        for reverse in [false, true] {
+            let mut circuit = Circuit::from_qubits(qs.to_vec()).unwrap();
+            let [control, target] = if reverse { [qs[1], qs[0]] } else { qs };
+            circuit.cx(control, target).unwrap();
+            let mut model = NoiseModel::new();
+            model
+                .add_two_qubit_error(
+                    StandardGate::CX,
+                    control,
+                    target,
+                    TwoQubitNoise::Independent {
+                        q0_noise: SingleQubitNoise::BitFlip(1.0),
+                        q1_noise: SingleQubitNoise::BitFlip(0.0),
+                    },
+                )
+                .unwrap();
+            let sim = DensityMatrixNoise::from_circuit(&circuit, Some(model)).unwrap();
+            let expected = if reverse { 2 } else { 1 };
+            assert!((sim.probabilities()[expected] - 1.0).abs() < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn failed_noisy_circuit_preserves_label_binding() {
+    use crate::circuit::Parameter;
+    let q = Qubit::new(5);
+    let mut bad = Circuit::from_qubits(vec![q]).unwrap();
+    bad.x(q).unwrap();
+    bad.rz(q, Parameter::symbol("unbound")).unwrap();
+    let mut model = NoiseModel::new();
+    model
+        .add_single_qubit_error(StandardGate::X, q, SingleQubitNoise::BitFlip(1.0))
+        .unwrap();
+    let mut sim = DensityMatrixNoise::new(1, Some(model.clone()));
+    assert!(sim.apply_circuit(&bad).is_err());
+    // Completed gates used label 5, but the failed application did not bind it.
+    assert!((sim.probabilities()[0] - 1.0).abs() < 1e-12);
+    sim.apply_circuit(&Circuit::new(1)).unwrap();
+
+    let mut good = Circuit::from_qubits(vec![q]).unwrap();
+    good.x(q).unwrap();
+    let mut bound = DensityMatrixNoise::from_circuit(&good, Some(model)).unwrap();
+    assert!(bound.apply_circuit(&bad).is_err());
+    bound.apply_x(0).unwrap();
+    assert!((bound.probabilities()[0] - 1.0).abs() < 1e-12);
+    assert!(bound.apply_circuit(&Circuit::new(1)).is_err());
+}
+
+#[test]
+fn identity_noise_respects_labels_and_repetition() {
+    for ids in [[0, 1], [12, 5]] {
+        for p in [0.0, 0.25, 1.0] {
+            for count in [1, 2, 3] {
+                let qs = ids.map(Qubit::new);
+                let mut c = Circuit::from_qubits(qs.to_vec()).unwrap();
+                for _ in 0..count {
+                    c.i(qs[1]).unwrap();
+                }
+                let mut model = NoiseModel::new();
+                model
+                    .add_single_qubit_error(StandardGate::I, qs[1], SingleQubitNoise::BitFlip(p))
+                    .unwrap();
+                let sim = DensityMatrixNoise::from_circuit(&c, Some(model)).unwrap();
+                let flipped = (1.0 - (1.0 - 2.0 * p).powi(count)) / 2.0;
+                for (actual, expected) in
+                    sim.probabilities()
+                        .iter()
+                        .zip([1.0 - flipped, 0.0, flipped, 0.0])
+                {
+                    assert!((actual - expected).abs() < 1e-12);
+                }
+                assert_eq!(
+                    DensityMatrixNoise::from_circuit(&c, None)
+                        .unwrap()
+                        .probabilities(),
+                    vec![1.0, 0.0, 0.0, 0.0]
+                );
+            }
+        }
+    }
+    let mut sim = DensityMatrixNoise::new(1, None);
+    assert!(
+        sim.apply_standard_gate_noise(StandardGate::I, &[1], &[])
+            .is_err()
+    );
+}
+
+#[test]
+fn controlled_gphase_circuit_evolution() {
+    for ids in [[0, 1, 2], [12, 5, 31]] {
+        let qubits = ids.map(Qubit::new);
+        for controls in [
+            vec![qubits[2]],
+            vec![qubits[2], qubits[0]],
+            vec![qubits[0], qubits[2]],
+        ] {
+            for theta in [0.0, 0.37, -0.51, PI] {
+                let mut preparation = Circuit::from_qubits(qubits.to_vec()).unwrap();
+                for qubit in qubits {
+                    preparation.h(qubit).unwrap();
+                }
+                preparation.s(qubits[1]).unwrap();
+                let mut phase = Circuit::from_qubits(qubits.to_vec()).unwrap();
+                phase
+                    .multi_control(
+                        StandardGate::GPhase,
+                        controls.clone(),
+                        Vec::<Qubit>::new(),
+                        [theta.into()],
+                    )
+                    .unwrap();
+                let mut circuit = preparation.clone();
+                circuit
+                    .multi_control(
+                        StandardGate::GPhase,
+                        controls.clone(),
+                        Vec::<Qubit>::new(),
+                        [theta.into()],
+                    )
+                    .unwrap();
+                let mask = controls.iter().fold(0usize, |mask, q| {
+                    mask | (1 << qubits.iter().position(|candidate| candidate == q).unwrap())
+                });
+                let expected: Vec<Complex64> = (0..8)
+                    .map(|index| {
+                        let amplitude = if index & 2 == 0 {
+                            Complex64::new(1.0, 0.0)
+                        } else {
+                            Complex64::new(0.0, 1.0)
+                        } / 8.0_f64.sqrt();
+                        if index & mask == mask {
+                            amplitude * Complex64::from_polar(1.0, theta)
+                        } else {
+                            amplitude
+                        }
+                    })
+                    .collect();
+                let expected_data = expected
+                    .iter()
+                    .flat_map(|a| expected.iter().map(move |b| a * b.conj()))
+                    .collect::<Vec<_>>();
+                let actual = DensityMatrixNoise::from_circuit(&circuit, None).unwrap();
+                let mut incremental = DensityMatrixNoise::new(3, None);
+                incremental.apply_circuit(&preparation).unwrap();
+                incremental.apply_circuit(&phase).unwrap();
+                for values in [actual.state.data(), incremental.state.data()] {
+                    for (actual, expected) in values.iter().zip(&expected_data) {
+                        assert!(
+                            (actual - expected).norm() < 1e-12,
+                            "{actual:?} != {expected:?}"
+                        );
+                    }
+                }
+                let mut inverse = Circuit::from_qubits(qubits.to_vec()).unwrap();
+                inverse
+                    .multi_control(
+                        StandardGate::GPhase,
+                        controls.clone(),
+                        Vec::<Qubit>::new(),
+                        [(-theta).into()],
+                    )
+                    .unwrap();
+                incremental.apply_circuit(&inverse).unwrap();
+                let baseline = DensityMatrixNoise::from_circuit(&preparation, None).unwrap();
+                for (actual, expected) in incremental.state.data().iter().zip(baseline.state.data())
+                {
+                    assert!((actual - expected).norm() < 1e-12);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn controlled_gphase_noise_applies_after_unitary_once() {
+    let qubits = [Qubit::new(12), Qubit::new(5)];
+    let mut circuit = Circuit::from_qubits(qubits.to_vec()).unwrap();
+    circuit.x(qubits[0]).unwrap();
+    circuit.h(qubits[1]).unwrap();
+    circuit
+        .multi_control(
+            StandardGate::GPhase,
+            [qubits[1]],
+            Vec::<Qubit>::new(),
+            [0.37.into()],
+        )
+        .unwrap();
+    let mut model = NoiseModel::new();
+    model
+        .add_single_qubit_error(
+            StandardGate::GPhase,
+            qubits[1],
+            SingleQubitNoise::BitFlip(0.23),
+        )
+        .unwrap();
+    model
+        .add_single_qubit_error(
+            StandardGate::GPhase,
+            qubits[0],
+            SingleQubitNoise::BitFlip(1.0),
+        )
+        .unwrap();
+    let sim = DensityMatrixNoise::from_circuit(&circuit, Some(model)).unwrap();
+    let amplitudes = [
+        Complex64::new(0.0, 0.0),
+        Complex64::new(1.0, 0.0) / 2.0_f64.sqrt(),
+        Complex64::new(0.0, 0.0),
+        Complex64::from_polar(1.0 / 2.0_f64.sqrt(), 0.37),
+    ];
+    for row in 0..4 {
+        for col in 0..4 {
+            let expected = 0.77 * amplitudes[row] * amplitudes[col].conj()
+                + 0.23 * amplitudes[row ^ 2] * amplitudes[col ^ 2].conj();
+            assert!((sim.state.data()[row * 4 + col] - expected).norm() < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn zero_control_gphase_circuit_evolution() {
+    use crate::circuit::gate::{Instruction, MCGate};
+    for num_qubits in [0, 1, 3] {
+        for theta in [0.0, 0.37, -0.51, PI] {
+            let mut circuit = Circuit::new(num_qubits);
+            if num_qubits > 0 {
+                circuit.h(Qubit::new(0)).unwrap();
+            }
+            circuit
+                .append(
+                    Instruction::McGate(Box::new(MCGate::new(0, StandardGate::GPhase))),
+                    Vec::<Qubit>::new(),
+                    [theta.into()],
+                    None,
+                )
+                .unwrap();
+            let actual = DensityMatrixNoise::from_circuit(&circuit, None).unwrap();
+            let mut amplitudes = vec![Complex64::new(0.0, 0.0); 1 << num_qubits];
+            amplitudes[0] = Complex64::from_polar(1.0, theta);
+            if num_qubits > 0 {
+                amplitudes[0] /= 2.0_f64.sqrt();
+                amplitudes[1] = amplitudes[0];
+            }
+            let expected = amplitudes
+                .iter()
+                .flat_map(|a| amplitudes.iter().map(move |b| a * b.conj()))
+                .collect::<Vec<_>>();
+            for (actual, expected) in actual.state.data().iter().zip(&expected) {
+                assert!((actual - expected).norm() < 1e-12);
+            }
+        }
+    }
 }

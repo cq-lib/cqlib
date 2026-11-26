@@ -161,7 +161,7 @@ vd_args = RunArgs.virtual_distillation(shots_numerator=3, shots_denominator=2)
 
 零噪声外推：`run()` 按配置的折叠等级构造缓解线路，对每条线路调用一次回调，观测量为传入的 `Hamiltonian`，采样次数取自 `RunArgs.zne(shots=...)`。回调返回的二元组只取第 1 个元素，方差被丢弃。`get_mitigated()` 对外推输入做拟合，结果的 `variance` 为 `None`。
 
-虚拟蒸馏：`run()` 先构造 copy-swap 线路，再在同一条线路上调用两次回调——先分子，后分母。分子传入按拷贝数扩展后的观测量与 `shots_numerator`，分母传入 `None` 与 `shots_denominator`。`get_mitigated()` 按 [虚拟蒸馏](2_virtual_distillation.md) 的合成公式求比值，结果的 `variance` 有值。
+虚拟蒸馏：`run()` 先构造 copy-swap 线路，再在同一条线路上调用两次回调——先分子，后分母。分子传入扩展到全宽的观测量（第 0 份副本上的原观测量 ⊗ 辅助比特上的 `X`）与 `shots_numerator`，分母传入仅辅助比特上带 `X` 的观测量与 `shots_denominator`。`get_mitigated()` 按 [虚拟蒸馏](2_virtual_distillation.md) 的合成公式求比值，结果的 `variance` 有值。
 
 ### 示例
 

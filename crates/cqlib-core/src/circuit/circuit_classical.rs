@@ -411,7 +411,9 @@ use crate::circuit::control_flow::{
 };
 use crate::circuit::error::CircuitError;
 use crate::circuit::gate::instruction::Instruction;
-use crate::circuit::{ClassicalDataOp, ClassicalType, ClassicalValue, ClassicalVar, Measurement};
+use crate::circuit::{
+    CircuitParam, ClassicalDataOp, ClassicalType, ClassicalValue, ClassicalVar, Measurement,
+};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -467,14 +469,17 @@ impl SwitchBuilder<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Restores appended builder state and the previous phase, not edits to existing entries.
+#[derive(Debug, Clone)]
 pub(super) struct CircuitCheckpoint {
     data_len: usize,
+    qubit_len: usize,
     parameter_len: usize,
     symbol_len: usize,
     classical_var_len: usize,
     classical_value_len: usize,
     control_scope_len: usize,
+    global_phase: CircuitParam,
 }
 
 /// Opaque rollback token for callback-driven control-flow construction.
@@ -539,17 +544,21 @@ impl Circuit {
     pub(super) fn checkpoint(&self) -> CircuitCheckpoint {
         CircuitCheckpoint {
             data_len: self.data.len(),
+            qubit_len: self.qubits.len(),
             parameter_len: self.parameters.len(),
             symbol_len: self.symbols.len(),
             classical_var_len: self.classical_vars.len(),
             classical_value_len: self.classical_values.len(),
             control_scope_len: self.control_scope_stack.len(),
+            global_phase: self.global_phase.clone(),
         }
     }
 
     pub(super) fn rollback_to(&mut self, checkpoint: CircuitCheckpoint) {
         Arc::make_mut(&mut self.data).truncate(checkpoint.data_len);
+        self.qubits.truncate(checkpoint.qubit_len);
         self.parameters.truncate(checkpoint.parameter_len);
+        self.global_phase = checkpoint.global_phase;
         self.symbols.truncate(checkpoint.symbol_len);
         self.classical_vars.truncate(checkpoint.classical_var_len);
         self.classical_values

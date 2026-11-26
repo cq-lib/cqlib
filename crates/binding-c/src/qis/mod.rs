@@ -14,10 +14,13 @@
 
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+mod algebra;
 pub mod density_matrix;
 pub mod density_matrix_noise;
 pub mod entropy;
+pub mod fermion;
 pub mod hamiltonian;
+pub mod hamiltonian_algebra;
 pub mod measurement;
 pub mod metrics;
 pub mod pauli;
@@ -103,7 +106,9 @@ pub(crate) fn qis_err_code(err: &cqlib_core::qis::QisError) -> i32 {
 pub use density_matrix::*;
 pub use density_matrix_noise::*;
 pub use entropy::*;
+pub use fermion::*;
 pub use hamiltonian::*;
+pub use hamiltonian_algebra::*;
 pub use measurement::*;
 pub use metrics::*;
 pub use pauli::*;

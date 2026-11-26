@@ -76,22 +76,19 @@ impl fmt::Display for PyHamiltonian {
 /// - complex -> complex number
 /// - tuple (real, imag) -> complex number
 fn extract_complex(value: &Bound<'_, PyAny>) -> PyResult<Complex64> {
-    // Try to extract as float first
-    if let Ok(val) = value.extract::<f64>() {
-        return Ok(Complex64::new(val, 0.0));
-    }
-    // Try to extract as Python complex
-    if let Ok(py_complex) = value.cast::<PyComplex>() {
-        return Ok(Complex64::new(py_complex.real(), py_complex.imag()));
-    }
-
-    // Try to extract as tuple (real, imag)
     if let Ok(tuple) = value.cast::<PyTuple>()
         && tuple.len() == 2
     {
         let real: f64 = tuple.get_item(0)?.extract()?;
         let imag: f64 = tuple.get_item(1)?.extract()?;
         return Ok(Complex64::new(real, imag));
+    }
+
+    // Use the complex protocol before real conversion: NumPy complex scalars
+    // permit float extraction, but discard the imaginary part with a warning.
+    // Propagate conversion errors instead of falling back to a lossy float cast.
+    if let Some(coefficient) = super::fermion::scalar_operand(value)? {
+        return Ok(coefficient);
     }
 
     Err(PyValueError::new_err(
@@ -188,6 +185,166 @@ impl PyHamiltonian {
         Ok(Self { inner })
     }
 
+    /// Construct a validated Pauli sum, absorbing phases and merging duplicates.
+    /// Only exact zeros are removed. Empty input retains the declared width.
+    #[staticmethod]
+    fn from_terms(num_qubits: &Bound<'_, PyAny>, terms: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let width = super::fermion::index(num_qubits, true)?;
+        let mut parsed = Vec::new();
+        for item in terms.try_iter()? {
+            let item = item?;
+            let pair = item.cast::<PyTuple>()?;
+            if pair.len() != 2 {
+                return Err(PyValueError::new_err(
+                    "each term must be (PauliString, coefficient)",
+                ));
+            }
+            let pauli = pair
+                .get_item(0)?
+                .extract::<PyRef<'_, PyPauliString>>()?
+                .inner
+                .clone();
+            let coefficient = pair.get_item(1)?.extract::<Complex64>()?;
+            parsed.push((pauli, coefficient));
+        }
+        Hamiltonian::from_terms(width, parsed)
+            .map(Into::into)
+            .map_err(qis_error_to_py_err)
+    }
+
+    /// Return a validated sum with phases absorbed and duplicates merged.
+    /// Retain all nonzero coefficients; legacy simplify() also truncates small terms.
+    fn normalized(&self) -> PyResult<Self> {
+        self.inner
+            .normalized()
+            .map(Into::into)
+            .map_err(qis_error_to_py_err)
+    }
+
+    /// Normalize and project imaginary roundoff <= 1e-10 to zero.
+    /// Larger imaginary coefficients raise ValueError; all nonzero real terms remain.
+    fn normalized_hermitian(&self) -> PyResult<Self> {
+        self.inner
+            .normalized_hermitian()
+            .map(Into::into)
+            .map_err(qis_error_to_py_err)
+    }
+
+    /// Return a validated, merged sum without changing either operand.
+    /// Legacy + and += concatenate stored terms instead.
+    fn add(&self, other: &Self) -> PyResult<Self> {
+        self.inner
+            .try_add(&other.inner)
+            .map(Into::into)
+            .map_err(qis_error_to_py_err)
+    }
+
+    /// Return a validated scaled copy, retaining all nonzero coefficients.
+    /// Unlike legacy scale(), validate the factor and resulting coefficients.
+    fn scaled(&self, factor: Complex64) -> PyResult<Self> {
+        self.inner
+            .scaled(factor)
+            .map(Into::into)
+            .map_err(qis_error_to_py_err)
+    }
+
+    /// Return the conjugate transpose after absorbing Pauli phases.
+    fn adjoint(&self) -> PyResult<Self> {
+        self.inner
+            .adjoint()
+            .map(Into::into)
+            .map_err(qis_error_to_py_err)
+    }
+
+    /// Normalize and remove coefficients with complex magnitude <= atol, in place.
+    /// Return None; errors leave this Hamiltonian unchanged.
+    #[pyo3(signature = (*, atol=0.0))]
+    fn chop(&mut self, atol: f64) -> PyResult<()> {
+        self.inner.chop(atol).map_err(qis_error_to_py_err)
+    }
+
+    /// Compare normalized coefficient differences, requiring equal register widths.
+    /// atol is a coefficient tolerance, not a matrix operator-norm bound.
+    #[pyo3(signature = (other, *, atol=0.0))]
+    fn equiv(&self, other: &Self, atol: f64) -> PyResult<bool> {
+        self.inner
+            .equiv(&other.inner, atol)
+            .map_err(qis_error_to_py_err)
+    }
+
+    /// Compare with the adjoint; normalized coefficients satisfy 2*abs(imag) <= atol.
+    /// This check does not project imaginary parts to zero.
+    #[pyo3(signature = (*, atol=0.0))]
+    fn is_hermitian(&self, atol: f64) -> PyResult<bool> {
+        self.inner.is_hermitian(atol).map_err(qis_error_to_py_err)
+    }
+
+    /// Return self tensor other: other occupies low qubits, self occupies high qubits.
+    fn tensor(&self, other: &Self) -> PyResult<Self> {
+        self.inner
+            .tensor(&other.inner)
+            .map(Into::into)
+            .map_err(qis_error_to_py_err)
+    }
+
+    /// Embed qubits using mapping[source] = destination; unused targets are identity.
+    /// Destinations must be unique and in range. This is not a fermionic permutation.
+    fn remap_qubits(
+        &self,
+        mapping: &Bound<'_, PyAny>,
+        target_width: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
+        let destinations = mapping
+            .try_iter()?
+            .map(|v| super::fermion::index(&v?, false))
+            .collect::<PyResult<Vec<_>>>()?;
+        self.inner
+            .remap_qubits(&destinations, super::fermion::index(target_width, true)?)
+            .map(Into::into)
+            .map_err(qis_error_to_py_err)
+    }
+
+    /// Return a validated difference on the same register, without truncation.
+    fn __sub__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        match other.extract::<PyRef<'_, Self>>() {
+            Ok(rhs) => Ok(Py::new(
+                other.py(),
+                Self::from(
+                    self.inner
+                        .try_sub(&rhs.inner)
+                        .map_err(qis_error_to_py_err)?,
+                ),
+            )?
+            .into_any()),
+            Err(_) => Ok(other.py().NotImplemented()),
+        }
+    }
+
+    /// Return AB (B acts first) or a scalar multiple; validate and merge the result.
+    fn __mul__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let result = if let Ok(rhs) = other.extract::<PyRef<'_, Self>>() {
+            self.inner.try_mul(&rhs.inner)
+        } else if let Some(factor) = super::fermion::scalar_operand(other)? {
+            self.inner.scaled(factor)
+        } else {
+            return Ok(other.py().NotImplemented());
+        };
+        Ok(Py::new(other.py(), Self::from(result.map_err(qis_error_to_py_err)?))?.into_any())
+    }
+
+    /// Return a validated scalar multiple.
+    fn __rmul__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        match super::fermion::scalar_operand(other)? {
+            Some(factor) => Ok(Py::new(other.py(), self.scaled(factor)?)?.into_any()),
+            None => Ok(other.py().NotImplemented()),
+        }
+    }
+
+    /// Return a validated negation without modifying this operator.
+    fn __neg__(&self) -> PyResult<Self> {
+        self.scaled(Complex64::new(-1.0, 0.0))
+    }
+
     /// Adds a new Pauli string term with a given coefficient to the Hamiltonian.
     ///
     /// Args:
@@ -195,7 +352,7 @@ impl PyHamiltonian {
     ///     coeff: The coefficient for this term. Can be float, int, complex, or tuple (real, imag).
     ///
     /// Returns:
-    ///     self (for method chaining)
+    ///     None. This method modifies the Hamiltonian in place.
     ///
     /// Raises:
     ///     ValueError: If the number of qubits in the operator does not match the Hamiltonian.
@@ -343,15 +500,18 @@ impl PyHamiltonian {
     ///     >>> h2 = Hamiltonian(2)
     ///     >>> h2.add_term(PauliString.from_str("XX"), 0.3)
     ///     >>> h3 = h1 + h2  # Contains both ZZ and XX terms
-    fn __add__(&self, other: &PyHamiltonian) -> PyResult<Self> {
-        if self.inner.num_qubits != other.inner.num_qubits {
+    fn __add__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let Ok(rhs) = other.extract::<PyRef<'_, Self>>() else {
+            return Ok(other.py().NotImplemented());
+        };
+        if self.inner.num_qubits != rhs.inner.num_qubits {
             return Err(PyValueError::new_err(format!(
                 "Cannot add Hamiltonians with different numbers of qubits: {} vs {}",
-                self.inner.num_qubits, other.inner.num_qubits
+                self.inner.num_qubits, rhs.inner.num_qubits
             )));
         }
-        let result = self.inner.clone() + other.inner.clone();
-        Ok(Self { inner: result })
+        let result = self.inner.clone() + rhs.inner.clone();
+        Ok(Py::new(other.py(), Self { inner: result })?.into_any())
     }
 
     /// In-place addition of another Hamiltonian.
@@ -369,8 +529,15 @@ impl PyHamiltonian {
         Ok(())
     }
 
-    fn __eq__(&self, other: &PyHamiltonian) -> bool {
-        self.inner == other.inner
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        match other.extract::<PyRef<'_, Self>>() {
+            Ok(rhs) => Ok((self.inner == rhs.inner)
+                .into_pyobject(other.py())?
+                .to_owned()
+                .into_any()
+                .unbind()),
+            Err(_) => Ok(other.py().NotImplemented()),
+        }
     }
 
     fn __str__(&self) -> String {
@@ -465,7 +632,21 @@ impl PyHamiltonian {
         }
     }
 
+    /// Implements Python's shallow-copy protocol with an independent value.
+    fn __copy__(&self) -> Self {
+        self.copy()
+    }
+
+    /// Implements Python's deep-copy protocol; all Rust fields are owned values.
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.copy()
+    }
+
     /// Computes the expectation value for a statevector.
+    ///
+    /// Raises:
+    ///     ValueError: If the observable is not Hermitian or input dimensions differ.
+    ///     ValueError: If original or merged coefficients are non-finite.
     fn expectation_statevector(&self, sv: &PyStatevector) -> PyResult<f64> {
         self.inner
             .expectation_statevector(&sv.inner)
@@ -473,6 +654,10 @@ impl PyHamiltonian {
     }
 
     /// Computes the expectation value for a density matrix.
+    ///
+    /// Raises:
+    ///     ValueError: If the observable is not Hermitian or input dimensions differ.
+    ///     ValueError: If original or merged coefficients are non-finite.
     fn expectation_density_matrix(&self, dm: &PyDensityMatrix) -> PyResult<f64> {
         self.inner
             .expectation_density_matrix(&dm.inner)
@@ -480,6 +665,10 @@ impl PyHamiltonian {
     }
 
     /// Computes the expectation value from measurement probabilities.
+    ///
+    /// Raises:
+    ///     ValueError: If the observable is not Hermitian or input dimensions differ.
+    ///     ValueError: If original or merged coefficients are non-finite.
     fn expectation_probs(&self, measurements: &Bound<'_, PyAny>) -> PyResult<f64> {
         let mut rust_measurements = Vec::new();
         for item in measurements.try_iter()? {
@@ -510,6 +699,10 @@ impl PyHamiltonian {
     }
 
     /// Computes the variance for a statevector.
+    ///
+    /// Raises:
+    ///     ValueError: If the observable is not Hermitian or input dimensions differ.
+    ///     ValueError: If original or merged coefficients are non-finite.
     fn variance_statevector(&self, sv: &PyStatevector) -> PyResult<f64> {
         self.inner
             .variance_statevector(&sv.inner)

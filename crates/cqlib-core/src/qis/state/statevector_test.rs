@@ -909,6 +909,35 @@ fn test_global_phase() {
 }
 
 #[test]
+fn circuit_evolution_applies_global_phase_including_small_residuals() {
+    use crate::circuit::Parameter;
+    for num_qubits in [0, 1] {
+        for angle in [0.3, 1e-12, 1e-20] {
+            let mut circuit = Circuit::new(num_qubits);
+            circuit.set_global_phase(Parameter::from(angle));
+            let state = Statevector::from_circuit(&circuit).unwrap();
+            let expected = Complex64::from_polar(1.0, angle);
+            assert_eq!(state.data[0], expected);
+            let mut incremental = Statevector::new(num_qubits);
+            incremental.apply_circuit(&circuit).unwrap();
+            assert_eq!(incremental.data[0], expected);
+        }
+    }
+}
+
+#[test]
+fn circuit_evolution_rejects_unbound_global_phase_before_mutating() {
+    use crate::circuit::Parameter;
+    let mut circuit = Circuit::new(1);
+    circuit.x(Qubit::new(0)).unwrap();
+    circuit.set_global_phase(Parameter::symbol("phi"));
+    let mut state = Statevector::new(1);
+    let before = state.data.clone();
+    assert!(state.apply_circuit(&circuit).is_err());
+    assert_eq!(&state.data[..], &before[..]);
+}
+
+#[test]
 fn test_relative_phase() {
     // S gate introduces relative phase
     // S(H|0⟩) = S((|0⟩+|1⟩)/√2) = (|0⟩+i|1⟩)/√2
@@ -2251,4 +2280,118 @@ fn test_apply_pauli_rotation_rejects_imaginary_global_phase() {
     let mut pauli = PauliString::new(1);
     pauli.phase = Phase::I;
     assert!(state.apply_pauli_rotation(&pauli, 0.2).is_err());
+}
+
+#[test]
+fn controlled_gphase_circuit_evolution() {
+    for ids in [[0, 1, 2], [12, 5, 31]] {
+        let qubits = ids.map(Qubit::new);
+        for controls in [
+            vec![qubits[2]],
+            vec![qubits[2], qubits[0]],
+            vec![qubits[0], qubits[2]],
+        ] {
+            for theta in [0.0, 0.37, -0.51, PI] {
+                let mut preparation = Circuit::from_qubits(qubits.to_vec()).unwrap();
+                for qubit in qubits {
+                    preparation.h(qubit).unwrap();
+                }
+                preparation.s(qubits[1]).unwrap();
+                let mut phase = Circuit::from_qubits(qubits.to_vec()).unwrap();
+                phase
+                    .multi_control(
+                        StandardGate::GPhase,
+                        controls.clone(),
+                        Vec::<Qubit>::new(),
+                        [theta.into()],
+                    )
+                    .unwrap();
+                let mut circuit = preparation.clone();
+                circuit
+                    .multi_control(
+                        StandardGate::GPhase,
+                        controls.clone(),
+                        Vec::<Qubit>::new(),
+                        [theta.into()],
+                    )
+                    .unwrap();
+                let mask = controls.iter().fold(0usize, |mask, q| {
+                    mask | (1 << qubits.iter().position(|candidate| candidate == q).unwrap())
+                });
+                let expected: Vec<Complex64> = (0..8)
+                    .map(|index| {
+                        let amplitude = if index & 2 == 0 {
+                            Complex64::new(1.0, 0.0)
+                        } else {
+                            Complex64::new(0.0, 1.0)
+                        } / 8.0_f64.sqrt();
+                        if index & mask == mask {
+                            amplitude * Complex64::from_polar(1.0, theta)
+                        } else {
+                            amplitude
+                        }
+                    })
+                    .collect();
+                let expected_data = expected.clone();
+                let actual = Statevector::from_circuit(&circuit).unwrap();
+                let mut incremental = Statevector::new(3);
+                incremental.apply_circuit(&preparation).unwrap();
+                incremental.apply_circuit(&phase).unwrap();
+                for values in [actual.data(), incremental.data()] {
+                    for (actual, expected) in values.iter().zip(&expected_data) {
+                        assert!(
+                            (actual - expected).norm() < 1e-12,
+                            "{actual:?} != {expected:?}"
+                        );
+                    }
+                }
+                let mut inverse = Circuit::from_qubits(qubits.to_vec()).unwrap();
+                inverse
+                    .multi_control(
+                        StandardGate::GPhase,
+                        controls.clone(),
+                        Vec::<Qubit>::new(),
+                        [(-theta).into()],
+                    )
+                    .unwrap();
+                incremental.apply_circuit(&inverse).unwrap();
+                let baseline = Statevector::from_circuit(&preparation).unwrap();
+                for (actual, expected) in incremental.data().iter().zip(baseline.data()) {
+                    assert!((actual - expected).norm() < 1e-12);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn zero_control_gphase_circuit_evolution() {
+    use crate::circuit::gate::{Instruction, MCGate};
+    for num_qubits in [0, 1, 3] {
+        for theta in [0.0, 0.37, -0.51, PI] {
+            let mut circuit = Circuit::new(num_qubits);
+            if num_qubits > 0 {
+                circuit.h(Qubit::new(0)).unwrap();
+            }
+            circuit
+                .append(
+                    Instruction::McGate(Box::new(MCGate::new(0, StandardGate::GPhase))),
+                    Vec::<Qubit>::new(),
+                    [theta.into()],
+                    None,
+                )
+                .unwrap();
+            let actual = Statevector::from_circuit(&circuit).unwrap();
+            let mut amplitudes = vec![Complex64::new(0.0, 0.0); 1 << num_qubits];
+            amplitudes[0] = Complex64::from_polar(1.0, theta);
+            if num_qubits > 0 {
+                amplitudes[0] /= 2.0_f64.sqrt();
+                amplitudes[1] = amplitudes[0];
+            }
+            let expected = amplitudes;
+            for (actual, expected) in actual.data().iter().zip(&expected) {
+                assert!((actual - expected).norm() < 1e-12);
+            }
+        }
+    }
 }

@@ -11,6 +11,8 @@
 // that they have been altered from the originals.
 
 use super::*;
+use crate::circuit::Parameter;
+use crate::circuit::gate::{MCGate, StandardGate};
 use crate::circuit::test_utils::assert_is_unitary;
 use std::f64::consts::PI;
 
@@ -22,6 +24,45 @@ fn assert_matrix_approx_eq(a: &Array2<Complex<f64>>, b: &Array2<Complex<f64>>) {
             panic!(
                 "Matrices not equal. Diff: {}, Expected: {}, Actual: {}",
                 diff, y, x
+            );
+        }
+    }
+}
+
+#[test]
+fn test_gphase_scalar_matrix() {
+    for theta in [0.0, 0.37, -0.51, PI] {
+        let matrix = global_phase_gate(theta);
+        assert_eq!(matrix.dim(), (1, 1));
+        assert!((matrix[[0, 0]] - Complex::from_polar(1.0, theta)).norm() < 1e-12);
+        assert_is_unitary(&matrix, 1e-12);
+    }
+}
+
+#[test]
+fn test_gphase_controlled_matrix_matches_metadata_and_inverse() {
+    assert_eq!(StandardGate::GPhase.num_qubits(), 0);
+    assert_eq!(StandardGate::GPhase.num_ctrl_qubits(), 0);
+    assert_eq!(StandardGate::GPhase.num_params(), 1);
+    for theta in [0.0, 0.37, -0.51, PI] {
+        for controls in 0..=2 {
+            let gate = MCGate::new(controls, StandardGate::GPhase);
+            assert_eq!(gate.num_qubits(), controls as usize);
+            let dim = 1 << gate.num_qubits();
+            let matrix = gate.matrix(&[theta]).unwrap();
+            let mut expected = Array2::eye(dim);
+            expected[[dim - 1, dim - 1]] = Complex::from_polar(1.0, theta);
+            crate::circuit::test_utils::assert_matrix_approx_eq(&matrix, &expected, 1e-12);
+            assert_is_unitary(&matrix, 1e-12);
+
+            let (inverse, params) = gate.inverse(&[Parameter::from(theta)]).unwrap();
+            let inverse_theta = params[0].evaluate(&None).unwrap();
+            let inverse_matrix = inverse.matrix(&[inverse_theta]).unwrap();
+            let expected_inverse = expected.t().mapv(|value| value.conj());
+            crate::circuit::test_utils::assert_matrix_approx_eq(
+                &inverse_matrix,
+                &expected_inverse,
+                1e-12,
             );
         }
     }

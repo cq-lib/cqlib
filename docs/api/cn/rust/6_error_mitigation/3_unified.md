@@ -77,7 +77,7 @@ pub struct ErrorMitigation {
 执行细节按方法区分：
 
 - 零噪声外推：按配置的折叠等级构造折叠线路，逐条调用估计器，可观测量参数为 `Some(hamiltonian)`，shot 数为 `RunArgs::Zne::shots`；只取返回值中的期望值。折叠线路、期望值、噪声因子与执行参数一并留存。
-- 虚拟蒸馏：构造 copy-swap 线路并把可观测量扩展到该线路宽度，分子线路的估计器收到 `Some(扩展后的可观测量)` 与 `Some(shots_numerator)`，分母线路收到 `None` 与 `Some(shots_denominator)`；分子与分母的均值、方差一并留存。
+- 虚拟蒸馏：构造 copy-swap 线路并把可观测量扩展到该线路宽度，分子线路的估计器收到 `Some(扩展后的可观测量)`——第 0 份副本上的原可观测量与辅助比特上的 `X`——与 `Some(shots_numerator)`，分母线路收到 `Some(分母可观测量)`——辅助比特上的 `X`，其余比特为恒等——与 `Some(shots_denominator)`；分子与分母的均值、方差一并留存。
 
 返回：
 

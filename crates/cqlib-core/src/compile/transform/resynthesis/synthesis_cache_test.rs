@@ -29,6 +29,20 @@ fn matrix_with(real: f64) -> Array2<Complex64> {
 }
 
 #[test]
+fn weyl_boundary_kak_cache_stores_a_successful_decomposition() {
+    let matrix = crate::compile::test_utils::kak_boundary_matrix();
+    let mut cache = TwoQubitSynthesisCache::new_native_session();
+    let first = cache.kak_decomposition(&matrix).unwrap().unwrap();
+    let second = cache.kak_decomposition(&matrix).unwrap().unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(first.a, std::f64::consts::FRAC_PI_4);
+    assert!(first.c > 0.0);
+    assert_eq!(cache.stats().kak_misses, 1);
+    assert_eq!(cache.stats().kak_hits, 1);
+    assert_eq!(cache.stats().kak_failed_hits, 0);
+}
+
+#[test]
 fn exact_key_distinguishes_qargs_bits_and_signed_zero() {
     let q0 = Qubit::new(0);
     let q1 = Qubit::new(1);

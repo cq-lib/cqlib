@@ -132,13 +132,15 @@ int32_t pauli_mul_with_phase(uint8_t left, uint8_t right, uint8_t *out_pauli, Co
 
 ### pauli_string_matrix_len(ptr)
 
-返回稠密矩阵的边长 `2^N`；NULL 返回 0。
+返回稠密矩阵的边长 `2^N`；NULL 或边长无法表示时返回 0。
 
 ### pauli_string_matrix(ptr, buffer, len)
 
 把 `2^N × 2^N` 稠密矩阵按行主序拷入 `buffer`（`Complex64` 值）。`len` 必须等于 `pauli_string_matrix_len(ptr) * pauli_string_matrix_len(ptr)`。
 
-返回：0 成功；-1 空指针；-8 `len` 与矩阵元素数不符。
+返回：0 成功；-1 空指针；-7 元素数或字节数无法表示，或分配失败；-8 `len` 与矩阵元素数不符。失败不改写缓冲区。
+
+可表示的边长不保证完整矩阵可以分配；调用方应在计算 `dim * dim` 前检查溢出。
 
 ---
 
@@ -169,6 +171,7 @@ int32_t pauli_mul_with_phase(uint8_t left, uint8_t right, uint8_t *out_pauli, Co
 ## 示例
 
 ```c
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "cqlib_c.h"
@@ -191,6 +194,11 @@ int main(void) {
     char *text = pauli_string_to_string(ps);        /* "+XZI" */
     struct CPauliString *zz = pauli_string_parse("ZZI");
     int32_t commutes = pauli_string_commutes_with(ps, zz);  /* 0（比特 2 上 X 与 Z 反对易） */
+
+    printf("%s: qubits=%" PRIuPTR ", p2=%u, p0=%u\n", text, n,
+           (unsigned)p2, (unsigned)p0);
+    printf("x_mask=%" PRIuPTR ", z_mask=%" PRIuPTR ", commutes=%" PRId32 "\n",
+           x_mask, z_mask, commutes);
 
     /* 4. 两步式读取 8x8 稠密矩阵 */
     uintptr_t dim = pauli_string_matrix_len(ps);    /* 8 */

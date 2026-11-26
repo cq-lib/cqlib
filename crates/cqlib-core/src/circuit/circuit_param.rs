@@ -102,8 +102,10 @@ impl ParameterValue {
     ///
     /// Fixed values use floating-point multiplication. Symbolic values use
     /// expression multiplication and remain `Param`, even if the resulting
-    /// expression is constant (including multiplication by zero). This method
-    /// does not explicitly evaluate, simplify, or canonicalize expressions.
+    /// expression is constant (including multiplication by zero). In affine
+    /// expressions with unresolved symbols, coefficients are preserved without
+    /// tolerance pruning.
+    /// This method does not explicitly evaluate or canonicalize expressions.
     /// Unlike converting a `Parameter` with `Into`, it does not fold constants
     /// into `Fixed` values.
     ///

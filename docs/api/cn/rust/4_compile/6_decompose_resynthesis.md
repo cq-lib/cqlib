@@ -47,12 +47,15 @@ use cqlib_core::compile::transform::DeviceLowerer;
 - `decompose_unitaries_with_rule_stats(circuit: &Circuit, config: UnitaryDecomposeConfig) -> Result<(TransformOutcome, DecompositionRuleStats), CompilerError>`
 - `DecomposeUnitaries`：`Transformer` 适配器，配置在构造时绑定，`DecomposeUnitaries::new(config)` 构造，实现 `Default`。
 
+对于三比特及以上的矩阵，该 pass 使用 Block-ZXZ 分解，并在路由与目标门集转换之前输出标准门序列。门的第一个比特参数对应矩阵最高有效位。规则缓存会连同操作序列一起保存全局相位；当规则应用于控制流体内部时，条件体将获得其对应的相位。
+
 ### UnitaryDecomposeConfig
 
 ```rust
 pub struct UnitaryDecomposeConfig {
     pub two_qubit_target: TwoQubitSynthesisTarget,
     pub recurse_control_flow: bool,
+    pub block_zxz_options: BlockZxzDecomposeOptions,
 }
 ```
 
@@ -60,8 +63,9 @@ pub struct UnitaryDecomposeConfig {
 
 - `two_qubit_target`：精确双比特数值合成使用的目标能力，由 `TwoQubitSynthesisTarget::from_instructions(target_basis: Option<&[Instruction]>)` 构造；`None` 表示无目标约束，启用中立的 Pauli 旋转回退。
 - `recurse_control_flow`：是否递归进入控制流块。
+- `block_zxz_options`：应用于三比特及以上 Block-ZXZ 合成的优化开关（`BlockZxzDecomposeOptions::default()` 默认启用 A.1 和 A.2，并自动处理块对角输入）。
 
-实现 `Default`，等价于无目标约束且递归进入控制流块。
+实现 `Default`，等价于无目标约束、递归进入控制流块，并使用默认 Block-ZXZ 选项。
 
 ### DecompositionRuleStats
 
@@ -76,6 +80,12 @@ pub struct DecompositionRuleStats {
 pass 内规则缓存统计：命中、未命中与写入次数。
 
 ---
+
+## Block-ZXZ 合成
+
+`cqlib_core::compile::transform::decompose` 模块重新导出了 `decompose_block_zxz(matrix, atol)` 和 `decompose_block_zxz_with_options(matrix, atol, &options)`。两者均接收 `&Array2<Complex64>` 并返回 `Result<Circuit, CompilerError>`。输入需为维度 `2^n`（`n >= 1`）的有限方阵酉矩阵。局部比特 0 为矩阵最低有效位。返回的线路矩阵包含输入矩阵的全局相位。有限非负绝对容差 `atol` 用于校验输入酉性（`||M†M - I||_max <= atol`）并控制解复用器与双比特叶子的重构误差；通过输入校验的近酉矩阵会在需要时先投影到所有酉不变范数下最近的精确酉矩阵 `U_proj`，再以 `atol` 为容差重构 `U_proj`。
+
+`BlockZxzDecomposeOptions::default()` 默认启用 `opt_a1`（吸收边界 CX 门）和 `opt_a2`（在双比特叶子之间转移对角余项）。当 `opt_a2` 启用时，`opt_a2_force` 允许对块对角输入也执行 A.2 优化。对于三比特及以上输入，精确块对角矩阵仅使用单个解复用器；若上下两半相等，最高位比特保持空闲。若某个双比特 KAK 叶子无法达到请求精度，合成器会针对原始 4×4 矩阵额外检查一层 Block-ZXZ 回退；数值回退可能会输出显式对角门与额外门。
 
 ## 数值酉门合成
 

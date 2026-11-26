@@ -903,8 +903,8 @@ fn decompose_swap_x2p_cz_triple_product_differs_from_swap_by_exactly_pi() {
         "bare (X2P⊗X2P)·CZ triple product must differ from SWAP by a global phase"
     );
 
-    // The qiskit SX-convention tail -π/2 is wrong for the phase-free X2P
-    // convention used here: it yields exp(iπ/2)·SWAP = i·SWAP.
+    // With X2P = Rx(π/2), a phase tail of -π/2 yields
+    // exp(iπ/2)·SWAP = i·SWAP instead of exactly SWAP.
     let mut wrong_phase = repeat_three_times(|c| {
         c.x2p(q0).unwrap();
         c.x2p(q1).unwrap();

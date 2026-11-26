@@ -56,7 +56,7 @@ Mitigation flows obtain expectation estimates through this callback. The contrac
 
 - **Pointer validity**: `circuit`, `hamiltonian` and all out pointers are valid only for the duration of the callback; do not keep using them or store them beyond the callback.
 - **hamiltonian ownership**: the `hamiltonian` handle is owned by the library and must not be freed by the callback. The Hamiltonian the callback receives may already have been expanded to the width of the folded/copy circuit as required by the flow.
-- **Out writes**: the callback must write the expectation value through `expectation`; write the variance through `variance` when known, NaN otherwise. In the virtual distillation denominator estimate, `hamiltonian` is NULL — treat it as "no observable".
+- **Out writes**: the callback must write the expectation value through `expectation`; write the variance through `variance` when known, NaN otherwise. In virtual distillation both the numerator and the denominator estimates pass a non-NULL `hamiltonian`: the numerator observable acts on the first copy's qubits and carries `X` on the ancillary qubit, while the denominator observable carries only `X` on the ancillary qubit (identities elsewhere).
 - **shots semantics**: `shots == 0` means "not specified" and the callback decides the sampling scale; a non-zero value is the shot count suggested by the caller.
 
 Inside the callback you can freely call simulator interfaces (e.g. `statevector_from_circuit` + `statevector_expectation` from the [Statevector](../3_qis/1_statevector.md) page) to compute the estimate.

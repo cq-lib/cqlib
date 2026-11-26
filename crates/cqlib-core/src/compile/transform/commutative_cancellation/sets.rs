@@ -12,8 +12,7 @@
 
 //! Commutation-set grouping and cancellation-key analysis.
 //!
-//! The analysis mirrors qiskit's `CommutativeCancellation` structure:
-//! every wire's operation sequence is greedily partitioned into contiguous
+//! Each wire's operation sequence is greedily partitioned into contiguous
 //! sets of pairwise exactly-commuting operations, and self-inverse gates are
 //! bucketed by a key of `(gate, canonical qargs, per-wire set indices)`.
 //! Two operations share a key only when everything between them on each of
@@ -23,6 +22,9 @@
 //!
 //! Sets are tracked per wire independently; a two-qubit gate therefore
 //! records one set index per qubit and the key keeps both as a tuple.
+//!
+//! Implementation reference for per-wire grouping and cancellation keys:
+//! Qiskit's `CommutativeCancellation`.
 
 use crate::circuit::{Instruction, Operation, Parameter, Qubit, StandardGate};
 use crate::compile::commutation::{Commutation, CommutationChecker};

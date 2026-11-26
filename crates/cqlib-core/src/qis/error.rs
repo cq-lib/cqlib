@@ -11,6 +11,7 @@
 // that they have been altered from the originals.
 
 use crate::circuit::CircuitError;
+use num_complex::Complex64;
 use thiserror::Error;
 
 /// Comprehensive error type for the `qis` (Quantum Information Science) module.
@@ -19,6 +20,21 @@ use thiserror::Error;
 /// density matrix simulation, observables, Hamiltonians, and Pauli operator manipulations.
 #[derive(Debug, Error)]
 pub enum QisError {
+    /// A fermionic mode lies outside the declared mode space.
+    #[error("Fermionic mode {mode} is out of bounds for {num_modes} modes")]
+    ModeOutOfBounds { mode: usize, num_modes: usize },
+
+    /// Fermionic operators must declare the same mode count.
+    #[error("Mode count mismatch: expected {expected}, got {actual}")]
+    ModeMismatch { expected: usize, actual: usize },
+
+    /// Operator coefficients and arithmetic results must be finite.
+    #[error("Operator coefficient must be finite, got {coefficient}")]
+    NonFiniteCoefficient { coefficient: Complex64 },
+
+    /// A fermionic occupation must be either zero or one.
+    #[error("Invalid occupation at mode {index}: expected 0 or 1, got {value}")]
+    InvalidOccupation { index: usize, value: u8 },
     /// Errors originating from quantum circuit operations, such as unsupported gates
     /// or symbolic parameters.
     #[error(transparent)]
@@ -88,6 +104,14 @@ pub enum QisError {
     /// Use [`crate::qis::Statevector`] for universal (non-Clifford) simulation.
     #[error("Non-Clifford gate: {0}")]
     NonCliffordGate(String),
+}
+
+pub(crate) fn validate_coefficient(coefficient: Complex64) -> Result<(), QisError> {
+    if coefficient.re.is_finite() && coefficient.im.is_finite() {
+        Ok(())
+    } else {
+        Err(QisError::NonFiniteCoefficient { coefficient })
+    }
 }
 
 /// Error type for parsing PauliString from a string representation.

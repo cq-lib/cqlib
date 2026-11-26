@@ -21,6 +21,8 @@ from cqlib.qis.state import DensityMatrixNoise
 
 ### DensityMatrixNoise(num_qubits, noise_model=None)
 
+状态维度无法表示或状态内存分配失败时抛出 `ValueError`。支持零比特状态。
+
 创建一个模拟器。省略噪声模型时等价于理想模拟。
 
 参数：
@@ -169,7 +171,7 @@ assert sim.state[0, 0] != 999.0
 **概率**
 
 - `probabilities() -> list[float]`：返回不含读出噪声的各基态概率，长度为 2^num_qubits。不修改状态。
-- `probabilities_with_readout(qubits) -> list[float]`：返回在指定比特上施加读出噪声后的概率分布，长度为 2^n，n 为 `qubits` 长度。
+- `probabilities_with_readout(qubits) -> list[float]`：`qubits` 为施加读出误差的存储位置；绑定线路后，按这些位置对应的线路比特 ID 查询噪声模型，未绑定时 ID 与位置相同。返回完整的 `2^num_qubits` 项概率数组，保持存储位序，不随选择的顺序或数量改变；空选择不施加读出误差。位置越界时抛出 `IndexError`，即使未配置噪声模型。
   - `qubits` (`list[int]`)：参与读出噪声建模的比特下标列表。下标越界时抛出 `IndexError`。
 
 **测量与采样**

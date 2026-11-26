@@ -29,6 +29,8 @@
 
 ### 观测量与时间演化
 
+[`FermionicOp` 与 `JordanWignerMapper`](10_fermion.md) 提供通用费米代数、激发生成元及费米到 Pauli 和的映射，可直接复用现有演化组件。
+
 `PauliString` 与 `Hamiltonian` 描述可观测量，两者都可以给出期望值；`Hamiltonian` 还可以通过 Trotter 分解转成演化线路，回到 `cqlib.circuit` 的线路空间中执行。
 
 ---

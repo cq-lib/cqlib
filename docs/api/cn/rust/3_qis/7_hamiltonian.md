@@ -1,11 +1,11 @@
 # Hamiltonian 与 Observable
 
-`cqlib_core::qis::hamiltonian`  
+`cqlib_core::qis::hamiltonian`
 `cqlib_core::qis::observable`
 
-本页介绍由 Pauli 串与复系数构成的观测量 `Hamiltonian`，以及计算期望值的统一接口 `Observable` trait。
+本页介绍由 Pauli 串与复系数构成的算符 `Hamiltonian`，以及计算实数期望值的统一接口 `Observable` trait。
 
-`Hamiltonian` 是 $2^N \times 2^N$ 矩阵的稀疏表示，形式为 $H = \sum_k c_k P_k$，其中 $c_k$ 是复系数，$P_k$ 是 $N$ 比特 Pauli 串。同一个结构既用于物理解释中的哈密顿量，也用于任意需要求期望值的可观测量。
+`Hamiltonian` 是 $2^N \times 2^N$ 矩阵的稀疏表示，形式为 $H = \sum_k c_k P_k$，其中 $c_k$ 是复系数，$P_k$ 是 $N$ 比特 Pauli 串。该结构允许非厄米算符；实数期望值和酉演化入口会额外检查厄米性。
 
 ## 导入
 
@@ -46,10 +46,59 @@ pub struct Hamiltonian {
 - `fn simplify(&mut self)`：化简项列表。该操作分两步：把每个 `PauliString` 的内部相位吸收进系数，使所有 Pauli 串归一到 `Phase::Plus`；再按 X、Z 分量向量分组，合并相同算子的系数。绝对值小于 $10^{-10}$ 的系数会被丢弃。
 - `fn scale(&mut self, factor: Complex64)`：把所有项的系数乘以同一个复因子。
 
+### 安全 Pauli 和式代数
+
+以下接口返回 `Result`，验证比特数、X/Z 位向量长度、有限系数及系数乘法/累加结果。返回的算符已吸收相位、按 Z 再 X 向量确定性排序并合并重复项，且只删除精确零；不采用 `simplify()` 的默认截断。
+
+| 接口 | 语义 |
+| --- | --- |
+| `identity(num_qubits) -> Self` | 指定寄存器上的单位算符；零比特时为标量 1。 |
+| `from_terms(num_qubits, terms) -> Result<Self, QisError>` | 从 `(PauliString, Complex64)` 的 `IntoIterator` 安全构造；空输入保留声明宽度。 |
+| `try_add(&self, other: &Self)` / `try_sub(&self, other: &Self)` | 同宽度加减，返回 `Result<Self, QisError>`，不修改输入。 |
+| `try_mul(&self, other: &Self) -> Result<Self, QisError>` | 矩阵乘积 $AB$，右操作数先作用；允许非厄米结果。 |
+| `scaled(&self, factor: Complex64) -> Result<Self, QisError>` | 返回缩放结果；零算符也验证因子。 |
+| `adjoint(&self) -> Result<Self, QisError>` | 相位归一化后共轭系数，得到 $A^\dagger$。 |
+| `normalized(&self) -> Result<Self, QisError>` | 验证、吸收相位、合并同类项，仅删除精确零。 |
+| `chop(&mut self, atol: f64) -> Result<(), QisError>` | 先归并，再删除复数模长 `≤ atol` 的项；失败时原值不变。 |
+| `equiv(&self, other: &Self, atol: f64) -> Result<bool, QisError>` | 判断归一化后 $A-B$ 的每个系数模长是否 `≤ atol`。 |
+| `is_hermitian(&self, atol: f64) -> Result<bool, QisError>` | 等价于与伴随的 `equiv`，不投影到实数。 |
+| `tensor(&self, other: &Self) -> Result<Self, QisError>` | $A\otimes B$，B 占低比特，A 占高比特。 |
+| `remap_qubits(&self, mapping: &[usize], target_width: usize) -> Result<Self, QisError>` | `mapping[source] = destination`；支持置换和嵌入，未使用位置补 I。 |
+
+所有容差必须有限且非负。`equiv` 使用逐项系数容差，不是矩阵算符范数界；宽度不同返回 `QubitMismatch`，不会隐式扩展寄存器。`is_hermitian` 的容差衡量 $A-A^\dagger$，归一化后等于虚部幅值的两倍，与 `FermionicOp` 一致。已有 `normalized_hermitian()` 使用独立消费者契约：允许虚部幅值不超过 `1e-10`，将其投影到实数，但保留任何非零实系数。
+
+`remap_qubits` 要求映射长度等于源宽度，目标位置不重复且小于 `target_width`，包括零/单位算符。它不表示费米子模式置换或部分迹。零算符保留寄存器宽度，稀疏运算支持超过 64 个量子比特；乘法可展开成两侧项数的乘积，仍可能产生大量项。
+
+若张量或嵌入结果需要构造 Pauli 项，宽度超过 BitVec 的可表示长度时返回 `UnsupportedOperation`，不会触发长度断言。零算符不需要位向量，可以保留更大的声明宽度。
+
+```rust
+use cqlib_core::qis::{Hamiltonian, QisError};
+use num_complex::Complex64;
+
+let x = Hamiltonian::from_pauli("X".parse()?);
+let z = Hamiltonian::from_pauli("Z".parse()?);
+let sum = x.try_add(&z)?;
+assert!(sum.try_mul(&sum)?.equiv(&Hamiltonian::identity(1).scaled(2.0.into())?, 0.0)?);
+
+let xz = x.try_mul(&z)?; // XZ = -iY
+let minus_i_y = Hamiltonian::from_terms(1, [("Y".parse()?, Complex64::new(0.0, -1.0))])?;
+assert!(xz.equiv(&minus_i_y, 0.0)?);
+assert!(!xz.is_hermitian(0.0)?);
+
+// [X,Z]，以及 X ⊗ Z：最右字符对应比特 0。
+let commutator = xz.try_sub(&z.try_mul(&x)?)?;
+assert!(commutator.equiv(&minus_i_y.scaled(2.0.into())?, 0.0)?);
+assert!(x.tensor(&z)?.equiv(&Hamiltonian::from_pauli("XZ".parse()?), 0.0)?);
+assert!(x.remap_qubits(&[2], 3)?.equiv(&Hamiltonian::from_pauli("XII".parse()?), 0.0)?);
+# Ok::<(), QisError>(())
+```
+
+旧 `Add`、`scale`、`simplify` 和构造器保留原契约；新调用优先使用安全接口。`PartialEq` 比较存储结构，项顺序、重复项或相位分布不同的等价算符可能不相等，应使用 `equiv`。
+
 ### 查询与转换
 
 - `fn all_terms_commute(&self) -> bool`：判断所有 Pauli 项是否两两对易。为真时 $e^{-iHt}$ 可以按项分解为精确演化。
-- `fn to_matrix(&self) -> Result<Array2<Complex64>, QisError>`：返回 $2^N \times 2^N$ 稠密矩阵。任一项的比特数与 `num_qubits` 不一致时返回 `QisError::QubitMismatch`。空算量返回对应维度的零矩阵。
+- `fn to_matrix(&self) -> Result<Array2<Complex64>, QisError>`：验证并返回 $2^N \times 2^N$ 稠密矩阵。空算符返回对应维度的零矩阵，零比特输入返回 1×1 矩阵。分配前检查维度、元素数和字节数；大小溢出或内存预留失败返回 `UnsupportedOperation`。非法结构或非有限系数（包括矩阵元素累加溢出）返回相应错误。需要 $O(4^N)$ 内存，仅适用于小系统。
 - `fn to_trotter_circuit(&self, time: f64, steps: usize, mode: TrotterMode) -> Result<Circuit, QisError>`：见 [Trotter 演化](8_evolution.md)。
 - `fn to_evolution_circuit(&self, time: f64, steps: usize, mode: TrotterMode) -> Result<Circuit, QisError>`：见 [Trotter 演化](8_evolution.md)。
 
@@ -174,6 +223,8 @@ pub trait Observable {
 ### 默认方法
 
 - `fn variance_statevector(&self, sv: &Statevector) -> Result<f64, QisError>`：计算纯态方差 $\text{Var}(O) = \langle O^2 \rangle - \langle O \rangle^2$。trait 中的默认实现返回 `QisError::UnsupportedOperation`，支持方差计算的观测量需要覆写该方法。
+
+实数期望值和方差接口在吸收相位、合并重复项后检查厄米性，不删除非零小系数。原始或合并后系数非有限时返回 `QisError::InvalidParameterValue`，非厄米算符返回 `QisError::NotHermitian`。
 
 ### 实现者
 

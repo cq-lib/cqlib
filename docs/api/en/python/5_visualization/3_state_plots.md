@@ -120,6 +120,8 @@ Raises:
 
 Compute the expectation values of the quantum state in the Pauli basis and render them as a bar chart.
 
+By default, labels follow `PauliString`: the highest-index qubit is on the left and qubit 0 is on the right. For example, `IX` measures X on qubit 0 of a two-qubit state. Enabling `reverse_bits` reverses the characters in each label without changing the corresponding expectation value.
+
 Parameters:
 
 - `state` (`QuantumState`): the quantum state to render.

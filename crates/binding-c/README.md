@@ -122,3 +122,14 @@ gcc -I crates/binding-c/include \
 
 ./test_circuit        # prints "binding-c circuit tests passed"
 ```
+
+## Checked sparse algebra
+
+The new `fermionic_op_*`, `jordan_wigner_*`, and checked `hamiltonian_*` functions
+expose fermionic products, excitation generators and sparse Pauli arithmetic.
+They return an error code and deliver independent objects through output pointers;
+errors leave outputs unchanged. Inputs are borrowed and coefficients are never
+approximately pruned unless requested. See [Fermionic algebra](../../docs/api/en/c/3_qis/10_fermion.md)
+and [Hamiltonian](../../docs/api/en/c/3_qis/7_hamiltonian.md).
+
+The staged SDK consumer tests include `test_qis_algebra.c` for both static and shared linking.

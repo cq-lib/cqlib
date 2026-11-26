@@ -57,6 +57,7 @@ Submodule             Purpose                                         Key types
 ``.gates``            Gate definitions and factory constants          :class:`StandardGate`
 ``.parameter``        Symbolic/numeric parameter expressions          :class:`Parameter`
 ``.classical``        Runtime classical types and storage handles     :class:`ClassicalType`
+``.classical_data``   Runtime classical data operations               :class:`ClassicalDataOp`
 ``.classical_expr``   Typed classical expression AST                  :class:`ClassicalExpr`
 ``.control_flow``     Classical control-flow operations               :class:`ClassicalControlOp`
 ``.operation``        Instruction and operation types                 :class:`ValueOperation`
@@ -84,6 +85,7 @@ from .classical import (
     ClassicalVar as ClassicalVar,
     Measurement as Measurement,
 )
+from .classical_data import ClassicalDataOp as ClassicalDataOp
 from .classical_expr import ClassicalExpr as ClassicalExpr
 from .control_flow import (
     ClassicalControlOp as ClassicalControlOp,
@@ -121,6 +123,7 @@ __all__ = [
     "CircuitId",
     "CircuitError",
     "ClassicalControlOp",
+    "ClassicalDataOp",
     "ClassicalExpr",
     "ClassicalType",
     "ClassicalValue",

@@ -732,3 +732,27 @@ fn test_evolution_circuit_exact_matrix_correctness() {
     assert_abs_diff_eq!(matrix[[0, 1]].re, 0.0, epsilon = 1e-12);
     assert_abs_diff_eq!(matrix[[1, 0]].re, 0.0, epsilon = 1e-12);
 }
+
+#[test]
+fn evolution_retains_small_coefficients_before_time_scaling() {
+    for coefficients in [vec![1e-11], vec![2e-11, -1e-11], vec![1e-11, -1e-11]] {
+        let mut h = Hamiltonian::new(1);
+        for &c in &coefficients {
+            h.add_term("Z".parse().unwrap(), c.into()).unwrap();
+        }
+        let angle = coefficients.iter().sum::<f64>() * 1e11;
+        for mode in [TrotterMode::FirstOrder, TrotterMode::SecondOrder] {
+            for circuit in [
+                h.to_trotter_circuit(1e11, 3, mode).unwrap(),
+                h.to_evolution_circuit(1e11, 3, mode).unwrap(),
+            ] {
+                let m = circuit_to_matrix(&circuit, None).unwrap();
+                assert!((m[[0, 0]] - Complex64::from_polar(1.0, -angle)).norm() < 1e-10);
+                assert!((m[[1, 1]] - Complex64::from_polar(1.0, angle)).norm() < 1e-10);
+                assert!(m[[0, 1]].norm() < 1e-10 && m[[1, 0]].norm() < 1e-10);
+            }
+        }
+        h.simplify();
+        assert!(h.terms.is_empty());
+    }
+}

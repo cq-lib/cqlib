@@ -32,9 +32,14 @@ Methods:
 
 ### Construction and data access
 
+`new`, `zeros` and `maximally_mixed` panic when the dimension is unrepresentable or state allocation fails. Use the corresponding `try_*` constructor to handle these errors. Zero-qubit states are supported.
+
 - `fn new(num_qubits: usize) -> Self`: construct the pure state `|0...0><0...0|`.
+- `fn try_new(num_qubits: usize) -> Result<Self, QisError>`: construct the ground state, returning `QisError::InvalidParameterValue` for an unrepresentable dimension or `QisError::UnsupportedOperation` when state allocation fails.
 - `fn maximally_mixed(num_qubits: usize) -> Self`: construct the maximally mixed state `I / 2^N`, where every computational basis state is equally probable and there are no coherence terms.
+- `fn try_maximally_mixed(num_qubits: usize) -> Result<Self, QisError>`: fallible variant with the same errors as `try_new`.
 - `fn zeros(num_qubits: usize) -> Self`: construct an all-zero matrix; it is not a valid physical state (trace 0) and is used as the accumulation starting point for operations such as quantum channels.
+- `fn try_zeros(num_qubits: usize) -> Result<Self, QisError>`: fallible variant with the same errors as `try_new`.
 - `fn from_state(num_qubits: usize, initial_state: Vec<Complex64>) -> Result<Self, QisError>`: construct by the outer product of pure state amplitudes `ρ = |ψ><ψ|`.
 - `fn from_density_matrix_state(num_qubits: usize, dm_state: Vec<Complex64>) -> Result<Self, QisError>`: construct directly from a flattened `2^N × 2^N` matrix, validating Hermiticity, positive semidefiniteness and unit trace.
 - `fn data(&self) -> &[Complex64]`: read the flattened matrix elements as a shared slice.

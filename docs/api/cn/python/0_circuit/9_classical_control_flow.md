@@ -5,6 +5,7 @@
 - `cqlib.circuit.ClassicalVar`
 - `cqlib.circuit.ClassicalValue`
 - `cqlib.circuit.Measurement`
+- `cqlib.circuit.ClassicalDataOp`
 - `cqlib.circuit.ClassicalExpr`
 - `cqlib.circuit.ClassicalControlOp`
 - `cqlib.circuit.ValueControlBody`
@@ -15,6 +16,7 @@ from cqlib.circuit import (
     CircuitId,
     ClassicalType,
     ClassicalExpr,
+    ClassicalDataOp,
     ClassicalControlOp,
     ValueControlBody,
     ValueSwitchCase,
@@ -35,6 +37,7 @@ from cqlib.circuit import (
 | `ClassicalVar` | 可变经典变量句柄，由 `Circuit.var()` 创建。 |
 | `ClassicalValue` | 不可变经典值句柄，通常由测量产生。 |
 | `Measurement` | 测量回执，记录测量结果句柄和被测量的量子比特顺序。 |
+| `ClassicalDataOp` | 经典数据操作的指令形式（变量写入或测量结果写入），通过 `Instruction.classical_data` 获得。 |
 | `ClassicalExpr` | 无副作用的经典表达式，可表示字面量、变量读取、比较和逻辑组合。 |
 | `ClassicalControlOp` | 低层控制流对象，用于表示 `if`、`while`、`for`、`switch`、`break` 和 `continue`。 |
 | `ValueControlBody` | 控制流分支体或循环体中的操作序列。 |
@@ -234,6 +237,30 @@ expr = m.expr()
 ```python
 single = circuit.measure(1)
 condition = single.expr().to_bool()
+```
+
+---
+
+## `ClassicalDataOp`
+
+`ClassicalDataOp` 是经典数据操作的指令形式：写入可变经典变量，或产生不可变经典值的测量。它不直接构造，实例通过 `Instruction` 或 `ValueInstruction` 的 `classical_data` 属性获得。
+
+| 属性 | 类型 | 说明 |
+|---|---|---|
+| `kind` | `str` | 操作类别：`"store"`、`"measure_bit"` 或 `"measure_bits"`。 |
+| `target` | `ClassicalVar / None` | 当 `kind` 为 `"store"` 时，返回写入的目标变量。 |
+| `value` | `ClassicalExpr / None` | 当 `kind` 为 `"store"` 时，返回写入的表达式。 |
+| `result` | `ClassicalValue / None` | 当 `kind` 为 `"measure_bit"` 或 `"measure_bits"` 时，返回接收结果的不可变值。 |
+
+```python
+from cqlib import Circuit
+
+circuit = Circuit(2)
+circuit.measure_bits([0, 1])
+
+data = circuit.operations[0].instruction.classical_data
+print(data.kind)    # measure_bits
+print(data.result)  # 测量产生的 ClassicalValue
 ```
 
 ---

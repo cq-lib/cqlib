@@ -14,6 +14,7 @@
 
 use crate::circuit::CCircuit;
 use crate::error::CqlibError;
+use crate::qis::algebra::{dense_matrix_dim, dense_matrix_len};
 use crate::qis::{CHamiltonian, CPauliString, CStatevector, qis_err_code};
 use cqlib_core::qis::evolution::TrotterMode;
 use cqlib_core::qis::{Hamiltonian, Observable};
@@ -141,19 +142,22 @@ pub extern "C" fn hamiltonian_scale(ptr: *mut CHamiltonian, factor_re: f64, fact
     0
 }
 
-/// Return the side length of the dense matrix (`2^N`), or 0 for NULL.
+/// Return the side length of the dense matrix (`2^N`), or 0 for NULL or
+/// an unrepresentable side length. A representable side does not guarantee
+/// that the complete dense matrix can be allocated.
 #[unsafe(no_mangle)]
 pub extern "C" fn hamiltonian_to_matrix_len(ptr: *const CHamiltonian) -> usize {
     if ptr.is_null() {
         return 0;
     }
-    1usize << unsafe { (*ptr).inner.num_qubits }
+    dense_matrix_dim(unsafe { (*ptr).inner.num_qubits }).unwrap_or(0)
 }
 
 /// Copy the dense `2^N x 2^N` matrix into `buffer` (row-major,
 /// `Complex64` values). `len` must equal
 /// `hamiltonian_to_matrix_len(ptr) * hamiltonian_to_matrix_len(ptr)`.
-/// Returns 0 on success, or a negative error code.
+/// Returns 0 on success, -7 for unrepresentable dense allocation size or
+/// allocation failure, -8 for an incorrect buffer length. Errors leave the buffer unchanged.
 #[unsafe(no_mangle)]
 pub extern "C" fn hamiltonian_to_matrix(
     ptr: *const CHamiltonian,
@@ -164,6 +168,12 @@ pub extern "C" fn hamiltonian_to_matrix(
         return CqlibError::NullPtr as i32;
     }
     let wrapper = unsafe { &*ptr };
+    let Some(expected_len) = dense_matrix_len(wrapper.inner.num_qubits) else {
+        return CqlibError::SimulationError as i32;
+    };
+    if len != expected_len {
+        return CqlibError::InvalidParam as i32;
+    }
     let matrix = match wrapper.inner.to_matrix() {
         Ok(matrix) => matrix,
         Err(err) => return qis_err_code(&err),
@@ -171,9 +181,9 @@ pub extern "C" fn hamiltonian_to_matrix(
     if matrix.len() != len {
         return CqlibError::InvalidParam as i32;
     }
-    let flat: Vec<Complex64> = matrix.iter().cloned().collect();
+    // Checked core conversion returns a contiguous row-major matrix.
     unsafe {
-        std::ptr::copy_nonoverlapping(flat.as_ptr(), buffer, len);
+        std::ptr::copy_nonoverlapping(matrix.as_ptr(), buffer, len);
     }
     0
 }

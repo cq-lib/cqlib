@@ -51,6 +51,141 @@ def operation_names(circuit: Circuit) -> list[str]:
     return [operation.instruction.instruction.name for operation in circuit.operations]
 
 
+@pytest.fixture
+def weyl_boundary_matrix() -> np.ndarray:
+    # Preserve the reported matrix, including its floating-point roundoff.
+    return np.array(
+        [
+            [
+                complex(-0.14755155196621783, 0.08535345227001921),
+                complex(-0.015112015359785388, -0.026124324914469213),
+                complex(-4.3021142204224816e-16, 0.06601980439593577),
+                complex(-0.9826870609532827, 2.7755575615628914e-16),
+            ],
+            [
+                complex(-0.006212290419590961, -0.010739262071974568),
+                complex(-0.3589338503302527, 0.2076307761864266),
+                complex(0.9070757873156866, -5.412337245047638e-16),
+                complex(-6.245004513516506e-16, -0.07152302867497204),
+            ],
+            [
+                complex(-0.9706933646378622, 2.7755575615628914e-17),
+                complex(2.6020852139652106e-18, -0.15594957493615416),
+                complex(0.03569705171577718, -0.061709927849413246),
+                complex(0.1457506851638859, 0.08431171332109447),
+            ],
+            [
+                complex(7.112366251504909e-17, -0.16894909068671718),
+                complex(-0.8960049266516804, -3.608224830031759e-16),
+                complex(-0.35455306241796475, -0.20509664240745978),
+                complex(-0.014674445936026376, 0.02536789332498595),
+            ],
+        ],
+        dtype=np.complex128,
+    )
+
+
+def reconstructed_kak(decomposition: KakDecomposition) -> np.ndarray:
+    core = np.eye(4, dtype=np.complex128)
+    paulis = (
+        np.array([[0, 1], [1, 0]], dtype=np.complex128),
+        np.array([[0, -1j], [1j, 0]], dtype=np.complex128),
+        np.diag([1, -1]),
+    )
+    for angle, pauli in zip(
+        (decomposition.a, decomposition.b, decomposition.c), paulis, strict=True
+    ):
+        core = core @ (
+            np.cos(angle) * np.eye(4) + 1j * np.sin(angle) * np.kron(pauli, pauli)
+        )
+    return (
+        np.exp(1j * decomposition.global_phase)
+        * np.kron(decomposition.k1l, decomposition.k1r)
+        @ core
+        @ np.kron(decomposition.k2l, decomposition.k2r)
+    )
+
+
+@pytest.mark.parametrize("phase", [0.0, -1.1, np.pi / 4, np.pi / 2, np.pi, 2.7])
+def test_weyl_boundary_kak_preserves_phase_and_su2_factors(
+    weyl_boundary_matrix: np.ndarray, phase: float
+) -> None:
+    source = np.exp(1j * phase) * weyl_boundary_matrix
+    decomposition = kak_decompose(source)
+    assert decomposition.a == np.pi / 4
+    assert decomposition.c > 0
+    np.testing.assert_allclose(
+        reconstructed_kak(decomposition), source, atol=1e-12, rtol=0
+    )
+    for factor in (
+        decomposition.k1l,
+        decomposition.k1r,
+        decomposition.k2l,
+        decomposition.k2r,
+    ):
+        np.testing.assert_allclose(
+            factor.conj().T @ factor, np.eye(2), atol=1e-12, rtol=0
+        )
+        np.testing.assert_allclose(np.linalg.det(factor), 1, atol=1e-12, rtol=0)
+
+
+@pytest.mark.parametrize(
+    "basis",
+    [
+        TwoQubitUnitaryDecomposeBasis.cx(),
+        TwoQubitUnitaryDecomposeBasis.cy(),
+        TwoQubitUnitaryDecomposeBasis.cz(),
+        TwoQubitUnitaryDecomposeBasis.rzz(),
+        TwoQubitUnitaryDecomposeBasis.pauli_rotations(),
+    ],
+)
+@pytest.mark.parametrize("qubits", [[0, 1], [1, 0]])
+def test_weyl_boundary_synthesis_and_cached_unitary_lowering(
+    weyl_boundary_matrix: np.ndarray,
+    basis: TwoQubitUnitaryDecomposeBasis,
+    qubits: list[int],
+) -> None:
+    matrix = np.exp(0.37j) * weyl_boundary_matrix
+    gate = UnitaryGate("boundary", 2).with_matrix(matrix)
+    source = Circuit(2)
+    source.append_unitary_gate(gate, qubits)
+    synthesis = synthesize_numeric_2q_unitary(matrix, *qubits, basis)
+    output = Circuit.from_operations([Qubit(0), Qubit(1)], synthesis.operations)
+    output.set_global_phase(synthesis.global_phase)
+    np.testing.assert_allclose(
+        output.to_matrix(), source.to_matrix(), atol=1e-9, rtol=0
+    )
+
+    source.append_unitary_gate(gate, qubits)
+    config = UnitaryDecomposeConfig(two_qubit_basis=basis)
+    result, stats = decompose_unitaries_with_rule_stats(source, config)
+    np.testing.assert_allclose(
+        result.circuit.to_matrix(), source.to_matrix(), atol=1e-9, rtol=0
+    )
+    assert (stats.hits, stats.misses, stats.inserts) == (1, 1, 1)
+
+
+def test_weyl_boundary_interior_negative_c_is_not_rejected() -> None:
+    identity = np.eye(4, dtype=np.complex128)
+    x = np.array([[0, 1], [1, 0]], dtype=np.complex128)
+    y = np.array([[0, -1j], [1j, 0]], dtype=np.complex128)
+    z = np.diag([1, -1])
+    for distance in (1e-12, 1e-10, 5e-9, 2e-8):
+        source = identity.copy()
+        for angle, pauli in zip(
+            (np.pi / 4 - distance, 0.2, -0.03), (x, y, z), strict=True
+        ):
+            source = source @ (
+                np.cos(angle) * identity + 1j * np.sin(angle) * np.kron(pauli, pauli)
+            )
+        decomposition = kak_decompose(source)
+        assert decomposition.a < np.pi / 4
+        assert decomposition.c < 0
+        np.testing.assert_allclose(
+            reconstructed_kak(decomposition), source, atol=1e-12, rtol=0
+        )
+
+
 def test_decompose_module_and_types_are_registered() -> None:
     assert "cqlib._native.compile.transform.decompose" in sys.modules
     assert decompose.expand_definitions is expand_definitions
@@ -259,23 +394,7 @@ def test_kak_decomposition_reconstructs_matrix_and_returns_owned_arrays() -> Non
     )
 
     decomposition = kak_decompose(source)
-    identity = np.eye(4, dtype=np.complex128)
-    x = np.array([[0, 1], [1, 0]], dtype=np.complex128)
-    y = np.array([[0, -1j], [1j, 0]], dtype=np.complex128)
-    z = np.array([[1, 0], [0, -1]], dtype=np.complex128)
-    xx, yy, zz = np.kron(x, x), np.kron(y, y), np.kron(z, z)
-    cartan = (
-        np.cos(decomposition.a) * identity + 1j * np.sin(decomposition.a) * xx
-    ) @ (np.cos(decomposition.b) * identity + 1j * np.sin(decomposition.b) * yy)
-    cartan = cartan @ (
-        np.cos(decomposition.c) * identity + 1j * np.sin(decomposition.c) * zz
-    )
-    reconstructed = (
-        np.exp(1j * decomposition.global_phase)
-        * np.kron(decomposition.k1l, decomposition.k1r)
-        @ cartan
-        @ np.kron(decomposition.k2l, decomposition.k2r)
-    )
+    reconstructed = reconstructed_kak(decomposition)
 
     np.testing.assert_allclose(reconstructed, source, atol=1e-7)
     local = decomposition.k1l

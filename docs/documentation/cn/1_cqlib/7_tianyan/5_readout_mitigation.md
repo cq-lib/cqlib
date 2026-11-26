@@ -63,7 +63,7 @@ task = backend.run_with_mode(
 
 ```python
 task = backend.run(["H Q1\nM Q1"], shots=1000)
-results = task.wait(timeout_secs=120.0)
+results = task.wait(timeout=120.0)
 ```
 
 `auto` 模式会在满足条件时自动应用读取误差矫正。
@@ -74,14 +74,14 @@ results = task.wait(timeout_secs=120.0)
 
 ```python
 task = backend.run_raw(["H Q1\nM Q1"], shots=1000)
-raw_results = task.wait(timeout_secs=120.0)
+raw_results = task.wait(timeout=120.0)
 ```
 
 或者在已有任务上使用 `wait_raw`：
 
 ```python
 task = backend.run(["H Q1\nM Q1"], shots=1000)
-raw_results = task.wait_raw(timeout_secs=120.0)
+raw_results = task.wait_raw(timeout=120.0)
 ```
 
 ## 5. 显式指定矫正模式
@@ -135,8 +135,8 @@ qcis = "H Q1\nM Q1"
 
 task = backend.run([qcis], shots=1000)
 
-calibrated = task.wait(timeout_secs=120.0)
-raw = task.wait_raw(timeout_secs=120.0)
+calibrated = task.wait(timeout=120.0)
+raw = task.wait_raw(timeout=120.0)
 
 print("矫正后:", calibrated[0].counts, calibrated[0].probabilities)
 print("原始值:", raw[0].counts, raw[0].probabilities)

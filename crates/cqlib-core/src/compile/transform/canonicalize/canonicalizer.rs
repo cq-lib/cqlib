@@ -267,15 +267,6 @@ impl<'a> CanonicalizeRound<'a> {
 
     fn run(mut self) -> Result<(Circuit, Vec<Option<usize>>), CompilerError> {
         self.top_phase = self.canonicalize_parameter(self.top_phase.clone())?;
-        if !self.source.operations().is_empty() && !self.top_phase.is_canonical_positive_zero() {
-            // The previous operation loop normalized `current + 0` once for
-            // every source operation, including operations with no phase
-            // contribution. Preserve that representation for tiny numeric
-            // residues with one up-front normalization instead of repeating
-            // the same symbolic work for every operation.
-            self.top_phase =
-                self.canonicalize_parameter(self.top_phase.clone() + Parameter::from(0.0))?;
-        }
         let mut top_level = Vec::with_capacity(self.source.operations().len());
         let mut provenance = Vec::with_capacity(self.source.operations().len());
 

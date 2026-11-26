@@ -164,7 +164,7 @@ impl SingleQubitNoise {
                 ]
             }
             Self::Pauli { px, py, pz } => {
-                let pi = (1.0 - px - py - pz).sqrt();
+                let pi = (1.0 - (px + py + pz)).sqrt();
                 vec![
                     Pauli::I.to_matrix() * pi,
                     Pauli::X.to_matrix() * px.sqrt(),
@@ -557,5 +557,37 @@ mod tests {
             }
             result => panic!("unexpected result: {result:?}"),
         }
+    }
+
+    #[test]
+    fn pauli_probability_boundary_has_complete_finite_kraus_operators() {
+        let noise = SingleQubitNoise::Pauli {
+            px: 0.3,
+            py: 0.6,
+            pz: 0.1,
+        };
+        assert!(noise.is_valid());
+        let ops = noise.to_kraus();
+        let mut completeness = ndarray::Array2::<Complex64>::zeros((2, 2));
+        for op in &ops {
+            assert!(op.iter().all(|v| v.re.is_finite() && v.im.is_finite()));
+            completeness += &op.t().mapv(|v| v.conj()).dot(op);
+        }
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (completeness[[i, j]] - Complex64::from(if i == j { 1.0 } else { 0.0 })).norm()
+                        < 1e-12
+                );
+            }
+        }
+        assert!(
+            !SingleQubitNoise::Pauli {
+                px: 0.4,
+                py: 0.6,
+                pz: 0.1
+            }
+            .is_valid()
+        );
     }
 }

@@ -181,7 +181,7 @@ pub struct EvolutionInfo {
 ///
 /// # Requirements
 ///
-/// - The Hamiltonian must be **Hermitian**: after calling `simplify()`, all
+/// - The Hamiltonian must be **Hermitian**: after phase normalization and merging, all
 ///   coefficients must have negligible imaginary part ($|\text{Im}(c_k)| < 10^{-10}$).
 /// - The Hamiltonian must be **non-empty**.
 /// - For [`EvolutionStrategy::Exact`], all terms must mutually commute.
@@ -232,7 +232,7 @@ pub struct PauliEvolutionAnsatz {
     /// The simplified Hamiltonian (normalized, de-duplicated).
     ///
     /// **Invariant**: always in simplified form (phases absorbed, duplicates merged,
-    /// near-zero terms removed). Any future mutating API must re-run `simplify()` and
+    /// exact-zero terms removed). Any future mutating API must re-run normalization and
     /// re-validate Hermiticity before updating this field.
     hamiltonian: Hamiltonian,
     /// Cached result of `hamiltonian.all_terms_commute()`, computed once in `new()`.
@@ -252,35 +252,26 @@ pub struct PauliEvolutionAnsatz {
 impl PauliEvolutionAnsatz {
     /// Creates a new ansatz from a Hamiltonian.
     ///
-    /// Internally calls [`Hamiltonian::simplify`] to normalize the Hamiltonian
-    /// (merge duplicate terms, absorb phases into coefficients, remove near-zero terms)
-    /// before any further processing.
+    /// Validates and normalizes the Hamiltonian (merges duplicate terms, absorbs
+    /// phases into coefficients and removes exact zeros). Small nonzero coefficients
+    /// are retained, matching the numeric Hamiltonian evolution APIs. Imaginary
+    /// roundoff residuals of magnitude at most `1e-10` are projected to zero.
     ///
     /// The default strategy is [`EvolutionStrategy::Auto`] with `steps = 1`.
     ///
     /// # Errors
     ///
     /// Returns [`QisError::InvalidParameterValue`] if the Hamiltonian is empty after
-    /// simplification, or [`QisError::NotHermitian`] if any coefficient has a non-zero
-    /// imaginary part after simplification.
+    /// real projection, or [`QisError::NotHermitian`] if any merged coefficient
+    /// has an imaginary part of magnitude greater than `1e-10`.
     pub fn new(hamiltonian: Hamiltonian) -> Result<Self, QisError> {
-        let mut h = hamiltonian;
-        h.simplify();
+        let h = hamiltonian.normalized_hermitian()?;
 
         if h.terms.is_empty() {
             return Err(QisError::InvalidParameterValue(
                 "Hamiltonian is empty after simplification; cannot build evolution circuit"
                     .to_string(),
             ));
-        }
-
-        // Hermitian check: all coefficients must be real after simplify().
-        // simplify() absorbs any PauliString phase into the coefficient, so a
-        // term like (0.5) * (-iY) becomes (-0.5i) * Y — which fails this check.
-        for (_pauli, coeff) in &h.terms {
-            if coeff.im.abs() > 1e-10 {
-                return Err(QisError::NotHermitian);
-            }
         }
 
         // Cache commutativity once; reused by validate(), evolution_info(), build_circuit().

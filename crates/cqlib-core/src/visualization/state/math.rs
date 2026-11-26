@@ -84,6 +84,8 @@ pub fn local_bloch_vectors<S: StateVisualizationSource + ?Sized>(
 /// The returned labels enumerate tensor products over `I`, `X`, `Y`, and `Z`.
 /// Values are expectation coefficients `Tr(rho P)` in the same qubit indexing convention
 /// used by the statevector basis: qubit `q` corresponds to bit `1 << q`.
+/// Labels follow [`crate::qis::pauli::PauliString`]: the highest-index qubit is on
+/// the left by default. `reverse_bits` reverses the displayed characters only.
 pub(crate) fn pauli_coefficients(
     num_qubits: usize,
     rho: &[Complex64],
@@ -97,6 +99,11 @@ pub(crate) fn pauli_coefficients(
         )));
     }
 
+    let display_qubits: Vec<usize> = if reverse_bits {
+        (0..num_qubits).collect()
+    } else {
+        (0..num_qubits).rev().collect()
+    };
     let mut out = Vec::with_capacity(total);
     for idx in 0..total {
         let mut code = idx;
@@ -111,11 +118,6 @@ pub(crate) fn pauli_coefficients(
             ops.push((qubit, op));
             code /= 4;
         }
-        let display_qubits: Vec<usize> = if reverse_bits {
-            (0..num_qubits).rev().collect()
-        } else {
-            (0..num_qubits).collect()
-        };
         let label = display_qubits
             .iter()
             .map(|qubit| match ops[*qubit].1 {

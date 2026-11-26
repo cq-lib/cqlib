@@ -102,6 +102,9 @@ impl Operation {
     /// # Returns
     ///
     /// * `Ok(Cow<Array2>)` - The unitary matrix. It may be borrowed (static) or owned (computed).
+    ///   All gate matrices put the first qubit argument at the most-significant
+    ///   local basis bit, including circuit-backed UnitaryGate and CircuitGate
+    ///   definitions. Full circuit matrices instead use an LSB-first basis.
     /// * `Err(CircuitError)` - If the operation is non-unitary or contains an
     ///   unresolved symbolic parameter.
     ///

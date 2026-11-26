@@ -4,7 +4,7 @@ This guide covers the installation of Cqlib and the setup of a development envir
 
 Before installing Cqlib, ensure that the environment meets the following conditions:
 
-- Python environment: Python 3.10 – 3.14 is supported (a 64-bit build is recommended);
+- Python environment: CPython 3.11 – 3.15 with the GIL enabled is supported (a 64-bit build is recommended);
 - Operating system:
   - Linux
   - macOS

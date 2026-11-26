@@ -124,15 +124,18 @@ fn apply_three(
 
 /// Create a new noisy simulator with `num_qubits` initialised to |0...0>.
 /// Pass NULL `noise_model` for an ideal (noise-free) simulation.
+/// Returns a newly allocated simulator, or NULL if its dimension is
+/// unrepresentable or its state allocation fails.
 #[unsafe(no_mangle)]
 pub extern "C" fn density_matrix_noise_new(
     num_qubits: usize,
     noise_model: *const CNoiseModel,
 ) -> *mut CDensityMatrixNoise {
     let noise = clone_noise_model(noise_model);
-    Box::into_raw(Box::new(CDensityMatrixNoise {
-        inner: DensityMatrixNoise::new(num_qubits, noise),
-    }))
+    match DensityMatrixNoise::try_new(num_qubits, noise) {
+        Ok(inner) => Box::into_raw(Box::new(CDensityMatrixNoise { inner })),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 /// Free a noisy simulator. NULL is allowed.
@@ -678,6 +681,10 @@ pub extern "C" fn density_matrix_noise_probabilities_with_readout_len(
 
 /// Copy the probability distribution including readout errors configured in
 /// the noise model for `qubits` into `buffer`. Returns 0 on success.
+///
+/// `qubits` contains storage positions. For a circuit-bound state, noise is
+/// looked up using the circuit ID at each position; unbound states use identity
+/// IDs. The full output distribution retains storage order.
 ///
 /// `qubits` may be NULL when `qubit_len` is 0, in which case no readout
 /// error is applied and the result matches `density_matrix_noise_probabilities`.

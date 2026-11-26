@@ -2,9 +2,8 @@
 
 ## File Organization
 
-The structure follows Qiskit's separation of entry-point workflows, reusable
-workflows, and tools scripts, without adopting its automated publishing steps
-or modifying project source code, existing tests, or Cargo configuration.
+CQLib separates entry-point workflows, reusable workflows, and tool scripts.
+Publishing is triggered manually through release tags.
 
 | File | Responsibility |
 | --- | --- |
@@ -40,16 +39,35 @@ Tags use the Python version to identify a release batch:
 
 - Stable releases: `vX.Y.Z`.
 - Prereleases: `vX.Y.Z-alpha.N`, `vX.Y.Z-beta.N`, or `vX.Y.Z-rc.N`, with N starting at 1.
-- Current tag: `v1.4.0-beta.1`.
-- Current Python source version: `1.4.0-beta1`, normalized to `1.4.0b1` for PEP 440 and wheel filenames.
-- Current Rust/C version: `0.1.0-beta.1`; both inherit the workspace version.
+- Planned release tag: `v2.0.0-beta.7` (create manually after validation).
+- Current Python source version: `2.0.0-beta7`, normalized to `2.0.0b7` for PEP 440 and wheel filenames.
+- Current Rust/C version: `0.1.0-beta.7`; both inherit the workspace version.
 
 Python and Rust/C versions evolve independently and do not need matching
 numbers. The Cargo.toml files at a given tag record the version mapping for that
 release; no separate release.toml is maintained.
 CI checks that the tag is equivalent to the Python version, core dependency
-versions are consistent across bindings, the minimum Python version is 3.10,
-and `abi3-py310` is enabled. Maintainers must update versions before tagging.
+versions are consistent across bindings, the minimum Python version is 3.11,
+and `abi3-py311` is enabled. Maintainers must update versions before tagging.
+
+## Beta 6 Compatibility Notes
+
+Beta 6 fixes composite-gate parameter binding and qubit ordering, nested global
+phase preservation, symbolic parameter substitution, density-matrix target
+validation, readout-noise qubit lookup, NumPy complex Hamiltonian coefficients,
+and Pauli-vector labels. Callers upgrading from beta 5 should account for:
+
+- `GPhase` matrices now have shape 1×1, consistent with a zero-qubit gate.
+- Gate-local instruction and operation matrices put the first qubit argument
+  at the most-significant bit, including circuit-backed gates. Full circuit
+  matrices retain their least-significant-bit-first basis.
+- Parameter substitution is simultaneous: replacement expressions are not
+  substituted again by other entries in the same binding map.
+- Pauli-vector labels put qubit 0 at the right by default, matching `PauliString`.
+- Readout-noise selections use storage positions; circuit-bound states resolve
+  the configured noise using the circuit qubit ID at each selected position.
+- Density-matrix gate operations reject duplicate targets before changing the
+  state.
 
 ## Platforms and Artifacts
 
@@ -70,8 +88,8 @@ Images use the latest tag, with the resolved digest recorded in logs.
 On macOS, CI checks the shared library's minimum deployment version. Tests
 actually run on macOS 15; this does not constitute execution testing on macOS 11.
 
-Each platform produces one `cp310-abi3` wheel. That same wheel is installed into
-separate CPython 3.10, 3.11, 3.12, 3.13, and 3.14 environments for import checks,
+Each platform produces one `cp311-abi3` wheel. That same wheel is installed into
+separate CPython 3.11, 3.12, 3.13, 3.14, and 3.15 environments for import checks,
 pip check, and the full pytest suite. Tests are copied alongside the installed
 package to satisfy existing sibling-directory assertions. They do not import
 cqlib from the checkout, and existing tests are not modified, skipped, or marked

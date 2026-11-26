@@ -101,7 +101,7 @@ pub fn matrix_commutation(
 ///
 /// `gate_positions` maps each gate-local qubit to its position in the sorted
 /// combined support used by [`matrix_commutation`].  Bit extraction follows the
-/// existing circuit matrix convention: earlier qubits correspond to more
+/// gate-local matrix convention: earlier qubits correspond to more
 /// significant bits in the local basis index.
 fn expand_unitary(
     matrix: Cow<'_, Array2<Complex64>>,

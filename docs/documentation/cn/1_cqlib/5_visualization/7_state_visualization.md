@@ -242,7 +242,9 @@ plot_state_paulivec(
 
 ![Asymmetric Pauli vector with reversed bits](assets/asymmetric_paulivec_reverse_bits.png)
 
-在多比特状态图中，先确认 basis label 和 Pauli string 的显示顺序，再解释相干项、对角权重或 Pauli 期望值。
+默认 Pauli vector 标签遵循 `PauliString`：最高位在左，qubit 0 在最右侧。因此，`IX` 表示 qubit 0 上的 X，`XI` 表示 qubit 1 上的 X。上面的对角态在默认图中给出 `IZ = 0.6`、`ZI = -0.6`。设置 `reverse_bits=True` 时，每个标签中的字符顺序反转，对应的系数不变。
+
+早期版本的多比特 Pauli 标签方向与此相反，现已修正。此前用 `reverse_bits=True` 对齐公共 `PauliString` 约定的代码，现在应使用默认设置。单比特图不受影响。
 
 ---
 

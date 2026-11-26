@@ -4,7 +4,7 @@
 
 在开始之前，请确保您的环境已准备就绪：
 
-- Python 环境：支持 Python 3.10 – 3.14
+- Python 环境：支持启用 GIL 的 CPython 3.11 – 3.15
 - 完成 Cqlib 安装与环境配置（安装方式见 “[Cqlib 安装与环境配置](../0_get_started/1_installation.md)”）
 
 ---

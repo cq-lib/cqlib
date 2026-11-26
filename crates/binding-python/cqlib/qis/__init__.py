@@ -65,6 +65,15 @@ from .pauli import PauliString as PauliString
 # Hamiltonian module
 from .hamiltonian import Hamiltonian as Hamiltonian
 
+from . import fermion as fermion
+from .fermion import (
+    FermionicLadder as FermionicLadder,
+    FermionicOp as FermionicOp,
+    FermionToQubitMapper as FermionToQubitMapper,
+    OccupationStateMapper as OccupationStateMapper,
+    JordanWignerMapper as JordanWignerMapper,
+)
+
 # Evolution module
 from .evolution import TrotterMode as TrotterMode
 
@@ -103,6 +112,12 @@ __all__ = [
     "Pauli",
     "PauliString",
     "Hamiltonian",
+    "fermion",
+    "FermionicLadder",
+    "FermionicOp",
+    "FermionToQubitMapper",
+    "OccupationStateMapper",
+    "JordanWignerMapper",
     "TrotterMode",
     "state",
     "Statevector",

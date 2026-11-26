@@ -81,6 +81,9 @@ impl PyDensityMatrixNoise {
     /// Returns:
     ///     A new DensityMatrixNoise instance
     ///
+    /// Raises:
+    ///     ValueError: If the dimension is unrepresentable or state allocation fails.
+    ///
     /// Examples:
     ///     >>> from cqlib.qis.state import DensityMatrixNoise
     ///     >>> # Simulator without noise (ideal simulation)
@@ -90,11 +93,11 @@ impl PyDensityMatrixNoise {
     ///     >>> sim = DensityMatrixNoise(2, NoiseModel())
     #[new]
     #[pyo3(signature = (num_qubits, noise_model=None))]
-    fn new(num_qubits: usize, noise_model: Option<PyNoiseModel>) -> Self {
+    fn new(num_qubits: usize, noise_model: Option<PyNoiseModel>) -> PyResult<Self> {
         let model = noise_model.map(|m| m.inner);
-        Self {
-            inner: DensityMatrixNoise::new(num_qubits, model),
-        }
+        Ok(Self {
+            inner: DensityMatrixNoise::try_new(num_qubits, model).map_err(qis_error_to_py_err)?,
+        })
     }
 
     /// Simulates a circuit, applying noise after each operation.
@@ -167,10 +170,17 @@ impl PyDensityMatrixNoise {
     /// Computes measurement probabilities with readout error modeling.
     ///
     /// Args:
-    ///     qubits: Indices of qubits to measure
+    ///     qubits: Storage positions on which to apply readout errors. For a
+    ///         circuit-bound state, noise is looked up using the circuit ID at
+    ///         each position; unbound states use identity IDs.
     ///
     /// Returns:
-    ///     A vector of probabilities for all 2^n computational basis states.
+    ///     A vector of probabilities for all 2^num_qubits computational basis
+    ///     states in storage order, independent of the selection order or size.
+    ///     An empty selection applies no readout errors.
+    ///
+    /// Raises:
+    ///     IndexError: A position is out of range, even without a noise model.
     fn probabilities_with_readout(&self, py: Python<'_>, qubits: Vec<usize>) -> PyResult<Vec<f64>> {
         py.detach(|| self.inner.probabilities_with_readout(&qubits))
             .map_err(qis_error_to_py_err)
@@ -434,6 +444,10 @@ impl PyDensityMatrixNoise {
     }
 
     /// Computes the expectation value of an observable.
+    ///
+    /// Raises:
+    ///     ValueError: If qubit counts differ, the observable type is invalid,
+    ///         the observable is not Hermitian, or its coefficients are non-finite.
     fn expectation(&self, py: Python<'_>, observable: &Bound<'_, PyAny>) -> PyResult<f64> {
         if let Ok(h) = observable.extract::<crate::qis::hamiltonian::PyHamiltonian>() {
             py.detach(|| self.inner.expectation(&h.inner))

@@ -76,6 +76,8 @@ char *plot_state_city_density_matrix(const struct CDensityMatrix *state,
 
 把泡利基期望值绘制为柱状图。标签为 `I`、`X`、`Y`、`Z` 的张量积，共 `4^n` 条，其中 `n` 为量子比特数；非负柱与负值柱使用不同颜色。柱数不超过 `64` 时才绘制旋转的横轴标签。
 
+默认标签遵循 `PauliString`：最高位在左，qubit 0 在最右侧。例如，两比特态的 `IX` 表示 qubit 0 上的 X。启用 `reverse_bits` 仅反转每个标签中的字符顺序，对应的期望值不变。
+
 ```c
 char *plot_state_paulivec(const struct CStatevector *state,
                           const struct CStatePlotOptions *options);

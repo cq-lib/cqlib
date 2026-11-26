@@ -72,30 +72,25 @@
 
 ## 示例
 
-虚拟蒸馏方法的完整流程（分子线路带可观测量、分母线路无可观测量的回调分支，见 [模块概览](0_overview.md)）：
+虚拟蒸馏方法的完整流程（分子与分母的回调都会收到非 NULL 的哈密顿量，见 [模块概览](0_overview.md)）：
 
 ```c
 #include <stdio.h>
 #include "cqlib_c.h"
 
-/* 估计器回调：分子线路带可观测量（精确模拟），分母线路无可观测量 */
+/* 估计器回调：分子与分母都携带哈密顿量（分子作用在第 0 份副本的比特上
+   并在辅助比特上携带 X；分母只在辅助比特上携带 X）——精确模拟线路并求其期望 */
 static void estimate(const struct CCircuit *circuit,
                      const struct CHamiltonian *hamiltonian,
                      uintptr_t shots,
                      double *expectation,
                      double *variance) {
-    if (hamiltonian != NULL) {
-        struct CStatevector *sv = statevector_from_circuit(circuit);
-        double value = 0.0;
-        statevector_expectation(sv, hamiltonian, &value);
-        statevector_free(sv);
-        *expectation = value;
-        *variance = 0.0;
-    } else {
-        /* 分母 Tr(rho^M)：由采样型估计器从测量结果估计，此处返回示例值 */
-        *expectation = 1.0;
-        *variance = 0.0;
-    }
+    struct CStatevector *sv = statevector_from_circuit(circuit);
+    double value = 0.0;
+    statevector_expectation(sv, hamiltonian, &value);
+    statevector_free(sv);
+    *expectation = value;
+    *variance = 0.0;
     (void)shots;
 }
 

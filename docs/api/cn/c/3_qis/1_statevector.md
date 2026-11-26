@@ -8,6 +8,8 @@
 
 ### statevector_new(num_qubits)
 
+状态维度无法表示或状态内存分配失败时返回 `NULL`。支持零比特状态。
+
 ```c
 struct CStatevector *statevector_new(uintptr_t num_qubits);
 ```

@@ -862,3 +862,53 @@ fn export_preserves_indexed_constants_and_symbol_substitution() {
         "(angle0)"
     );
 }
+
+#[test]
+fn nested_gate_global_phase_round_trip() {
+    let circuit = qasm3_loads(
+        r#"
+        OPENQASM 3;
+        include "stdgates.inc";
+        gate fragment(theta) q { gphase(theta); h q; }
+        gate middle(alpha) q { gphase(0.11); fragment(alpha) q; }
+        qubit q;
+        middle(0.37) q;
+        middle(-0.51) q;
+    "#,
+    )
+    .unwrap();
+    let output = dumps(&circuit).unwrap();
+    let loaded = qasm3_loads(&output).unwrap();
+    let expected = num_complex::Complex64::from_polar(1.0, 0.08);
+    for ((row, col), actual) in loaded.to_matrix(None).unwrap().indexed_iter() {
+        let reference = if row == col {
+            expected
+        } else {
+            num_complex::Complex64::new(0.0, 0.0)
+        };
+        assert!((*actual - reference).norm() < 1e-12, "{output}");
+    }
+    assert!(output.contains("gphase(theta);"), "{output}");
+    assert!(output.contains("gphase(0.11);"), "{output}");
+}
+
+#[test]
+fn unitary_definition_global_phase_round_trip() {
+    use crate::circuit::gate::UnitaryGate;
+    let mut inner = Circuit::new(1);
+    inner.h(Qubit::new(0)).unwrap();
+    inner.set_global_phase(0.37.into());
+    let expected = inner.to_matrix(None).unwrap();
+    let gate = UnitaryGate::new("phase_h", 1, 0)
+        .with_matrix(expected.clone())
+        .unwrap()
+        .with_circuit(Arc::new(FrozenCircuit::new(inner)))
+        .unwrap();
+    let mut circuit = Circuit::new(1);
+    circuit.unitary(gate, vec![Qubit::new(0)]).unwrap();
+    let output = dumps(&circuit).unwrap();
+    let loaded = qasm3_loads(&output).unwrap();
+    for (actual, expected) in loaded.to_matrix(None).unwrap().iter().zip(expected.iter()) {
+        assert!((actual - expected).norm() < 1e-12, "{output}");
+    }
+}

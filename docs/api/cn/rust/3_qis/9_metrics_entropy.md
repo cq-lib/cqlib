@@ -1,6 +1,6 @@
 # 度量与熵
 
-`cqlib_core::qis::metrics`  
+`cqlib_core::qis::metrics`
 `cqlib_core::qis::entropy`
 
 本页介绍量子态之间的度量与信息量函数。`metrics` 集合纯度、保真度、迹距离、冯·诺依曼熵与偏转置相关的量；`entropy` 集合线性熵、Rényi 熵，以及针对纠缠的度量。两模块的函数都以态矢量或密度矩阵为输入，返回 `Result<f64, QisError>`（`density_matrix_to_faer` 除外）。
@@ -143,6 +143,8 @@ assert!((trace_distance_mixed(&dm0, &dm1).unwrap() - 1.0).abs() < 1e-10);
 
 ### `renyi_entropy(dm: &DensityMatrix, alpha: f64) -> Result<f64, QisError>`
 
+阶数必须为正且不能为 NaN。`alpha = 1` 返回冯·诺依曼熵，正无穷返回最小熵；接近 1 时使用稳定计算。非对角矩阵中不超过 `矩阵维度 × f64::EPSILON × 最大特征值` 的特征值视为数值零；对角矩阵保留全部正特征值。
+
 Rényi 熵 $S_\alpha(\rho) = \frac{1}{1-\alpha}\log_2\left(\sum_i \lambda_i^\alpha\right)$，$\lambda_i$ 为密度矩阵的特征值。$\alpha$ 不大于 0 时返回 `QisError::InvalidParameterValue`；$\alpha$ 与 1 的差小于 `f64::EPSILON` 时改用冯·诺依曼熵，避免除零。结果截断为非负值。
 
 示例：
@@ -283,7 +285,7 @@ assert!(partial_transpose(&dm, &[2]).is_err());
 | 错误 | 触发场景 |
 | --- | --- |
 | `QisError::QubitMismatch` | 参与运算的两个态比特数不一致。 |
-| `QisError::InvalidParameterValue` | `renyi_entropy()` 的 `alpha` 不大于 0。 |
+| `QisError::InvalidParameterValue` | `renyi_entropy()` 的 `alpha` 为 NaN 或不大于 0。 |
 | `QisError::InvalidSubsystem` | `entanglement_entropy_pure()` 的子系统为空、包含全部比特或存在重复下标。 |
 | `QisError::IndexOutOfBounds` | `partial_transpose()` 的目标下标越界，或 `entanglement_entropy_pure()` 的子系统下标越界。 |
 | `QisError::UnsupportedDimension` | `concurrence()` 与 `entanglement_of_formation()` 的输入不是双比特。 |

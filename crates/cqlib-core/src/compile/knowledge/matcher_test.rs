@@ -320,6 +320,56 @@ fn instantiate_target_rejects_unbound_rewrite_references() {
 }
 
 #[test]
+fn instantiate_target_substitutes_overlapping_symbol_names_simultaneously() {
+    let a = Parameter::symbol("a");
+    let b = Parameter::symbol("b");
+    let rule = Rule::new(
+        "overlapping_parameters",
+        vec![
+            RuleItem::standard(
+                StandardGate::RZ,
+                &[0],
+                vec![ParameterValue::Param(a.clone())],
+            ),
+            RuleItem::standard(
+                StandardGate::RZ,
+                &[0],
+                vec![ParameterValue::Param(b.clone())],
+            ),
+        ],
+        vec![RuleItem::standard(
+            StandardGate::RZ,
+            &[0],
+            vec![ParameterValue::Param(a.clone() + b.clone() * 2.0)],
+        )],
+    );
+    let instruction = Instruction::Standard(StandardGate::RZ);
+    let qubits = [Qubit::new(0)];
+    let first = [b];
+    let second = [a];
+    let operations = [
+        ConcreteOperationView::new(&instruction, &qubits, &first),
+        ConcreteOperationView::new(&instruction, &qubits, &second),
+    ];
+    let bindings = rule_matches_operations(&rule, &operations)
+        .unwrap()
+        .unwrap();
+    let replacements = instantiate_target(&rule.target, &bindings).unwrap();
+    let ParameterValue::Param(result) = &replacements[0].params[0] else {
+        panic!("expected a symbolic parameter");
+    };
+    assert_eq!(
+        result
+            .evaluate(&Some(std::collections::HashMap::from([
+                ("a", 1.0),
+                ("b", 3.0)
+            ])))
+            .unwrap(),
+        5.0
+    );
+}
+
+#[test]
 fn rule_matches_operations_returns_none_for_non_adjacent_policy_cases() {
     let rule = Rule::new(
         "cancel_h",

@@ -26,7 +26,7 @@
 //!
 //! ## Memory Layout & Convention
 //!
-//! - **State Vector Ordering**: Little-Endian (similar to Qiskit). Qubit 0 corresponds to the Least Significant Bit (LSB).
+//! - **State Vector Ordering**: Little-Endian. Qubit 0 corresponds to the Least Significant Bit (LSB).
 //!   State $|q_{n-1} \dots q_1 q_0\rangle$.
 //! - **Parallelization**: Large matrix multiplications (large state spaces) are automatically parallelized using `rayon`.
 
@@ -123,7 +123,7 @@ pub fn circuit_to_matrix(
     // Map logical qubit index to physical bit position (0 to N-1).
     // Little-Endian mapping: first qubit in target_order corresponds to LSB (bit 0)
     // q0 -> bit 0, q1 -> bit 1, ...
-    // This matches Qiskit's convention.
+    // Qubit 0 occupies the least significant bit.
     let qubit_bit_map: HashMap<usize, usize> = target_order
         .iter()
         .enumerate()
@@ -198,23 +198,11 @@ pub fn circuit_to_matrix(
                 }
             }
             Instruction::CircuitGate(circuit_gate) => {
-                let symbols = circuit_gate.signature_params();
-                let expected = symbols.len();
-                let actual = params.len();
-                if actual != expected {
-                    return Err(CircuitError::ParameterCountMismatch { expected, actual });
-                }
-                let mut bindings = HashMap::new();
-                for (sym, val) in symbols.iter().zip(params.iter()) {
-                    bindings.insert(sym.as_str(), *val);
-                }
-                let sub_circuit = circuit_gate
-                    .circuit
-                    .circuit
-                    .assign_parameters(&Some(bindings))
-                    .map_err(|_| CircuitError::SymbolicParameterError)?;
-                let sub_matrix = circuit_to_matrix(&sub_circuit, None)?;
-                apply_gate_to_matrix(&mut matrix, &sub_matrix, &bits)?;
+                let gate_matrix = circuit_gate.matrix_for_params(params.as_slice())?;
+                // Gate-local matrices put the first positional argument at MSB;
+                // the full circuit uses an LSB-first basis, as for standard gates.
+                let reversed_bits: SmallVec<[usize; 3]> = bits.iter().copied().rev().collect();
+                apply_gate_to_matrix(&mut matrix, &gate_matrix, &reversed_bits)?;
             }
             Instruction::ClassicalControl(_) => {
                 return Err(CircuitError::InvalidOperation(

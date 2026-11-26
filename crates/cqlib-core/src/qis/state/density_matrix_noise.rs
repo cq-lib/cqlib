@@ -92,11 +92,26 @@ impl DensityMatrixNoise {
     /// // Simulator with empty noise model
     /// let sim = DensityMatrixNoise::new(2, Some(cqlib_core::device::NoiseModel::new()));
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the dimension is unrepresentable or allocation fails.
+    /// Use [`Self::try_new`] to receive an error instead.
     pub fn new(num_qubits: usize, noise_model: Option<NoiseModel>) -> Self {
-        Self {
-            state: DensityMatrix::new(num_qubits),
+        Self::try_new(num_qubits, noise_model).expect("cannot allocate noisy density matrix")
+    }
+
+    /// Fallible ground-state constructor, preserving the supplied noise model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QisError::InvalidParameterValue`] for an unrepresentable
+    /// dimension, or [`QisError::UnsupportedOperation`] if allocation fails.
+    pub fn try_new(num_qubits: usize, noise_model: Option<NoiseModel>) -> Result<Self, QisError> {
+        Ok(Self {
+            state: DensityMatrix::try_new(num_qubits)?,
             noise_model,
-        }
+        })
     }
 
     /// Simulates a circuit, applying noise after each operation.
@@ -139,7 +154,7 @@ impl DensityMatrixNoise {
         noise_model: Option<NoiseModel>,
     ) -> Result<Self, QisError> {
         let mut dms = Self {
-            state: DensityMatrix::new(circuit.num_qubits()),
+            state: DensityMatrix::try_new(circuit.num_qubits())?,
             noise_model,
         };
         dms.apply_circuit(circuit)?;
@@ -199,51 +214,64 @@ impl DensityMatrixNoise {
             .map(|p| p.evaluate(&None).ok())
             .collect();
 
-        for op in circuit.operations() {
-            let params: Vec<f64> = op
-                .params
-                .iter()
-                .map(|p| match p {
-                    CircuitParam::Fixed(v) => Ok(*v),
-                    CircuitParam::Index(idx) => parameter_values
-                        .get(*idx as usize)
-                        .copied()
-                        .flatten()
-                        .ok_or(QisError::CircuitError(
-                            crate::circuit::CircuitError::SymbolicParameterError,
-                        )),
-                })
-                .collect::<Result<Vec<_>, QisError>>()?;
-
-            let qs: Result<Vec<usize>, QisError> = op
-                .qubits
-                .iter()
-                .map(|q| {
-                    qubit_map.get(q).copied().ok_or_else(|| {
-                        QisError::CircuitError(crate::circuit::CircuitError::QubitNotFound(q.id()))
+        // Expose labels to gate-noise lookup during execution, restoring the
+        // previous binding on error (already executed gates are not rolled back).
+        let previous_map = sim.state.qubit_map.replace(qubit_map);
+        let result = (|| {
+            for op in circuit.operations() {
+                let params: Vec<f64> = op
+                    .params
+                    .iter()
+                    .map(|p| match p {
+                        CircuitParam::Fixed(v) => Ok(*v),
+                        CircuitParam::Index(idx) => parameter_values
+                            .get(*idx as usize)
+                            .copied()
+                            .flatten()
+                            .ok_or(QisError::CircuitError(
+                                crate::circuit::CircuitError::SymbolicParameterError,
+                            )),
                     })
-                })
-                .collect();
-            let qs = qs?;
+                    .collect::<Result<Vec<_>, QisError>>()?;
 
-            match &op.instruction {
-                Instruction::Standard(gate) => {
-                    sim.apply_standard_gate_noise(*gate, &qs, &params)?;
-                }
-                Instruction::McGate(mc_gate) => {
-                    let num_controls = mc_gate.num_ctrl_qubits();
-                    let base_gate = mc_gate.base_gate();
+                let qs: Result<Vec<usize>, QisError> = op
+                    .qubits
+                    .iter()
+                    .map(|q| {
+                        sim.state
+                            .qubit_map
+                            .as_ref()
+                            .unwrap()
+                            .get(q)
+                            .copied()
+                            .ok_or_else(|| {
+                                QisError::CircuitError(crate::circuit::CircuitError::QubitNotFound(
+                                    q.id(),
+                                ))
+                            })
+                    })
+                    .collect();
+                let qs = qs?;
 
-                    if num_controls == 1 {
-                        let c = qs[0];
-                        let t = qs[1];
-                        match base_gate {
-                            StandardGate::X => sim.apply_cx(c, t)?,
-                            StandardGate::Y => sim.apply_cy(c, t)?,
-                            StandardGate::Z => sim.apply_cz(c, t)?,
-                            StandardGate::RX => sim.apply_crx(c, t, params[0])?,
-                            StandardGate::RY => sim.apply_cry(c, t, params[0])?,
-                            StandardGate::RZ => sim.apply_crz(c, t, params[0])?,
+                match &op.instruction {
+                    Instruction::Standard(gate) => {
+                        sim.apply_standard_gate_noise(*gate, &qs, &params)?;
+                    }
+                    Instruction::McGate(mc_gate) => {
+                        let num_controls = mc_gate.num_ctrl_qubits();
+                        let base_gate = mc_gate.base_gate();
+
+                        match (num_controls, *base_gate) {
+                            (0, StandardGate::GPhase) => {
+                                sim.apply_standard_gate_noise(*base_gate, &qs, &params)?
+                            }
+                            (1, StandardGate::X) => sim.apply_cx(qs[0], qs[1])?,
+                            (1, StandardGate::Y) => sim.apply_cy(qs[0], qs[1])?,
+                            (1, StandardGate::Z) => sim.apply_cz(qs[0], qs[1])?,
+                            (1, StandardGate::RX) => sim.apply_crx(qs[0], qs[1], params[0])?,
+                            (1, StandardGate::RY) => sim.apply_cry(qs[0], qs[1], params[0])?,
+                            (1, StandardGate::RZ) => sim.apply_crz(qs[0], qs[1], params[0])?,
+                            (2, StandardGate::X) => sim.apply_ccx(qs[0], qs[1], qs[2])?,
                             _ => {
                                 let matrix = mc_gate.matrix(&params).map_err(|_| {
                                     QisError::CircuitError(
@@ -254,59 +282,52 @@ impl DensityMatrixNoise {
                                 sim.apply_noise(*base_gate, &qs)?;
                             }
                         }
-                    } else if num_controls == 2 && *base_gate == StandardGate::X {
-                        sim.apply_ccx(qs[0], qs[1], qs[2])?;
-                    } else {
-                        let matrix = mc_gate.matrix(&params).map_err(|_| {
-                            QisError::CircuitError(
-                                crate::circuit::CircuitError::NoMatrixRepresentation,
-                            )
-                        })?;
-                        sim.apply_unitary_gate(&qs, &matrix)?;
-                        sim.apply_noise(*base_gate, &qs)?;
                     }
-                }
-                Instruction::UnitaryGate(u_gate) => {
-                    if let Some(matrix) = u_gate.matrix() {
-                        sim.apply_unitary_gate(&qs, matrix)?;
-                        sim.apply_noise(StandardGate::U, &qs)?;
-                    } else {
+                    Instruction::UnitaryGate(u_gate) => {
+                        if let Some(matrix) = u_gate.matrix() {
+                            sim.apply_unitary_gate(&qs, matrix)?;
+                            sim.apply_noise(StandardGate::U, &qs)?;
+                        } else {
+                            return Err(QisError::CircuitError(
+                                crate::circuit::CircuitError::NoMatrixRepresentation,
+                            ));
+                        }
+                    }
+                    Instruction::CircuitGate(_) => {
                         return Err(QisError::CircuitError(
-                            crate::circuit::CircuitError::NoMatrixRepresentation,
+                            crate::circuit::CircuitError::InvalidOperation(
+                                "CircuitGate should have been decomposed".to_string(),
+                            ),
                         ));
                     }
-                }
-                Instruction::CircuitGate(_) => {
-                    return Err(QisError::CircuitError(
-                        crate::circuit::CircuitError::InvalidOperation(
-                            "CircuitGate should have been decomposed".to_string(),
-                        ),
-                    ));
-                }
-                Instruction::Directive(directive) => match directive {
-                    Directive::Barrier => {}
-                    Directive::Measure => {
-                        return Err(QisError::UnsupportedOperation(
+                    Instruction::Directive(directive) => match directive {
+                        Directive::Barrier => {}
+                        Directive::Measure => {
+                            return Err(QisError::UnsupportedOperation(
                             "legacy Measure directive is not supported by noisy density matrix circuit evolution; use Circuit::measure as an output declaration".to_string(),
                         ));
-                    }
-                    Directive::Reset => {
-                        let qubit = qs[0];
-                        sim.reset(qubit)?;
-                    }
-                },
-                Instruction::Delay => continue,
-                Instruction::ClassicalControl(_) => {
-                    return Err(QisError::UnsupportedOperation(
+                        }
+                        Directive::Reset => {
+                            let qubit = qs[0];
+                            sim.reset(qubit)?;
+                        }
+                    },
+                    Instruction::Delay => continue,
+                    Instruction::ClassicalControl(_) => {
+                        return Err(QisError::UnsupportedOperation(
                         "classical control flow is not supported in noisy density matrix simulation"
                             .to_string(),
                     ));
+                    }
+                    Instruction::ClassicalData(_) => {}
                 }
-                Instruction::ClassicalData(_) => {}
             }
+            Ok(())
+        })();
+        if result.is_err() {
+            sim.state.qubit_map = previous_map;
         }
-        sim.state.qubit_map = Some(qubit_map);
-        Ok(())
+        result
     }
 
     /// Applies a standard gate and then applies any matching gate noise.
@@ -342,7 +363,15 @@ impl DensityMatrixNoise {
             )));
         }
         match gate {
-            StandardGate::I => {}
+            StandardGate::I => {
+                if qs[0] >= self.state.num_qubits {
+                    return Err(QisError::IndexOutOfBounds {
+                        index: qs[0],
+                        max: self.state.num_qubits.saturating_sub(1),
+                    });
+                }
+                self.apply_noise(StandardGate::I, qs)?;
+            }
             StandardGate::X => self.apply_x(qs[0])?,
             StandardGate::Y => self.apply_y(qs[0])?,
             StandardGate::Z => self.apply_z(qs[0])?,
@@ -393,6 +422,19 @@ impl DensityMatrixNoise {
             .collect()
     }
 
+    /// Resolves a storage position to its noise-model qubit ID.
+    /// Callers validate positions before looking up noise.
+    fn noise_qubit(&self, position: usize) -> Qubit {
+        self.state
+            .qubit_map
+            .as_ref()
+            .and_then(|map| {
+                map.iter()
+                    .find_map(|(&qubit, &index)| (index == position).then_some(qubit))
+            })
+            .unwrap_or_else(|| Qubit::new(position as u32))
+    }
+
     /// Applies noise channels associated with a gate operation.
     ///
     /// Looks up the noise model for errors associated with `gate` on `qubits`,
@@ -401,7 +443,7 @@ impl DensityMatrixNoise {
     fn apply_noise(&mut self, gate: StandardGate, qubits: &[usize]) -> Result<(), QisError> {
         if let Some(noise_model) = &self.noise_model {
             if qubits.len() == 1 {
-                let q0 = Qubit::new(qubits[0] as u32);
+                let q0 = self.noise_qubit(qubits[0]);
                 let key = OperationKey::new_single(gate, q0);
                 if let Some(errors) = noise_model.get_single_qubit_errors(&key) {
                     for error in errors {
@@ -411,8 +453,8 @@ impl DensityMatrixNoise {
                     }
                 }
             } else if qubits.len() == 2 {
-                let q0 = Qubit::new(qubits[0] as u32);
-                let q1 = Qubit::new(qubits[1] as u32);
+                let q0 = self.noise_qubit(qubits[0]);
+                let q1 = self.noise_qubit(qubits[1]);
                 if let Ok(key) = OperationKey::new_double(gate, q0, q1)
                     && let Some(errors) = noise_model.get_two_qubit_errors(&key)
                 {
@@ -423,9 +465,9 @@ impl DensityMatrixNoise {
                     }
                 }
             } else if qubits.len() == 3 {
-                let q0 = Qubit::new(qubits[0] as u32);
-                let q1 = Qubit::new(qubits[1] as u32);
-                let q2 = Qubit::new(qubits[2] as u32);
+                let q0 = self.noise_qubit(qubits[0]);
+                let q1 = self.noise_qubit(qubits[1]);
+                let q2 = self.noise_qubit(qubits[2]);
                 if let Ok(_key) = OperationKey::new_triple(gate, q0, q1, q2) {
                     // Current noise model struct doesn't have `get_three_qubit_errors`.
                     // Ready for future extension without silently failing or panicking.
@@ -993,12 +1035,21 @@ impl DensityMatrixNoise {
     ///
     /// # Arguments
     ///
-    /// * `qubits` - Indices of qubits to measure.
+    /// * `qubits` - Storage positions on which to apply readout errors, not circuit
+    ///   qubit IDs. For a circuit-bound state, each position selects the noise
+    ///   configured for `circuit.qubits()[position]`. Unbound states use identity IDs.
     ///
     /// # Returns
     ///
     /// A vector of probabilities for all 2^n computational basis states, where n
-    /// is the total number of qubits in the simulator.
+    /// is the total number of qubits in the simulator. The array retains storage
+    /// order regardless of the order or number of selected positions. An empty
+    /// selection returns the probabilities before readout noise.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QisError::IndexOutOfBounds`] for a position outside `0..num_qubits`,
+    /// including when no noise model is configured.
     ///
     /// # Examples
     ///
@@ -1014,10 +1065,20 @@ impl DensityMatrixNoise {
     /// // For Bell state |Φ+⟩, P(|00⟩) ≈ 0.5 and P(|11⟩) ≈ 0.5
     /// ```
     pub fn probabilities_with_readout(&self, qubits: &[usize]) -> Result<Vec<f64>, QisError> {
+        for &position in qubits {
+            if position >= self.state.num_qubits {
+                return Err(QisError::IndexOutOfBounds {
+                    index: position,
+                    max: self.state.num_qubits.saturating_sub(1),
+                });
+            }
+        }
         let mut probs = self.probabilities();
         self.apply_readout_noise(
             &mut probs,
-            qubits.iter().map(|&q| (Qubit::new(q as u32), q)),
+            qubits
+                .iter()
+                .map(|&position| (self.noise_qubit(position), position)),
         )?;
         Ok(probs)
     }

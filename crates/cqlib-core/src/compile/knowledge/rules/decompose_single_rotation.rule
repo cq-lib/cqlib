@@ -168,3 +168,53 @@ rule decompose_u_to_xy_basis {
     match { U(theta, phi, lambda) 0 }
     rewrite { RZ(lambda) 0, XY2P(0) 0, RZ(theta) 0, XY2M(0) 0, RZ(phi) 0, GPhase((phi + lambda) / 2) }
 }
+
+rule decompose_rx_to_u {
+    match { RX(theta) 0 }
+    rewrite { U(theta, -π/2, π/2) 0 }
+}
+
+rule decompose_ry_to_u {
+    match { RY(theta) 0 }
+    rewrite { U(theta, 0, 0) 0 }
+}
+
+rule decompose_rxy_to_u {
+    match { RXY(theta, phi) 0 }
+    rewrite { U(theta, phi - π/2, π/2 - phi) 0 }
+}
+
+rule decompose_rx_to_rxy {
+    match { RX(theta) 0 }
+    rewrite { RXY(theta, 0) 0 }
+}
+
+rule decompose_ry_to_rxy {
+    match { RY(theta) 0 }
+    rewrite { RXY(theta, π/2) 0 }
+}
+
+rule decompose_xy2p_to_xy2m {
+    match { XY2P(phi) 0 }
+    rewrite { XY2M(phi + π) 0 }
+}
+
+rule decompose_u_to_x2p_rz_same_sign {
+    match { U(theta, phi, lambda) 0 }
+    rewrite { RZ(lambda) 0, X2P 0, RZ(theta + π) 0, X2P 0, RZ(phi + π) 0, GPhase((phi + lambda) / 2 + π) }
+}
+
+rule decompose_u_to_x2m_rz_same_sign {
+    match { U(theta, phi, lambda) 0 }
+    rewrite { RZ(lambda) 0, X2M 0, RZ(π - theta) 0, X2M 0, RZ(phi + π) 0, GPhase((phi + lambda) / 2 + π) }
+}
+
+rule decompose_u_to_y2p_rz_same_sign {
+    match { U(theta, phi, lambda) 0 }
+    rewrite { RZ(lambda + π/2) 0, Y2P 0, RZ(theta + π) 0, Y2P 0, RZ(phi + π/2) 0, GPhase((phi + lambda) / 2 + π) }
+}
+
+rule decompose_u_to_y2m_rz_same_sign {
+    match { U(theta, phi, lambda) 0 }
+    rewrite { RZ(lambda + π/2) 0, Y2M 0, RZ(π - theta) 0, Y2M 0, RZ(phi + π/2) 0, GPhase((phi + lambda) / 2 + π) }
+}

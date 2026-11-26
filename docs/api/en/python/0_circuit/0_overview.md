@@ -111,6 +111,7 @@ This page gives a brief description of terms commonly used in the `cqlib.circuit
 | `ClassicalVar` | [Classical / Control Flow](9_classical_control_flow.md) | A mutable classical storage handle, created by `Circuit.var()`. |
 | `ClassicalValue` | [Classical / Control Flow](9_classical_control_flow.md) | An immutable classical value, usually produced by measurement. |
 | `Measurement` | [Classical / Control Flow](9_classical_control_flow.md) | A measurement receipt, containing the measured values and the order of the measured qubits. |
+| `ClassicalDataOp` | [Classical / Control Flow](9_classical_control_flow.md) | The instruction form of a classical data operation (a store or a measurement result write), obtained from `Instruction.classical_data`. |
 | `ClassicalExpr` | [Classical / Control Flow](9_classical_control_flow.md) | A typed classical expression AST, used for conditions, comparisons, bit extraction and expression composition. |
 | `ClassicalControlOp` | [Classical / Control Flow](9_classical_control_flow.md) | The structured control flow IR, including `if`, `while`, `for`, `switch`, `break` and `continue`. |
 | `ValueControlBody` | [Classical / Control Flow](9_classical_control_flow.md) | A construction-layer control flow body, containing several `ValueOperation`s. |

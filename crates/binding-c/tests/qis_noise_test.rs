@@ -2,7 +2,9 @@
 
 #![allow(dead_code)]
 
-use binding_c::circuit::{circuit_cx, circuit_free, circuit_h, circuit_new, circuit_x};
+use binding_c::circuit::{
+    circuit_cx, circuit_free, circuit_from_qubits, circuit_h, circuit_new, circuit_x,
+};
 use binding_c::cqlib_string_free;
 use binding_c::device::{
     NOISE_BIT_FLIP, noise_model_add_readout, noise_model_add_single_qubit, noise_model_free,
@@ -214,6 +216,42 @@ fn test_readout_error_difference() {
 
     density_matrix_noise_free(sim);
     noise_model_free(nm);
+}
+
+#[test]
+fn test_readout_uses_circuit_ids_at_storage_positions() {
+    for ids in [[0, 1], [1, 0], [2, 0], [9, 2]] {
+        let circuit = circuit_from_qubits(ids.as_ptr(), ids.len());
+        assert!(!circuit.is_null());
+        let model = noise_model_new();
+        assert_eq!(noise_model_add_readout(model, ids[0], 0.0, 1.0), 0);
+        let sim = density_matrix_noise_from_circuit(circuit, model);
+        assert!(!sim.is_null());
+        assert_eq!(density_matrix_noise_probabilities_with_readout_len(sim), 4);
+        for (positions, expected) in [
+            (&[0][..], [0.0, 1.0, 0.0, 0.0]),
+            (&[1][..], [1.0, 0.0, 0.0, 0.0]),
+            (&[1, 0][..], [0.0, 1.0, 0.0, 0.0]),
+            (&[][..], [1.0, 0.0, 0.0, 0.0]),
+        ] {
+            let mut actual = [0.0; 4];
+            assert_eq!(
+                density_matrix_noise_probabilities_with_readout(
+                    sim,
+                    actual.as_mut_ptr(),
+                    actual.len(),
+                    positions.as_ptr(),
+                    positions.len()
+                ),
+                0
+            );
+            assert_eq!(actual, expected);
+        }
+        assert_eq!(read_probs(sim, 4), vec![1.0, 0.0, 0.0, 0.0]);
+        density_matrix_noise_free(sim);
+        noise_model_free(model);
+        circuit_free(circuit);
+    }
 }
 
 #[test]

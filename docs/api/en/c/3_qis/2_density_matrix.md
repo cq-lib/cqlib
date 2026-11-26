@@ -8,6 +8,8 @@ The `CDensityMatrix*` handle is the mixed-state simulator: the quantum state is 
 
 ### density_matrix_new(num_qubits)
 
+Returns `NULL` if the state dimension is unrepresentable or state allocation fails. Zero-qubit states are supported.
+
 ```c
 struct CDensityMatrix *density_matrix_new(uintptr_t num_qubits);
 ```
@@ -20,6 +22,8 @@ Returns: a newly allocated `CDensityMatrix*`; free it with `density_matrix_free`
 
 ### density_matrix_maximally_mixed(num_qubits)
 
+Returns `NULL` if the state dimension is unrepresentable or state allocation fails. Zero-qubit states are supported.
+
 ```c
 struct CDensityMatrix *density_matrix_maximally_mixed(uintptr_t num_qubits);
 ```
@@ -31,6 +35,8 @@ Creates the maximally mixed state `I / 2^N`: every computational basis state is 
 Returns: a newly allocated `CDensityMatrix*`; free it with `density_matrix_free`.
 
 ### density_matrix_zeros(num_qubits)
+
+Returns `NULL` if the state dimension is unrepresentable or state allocation fails. Zero-qubit states are supported.
 
 ```c
 struct CDensityMatrix *density_matrix_zeros(uintptr_t num_qubits);

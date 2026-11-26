@@ -101,6 +101,35 @@ class TestDensityMatrixNoiseProperties:
         assert len(probs) == 4
         assert abs(sum(probs) - 1.0) < 1e-10
 
+    @pytest.mark.parametrize("ids", [[0, 1], [1, 0], [2, 0], [9, 2]])
+    @pytest.mark.parametrize("bind_with_apply", [False, True])
+    def test_readout_uses_circuit_ids_at_storage_positions(self, ids, bind_with_apply):
+        circuit = Circuit(ids)
+        receipt = circuit.measure(ids[0])
+        model = NoiseModel()
+        model.add_readout_error(ids[0], ReadoutError(0.0, 1.0))
+        if bind_with_apply:
+            sim = DensityMatrixNoise(2, model)
+            sim.apply_circuit(circuit)
+        else:
+            sim = DensityMatrixNoise.from_circuit(circuit, model)
+
+        assert sim.probabilities_with_readout([0]) == [0.0, 1.0, 0.0, 0.0]
+        assert sim.probabilities_with_readout([1]) == [1.0, 0.0, 0.0, 0.0]
+        assert sim.probabilities_with_readout([1, 0]) == [0.0, 1.0, 0.0, 0.0]
+        assert sim.probabilities_with_readout([]) == sim.probabilities()
+        assert sim.probabilities() == [1.0, 0.0, 0.0, 0.0]
+        marginal = {
+            o.to_bitstring(1): p for o, p in sim.probs_with_readout(receipt).items()
+        }
+        assert marginal == {"1": 1.0}
+
+    @pytest.mark.parametrize("model", [None, NoiseModel()])
+    def test_readout_rejects_out_of_range_positions_without_errors(self, model):
+        sim = DensityMatrixNoise.from_circuit(Circuit([9, 2]), model)
+        with pytest.raises(IndexError):
+            sim.probabilities_with_readout([9])
+
 
 class TestDensityMatrixNoiseSingleQubitGates:
     """Test single-qubit gate operations with noise."""

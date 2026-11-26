@@ -420,6 +420,76 @@ fn test_unitary_gate_two_qubit() {
 }
 
 #[test]
+fn test_circuit_gate_storage_order_mapping() {
+    for order in [[7, 2], [1, 0], [2, 7], [0, 1]] {
+        let mut inner = Circuit::from_qubits(order.map(Qubit::new).to_vec()).unwrap();
+        inner.x(Qubit::new(order[0])).unwrap();
+        let gate = inner.to_gate("StoredOrderX").unwrap();
+        for targets in [[0, 1], [1, 0]] {
+            let mut circuit = Circuit::new(2);
+            circuit
+                .append(gate.clone(), targets.map(Qubit::new), [], None)
+                .unwrap();
+            let mut expected = Circuit::new(2);
+            expected.x(Qubit::new(targets[0])).unwrap();
+            let matrix = circuit_to_matrix(&circuit, None).unwrap();
+            let expected = circuit_to_matrix(&expected, None).unwrap();
+            assert_matrix_approx_eq(&matrix, &expected, 1e-10);
+            assert_eq!(matrix[[1 << targets[0], 0]], c(1.0, 0.0));
+            assert_matrix_approx_eq(
+                &matrix,
+                &circuit_to_matrix(&circuit.decompose().unwrap(), None).unwrap(),
+                1e-10,
+            );
+        }
+    }
+}
+
+#[test]
+fn test_circuit_gate_storage_order_three_qubit_permutations() {
+    let permutations = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let inner_ids = [2, 7, 11];
+    let outer_ids = [4, 9, 15];
+    for permutation in permutations {
+        let order = permutation.map(|i| Qubit::new(inner_ids[i]));
+        let mut inner = Circuit::from_qubits(order.to_vec()).unwrap();
+        inner.x(order[0]).unwrap();
+        inner.ry(order[1], 0.37).unwrap();
+        inner.cx(order[0], order[2]).unwrap();
+        let gate = inner.to_gate("Permuted").unwrap();
+        for target_permutation in permutations {
+            let targets = target_permutation.map(|i| Qubit::new(outer_ids[i]));
+            let mut circuit = Circuit::from_qubits(outer_ids.map(Qubit::new).to_vec()).unwrap();
+            circuit.append(gate.clone(), targets, [], None).unwrap();
+            let mut expected = Circuit::from_qubits(outer_ids.map(Qubit::new).to_vec()).unwrap();
+            expected.x(targets[0]).unwrap();
+            expected.ry(targets[1], 0.37).unwrap();
+            expected.cx(targets[0], targets[2]).unwrap();
+            for output_order in [None, Some([15, 4, 9].as_slice())] {
+                let matrix = circuit_to_matrix(&circuit, output_order).unwrap();
+                assert_matrix_approx_eq(
+                    &matrix,
+                    &circuit_to_matrix(&expected, output_order).unwrap(),
+                    1e-10,
+                );
+                assert_matrix_approx_eq(
+                    &matrix,
+                    &circuit_to_matrix(&circuit.decompose().unwrap(), output_order).unwrap(),
+                    1e-10,
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn test_circuit_gate_bell_state() {
     // Create a Bell state preparation circuit as a gate
     let mut inner = Circuit::new(2);
@@ -864,6 +934,74 @@ fn test_global_phase_is_included_for_empty_circuit() {
     expected.mapv_inplace(|value| c(0.0, 1.0) * value);
 
     assert_matrix_approx_eq(&matrix, &expected, 1e-10);
+}
+
+#[test]
+fn test_gphase_markers_accumulate_with_circuit_global_phase() {
+    for num_qubits in [0, 1, 3] {
+        for theta in [0.0, 0.37, -0.51, PI] {
+            let mut circuit = Circuit::new(num_qubits);
+            if num_qubits > 0 {
+                circuit.h(Qubit::new(0)).unwrap();
+            }
+            let baseline = circuit_to_matrix(&circuit, None).unwrap();
+            for phase in [theta, -0.21] {
+                circuit
+                    .append(
+                        Instruction::Standard(StandardGate::GPhase),
+                        [] as [Qubit; 0],
+                        [phase.into()],
+                        None,
+                    )
+                    .unwrap();
+            }
+            circuit.set_global_phase(Parameter::from(0.17));
+            let expected = baseline * Complex64::from_polar(1.0, theta - 0.21 + 0.17);
+            let actual = circuit_to_matrix(&circuit, None).unwrap();
+            assert_matrix_approx_eq(&actual, &expected, 1e-12);
+        }
+    }
+}
+
+#[test]
+fn test_gphase_controlled_embedding_with_spectator_and_custom_order() {
+    for controls in [vec![], vec![2usize], vec![2, 0]] {
+        for theta in [0.0, 0.37, -0.51, PI] {
+            let mut circuit = Circuit::new(3);
+            circuit.h(Qubit::new(1)).unwrap();
+            circuit
+                .multi_control(
+                    StandardGate::GPhase,
+                    controls.iter().map(|&q| Qubit::new(q as u32)),
+                    [] as [Qubit; 0],
+                    [theta.into()],
+                )
+                .unwrap();
+            for order in [[0, 1, 2], [2, 0, 1]] {
+                let spectator_bit = order.iter().position(|&q| q == 1).unwrap();
+                let mask = controls.iter().fold(0, |mask, control| {
+                    mask | (1 << order.iter().position(|q| q == control).unwrap())
+                });
+                let mut expected = Array2::zeros((8, 8));
+                for row in 0..8 {
+                    for col in 0..8 {
+                        if (row ^ col) & !(1 << spectator_bit) == 0 {
+                            let sign = if row & col & (1 << spectator_bit) != 0 {
+                                -1.0
+                            } else {
+                                1.0
+                            };
+                            let phase = if row & mask == mask { theta } else { 0.0 };
+                            expected[[row, col]] =
+                                Complex64::from_polar(1.0, phase) * sign / SQRT_2;
+                        }
+                    }
+                }
+                let actual = circuit_to_matrix(&circuit, Some(&order)).unwrap();
+                assert_matrix_approx_eq(&actual, &expected, 1e-12);
+            }
+        }
+    }
 }
 
 #[test]

@@ -145,8 +145,9 @@ fn test_virtual_distillation_build_copy_swap_circuit() {
 
     let copy_swap = virtual_distillation_build_copy_swap_circuit(vd);
     assert!(!copy_swap.is_null());
-    // The copy-swap width is copies (2) times the base width (1).
-    assert_eq!(circuit_num_qubits(copy_swap), 2);
+    // The copy-swap width is copies (2) times the base width (1) plus one
+    // ancilla qubit.
+    assert_eq!(circuit_num_qubits(copy_swap), 3);
     assert!(
         circuit_num_operations(copy_swap) > 0,
         "copy-swap circuit should contain operations"

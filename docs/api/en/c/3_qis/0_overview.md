@@ -84,3 +84,5 @@ int main(void) {
 ```
 
 For constructing and populating the `CNoiseModel` handle, see [NoiseModel](../2_device/4_noise.md).
+
+New [fermionic algebra and Jordan–Wigner](10_fermion.md) and [checked Hamiltonian algebra](7_hamiltonian.md#checked-sparse-pauli-algebra) use error codes plus output pointers: constructors deliver handles through outputs and predicates write 0/1 bytes. Existing QIS functions retain their original conventions.

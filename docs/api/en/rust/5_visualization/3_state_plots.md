@@ -118,6 +118,8 @@ assert!(svg.contains("Re[rho]"));
 
 Draw Pauli basis expectation values as a bar chart. The labels are tensor products of `I`, `X`, `Y` and `Z`, `4^n` of them in total, where `n` is the number of qubits. Non-negative bars and negative bars use different colors.
 
+By default, labels follow `PauliString`: the highest-index qubit is on the left and qubit 0 is on the right. For example, `IX` measures X on qubit 0 of a two-qubit state. Enabling `reverse_bits` reverses the characters in each label without changing the corresponding expectation value.
+
 Parameters:
 
 - `state` (`&S`, `S: StateVisualizationSource + ?Sized`): the input state.

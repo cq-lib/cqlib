@@ -12,7 +12,11 @@
 
 """Hamiltonian observable wrapper."""
 
+from typing import TypeAlias
+
 from .._native import qis as _qis_module
+
+Coefficient: TypeAlias = float | int | complex | tuple[float, float]
 
 Hamiltonian = _qis_module.Hamiltonian
 

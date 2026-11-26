@@ -12,7 +12,9 @@
 
 use std::collections::HashMap;
 
-use crate::circuit::{Circuit, CircuitError, CircuitParam, ParameterValue, Qubit};
+use num_complex::Complex64;
+
+use crate::circuit::{Circuit, CircuitError, CircuitParam, ParameterValue, Qubit, StandardGate};
 use crate::error_mitigation::ErrorMitigationError;
 use crate::error_mitigation::Estimator;
 use crate::qis::{Hamiltonian, Pauli, PauliString};
@@ -65,53 +67,76 @@ impl VirtualDistillation {
         Ok(())
     }
 
-    /// Builds a copy-swap circuit from the configured base circuit.
+    /// Builds the virtual distillation circuit from the configured base circuit.
     ///
     /// The returned circuit contains:
     /// - `copies` disjoint copies of the base circuit preparation,
-    /// - pairwise SWAP operations between the first copy and every additional copy.
+    /// - one ancillary qubit (the last qubit, index `copies * base_width`),
+    ///   prepared in `|+>` by a Hadamard gate,
+    /// - a derangement of the copies implemented as a ladder of swap gates
+    ///   between adjacent copies, each controlled by the ancillary qubit
+    ///   (CSWAP).
+    ///
+    /// This is the Hadamard-test circuit of the virtual distillation protocol:
+    /// measuring `X` on the ancillary qubit (together with an observable on the
+    /// first copy) yields `Tr(O rho^M)` / `Tr(rho^M)`. Applying uncontrolled
+    /// swaps instead would leave the permutation-symmetric state `rho^M`
+    /// invariant and measure nothing related to the distilled moments.
     pub fn build_copy_swap_circuit(&self) -> Result<Circuit, CircuitError> {
         let base_circuit = self.circuit.decompose()?;
         let base_width = base_circuit.width();
-        let mut copy_swap_circuit = Circuit::new(self.copies * base_width);
+        let ancilla = Qubit::new((self.copies * base_width) as u32);
+        let mut copy_swap_circuit = Circuit::new(self.copies * base_width + 1);
 
         for copy_index in 0..self.copies {
             let copy_offset = copy_index * base_width;
             Self::append_circuit_with_offset(&mut copy_swap_circuit, &base_circuit, copy_offset)?;
         }
 
-        for other_copy in 1..self.copies {
-            let first_copy_offset = 0;
-            let other_copy_offset = other_copy * base_width;
+        copy_swap_circuit.h(ancilla)?;
+
+        for lower_copy in 0..(self.copies - 1) {
+            let lower_offset = lower_copy * base_width;
+            let upper_offset = (lower_copy + 1) * base_width;
             for qubit_index in 0..base_width {
-                let left = Qubit::new((first_copy_offset + qubit_index) as u32);
-                let right = Qubit::new((other_copy_offset + qubit_index) as u32);
-                copy_swap_circuit.swap(left, right)?;
+                let lower = Qubit::new((lower_offset + qubit_index) as u32);
+                let upper = Qubit::new((upper_offset + qubit_index) as u32);
+                copy_swap_circuit.multi_control(
+                    StandardGate::SWAP,
+                    [ancilla],
+                    [lower, upper],
+                    [],
+                )?;
             }
         }
 
         Ok(copy_swap_circuit)
     }
 
-    /// Expands a Hamiltonian to the full copy-swap circuit width.
+    /// Expands a Hamiltonian to the numerator observable on the full virtual
+    /// distillation circuit width.
     ///
-    /// Virtual distillation evaluates the numerator on a wider copy-swap circuit,
-    /// so the estimator needs a Hamiltonian of matching width. This helper keeps
-    /// the original Pauli operators on their current qubit indices and appends
-    /// `n` `Z`s on higher-index qubits.
+    /// The numerator of virtual distillation estimates `Tr(O rho^M)`, measured
+    /// as the expectation value of `X` on the ancillary qubit tensored with the
+    /// observable on the first copy and identities on the remaining copies.
+    /// This helper keeps the original Pauli operators on their current qubit
+    /// indices, pads identities on the additional copies, and appends an `X`
+    /// on the ancillary qubit (the last qubit).
     pub(crate) fn expand_hamiltonian(
         hamiltonian: &Hamiltonian,
-        n: usize,
+        copies: usize,
     ) -> Result<Hamiltonian, ErrorMitigationError> {
+        let width = hamiltonian.num_qubits * copies + 1;
+        let ancilla = width - 1;
         if hamiltonian.terms.is_empty() {
-            return Ok(Hamiltonian::new(hamiltonian.num_qubits + n));
+            return Ok(Hamiltonian::new(width));
         }
 
         let expanded_terms = hamiltonian
             .terms
             .iter()
             .map(|(term, coeff)| {
-                let mut expanded_term = PauliString::new(hamiltonian.num_qubits + n);
+                let mut expanded_term = PauliString::new(width);
                 expanded_term.phase = term.phase;
 
                 for qubit in 0..hamiltonian.num_qubits {
@@ -124,9 +149,7 @@ impl VirtualDistillation {
                     expanded_term.set_pauli(qubit, pauli);
                 }
 
-                for qubit in hamiltonian.num_qubits..(hamiltonian.num_qubits + n) {
-                    expanded_term.set_pauli(qubit, Pauli::Z);
-                }
+                expanded_term.set_pauli(ancilla, Pauli::X);
 
                 (expanded_term, *coeff)
             })
@@ -135,35 +158,58 @@ impl VirtualDistillation {
         Ok(Hamiltonian::from_list(expanded_terms)?)
     }
 
+    /// Returns the denominator observable of virtual distillation.
+    ///
+    /// The denominator estimates `Tr(rho^M)`, measured as the expectation
+    /// value of `X` on the ancillary qubit (the last qubit) with identities
+    /// everywhere else.
+    fn denominator_hamiltonian(&self) -> Result<Hamiltonian, ErrorMitigationError> {
+        let width = self.copies * self.circuit.width() + 1;
+        let mut term = PauliString::new(width);
+        term.set_pauli(width - 1, Pauli::X);
+        Ok(Hamiltonian::from_list(vec![(
+            term,
+            Complex64::new(1.0, 0.0),
+        )])?)
+    }
+
     /// Runs the denominator circuit and returns the estimated mean and variance.
     ///
     /// - `shots`: the number of shots to run the circuit.
-    /// - `estimator`: an estimator that evaluates the copy-swap circuit, with no
-    ///   Hamiltonian (`None`) and the provided shot count.
+    /// - `estimator`: an estimator that evaluates the virtual distillation
+    ///   circuit with the denominator observable (`X` on the ancillary qubit,
+    ///   identities elsewhere) and the provided shot count.
     ///
     /// # Returns
     ///
-    /// - `(mu, var)`: the estimated mean and variance of the denominator circuit.
+    /// - `(mu, var)`: the estimated mean and variance of `Tr(rho^M)`.
     pub fn run_denominator_circuit(
         &self,
         shots: usize,
         estimator: &Estimator<'_>,
-    ) -> Result<(f64, f64), CircuitError> {
+    ) -> Result<(f64, f64), ErrorMitigationError> {
         let denominator_circuit = self.build_copy_swap_circuit()?;
+        let denominator_hamiltonian = self.denominator_hamiltonian()?;
 
-        Ok(estimator(&denominator_circuit, None, Some(shots)))
+        Ok(estimator(
+            &denominator_circuit,
+            Some(&denominator_hamiltonian),
+            Some(shots),
+        ))
     }
 
     /// Runs the numerator circuit and returns the estimated mean and variance.
     ///
-    /// - `hamiltonian`: the Hamiltonian to estimate on the copy-swap circuit.
+    /// - `hamiltonian`: the Hamiltonian to estimate on the virtual distillation
+    ///   circuit. It is expanded to the full circuit width with `X` on the
+    ///   ancillary qubit (see [`Self::expand_hamiltonian`]).
     /// - `shots`: the number of shots to run the circuit.
-    /// - `estimator`: an estimator that evaluates the copy-swap circuit, the given
-    ///   expanded Hamiltonian, and the provided shot count.
+    /// - `estimator`: an estimator that evaluates the virtual distillation
+    ///   circuit, the given expanded Hamiltonian, and the provided shot count.
     ///
     /// # Returns
     ///
-    /// - `(mu, var)`: the estimated mean and variance of the numerator circuit.
+    /// - `(mu, var)`: the estimated mean and variance of `Tr(H rho^M)`.
     pub fn run_numerator_circuit(
         &self,
         hamiltonian: &Hamiltonian,
@@ -171,8 +217,7 @@ impl VirtualDistillation {
         estimator: &Estimator<'_>,
     ) -> Result<(f64, f64), ErrorMitigationError> {
         let numerator_circuit = self.build_copy_swap_circuit()?;
-        let extra_qubits = (self.copies - 1) * hamiltonian.num_qubits;
-        let expanded_hamiltonian = Self::expand_hamiltonian(hamiltonian, extra_qubits)?;
+        let expanded_hamiltonian = Self::expand_hamiltonian(hamiltonian, self.copies)?;
         if expanded_hamiltonian.num_qubits != numerator_circuit.width() {
             return Err(CircuitError::QubitCountMismatch {
                 expected: numerator_circuit.width(),

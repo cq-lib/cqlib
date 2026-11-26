@@ -19,10 +19,10 @@
 //!
 //! # Supported inputs
 //!
-//! The circuit-facing pass supports fixed numeric one- and two-qubit unitary
+//! The circuit-facing pass supports fixed numeric unitary
 //! matrices. A parameterized matrix is supported only after every argument at
 //! the call site resolves to a finite numeric value. Three-qubit and larger
-//! matrices are rejected explicitly.
+//! matrices use [`super::block_zxz`].
 //!
 //! This module does not expand circuit-backed definitions or adapt gates to
 //! hardware topology. It also does not perform target-basis lowering itself;
@@ -75,3 +75,4 @@ pub(crate) use device_synthesis::{
     DeviceContextCostFailure, DevicePhysicalCost, DevicePreLayoutEvaluation,
     DeviceSynthesisPlacement, DeviceTwoQubitSynthesisContext,
 };
+pub(crate) use unitary_2q::TWO_QUBIT_EXACT_TOLERANCE;

@@ -21,6 +21,8 @@ Data is stored contiguously in row-major order. Qubit i corresponds to bit i of 
 
 ### DensityMatrixNoise(num_qubits, noise_model=None)
 
+Raises `ValueError` if the state dimension is unrepresentable or state allocation fails. Zero-qubit states are supported.
+
 Create a simulator. Omitting the noise model is equivalent to an ideal simulation.
 
 Parameters:
@@ -169,7 +171,7 @@ All gate application and state rewriting methods modify the current state in pla
 **Probabilities**
 
 - `probabilities() -> list[float]`: return the probability of each basis state without readout noise, with length 2^num_qubits. Does not modify the state.
-- `probabilities_with_readout(qubits) -> list[float]`: return the probability distribution after readout noise is applied on the given qubits, with length 2^n, where n is the length of `qubits`.
+- `probabilities_with_readout(qubits) -> list[float]`: `qubits` contains storage positions on which to apply readout errors. Circuit-bound states look up noise using the circuit ID at each position; unbound states use identity IDs. Returns all `2^num_qubits` probabilities in storage order, independent of the selection order or size; an empty selection applies no readout errors. Out-of-range positions raise `IndexError` even without a noise model.
   - `qubits` (`list[int]`): the list of qubit indices taking part in readout noise modeling. An `IndexError` is raised when an index is out of range.
 
 **Measurement and sampling**

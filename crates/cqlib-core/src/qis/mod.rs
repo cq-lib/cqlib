@@ -24,6 +24,7 @@
 //! - [`state`]: Quantum state representations (statevector, density matrix, stabilizer)
 //! - [`pauli`]: Pauli operators and Pauli strings with symplectic encoding
 //! - [`hamiltonian`]: Hamiltonian construction from Pauli strings
+//! - [`fermion`]: Fermionic operator algebra and fermion-to-qubit mappings
 //! - [`observable`]: Trait for computing expectation values
 //! - [`entropy`]: Entropy measures and entanglement metrics
 //! - [`error`]: Error types for QIS operations
@@ -79,6 +80,7 @@
 pub mod entropy;
 pub mod error;
 pub mod evolution;
+pub mod fermion;
 pub mod hamiltonian;
 pub mod metrics;
 pub mod observable;
@@ -88,6 +90,9 @@ pub mod state;
 
 pub use error::{PauliStringParseError, QisError};
 pub use evolution::{PauliEvolution, TrotterMode};
+pub use fermion::{
+    FermionToQubitMapper, FermionicLadder, FermionicOp, JordanWignerMapper, OccupationStateMapper,
+};
 pub use hamiltonian::Hamiltonian;
 pub use observable::Observable;
 pub use pauli::{Pauli, PauliIter, PauliString, Phase};

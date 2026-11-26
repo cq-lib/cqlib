@@ -17,6 +17,7 @@ import sys
 import pytest
 
 from cqlib.circuit import (
+    Circuit,
     Instruction,
     Parameter,
     Qubit,
@@ -62,6 +63,46 @@ def test_builtin_checker_proves_exact_and_global_phase_commutation():
     assert not global_phase.is_exact()
     assert math.isclose(global_phase.phase.evaluate(), math.pi, abs_tol=1e-10)
     assert "Parameter(" in repr(global_phase)
+
+
+@pytest.mark.parametrize("order", [[0, 1], [1, 0], [7, 2]])
+@pytest.mark.parametrize("parameterized", [False, True])
+def test_circuit_gate_matrix_commutation_uses_positional_targets(order, parameterized):
+    body = Circuit(order)
+    body.rx(order[0], Parameter("theta") if parameterized else 0.37)
+    circuit = Circuit(2)
+    circuit.append_circuit_gate(
+        body.to_gate("first_rx"), [0, 1], [0.37] if parameterized else []
+    )
+    matrix_checker = CommutationChecker.with_config(
+        CommutationConfig(enable_rule_oracle=False, enable_matrix_fallback=True)
+    )
+    for target in (0, 1):
+        z = operation(StandardGate.Z, [target])
+        expected = None if target == 0 else Commutation.exact()
+        for lhs, rhs in ((circuit[0], z), (z, circuit[0])):
+            assert check_commutation(lhs, rhs) == expected
+            assert matrix_checker.check(lhs, rhs) == expected
+
+
+def test_circuit_gate_matrix_commutation_preserves_global_phase_proof():
+    body = Circuit([7, 2])
+    body.x(7)
+    circuit = Circuit(2)
+    circuit.append_circuit_gate(body.to_gate("first_x"), [0, 1])
+    z = operation(StandardGate.Z, [0])
+    for lhs, rhs in ((circuit[0], z), (z, circuit[0])):
+        proof = check_commutation(lhs, rhs)
+        assert proof is not None and not proof.is_exact()
+        assert math.isclose(abs(proof.phase.evaluate()), math.pi, abs_tol=1e-12)
+
+
+def test_circuit_gate_unresolved_matrix_does_not_produce_a_proof():
+    body = Circuit(2)
+    body.rx(0, Parameter("theta"))
+    circuit = Circuit(2)
+    circuit.append_circuit_gate(body.to_gate("symbolic"), [0, 1], [Parameter("x")])
+    assert check_commutation(circuit[0], operation(StandardGate.Z, [0])) is None
 
 
 def test_symbolic_parameters_are_preserved_for_algebraic_proofs():

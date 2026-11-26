@@ -196,7 +196,12 @@ def plot_state_paulivec(
     figsize=None,
     output_path=None,
 ):
-    """Render Pauli-basis expectation values as SVG."""
+    """Render Pauli-basis expectation values as SVG.
+
+    Labels follow PauliString by default: the rightmost character acts on
+    qubit 0, so IX measures X on qubit 0 of a two-qubit state. Setting
+    reverse_bits=True reverses each label without changing its coefficient.
+    """
     svg = _visualization_module.plot_state_paulivec(
         state,
         title=title,

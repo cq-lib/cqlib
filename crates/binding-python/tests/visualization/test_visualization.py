@@ -23,6 +23,7 @@ import struct
 import subprocess
 import tempfile
 import zlib
+from xml.etree import ElementTree
 
 import pytest
 import resvg_py
@@ -639,6 +640,34 @@ def test_state_visualization_accepts_density_matrix():
 
     assert vis.plot_state_city(sv) == vis.plot_state_city(dm)
     assert vis.plot_state_paulivec(sv) == vis.plot_state_paulivec(dm)
+
+
+@pytest.mark.parametrize("state_type", [Statevector, DensityMatrix])
+@pytest.mark.parametrize("reverse_bits", [False, True])
+def test_paulivec_labels_identify_the_correct_qubit(state_type, reverse_bits):
+    """The displayed IX bar measures q0 unless display bits are reversed."""
+    state = state_type(2)
+    state.apply_h(0)
+    svg = vis.plot_state_paulivec(state, reverse_bits=reverse_bits)
+    elements = list(ElementTree.fromstring(svg))
+    bars = {
+        element.text: elements[index - 1].attrib
+        for index, element in enumerate(elements)
+        if element.tag.endswith("text")
+        and element.text in {"II", "IX", "XI", "IZ", "ZI"}
+    }
+    one_y = float(bars["II"]["y"])
+    one_height = float(bars["II"]["height"])
+    assert one_height > 1.0
+    for label, expected in [("IX", 1), ("XI", 0), ("IZ", 0), ("ZI", 1)]:
+        displayed = label[::-1] if reverse_bits else label
+        y = float(bars[displayed]["y"])
+        height = float(bars[displayed]["height"])
+        if expected:
+            assert (y, height) == (one_y, one_height)
+        else:
+            assert height == 1.0
+            assert y == pytest.approx(one_y + one_height)
 
 
 def test_state_visualization_validates_python_inputs():

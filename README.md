@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.txt)
 [![Rust](https://img.shields.io/badge/rust-1.89%2B-orange.svg)](https://www.rust-lang.org)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org)
 [![C](https://img.shields.io/badge/c-11%2B-lightgrey.svg)](https://en.cppreference.com/w/c/11)
 
 [中文文档](README.CN.md)
@@ -17,7 +17,7 @@
 
 Cqlib is a high-performance quantum computing SDK that provides a unified foundation for building, optimizing, and
 executing quantum programs. Its core is written in Rust for maximum safety and speed, with first-class language bindings
-for Python 3.10+ and C 11+.
+for Python 3.11+ and C 11+.
 
 Designed from the ground up for both research and production use, Cqlib covers the full quantum computing workflow: from
 circuit construction and parameterization, through multi-level IR transformations, rule-based compilation and
@@ -27,6 +27,8 @@ independently or compose them into a complete pipeline, making it equally suitab
 education, and integration into larger software stacks.
 
 Learn more at **[qc.zdxlz.com/cqlib](https://qc.zdxlz.com/cqlib)**.
+
+**[Read the Whitepaper](docs/whitepaper/Cqlib.pdf)** — Cqlib's design philosophy, architecture, and technical details in one document.
 
 ## Features
 
@@ -140,12 +142,12 @@ int main(void) {
 | Language | Minimum Version | Binding Technology |
 |----------|-----------------|--------------------|
 | Rust     | 1.89            | Native             |
-| Python   | 3.10            | PyO3 (abi3-py310)  |
+| Python   | 3.11            | PyO3 (abi3-py311)  |
 | C        | 11              | cbindgen           |
 
 ## Building from Source
 
-**Prerequisites:** Rust 1.89+, Python 3.10+ (for Python bindings)
+**Prerequisites:** Rust 1.89+, Python 3.11+ (for Python bindings)
 
 ```bash
 git clone https://gitee.com/cq-lib/cqlib.git

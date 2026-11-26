@@ -18,6 +18,66 @@ use super::unitary_2q::{
 };
 use crate::circuit::{Instruction, Qubit, StandardGate, ValueInstruction};
 
+#[test]
+fn weyl_boundary_all_backends_preserve_phase_and_qubit_order() {
+    use super::unitary_2q::{TwoQubitSynthesisCandidate, synthesize_numeric_2q_unitary};
+    use crate::compile::test_utils::kak_boundary_matrix;
+    use num_complex::Complex64;
+    for phase in [0.0, 0.37] {
+        let matrix = kak_boundary_matrix().mapv(|value| value * Complex64::from_polar(1.0, phase));
+        for qubits in [
+            [Qubit::new(0), Qubit::new(1)],
+            [Qubit::new(3), Qubit::new(1)],
+        ] {
+            for backend in [
+                TwoQubitUnitaryDecomposeBasis::Cx,
+                TwoQubitUnitaryDecomposeBasis::Cy,
+                TwoQubitUnitaryDecomposeBasis::Cz,
+                TwoQubitUnitaryDecomposeBasis::Rzz,
+                TwoQubitUnitaryDecomposeBasis::PauliRotations,
+            ] {
+                let result = synthesize_numeric_2q_unitary(&matrix, qubits, backend).unwrap();
+                let candidate = TwoQubitSynthesisCandidate {
+                    backend,
+                    operations: result.operations,
+                    global_phase: result.global_phase,
+                    cost: Default::default(),
+                };
+                validate_numeric_2q_candidate(&matrix, qubits, &candidate).unwrap();
+                assert!(
+                    candidate
+                        .operations
+                        .iter()
+                        .all(|op| op.qubits.iter().all(|q| qubits.contains(q)))
+                );
+                assert!(
+                    candidate
+                        .operations
+                        .iter()
+                        .filter(|op| op.qubits.len() == 2)
+                        .all(|op| {
+                            let ValueInstruction::Instruction(Instruction::Standard(gate)) =
+                                op.instruction
+                            else {
+                                return false;
+                            };
+                            match backend {
+                                TwoQubitUnitaryDecomposeBasis::Cx => gate == StandardGate::CX,
+                                TwoQubitUnitaryDecomposeBasis::Cy => gate == StandardGate::CY,
+                                TwoQubitUnitaryDecomposeBasis::Cz => gate == StandardGate::CZ,
+                                TwoQubitUnitaryDecomposeBasis::Rzz => gate == StandardGate::RZZ,
+                                TwoQubitUnitaryDecomposeBasis::PauliRotations => matches!(
+                                    gate,
+                                    StandardGate::RXX | StandardGate::RYY | StandardGate::RZZ
+                                ),
+                            }
+                        })
+                );
+            }
+        }
+    }
+}
+
 fn count_cx(candidate: &super::unitary_2q::TwoQubitSynthesisCandidate) -> usize {
     candidate
         .operations

@@ -13,6 +13,115 @@
 """Decomposition tests for the Python circuit API."""
 
 from cqlib import Circuit, Parameter
+from cqlib.qis import DensityMatrix, Statevector
+import numpy as np
+import pytest
+
+
+@pytest.mark.parametrize(
+    "width,has_operations", [(0, False), (1, False), (1, True), (2, True)]
+)
+@pytest.mark.parametrize("repetitions", [0, 1, 2])
+def test_decompose_preserves_global_phase_of_each_definition(
+    width, has_operations, repetitions
+):
+    inner = Circuit(width)
+    inner.set_global_phase(0.37)
+    if has_operations:
+        inner.x(0)
+        if width == 2:
+            inner.cx(0, 1)
+    gate = inner.to_gate("Phased")
+    outer = Circuit(2)
+    outer.set_global_phase(0.12)
+    expected = Circuit(2)
+    expected.set_global_phase(0.12 + repetitions * 0.37)
+    for _ in range(repetitions):
+        outer.append_circuit_gate(gate, [1, 0][:width])
+        if has_operations:
+            expected.x(1)
+            if width == 2:
+                expected.cx(1, 0)
+    flat = outer.decompose()
+    assert flat.global_phase.evaluate() == pytest.approx(0.12 + repetitions * 0.37)
+    for candidate in (outer, flat, flat.decompose()):
+        np.testing.assert_allclose(
+            candidate.to_matrix(), expected.to_matrix(), rtol=0, atol=1e-10
+        )
+    assert len(flat) == len(expected)
+    assert outer.global_phase.evaluate() == 0.12
+    reference_state = expected.to_matrix()[:, 0]
+    np.testing.assert_allclose(
+        Statevector.from_circuit(outer).data, reference_state, rtol=0, atol=1e-10
+    )
+    np.testing.assert_allclose(
+        DensityMatrix.from_circuit(outer).data,
+        np.outer(reference_state, reference_state.conj()),
+        rtol=0,
+        atol=1e-10,
+    )
+
+
+@pytest.mark.parametrize("inverse", [False, True])
+def test_decompose_preserves_nested_symbolic_global_phase(inverse):
+    theta = Parameter("theta")
+    inner = Circuit([7, 2])
+    inner.set_global_phase(theta / 2)
+    inner.rx(7, theta)
+    inner.cx(7, 2)
+    middle = Circuit([5, 1])
+    middle.set_global_phase(theta.sin())
+    middle.append_circuit_gate(inner.to_gate("Inner"), [5, 1], [theta + 1])
+    outer = Circuit(2)
+    x = Parameter("x")
+    outer.set_global_phase(x / 3)
+    outer.append_circuit_gate(middle.to_gate("Middle"), [1, 0], [2 * x])
+    if inverse:
+        outer = outer.inverse()
+    flat = outer.decompose()
+    symbolic = flat.to_symbolic_matrix()
+    for value in (0.37, -0.61):
+        phase = value / 3 + np.sin(2 * value) + (2 * value + 1) / 2
+        expected = Circuit(2)
+        expected.set_global_phase(phase)
+        expected.rx(1, 2 * value + 1)
+        expected.cx(1, 0)
+        if inverse:
+            expected = expected.inverse()
+            phase = -phase
+        bindings = {"x": value}
+        reference = expected.to_matrix()
+        assert flat.global_phase.evaluate(bindings) == pytest.approx(phase)
+        for candidate in (
+            flat.assign_parameters(bindings),
+            outer.assign_parameters(bindings).decompose(),
+            outer.assign_parameters(bindings),
+        ):
+            np.testing.assert_allclose(
+                candidate.to_matrix(), reference, rtol=0, atol=1e-10
+            )
+        np.testing.assert_allclose(
+            symbolic.evaluate(bindings), reference, rtol=0, atol=1e-10
+        )
+
+
+def test_decompose_keeps_symbols_used_only_by_global_phase():
+    inner = Circuit(1)
+    inner.set_global_phase(Parameter("theta"))
+    outer = Circuit(1)
+    outer.set_global_phase(Parameter("phi"))
+    outer.append_circuit_gate(inner.to_gate("PhaseOnly"), [0], [2 * Parameter("x")])
+    flat = outer.decompose()
+    assert len(flat) == 0
+    assert set(flat.used_symbols) == {"phi", "x"}
+    bindings = {"phi": 0.12, "x": 0.37}
+    assert flat.global_phase.evaluate(bindings) == pytest.approx(0.86)
+    np.testing.assert_allclose(
+        flat.assign_parameters(bindings).to_matrix(),
+        np.exp(0.86j) * np.eye(2),
+        rtol=0,
+        atol=1e-10,
+    )
 
 
 def test_decompose_keeps_standard_gates_unchanged():

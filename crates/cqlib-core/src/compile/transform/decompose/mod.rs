@@ -19,7 +19,7 @@
 //!   Use this first for [`CircuitGate`](crate::circuit::gate::CircuitGate) and
 //!   circuit-backed [`UnitaryGate`](crate::circuit::UnitaryGate) operations.
 //! - [`unitary`] synthesizes remaining custom `UnitaryGate` operations from
-//!   fixed numeric matrices. It currently supports one- and two-qubit matrices.
+//!   fixed numeric matrices. Larger matrices use recursive [`block_zxz`] synthesis.
 //! - [`mc_gate`] provides explicit algorithmic synthesis primitives for
 //!   multi-controlled gates, plus the circuit-level resource-aware
 //!   `decompose_mc_gates` entry point.
@@ -44,11 +44,15 @@
 //! Directed-coupling legalization and scheduling are separate compiler
 //! concerns.
 
+pub mod block_zxz;
 pub mod definition;
 pub mod mc_gate;
 pub mod rule;
 pub mod unitary;
 
+pub use block_zxz::{
+    BlockZxzDecomposeOptions, decompose_block_zxz, decompose_block_zxz_with_options,
+};
 pub use definition::{DecomposeDefinitions, expand_definitions};
 pub use mc_gate::{
     DecomposeMcGates, McGateDecomposeConfig, decompose_mc_gates, decompose_mc_gates_with_rule_stats,

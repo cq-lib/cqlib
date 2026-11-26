@@ -1,6 +1,6 @@
 # 分解与重综合（C）
 
-本页覆盖线路级分解 pass（电路门定义展开 `decompose_expand_definitions`、矩阵酉门合成 `decompose_unitaries`、多控制门改写 `decompose_mc_gates`）、双比特块重综合 `resynthesize_two_qubit_blocks`、数值酉矩阵合成原语（单比特 / 双比特）、酉合成目标 `decompose_unitary_target_*`、KAK（Weyl）分解、目标门集降级 `target_basis_lowerer_*` 与设备降级 `decompose_lower_to_device`。分解按操作可用的表示分层：定义展开先于数值合成执行，使自带实现线路的酉门在进入矩阵合成之前已经展开。矩阵输入使用 `Complex64`（`{double re; double im}` 交错对，行主序），布局说明见 [酉门](../0_circuit/6_gate_unitary.md)。错误码、字符串与句柄的释放约定遵循 [Overview](../0_overview.md)。
+本页覆盖线路级分解 pass（电路门定义展开 `decompose_expand_definitions`、矩阵酉门合成 `decompose_unitaries`、多控制门改写 `decompose_mc_gates`）、双比特块重综合 `resynthesize_two_qubit_blocks`、数值酉矩阵合成原语（含多比特 Block-ZXZ）、酉合成目标 `decompose_unitary_target_*`、KAK（Weyl）分解、目标门集降级 `target_basis_lowerer_*` 与设备降级 `decompose_lower_to_device`。分解按操作可用的表示分层：定义展开先于数值合成执行，使自带实现线路的酉门在进入矩阵合成之前已经展开。矩阵输入使用 `Complex64`（`{double re; double im}` 交错对，行主序），布局说明见 [酉门](../0_circuit/6_gate_unitary.md)。错误码、字符串与句柄的释放约定遵循 [Overview](../0_overview.md)。
 
 ---
 
@@ -25,13 +25,22 @@ KAK 局域因子标签（`kak_decomposition_local_factor` 的 `factor` 参数）
 | `KAK_FACTOR_K2L` | 2 | `k2l`（交互之前作用的左侧局域因子）。 |
 | `KAK_FACTOR_K2R` | 3 | `k2r`（交互之前作用的右侧局域因子）。 |
 
+Block-ZXZ 优化标志（`block_zxz_decompose` 与 `CUnitaryDecomposeConfig.block_zxz_options` 的位掩码）：
+
+| 常量 | 值 | 含义 |
+| --- | --- | --- |
+| `BLOCK_ZXZ_OPT_A1` | 1 | 在每个递归层吸收两个边界 `CX` 门。 |
+| `BLOCK_ZXZ_OPT_A2` | 2 | 在连续双比特叶子之间转移对角余项。 |
+| `BLOCK_ZXZ_OPT_A2_FORCE` | 4 | 当 `BLOCK_ZXZ_OPT_A2` 启用时，允许对块对角输入也执行 A.2 优化。 |
+| `BLOCK_ZXZ_OPT_ALL` | 3 | 默认优化组合（`BLOCK_ZXZ_OPT_A1 | BLOCK_ZXZ_OPT_A2`），自动处理块对角输入。 |
+
 ---
 
 ## 配置构造
 
 ### decompose_unitary_config_default()
 
-按值返回默认酉门分解配置：`recurse_control_flow=1`（递归进入控制流体）。
+按值返回默认酉门分解配置：`recurse_control_flow=1`（递归进入控制流体）、`has_block_zxz_options=1`，且 `block_zxz_options=BLOCK_ZXZ_OPT_ALL`（为三比特及以上酉门启用两项 Block-ZXZ CX 缩减优化）。
 
 ```c
 struct CUnitaryDecomposeConfig decompose_unitary_config_default(void);
@@ -216,6 +225,17 @@ struct CCircuit *resynthesize_two_qubit_blocks(const struct CCircuit *circuit,
 ---
 
 ## 数值酉合成原语
+
+### block_zxz_decompose(matrix, dim, atol, options)
+
+```c
+struct CCircuit *block_zxz_decompose(const Complex64 *matrix, uintptr_t dim,
+                                     double atol, uint8_t options);
+```
+
+传入行主序方阵酉矩阵。调用方拥有至少 `dim * dim` 个已初始化且对齐的 `Complex64` 元素（每个元素为实部/虚部双精度浮点数对），`matrix[row * dim + column]` 对应矩阵元素；函数在调用期间借用该缓冲区。`dim` 为矩阵边长，必须是 `[2, 2^20]` 范围内的 2 的幂。接口会在读取前检查字节长度是否溢出，调用方需保证缓冲区覆盖该长度。`atol` 为有限非负绝对容差。
+
+`options` 传 `BLOCK_ZXZ_OPT_ALL` 表示默认优化，传 `0` 表示关闭优化，也可按位或组合 `BLOCK_ZXZ_OPT_A1` 与 `BLOCK_ZXZ_OPT_A2`；附加 `BLOCK_ZXZ_OPT_A2_FORCE` 可在启用 A.2 时允许对块对角输入执行该优化。成功时返回拥有所有权且包含全局相位的线路句柄（用 `circuit_free` 释放）；空指针、非法维度、长度溢出、未知选项位、非法容差、非有限或非酉矩阵，或数值合成失败时均返回 `NULL`。
 
 ### synthesize_numeric_1q_unitary(matrix, out)
 
@@ -781,14 +801,18 @@ struct CCircuit *decompose_lower_to_device(const struct CCircuit *circuit,
 ```c
 typedef struct CUnitaryDecomposeConfig {
   uint8_t recurse_control_flow;
-  uint8_t _reserved[7];
+  uint8_t has_block_zxz_options;
+  uint8_t block_zxz_options;
+  uint8_t _reserved[5];
 } CUnitaryDecomposeConfig;
 ```
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `recurse_control_flow` | `uint8_t` | 1 递归进入控制流体，0 不递归。 |
-| `_reserved[7]` | `uint8_t[7]` | 填充字段，保持结构体布局稳定。 |
+| `has_block_zxz_options` | `uint8_t` | 非 0 时按 `block_zxz_options` 生效；为 0（含全零初始化结构体）时自动使用 `BLOCK_ZXZ_OPT_ALL`。 |
+| `block_zxz_options` | `uint8_t` | `has_block_zxz_options != 0` 时应用于三比特及以上 Block-ZXZ 合成的 `BLOCK_ZXZ_OPT_*` 位掩码（默认 `BLOCK_ZXZ_OPT_ALL`）。 |
+| `_reserved[5]` | `uint8_t[5]` | 填充字段，保持结构体布局稳定。 |
 
 ### CMcGateDecomposeConfig
 

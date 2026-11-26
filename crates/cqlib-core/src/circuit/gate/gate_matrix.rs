@@ -581,17 +581,14 @@ pub fn phase_gate(lambda: f64) -> Array2<Complex<f64>> {
     array![[ONE, ZERO], [ZERO, exp_i_lambda]]
 }
 
-/// Returns a global phase gate.
+/// Returns the 1×1 matrix of a zero-qubit global phase gate.
 ///
-/// This applies a global phase factor to the quantum state, physically equivalent to identity
-/// but useful for mathematical consistency in simulations.
+/// When embedded in a circuit, this scalar multiplies every state amplitude
+/// by the same phase factor without requiring a target qubit.
 ///
 /// Defined as:
 /// ```text
-/// [
-///   [exp(i*theta),      0      ],
-///   [     0,       exp(i*theta)]
-/// ]
+/// [[exp(i*theta)]]
 /// ```
 ///
 /// # Arguments
@@ -601,7 +598,7 @@ pub fn phase_gate(lambda: f64) -> Array2<Complex<f64>> {
 pub fn global_phase_gate(theta: f64) -> Array2<Complex<f64>> {
     let (sin_val, cos_val) = theta.sin_cos();
     let exp_i_theta = Complex::new(cos_val, sin_val);
-    array![[exp_i_theta, ZERO], [ZERO, exp_i_theta]]
+    array![[exp_i_theta]]
 }
 
 /// Returns the general single-qubit unitary gate (U3).

@@ -1,5 +1,4 @@
 // This code is part of Cqlib.
-// Modified to support reproducible state sampling.
 //
 // (C) Copyright China Telecom Quantum Group 2026
 //
@@ -10,8 +9,6 @@
 // Any modifications or derivative works of this code must retain this
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
-//
-// Modified to validate terminal measurements and clarify or correct reset behavior.
 
 //! Simulation consistency tests between Statevector and DensityMatrix
 
@@ -873,5 +870,66 @@ fn full_measurement_uses_the_supplied_random_stream() {
             dm.measure_all_with_rng(&mut ConstantRng(draw)).is_one(0),
             expected
         );
+    }
+}
+
+#[test]
+fn checked_constructors_reject_dimensions_without_allocating() {
+    for n in [usize::BITS as usize - 4, usize::BITS as usize, usize::MAX] {
+        assert!(Statevector::try_new(n).is_err());
+        assert!(Statevector::from_state(n, vec![]).is_err());
+    }
+    for n in [
+        (usize::BITS as usize - 4).div_ceil(2),
+        usize::BITS as usize,
+        usize::MAX,
+    ] {
+        assert!(DensityMatrix::try_new(n).is_err());
+        assert!(DensityMatrixNoise::try_new(n, None).is_err());
+        assert!(DensityMatrix::from_state(n, vec![]).is_err());
+        assert!(DensityMatrix::from_density_matrix_state(n, vec![]).is_err());
+        assert!(DensityMatrix::try_maximally_mixed(n).is_err());
+    }
+    for n in [0, 1, 3] {
+        assert_eq!(
+            Statevector::try_new(n).unwrap().data(),
+            Statevector::new(n).data()
+        );
+        assert_eq!(
+            DensityMatrix::try_new(n).unwrap().data(),
+            DensityMatrix::new(n).data()
+        );
+        assert!(
+            (DensityMatrixNoise::try_new(n, None)
+                .unwrap()
+                .probabilities()[0]
+                - 1.0)
+                .abs()
+                < 1e-12
+        );
+    }
+}
+
+#[test]
+fn nonfinite_pure_states_are_rejected() {
+    use num_complex::Complex64;
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
+        for amp in [Complex64::new(bad, 0.0), Complex64::new(0.0, bad)] {
+            let state = vec![amp, Complex64::new(0.0, 0.0)];
+            assert!(matches!(
+                Statevector::from_state(1, state.clone()),
+                Err(QisError::NotNormalized)
+            ));
+            assert!(matches!(
+                DensityMatrix::from_state(1, state),
+                Err(QisError::NotNormalized)
+            ));
+        }
+    }
+    for n in [0, 1] {
+        let mut v = vec![Complex64::new(0.0, 0.0); 1 << n];
+        v[0] = Complex64::new(0.0, 1.0);
+        assert!(Statevector::from_state(n, v.clone()).is_ok());
+        assert!(DensityMatrix::from_state(n, v).is_ok());
     }
 }

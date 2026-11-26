@@ -360,6 +360,42 @@ fn grid_device_uses_row_major_bidirectional_nearest_neighbors() {
 }
 
 #[test]
+fn device_factories_reject_zero_qubits() {
+    assert_eq!(
+        Device::line("bad", 0).unwrap_err(),
+        DeviceError::EmptyDevice
+    );
+    assert_eq!(
+        Device::line_from_qubits("bad", vec![]).unwrap_err(),
+        DeviceError::EmptyDevice
+    );
+    assert_eq!(
+        Device::bidirectional_line("bad", 0).unwrap_err(),
+        DeviceError::EmptyDevice
+    );
+    assert_eq!(
+        Device::ring("bad", 0).unwrap_err(),
+        DeviceError::EmptyDevice
+    );
+    assert_eq!(
+        Device::star("bad", 0, 0).unwrap_err(),
+        DeviceError::EmptyDevice
+    );
+    assert_eq!(
+        Device::grid("bad", 0, 3).unwrap_err(),
+        DeviceError::EmptyDevice
+    );
+    assert_eq!(
+        Device::grid("bad", 3, 0).unwrap_err(),
+        DeviceError::EmptyDevice
+    );
+    assert_eq!(
+        Device::from_edges("bad", 0, &[]).unwrap_err(),
+        DeviceError::EmptyDevice
+    );
+}
+
+#[test]
 fn from_edges_creates_explicit_directed_couplings() {
     let device = Device::from_edges("custom", 3, &[(0, 2), (2, 1)]).unwrap();
 

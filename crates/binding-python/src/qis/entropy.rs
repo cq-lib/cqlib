@@ -43,13 +43,20 @@ pub fn linear_entropy(dm: &PyDensityMatrix) -> PyResult<f64> {
 ///
 /// Args:
 ///     dm (DensityMatrix): The density matrix representing the quantum state.
-///     alpha (float): The order parameter. Must be positive.
+///     alpha (float): Positive order, including 1 (Von Neumann entropy)
+///         and positive infinity (min-entropy).
 ///
 /// Returns:
 ///     float: The Rényi entropy in bits (base-2 logarithm).
 ///
 /// Raises:
-///     ValueError: If alpha <= 0 or if eigendecomposition fails.
+///     ValueError: If alpha is NaN or <= 0, eigendecomposition fails,
+///         or no positive spectrum remains.
+///
+/// Notes:
+///     Non-diagonal spectra discard eigenvalues at or below
+///     dimension * machine epsilon * largest eigenvalue as numerical zeros.
+///     Diagonal spectra retain all positive entries.
 #[pyfunction]
 pub fn renyi_entropy(dm: &PyDensityMatrix, alpha: f64) -> PyResult<f64> {
     core_entropy::renyi_entropy(&dm.inner, alpha).map_err(qis_error_to_py_err)

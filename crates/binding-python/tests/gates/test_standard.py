@@ -396,12 +396,12 @@ class TestParametricGateMatrices:
         assert np.allclose(mat, expected), "Phase gate matrix mismatch"
 
     def test_global_phase_gate(self):
-        """GPhase(θ) = e^(iθ) I (2x2)"""
+        """The zero-qubit GPhase matrix contains one scalar phase."""
         theta = np.pi / 4
         mat = GPhase(theta).matrix()
-        # GPhase is 1-qubit gate with 1 parameter, matrix is 2x2
-        expected = np.exp(1j * theta) * np.eye(2)
-        assert np.allclose(mat, expected), "GPhase matrix mismatch"
+        expected = np.array([[np.exp(1j * theta)]])
+        assert mat.shape == (1, 1)
+        np.testing.assert_allclose(mat, expected, rtol=0, atol=1e-12)
 
     def test_u_gate_general(self):
         """U gate is general single-qubit gate"""

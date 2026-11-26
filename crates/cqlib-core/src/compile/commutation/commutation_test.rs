@@ -81,6 +81,215 @@ fn assert_pi_phase(result: CommutationResult) {
 }
 
 #[test]
+fn circuit_backed_unitary_matrix_fallback_respects_targets_and_parameters() {
+    for order in [vec![0, 1], vec![1, 0], vec![7, 2], vec![9, 2, 7]] {
+        let mut numeric_order = order.clone();
+        numeric_order.sort_unstable();
+        let qubits: Vec<Qubit> = [5, 1, 8][..order.len()]
+            .iter()
+            .copied()
+            .map(Qubit::new)
+            .collect();
+        for active in 0..order.len() {
+            for parameterized in [false, true] {
+                let mut body =
+                    Circuit::from_qubits(order.iter().copied().map(Qubit::new).collect()).unwrap();
+                body.rx(
+                    Qubit::new(numeric_order[active]),
+                    if parameterized {
+                        Parameter::symbol("theta")
+                    } else {
+                        Parameter::from(0.7)
+                    },
+                )
+                .unwrap();
+                body.set_global_phase(Parameter::from(0.19));
+                let instruction = Instruction::UnitaryGate(Box::new(
+                    UnitaryGate::new("rx_one_port", order.len() as u16, u16::from(parameterized))
+                        .with_circuit(std::sync::Arc::new(FrozenCircuit::new(body)))
+                        .unwrap(),
+                ));
+                let params = if parameterized {
+                    vec![Parameter::from(0.7)]
+                } else {
+                    vec![]
+                };
+                let z = Instruction::Standard(StandardGate::Z);
+                for checker in [
+                    CommutationChecker::builtin(),
+                    CommutationChecker::with_config(CommutationConfig {
+                        enable_rule_oracle: false,
+                        ..CommutationConfig::default()
+                    }),
+                ] {
+                    for (position, &qubit) in qubits.iter().enumerate() {
+                        for result in [
+                            checker.check(&instruction, &qubits, &params, &z, &[qubit], &[]),
+                            checker.check(&z, &[qubit], &[], &instruction, &qubits, &params),
+                        ] {
+                            if position == active {
+                                assert!(result.is_none(), "order={order:?}, active={active}");
+                            } else {
+                                assert_exact(result);
+                            }
+                        }
+                    }
+                }
+                if parameterized {
+                    assert!(
+                        super::matrix::matrix_commutation(
+                            &instruction,
+                            &qubits,
+                            &[Parameter::symbol("unresolved")],
+                            &z,
+                            &[qubits[active]],
+                            &[],
+                            4,
+                        )
+                        .is_none()
+                    );
+                }
+                assert!(
+                    super::matrix::matrix_commutation(
+                        &instruction,
+                        &qubits,
+                        &params,
+                        &z,
+                        &[qubits[active]],
+                        &[],
+                        order.len() - 1,
+                    )
+                    .is_none()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn circuit_backed_unitary_matrix_fallback_preserves_global_phase_proof() {
+    let mut body = Circuit::new(2);
+    body.x(Qubit::new(0)).unwrap();
+    body.set_global_phase(Parameter::from(0.19));
+    let instruction = Instruction::UnitaryGate(Box::new(
+        UnitaryGate::new("x_first", 2, 0)
+            .with_circuit(std::sync::Arc::new(FrozenCircuit::new(body)))
+            .unwrap(),
+    ));
+    let qubits = [Qubit::new(5), Qubit::new(1)];
+    let z = Instruction::Standard(StandardGate::Z);
+    let checker = CommutationChecker::builtin();
+    assert_pi_phase(checker.check(&instruction, &qubits, &[], &z, &[qubits[0]], &[]));
+    assert_pi_phase(checker.check(&z, &[qubits[0]], &[], &instruction, &qubits, &[]));
+    assert_exact(checker.check(&instruction, &qubits, &[], &z, &[qubits[1]], &[]));
+}
+
+#[test]
+fn circuit_gate_operation_matrix_does_not_certify_false_commutation() {
+    let mut body = Circuit::new(2);
+    body.rx(Qubit::new(0), Parameter::from(0.37)).unwrap();
+    let instruction = body.to_gate("rx_first").unwrap();
+    let qubits = [Qubit::new(0), Qubit::new(1)];
+    let checker = CommutationChecker::with_config(CommutationConfig {
+        enable_rule_oracle: false,
+        ..CommutationConfig::default()
+    });
+    assert!(
+        checker
+            .check(
+                &instruction,
+                &qubits,
+                &[],
+                &Instruction::Standard(StandardGate::Z),
+                &[qubits[0]],
+                &[],
+            )
+            .is_none()
+    );
+}
+
+#[test]
+fn circuit_gate_matrix_fallback_respects_targets_parameters_and_phase() {
+    for order in [[0, 1], [1, 0], [7, 2]] {
+        for parameterized in [false, true] {
+            let mut body = Circuit::from_qubits(order.map(Qubit::new).to_vec()).unwrap();
+            body.rx(
+                Qubit::new(order[0]),
+                if parameterized {
+                    Parameter::symbol("theta")
+                } else {
+                    Parameter::from(0.37)
+                },
+            )
+            .unwrap();
+            let instruction = body.to_gate("rx_first").unwrap();
+            let params = if parameterized {
+                vec![Parameter::from(0.37)]
+            } else {
+                vec![]
+            };
+            let qubits = [Qubit::new(5), Qubit::new(1)];
+            for checker in [
+                CommutationChecker::builtin(),
+                CommutationChecker::with_config(CommutationConfig {
+                    enable_rule_oracle: false,
+                    ..CommutationConfig::default()
+                }),
+            ] {
+                for (position, &qubit) in qubits.iter().enumerate() {
+                    let z = Instruction::Standard(StandardGate::Z);
+                    for result in [
+                        checker.check(&instruction, &qubits, &params, &z, &[qubit], &[]),
+                        checker.check(&z, &[qubit], &[], &instruction, &qubits, &params),
+                    ] {
+                        if position == 0 {
+                            assert!(result.is_none());
+                        } else {
+                            assert_exact(result);
+                        }
+                    }
+                }
+            }
+            if parameterized {
+                assert!(
+                    super::matrix::matrix_commutation(
+                        &instruction,
+                        &qubits,
+                        &[Parameter::symbol("unresolved")],
+                        &Instruction::Standard(StandardGate::Z),
+                        &[qubits[0]],
+                        &[],
+                        4,
+                    )
+                    .is_none()
+                );
+            }
+        }
+    }
+    let mut body = Circuit::new(2);
+    body.x(Qubit::new(0)).unwrap();
+    let x = body.to_gate("x_first").unwrap();
+    let z = Instruction::Standard(StandardGate::Z);
+    let checker = CommutationChecker::builtin();
+    assert_pi_phase(checker.check(
+        &x,
+        &[Qubit::new(0), Qubit::new(1)],
+        &[],
+        &z,
+        &[Qubit::new(0)],
+        &[],
+    ));
+    assert_pi_phase(checker.check(
+        &z,
+        &[Qubit::new(0)],
+        &[],
+        &x,
+        &[Qubit::new(0), Qubit::new(1)],
+        &[],
+    ));
+}
+
+#[test]
 fn identity_commutes_exactly() {
     let checker = CommutationChecker::builtin();
     let result = checker.check(

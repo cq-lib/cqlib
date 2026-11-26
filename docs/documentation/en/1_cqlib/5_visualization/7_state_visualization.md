@@ -242,7 +242,9 @@ Pauli vector after reversing the display order:
 
 ![Asymmetric Pauli vector with reversed bits](assets/asymmetric_paulivec_reverse_bits.png)
 
-In multi-qubit state figures, confirm the display order of the basis labels and Pauli strings before interpreting coherence terms, diagonal weights or Pauli expectation values.
+By default, Pauli-vector labels follow `PauliString`: the highest-index qubit is on the left and qubit 0 is on the right. Thus `IX` measures X on qubit 0 and `XI` measures X on qubit 1. For the diagonal state above, the default plot gives `IZ = 0.6` and `ZI = -0.6`. With `reverse_bits=True`, each label's characters are reversed while its coefficient stays the same.
+
+Earlier versions displayed multi-qubit Pauli labels in the opposite direction. This has been corrected; code that used `reverse_bits=True` to match the public `PauliString` convention should now use the default. Single-qubit plots are unaffected.
 
 ---
 

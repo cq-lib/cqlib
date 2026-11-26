@@ -228,7 +228,8 @@ impl PyParameter {
         self.inner.as_symbol()
     }
 
-    /// Substitutes multiple symbols and simplifies the resulting expression.
+    /// Simultaneously substitutes symbols and simplifies the resulting expression.
+    /// Inserted expressions are not substituted again; the original is unchanged.
     fn substitute(&self, bindings: HashMap<String, PyParameter>) -> Self {
         let bindings = bindings
             .into_iter()

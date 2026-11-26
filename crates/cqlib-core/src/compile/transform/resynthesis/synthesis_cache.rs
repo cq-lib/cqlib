@@ -52,7 +52,7 @@ use super::commutation::OperationView;
 use super::cost::ResynthesisCost;
 
 pub(super) const RESYNTHESIS_SYNTHESIS_CACHE_BUDGET: usize = 4096;
-const SYNTHESIS_ALGORITHM_REVISION: u32 = 2;
+const SYNTHESIS_ALGORITHM_REVISION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SynthesisCacheNamespace {

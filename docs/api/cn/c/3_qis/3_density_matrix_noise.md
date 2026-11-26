@@ -8,6 +8,8 @@
 
 ### density_matrix_noise_new(num_qubits, noise_model)
 
+状态维度无法表示或状态内存分配失败时返回 `NULL`。支持零比特状态。
+
 ```c
 struct CDensityMatrixNoise *density_matrix_noise_new(uintptr_t num_qubits,
                                                      const struct CNoiseModel *noise_model);
@@ -248,7 +250,7 @@ int32_t density_matrix_noise_probabilities_with_readout(const struct CDensityMat
 - `ptr` (`const CDensityMatrixNoise*`)：噪声模拟器句柄。
 - `buffer` (`double*`)：输出缓冲。
 - `len` (`uintptr_t`)：缓冲长度，必须等于 `density_matrix_noise_probabilities_with_readout_len`。
-- `qubits` (`const uint32_t*`)：施加读出误差的比特数组；`qubit_len` 为 0 时可为 NULL，此时结果与 `density_matrix_noise_probabilities` 一致。
+- `qubits` (`const uint32_t*`)：施加读出误差的存储位置数组；绑定线路后按位置对应的线路比特 ID 查询噪声模型，未绑定时 ID 与位置相同。输出始终为按存储位序排列的完整概率数组。`qubit_len` 为 0 时可为 NULL，此时结果与 `density_matrix_noise_probabilities` 一致。
 - `qubit_len` (`uintptr_t`)：比特数量。
 
 返回：`0` 成功；`-1` NULL 指针；`-2` 比特越界；`-8` `len` 与实际数量不符。

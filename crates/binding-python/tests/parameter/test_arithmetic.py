@@ -26,6 +26,28 @@ Test coverage:
 from cqlib.circuit import Parameter
 
 
+def test_affine_coefficients_and_cancellation_residues():
+    import math
+
+    theta = Parameter("theta")
+    for coefficient in (1e-15, math.nextafter(1.0, 2.0)):
+        scaled = (theta * coefficient).simplify()
+        assert scaled.evaluate({"theta": 1.0}) == coefficient
+        assert scaled.replace("theta", Parameter(1.0)).evaluate() == coefficient
+    coefficient = math.nextafter(1.0, 2.0)
+    residue = (theta * coefficient - theta).simplify()
+    assert residue.evaluate({"theta": 1.0}) == coefficient - 1.0
+    assert (Parameter(1e-15) - Parameter(0.0)).simplify().evaluate() == 1e-15
+
+
+def test_subnormal_parameter_division_preserves_representable_quotient():
+    smallest = float.fromhex("0x0.0000000000001p-1022")
+    theta = Parameter("theta")
+    scaled = theta * smallest
+    assert scaled.simplify().evaluate({"theta": 1.0}) == smallest
+    assert (scaled / smallest).simplify().evaluate({"theta": 1.0}) == 1.0
+
+
 class TestAddition:
     """Tests for addition operation."""
 

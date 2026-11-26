@@ -61,7 +61,7 @@ from cqlib.compile.transform import DeviceLowerer
 
 ### decompose_unitaries(circuit, config=None)
 
-用矩阵合成单比特与双比特酉门。
+合成线路中带固定数值矩阵的酉门。三比特及以上的门在路由与目标门集转换之前使用 Block-ZXZ 合成。
 
 参数：
 
@@ -84,13 +84,14 @@ from cqlib.compile.transform import DeviceLowerer
 
 - `(TransformResult, DecompositionRuleStats)`
 
-### UnitaryDecomposeConfig(*, two_qubit_basis=None, target_basis=None, recurse_control_flow=True)
+### UnitaryDecomposeConfig(*, two_qubit_basis=None, target_basis=None, recurse_control_flow=True, block_zxz_options=None)
 
 参数：
 
 - `two_qubit_basis` (`TwoQubitUnitaryDecomposeBasis | None`)：双比特合成门集。
 - `target_basis` (`list[str | Instruction] | None`)：目标门集约束，条目形式同 `compile()` 的 `target_basis`。
 - `recurse_control_flow` (`bool`)：是否递归进入控制流块。
+- `block_zxz_options` (`BlockZxzDecomposeOptions | None`)：应用于三比特及以上 Block-ZXZ 合成的优化开关；`None` 表示使用 `BlockZxzDecomposeOptions()`。
 
 `two_qubit_basis` 与 `target_basis` 互斥，同时给出会被拒绝。
 
@@ -99,6 +100,7 @@ from cqlib.compile.transform import DeviceLowerer
 - `two_qubit_basis -> TwoQubitUnitaryDecomposeBasis | None`
 - `target_basis -> list[Instruction] | None`
 - `recurse_control_flow -> bool`
+- `block_zxz_options -> BlockZxzDecomposeOptions`
 
 异常情况：
 
@@ -123,6 +125,24 @@ pass 内规则缓存统计：
 - `inserts -> int`：缓存写入次数。
 
 ---
+
+## Block-ZXZ 合成
+
+```python
+from cqlib.compile.transform.decompose import (
+    BlockZxzDecomposeOptions,
+    decompose_block_zxz,
+    decompose_block_zxz_with_options,
+)
+
+circuit = decompose_block_zxz(matrix, atol=1e-10)
+options = BlockZxzDecomposeOptions(opt_a1=True, opt_a2=True, opt_a2_force=False)
+circuit = decompose_block_zxz_with_options(matrix, atol=1e-10, options=options)
+```
+
+两个函数均接收形状为 `(2**n, 2**n)`（`n >= 1`）的有限酉矩阵数组，返回 `to_matrix()` 包含原始全局相位的 `Circuit`。局部比特 0 为矩阵最低有效位。`atol` 为有限非负绝对容差，用于校验输入酉性（`||M†M - I||_max <= atol`）并控制解复用器和双比特叶子的重构误差；通过输入校验的近酉矩阵会在需要时先投影到所有酉不变范数下最近的精确酉矩阵 `U_proj`，再以 `atol` 为容差重构 `U_proj`。非法矩阵值、维度或容差会抛出 `CompilerConfigError`；数值合成失败会抛出 `CompilerTransformError`。
+
+A.1 在每个递归节点吸收两个边界 CX 门；A.2 在双比特叶子之间转移对角余项；两者默认开启。对于块对角输入，除非显式强制（`opt_a2_force=True`），否则默认关闭 A.2。`BlockZxzDecomposeOptions.none()` 可同时关闭两项优化。对于三比特及以上输入，精确块对角矩阵仅使用单个解复用器；若上下两半相等，最高位比特保持空闲。若某个双比特 KAK 叶子无法达到请求精度，合成器会针对原始 4×4 矩阵额外检查一层 Block-ZXZ 回退。一般三比特和四比特情况最多分别达到 19 个和 95 个 CX 门；数值回退可能会增加门数并保持完整矩阵精度。
 
 ## 数值酉门合成
 

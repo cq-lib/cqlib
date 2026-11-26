@@ -61,7 +61,7 @@ The circuit-level entry point is located in `cqlib.compile.transform.decompose`,
 
 ### decompose_unitaries(circuit, config=None)
 
-Synthesize one-qubit and two-qubit unitary gates from matrices.
+Synthesize matrix-backed gates with fixed numeric arguments. Gates on three or more qubits use Block-ZXZ before routing and target-basis conversion.
 
 Parameters:
 
@@ -84,13 +84,14 @@ Returns:
 
 - `(TransformResult, DecompositionRuleStats)`
 
-### UnitaryDecomposeConfig(*, two_qubit_basis=None, target_basis=None, recurse_control_flow=True)
+### UnitaryDecomposeConfig(*, two_qubit_basis=None, target_basis=None, recurse_control_flow=True, block_zxz_options=None)
 
 Parameters:
 
 - `two_qubit_basis` (`TwoQubitUnitaryDecomposeBasis | None`): the two-qubit synthesis gate basis.
 - `target_basis` (`list[str | Instruction] | None`): the target gate set constraint; entries take the same form as `target_basis` in `compile()`.
 - `recurse_control_flow` (`bool`): whether to recurse into control flow blocks.
+- `block_zxz_options` (`BlockZxzDecomposeOptions | None`): optimization switches applied to three-or-more-qubit Block-ZXZ synthesis; `None` selects `BlockZxzDecomposeOptions()`.
 
 `two_qubit_basis` and `target_basis` are mutually exclusive; providing both is rejected.
 
@@ -99,6 +100,7 @@ Attributes:
 - `two_qubit_basis -> TwoQubitUnitaryDecomposeBasis | None`
 - `target_basis -> list[Instruction] | None`
 - `recurse_control_flow -> bool`
+- `block_zxz_options -> BlockZxzDecomposeOptions`
 
 Raises:
 
@@ -123,6 +125,40 @@ Rule cache statistics within the pass:
 - `inserts -> int`: the number of cache writes.
 
 ---
+
+## Block-ZXZ synthesis
+
+```python
+from cqlib.compile.transform.decompose import (
+    BlockZxzDecomposeOptions,
+    decompose_block_zxz,
+    decompose_block_zxz_with_options,
+)
+
+circuit = decompose_block_zxz(matrix, atol=1e-10)
+options = BlockZxzDecomposeOptions(opt_a1=True, opt_a2=True, opt_a2_force=False)
+circuit = decompose_block_zxz_with_options(matrix, atol=1e-10, options=options)
+```
+
+Both functions accept a finite unitary array of shape `(2**n, 2**n)` for
+`n >= 1` and return a `Circuit` whose `to_matrix()` includes the original
+global phase. Local qubit 0 is the least significant matrix bit.
+`atol` is a finite nonnegative absolute tolerance that validates input unitarity
+(`||M†M - I||_max <= atol`) and governs reconstruction of demultiplexers and two-qubit leaves;
+near-unitary inputs passing validation are projected onto the nearest unitary `U_proj` (in every
+unitarily invariant norm) when needed, and synthesis reconstructs `U_proj` within `atol`. Invalid matrix values, dimensions or tolerance raise
+`CompilerConfigError`. Numerical synthesis failures raise `CompilerTransformError`.
+
+A.1 absorbs two boundary CX gates per recursive node. A.2 transfers a
+diagonal remainder between two-qubit leaves. Both default on. A.2 is
+disabled for block-diagonal inputs unless explicitly forced.
+`BlockZxzDecomposeOptions.none()` disables both reductions.
+For three or more qubits, exact block-diagonal inputs use a single multiplexer.
+Equal halves leave the highest qubit idle. If a two-qubit KAK leaf cannot meet
+the requested precision, synthesis checks an additional Block-ZXZ layer
+against the original 4×4 matrix.
+Generic three- and four-qubit cases can reach 19 and 95 CX respectively.
+Numerical fallback can add gates and preserves the full matrix.
 
 ## Numeric unitary synthesis
 

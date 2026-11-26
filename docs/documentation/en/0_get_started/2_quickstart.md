@@ -4,7 +4,7 @@ This guide builds a minimal working quantum circuit with Cqlib and completes an 
 
 Before starting, ensure that the environment is ready:
 
-- Python environment: Python 3.10 – 3.14 is supported
+- Python environment: CPython 3.11 – 3.15 with the GIL enabled is supported
 - Cqlib is installed and the environment is configured (for installation, see "[Cqlib Installation and Environment Setup](../0_get_started/1_installation.md)")
 
 ---

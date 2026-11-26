@@ -20,10 +20,200 @@ Test coverage:
 - Parametric CircuitGate creation and usage
 """
 
+from itertools import permutations
+
+import numpy as np
 import pytest
 
 from cqlib.circuit import Circuit, Parameter
 from cqlib.circuit.gates import CircuitGate
+
+
+def _embed_operation_matrix(matrix, targets, width):
+    """Independent basis-index embedding: first gate argument is the MSB."""
+    result = np.zeros((2**width, 2**width), dtype=complex)
+    for column in range(2**width):
+        local_column = 0
+        for target in targets:
+            local_column = 2 * local_column + ((column >> target) & 1)
+        for local_row in range(2 ** len(targets)):
+            row = column
+            for position, target in enumerate(targets):
+                bit = (local_row >> (len(targets) - 1 - position)) & 1
+                row = (row & ~(1 << target)) | (bit << target)
+            result[row, column] = matrix[local_row, local_column]
+    return result
+
+
+class TestCircuitGateOperationMatrix:
+    @staticmethod
+    def assert_operations(circuit, expected):
+        # Cover snapshots returned by both collection and indexing APIs.
+        for operation in (circuit.operations[0], circuit[0]):
+            np.testing.assert_allclose(operation.matrix(), expected, rtol=0, atol=1e-12)
+
+    @pytest.mark.parametrize("order", [[0, 1], [1, 0], [7, 2]])
+    def test_positional_matrix(self, order):
+        body = Circuit(order)
+        body.x(order[0])
+        circuit = Circuit(2)
+        circuit.append_circuit_gate(body.to_gate("first_x"), [0, 1])
+        self.assert_operations(circuit, np.kron([[0, 1], [1, 0]], np.eye(2)))
+
+    def test_bound_parameter_and_repeated_application(self):
+        body = Circuit([7])
+        body.rx(7, Parameter("theta"))
+        gate = body.to_gate("rx")
+        for angle in (0.37, -0.61, 0.37):
+            circuit = Circuit(1)
+            circuit.append_circuit_gate(gate, [0], [angle])
+            c, s = np.cos(angle / 2), -1j * np.sin(angle / 2)
+            self.assert_operations(circuit, np.array([[c, s], [s, c]]))
+        assert gate.used_symbols == ["theta"]
+
+    @pytest.mark.parametrize("order", list(permutations([7, 2, 5])))
+    @pytest.mark.parametrize("targets", [[3, 0, 2], [2, 3, 0]])
+    def test_three_qubit_permutations_and_spectator(self, order, targets):
+        body = Circuit(list(order))
+        body.h(order[0])
+        body.rz(order[1], 0.29)
+        body.cx(order[0], order[2])
+        body.set_global_phase(0.17)
+        expected = np.zeros((8, 8), dtype=complex)
+        for column in range(8):
+            first, middle, last = column >> 2, (column >> 1) & 1, column & 1
+            for output_first in (0, 1):
+                row = (output_first << 2) | (middle << 1) | (last ^ output_first)
+                expected[row, column] = (
+                    (-1) ** (first * output_first)
+                    / np.sqrt(2)
+                    * np.exp(1j * (0.17 + (2 * middle - 1) * 0.29 / 2))
+                )
+        circuit = Circuit(4)
+        circuit.append_circuit_gate(body.to_gate("three"), targets)
+        self.assert_operations(circuit, expected)
+        full = _embed_operation_matrix(expected, targets, 4)
+        np.testing.assert_allclose(circuit.to_matrix(), full, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(
+            circuit.to_symbolic_matrix().evaluate(), full, rtol=0, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            circuit.decompose().to_matrix(), full, rtol=0, atol=1e-12
+        )
+
+    @pytest.mark.parametrize("nested", [False, True])
+    @pytest.mark.parametrize("inverse", [False, True])
+    def test_signature_phase_and_inverse(self, nested, inverse):
+        theta, phi = Parameter("theta"), Parameter("phi")
+        body = Circuit([7, 2])
+        body.rx(7, theta)
+        body.rz(2, phi)
+        body.cx(7, 2)
+        body.set_global_phase(theta + phi / 2)
+        gate = CircuitGate.with_signature(
+            "declared", body.to_gate("definition").circuit, ["unused", "phi", "theta"]
+        )
+        arguments = [12.0, -0.21, 0.37]
+        if nested:
+            middle = Circuit([5, 1])
+            middle.append_circuit_gate(gate, [5, 1], [0, phi, theta])
+            gate = CircuitGate.with_signature(
+                "nested", middle.to_gate("middle").circuit, ["unused", "phi", "theta"]
+            )
+        circuit = Circuit(2)
+        circuit.append_circuit_gate(gate, [1, 0], arguments)
+        if inverse:
+            circuit = circuit.inverse()
+        c, s = np.cos(0.37 / 2), -1j * np.sin(0.37 / 2)
+        rx = np.array([[c, s], [s, c]])
+        rz = np.diag(np.exp(1j * np.array([0.21, -0.21]) / 2))
+        cx = np.eye(4)[[0, 1, 3, 2]]
+        expected = np.exp(1j * (0.37 - 0.21 / 2)) * cx @ np.kron(rx, rz)
+        if inverse:
+            expected = expected.conj().T
+        self.assert_operations(circuit, expected)
+        np.testing.assert_allclose(circuit.to_matrix(), expected, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(
+            circuit.to_symbolic_matrix().evaluate(), expected, rtol=0, atol=1e-12
+        )
+
+    def test_zero_qubit_phase(self):
+        body = Circuit(0)
+        body.set_global_phase(Parameter("theta"))
+        circuit = Circuit(0)
+        circuit.append_circuit_gate(body.to_gate("phase"), [], [0.37])
+        expected = np.array([[np.exp(0.37j)]])
+        self.assert_operations(circuit, expected)
+        np.testing.assert_allclose(circuit.to_matrix(), expected, rtol=0, atol=1e-12)
+
+    def test_unresolved_arguments_keep_existing_error_behavior(self):
+        body = Circuit(1)
+        body.rx(0, Parameter("theta"))
+        circuit = Circuit(1)
+        circuit.append_circuit_gate(body.to_gate("unresolved"), [0], [Parameter("x")])
+        with pytest.raises(ValueError):
+            circuit.operations[0].matrix()
+        with pytest.raises(ValueError):
+            circuit[0].matrix()
+
+
+class TestCircuitGateStorageOrder:
+    @pytest.mark.parametrize("order", [[7, 2], [1, 0], [2, 7], [0, 1]])
+    @pytest.mark.parametrize("targets", [[0, 1], [1, 0]])
+    def test_matrix_uses_internal_storage_order(self, order, targets):
+        inner = Circuit(order)
+        inner.x(order[0])
+        outer = Circuit(2)
+        outer.append_circuit_gate(inner.to_gate("StoredOrderX"), targets)
+        expected = Circuit(2)
+        expected.x(targets[0])
+        for output_order in (None, [1, 0]):
+            reference = expected.to_matrix(output_order)
+            np.testing.assert_allclose(
+                outer.to_matrix(output_order), reference, rtol=0, atol=1e-10
+            )
+            np.testing.assert_allclose(
+                outer.to_symbolic_matrix(output_order).evaluate(),
+                reference,
+                rtol=0,
+                atol=1e-10,
+            )
+            np.testing.assert_allclose(
+                outer.decompose().to_matrix(output_order), reference, rtol=0, atol=1e-10
+            )
+        assert outer.to_matrix()[1 << targets[0], 0] == 1
+
+    @pytest.mark.parametrize("middle_order", [None, [0, 1], [5, 1]])
+    @pytest.mark.parametrize("inverse", [False, True])
+    def test_nested_parameterized_matrix_and_inverse(self, middle_order, inverse):
+        theta = Parameter("theta")
+        body = Circuit([7, 2])
+        body.rx(7, theta)
+        body.cx(7, 2)
+        if middle_order is not None:
+            gate = body.to_gate("Inner")
+            body = Circuit(middle_order)
+            body.append_circuit_gate(gate, middle_order, [theta])
+        outer = Circuit(2)
+        outer.append_circuit_gate(body.to_gate("Body"), [0, 1], [Parameter("x")])
+        if inverse:
+            outer = outer.inverse()
+        symbolic = outer.to_symbolic_matrix()
+        for angle in (0.37, -0.61):
+            expected = Circuit(2)
+            expected.rx(0, angle)
+            expected.cx(0, 1)
+            if inverse:
+                expected = expected.inverse()
+            reference = expected.to_matrix()
+            bound = outer.assign_parameters({"x": angle})
+            np.testing.assert_allclose(bound.to_matrix(), reference, rtol=0, atol=1e-10)
+            np.testing.assert_allclose(
+                symbolic.evaluate({"x": angle}), reference, rtol=0, atol=1e-10
+            )
+            np.testing.assert_allclose(
+                bound.decompose().to_matrix(), reference, rtol=0, atol=1e-10
+            )
 
 
 class TestCircuitGateCreation:

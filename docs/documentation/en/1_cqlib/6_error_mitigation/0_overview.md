@@ -88,7 +88,7 @@ Estimator = Callable[
 | Parameter | Meaning |
 |------|------|
 | `run_circuit` | The circuit to be executed (possibly a folded circuit or a copy-swap circuit) |
-| `observable` | The `Hamiltonian` to be estimated; `None` for the denominator circuit |
+| `observable` | The `Hamiltonian` to be estimated; both VD numerator and denominator calls carry one (the denominator observable is `X` on the ancillary qubit) |
 | `shots` | The shot count of this execution; may be `None` in some APIs |
 | Return value | `(expectation, variance)` |
 

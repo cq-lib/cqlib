@@ -472,10 +472,17 @@ impl Device {
     ///
     /// The device contains every supplied physical qubit, all of which are
     /// online. Couplings follow the supplied order: `qubits[i] -> qubits[i + 1]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceError::EmptyDevice`] if `physical_qubits` is empty.
     pub fn line_from_qubits(
         name: impl Into<String>,
         physical_qubits: Vec<PhysicalQubit>,
     ) -> Result<Self, DeviceError> {
+        if physical_qubits.is_empty() {
+            return Err(DeviceError::EmptyDevice);
+        }
         let qubits = physical_qubits.iter().copied().collect::<HashSet<_>>();
         let topology = Topology::line(physical_qubits).map_err(DeviceError::InvalidTopology)?;
         Self::new(name, qubits, topology)
@@ -569,6 +576,9 @@ impl Device {
         num_qubits: u32,
         edges: &[(u32, u32)],
     ) -> Result<Self, DeviceError> {
+        if num_qubits == 0 {
+            return Err(DeviceError::EmptyDevice);
+        }
         let physical_qubits = (0..num_qubits).map(PhysicalQubit::new).collect::<Vec<_>>();
         let qubits = physical_qubits.iter().copied().collect::<HashSet<_>>();
         let coupling_map = edges

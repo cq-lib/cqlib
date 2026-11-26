@@ -11,11 +11,13 @@
 // that they have been altered from the originals.
 
 use super::{CanonicalizeConfig, Canonicalizer, canonicalize_circuit};
+use crate::circuit::circuit_impl::Circuit;
+use crate::circuit::circuit_to_matrix::circuit_to_matrix;
 use crate::circuit::gate::FrozenCircuit;
 use crate::circuit::{
-    Circuit, CircuitError, CircuitGate, CircuitParam, ClassicalControlOp, ClassicalDataOp,
-    ClassicalExpr, ClassicalType, Directive, Instruction, MCGate, Parameter, ParameterValue, Qubit,
-    StandardGate, UnitaryGate, ValueInstruction, ValueOperation, circuit_to_matrix,
+    CircuitError, CircuitGate, CircuitParam, ClassicalControlOp, ClassicalDataOp, ClassicalExpr,
+    ClassicalType, Directive, Instruction, MCGate, Parameter, ParameterValue, Qubit, StandardGate,
+    UnitaryGate, ValueInstruction, ValueOperation,
 };
 use crate::compile::test_utils::generated_small_matrix_circuit;
 use crate::compile::transform::{RewriteEdits, TransformOutcome, TransformerTestExt};
@@ -1043,17 +1045,41 @@ fn canonicalize_phase_fast_path_does_not_accept_negative_zero() {
 }
 
 #[test]
-fn canonical_transform_normalizes_global_phase_accumulator_residue() {
+fn canonical_transform_preserves_nonzero_global_phase_residue() {
     let mut circuit = Circuit::new(1);
-    circuit.set_global_phase(Parameter::from(-3.330_669_073_875_469_6e-16));
+    let phase = Parameter::from(-3.330_669_073_875_469_6e-16);
+    circuit.set_global_phase(phase.clone());
     circuit.h(Qubit::new(0)).unwrap();
 
     let first = Canonicalizer::production().run(&circuit).unwrap();
-    assert!(first.changed);
-    assert_eq!(first.circuit.global_phase(), Parameter::from(0.0));
+    assert!(!first.changed);
+    assert_eq!(first.circuit.global_phase(), phase);
 
     let second = Canonicalizer::production().run(&first.circuit).unwrap();
     assert!(!second.changed);
+}
+
+#[test]
+fn canonical_transform_preserves_small_nonzero_rotation_angles() {
+    let mut circuit = Circuit::new(1);
+    circuit.rz(Qubit::new(0), Parameter::from(3e-16)).unwrap();
+    let result = Canonicalizer::production().run(&circuit).unwrap();
+    assert_eq!(result.circuit.operations().len(), 1);
+    assert_eq!(
+        result
+            .circuit
+            .resolve_parameter(&result.circuit.operations()[0].params[0])
+            .unwrap()
+            .evaluate(&None)
+            .unwrap(),
+        3e-16
+    );
+    assert!(
+        !Canonicalizer::production()
+            .run(&result.circuit)
+            .unwrap()
+            .changed
+    );
 }
 
 #[test]

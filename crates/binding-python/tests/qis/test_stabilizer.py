@@ -272,3 +272,19 @@ class TestStabilizerErrors:
 
         with pytest.raises(ValueError):
             state.apply_swap(1, 1)
+
+
+@pytest.mark.parametrize("theta", [0.0, 0.37, math.pi / 2])
+@pytest.mark.parametrize("entrypoint", ["from_circuit", "apply_circuit", "run_circuit"])
+def test_controlled_gphase_returns_normal_unsupported_error(theta, entrypoint):
+    from cqlib.circuit.gates import GPhase
+
+    circuit = Circuit([12])
+    circuit.append_mc_gate(GPhase(theta).control(1), [12])
+    execute = (
+        StabilizerState(1).apply_circuit
+        if entrypoint == "apply_circuit"
+        else getattr(StabilizerState, entrypoint)
+    )
+    with pytest.raises(ValueError, match="Controlled-GPhase.*not supported"):
+        execute(circuit)

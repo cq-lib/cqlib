@@ -29,6 +29,8 @@ All four simulators provide a `from_circuit()` static method, which simulates a 
 
 ### Observables and time evolution
 
+[`FermionicOp` and `JordanWignerMapper`](10_fermion.md) provide general fermionic algebra, excitation generators and mappings to Pauli sums for the existing evolution components.
+
 `PauliString` and `Hamiltonian` describe observables, and both can give expectation values; `Hamiltonian` can also be converted into an evolution circuit through Trotter decomposition, returning to the circuit space of `cqlib.circuit` for execution.
 
 ---

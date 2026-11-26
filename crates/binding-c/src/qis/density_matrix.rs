@@ -94,28 +94,26 @@ fn apply_three(
         .map_or_else(|e| e, |_| 0)
 }
 
+/// Returns a newly allocated simulator, or NULL if its dimension is
+/// unrepresentable or its state allocation fails.
 #[unsafe(no_mangle)]
 pub extern "C" fn density_matrix_new(num_qubits: usize) -> *mut CDensityMatrix {
-    Box::into_raw(Box::new(CDensityMatrix {
-        inner: DensityMatrix::new(num_qubits),
-    }))
+    match DensityMatrix::try_new(num_qubits) {
+        Ok(inner) => Box::into_raw(Box::new(CDensityMatrix { inner })),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 /// Create a density matrix filled entirely with zeros. This is not a valid
 /// physical state (trace = 0); it is useful as an accumulator during
 /// operations like Kraus channel application. Returns NULL when the matrix
-/// size overflows the addressable range.
+/// size overflows the addressable range or state allocation fails.
 #[unsafe(no_mangle)]
 pub extern "C" fn density_matrix_zeros(num_qubits: usize) -> *mut CDensityMatrix {
-    let Some(bits) = num_qubits.checked_mul(2) else {
-        return std::ptr::null_mut();
-    };
-    if bits >= usize::BITS as usize {
-        return std::ptr::null_mut();
+    match DensityMatrix::try_zeros(num_qubits) {
+        Ok(inner) => Box::into_raw(Box::new(CDensityMatrix { inner })),
+        Err(_) => std::ptr::null_mut(),
     }
-    Box::into_raw(Box::new(CDensityMatrix {
-        inner: DensityMatrix::zeros(num_qubits),
-    }))
 }
 
 #[unsafe(no_mangle)]
@@ -818,11 +816,14 @@ pub extern "C" fn density_matrix_validate_physical(ptr: *const CDensityMatrix, t
 }
 
 /// Create the maximally mixed state I / 2^N of `num_qubits` qubits.
+/// Returns a newly allocated simulator, or NULL if its dimension is
+/// unrepresentable or its state allocation fails.
 #[unsafe(no_mangle)]
 pub extern "C" fn density_matrix_maximally_mixed(num_qubits: usize) -> *mut CDensityMatrix {
-    Box::into_raw(Box::new(CDensityMatrix {
-        inner: DensityMatrix::maximally_mixed(num_qubits),
-    }))
+    match DensityMatrix::try_maximally_mixed(num_qubits) {
+        Ok(inner) => Box::into_raw(Box::new(CDensityMatrix { inner })),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 /// Apply a standard gate identified by name (e.g. "H", "CX", "RZZ", "FSIM").

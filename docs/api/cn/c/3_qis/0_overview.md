@@ -84,3 +84,5 @@ int main(void) {
 ```
 
 噪声模型句柄 `CNoiseModel` 的构造与噪声登记见 [NoiseModel](../2_device/4_noise.md)。
+
+新增的[费米子代数与 Jordan–Wigner](10_fermion.md)和 [checked Hamiltonian 代数](7_hamiltonian.md#带校验的稀疏-pauli-代数)使用“错误码 + 输出指针”接口；构造结果通过输出指针返回，判断通过字节输出写入 0/1。旧 QIS 接口保持原有约定。

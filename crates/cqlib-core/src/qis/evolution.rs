@@ -449,6 +449,16 @@ pub(crate) fn trotter_second_order_core(
     Ok(())
 }
 
+// Numeric evolution historically reports coefficient overflow as unsupported.
+fn normalized_evolution(h: &Hamiltonian) -> Result<Hamiltonian, QisError> {
+    h.normalized_hermitian().map_err(|error| match error {
+        nonfinite @ QisError::NonFiniteCoefficient { .. } => {
+            QisError::UnsupportedOperation(nonfinite.to_string())
+        }
+        other => other,
+    })
+}
+
 impl Hamiltonian {
     /// Converts the Hamiltonian to a Trotterized time evolution circuit.
     ///
@@ -459,6 +469,8 @@ impl Hamiltonian {
     /// the Hamiltonian terms commute. For an auto-selecting method that uses the
     /// mathematically exact single-pass decomposition when all terms commute, see
     /// [`to_evolution_circuit`](Hamiltonian::to_evolution_circuit).
+    /// Nonempty sums that cancel to zero produce an identity circuit, retaining
+    /// the declared qubit count. An empty input sum is rejected.
     ///
     /// # Arguments
     ///
@@ -521,15 +533,7 @@ impl Hamiltonian {
             ));
         }
 
-        let mut simplified_h = self.clone();
-        simplified_h.simplify();
-
-        for (_, coeff) in &simplified_h.terms {
-            if coeff.im.abs() > 1e-10 {
-                return Err(QisError::NotHermitian);
-            }
-        }
-
+        let simplified_h = normalized_evolution(self)?;
         let mut circuit = Circuit::new(simplified_h.num_qubits);
         let qubits: Vec<Qubit> = circuit.qubits();
         let t = ParameterValue::Fixed(time);
@@ -591,6 +595,8 @@ impl Hamiltonian {
     /// This mirrors the behavior of [`PauliEvolutionAnsatz`] with
     /// [`EvolutionStrategy::Auto`], closing the capability gap between the numeric
     /// and parametric APIs.
+    /// Nonempty sums that cancel to zero produce an identity circuit, retaining
+    /// the declared qubit count. An empty input sum is rejected.
     ///
     /// # Arguments
     ///
@@ -641,15 +647,7 @@ impl Hamiltonian {
             ));
         }
 
-        let mut simplified_h = self.clone();
-        simplified_h.simplify();
-
-        for (_, coeff) in &simplified_h.terms {
-            if coeff.im.abs() > 1e-10 {
-                return Err(QisError::NotHermitian);
-            }
-        }
-
+        let simplified_h = normalized_evolution(self)?;
         let mut circuit = Circuit::new(simplified_h.num_qubits);
         let qubits: Vec<Qubit> = circuit.qubits();
 

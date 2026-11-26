@@ -22,6 +22,124 @@ fn zeroed<T>() -> T {
     unsafe { std::mem::zeroed() }
 }
 
+#[test]
+fn test_weyl_boundary_kak_synthesis_and_unitary_decomposition() {
+    use binding_c::circuit::{circuit_to_matrix, circuit_to_matrix_len};
+    use cqlib_core::circuit::StandardGate;
+    use ndarray::{Array2, linalg::kron};
+    // Reported boundary unitary in the row-major order accepted by the C ABI.
+    let flat = [
+        Complex64::new(-0.14755155196621783, 0.08535345227001921),
+        Complex64::new(-0.015112015359785388, -0.026124324914469213),
+        Complex64::new(-4.3021142204224816e-16, 0.06601980439593577),
+        Complex64::new(-0.9826870609532827, 2.7755575615628914e-16),
+        Complex64::new(-0.006212290419590961, -0.010739262071974568),
+        Complex64::new(-0.3589338503302527, 0.2076307761864266),
+        Complex64::new(0.9070757873156866, -5.412337245047638e-16),
+        Complex64::new(-6.245004513516506e-16, -0.07152302867497204),
+        Complex64::new(-0.9706933646378622, 2.7755575615628914e-17),
+        Complex64::new(2.6020852139652106e-18, -0.15594957493615416),
+        Complex64::new(0.03569705171577718, -0.061709927849413246),
+        Complex64::new(0.1457506851638859, 0.08431171332109447),
+        Complex64::new(7.112366251504909e-17, -0.16894909068671718),
+        Complex64::new(-0.8960049266516804, -3.608224830031759e-16),
+        Complex64::new(-0.35455306241796475, -0.20509664240745978),
+        Complex64::new(-0.014674445936026376, 0.02536789332498595),
+    ];
+    let matrix = Array2::from_shape_vec((4, 4), flat.to_vec()).unwrap();
+    let kak = kak_decompose(flat.as_ptr());
+    assert!(!kak.is_null());
+    let (mut a, mut b, mut c) = (0.0, 0.0, 0.0);
+    assert_eq!(
+        kak_decomposition_coordinates(kak, &mut a, &mut b, &mut c),
+        0
+    );
+    assert_eq!(a, std::f64::consts::FRAC_PI_4);
+    assert!(c > 0.0);
+    let mut local = Vec::new();
+    for tag in [
+        KAK_FACTOR_K1L,
+        KAK_FACTOR_K1R,
+        KAK_FACTOR_K2L,
+        KAK_FACTOR_K2R,
+    ] {
+        let mut values = vec![Complex64::new(0.0, 0.0); 4];
+        assert_eq!(
+            kak_decomposition_local_factor(kak, tag, values.as_mut_ptr()),
+            0
+        );
+        local.push(Array2::from_shape_vec((2, 2), values).unwrap());
+    }
+    let rxx = StandardGate::RXX.matrix(&[-2.0 * a]).unwrap().into_owned();
+    let ryy = StandardGate::RYY.matrix(&[-2.0 * b]).unwrap().into_owned();
+    let rzz = StandardGate::RZZ.matrix(&[-2.0 * c]).unwrap().into_owned();
+    let core = rxx.dot(&ryy).dot(&rzz);
+    let phase = Complex64::from_polar(1.0, kak_decomposition_global_phase(kak));
+    let reconstructed = kron(&local[0], &local[1])
+        .dot(&core)
+        .dot(&kron(&local[2], &local[3]));
+    assert!(
+        reconstructed
+            .iter()
+            .zip(matrix.iter())
+            .all(|(actual, expected)| (phase * actual - expected).norm() < 1e-12)
+    );
+    kak_decomposition_free(kak);
+
+    for basis in [
+        TWO_QUBIT_BASIS_CX,
+        TWO_QUBIT_BASIS_CY,
+        TWO_QUBIT_BASIS_CZ,
+        TWO_QUBIT_BASIS_RZZ,
+        TWO_QUBIT_BASIS_PAULI_ROTATIONS,
+    ] {
+        let synthesis = synthesize_numeric_2q_unitary(flat.as_ptr(), 1, 0, basis);
+        assert!(!synthesis.is_null(), "basis={basis}");
+        assert!(two_qubit_synthesis_num_operations(synthesis) > 0);
+        assert!(two_qubit_synthesis_global_phase(synthesis).is_finite());
+        two_qubit_synthesis_free(synthesis);
+    }
+
+    let source = circuit_new(2);
+    let targets = [1, 0];
+    assert_eq!(
+        circuit_unitary(
+            source,
+            name("boundary").as_ptr(),
+            2,
+            flat.as_ptr(),
+            targets.as_ptr(),
+            2
+        ),
+        0
+    );
+    let output = decompose_unitaries(source, decompose_unitary_config_default());
+    assert!(!output.is_null());
+    let matrix_of = |circuit| {
+        let len = circuit_to_matrix_len(circuit, std::ptr::null(), 0);
+        let mut values = vec![0.0; 2 * len];
+        assert_eq!(
+            circuit_to_matrix(
+                circuit,
+                std::ptr::null(),
+                0,
+                values.as_mut_ptr(),
+                values.len()
+            ),
+            len
+        );
+        values
+    };
+    assert!(
+        matrix_of(output)
+            .iter()
+            .zip(matrix_of(source))
+            .all(|(a, b)| (a - b).abs() < 1e-9)
+    );
+    circuit_free(output);
+    circuit_free(source);
+}
+
 // =====  Decomposition and resynthesis  =====
 
 #[test]

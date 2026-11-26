@@ -195,6 +195,11 @@ pub fn plot_state_city<S: StateVisualizationSource + ?Sized>(
 
 /// Plot Pauli-basis expectation values as an SVG bar chart.
 ///
+/// By default, labels follow [`crate::qis::pauli::PauliString`]: the rightmost
+/// character acts on qubit 0. For example, `IX` measures X on qubit 0 of a
+/// two-qubit state. Setting `options.reverse_bits` reverses the characters in
+/// each label without changing the state or the corresponding expectation value.
+///
 /// # Arguments
 ///
 /// * `state` - Input core state object accepted by state visualization routines.

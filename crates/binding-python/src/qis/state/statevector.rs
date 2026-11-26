@@ -83,14 +83,17 @@ impl PyStatevector {
     /// Returns:
     ///     A new Statevector instance in the ground state
     ///
+    /// Raises:
+    ///     ValueError: If the dimension is unrepresentable or state allocation fails.
+    ///
     /// Examples:
     ///     >>> from cqlib.qis import Statevector
     ///     >>> sv = Statevector(2)  # |00⟩ state
     #[new]
-    fn new(num_qubits: usize) -> Self {
-        Self {
-            inner: Statevector::new(num_qubits),
-        }
+    fn new(num_qubits: usize) -> PyResult<Self> {
+        Ok(Self {
+            inner: Statevector::try_new(num_qubits).map_err(qis_error_to_py_err)?,
+        })
     }
 
     /// Creates a statevector from initial amplitudes.
@@ -194,7 +197,8 @@ impl PyStatevector {
     ///     The expectation value as a real number
     ///
     /// Raises:
-    ///     ValueError: If the qubit counts don't match or the observable type is invalid
+    ///     ValueError: If qubit counts differ, the observable type is invalid,
+    ///         the observable is not Hermitian, or its coefficients are non-finite.
     fn expectation(&self, py: Python<'_>, observable: &Bound<'_, PyAny>) -> PyResult<f64> {
         if let Ok(h) = observable.extract::<crate::qis::hamiltonian::PyHamiltonian>() {
             py.detach(|| self.inner.expectation(&h.inner))

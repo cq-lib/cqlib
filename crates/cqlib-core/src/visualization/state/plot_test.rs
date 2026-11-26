@@ -173,6 +173,54 @@ fn paulivec_matches_reference_image() {
 }
 
 #[test]
+fn paulivec_svg_labels_match_asymmetric_state() {
+    let state = Statevector::from_state(
+        2,
+        vec![
+            Complex64::new(1.0 / 2.0_f64.sqrt(), 0.0),
+            Complex64::new(1.0 / 2.0_f64.sqrt(), 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        ],
+    )
+    .unwrap();
+    let density = DensityMatrix::from_state(2, state.data().to_vec()).unwrap();
+    for reverse_bits in [false, true] {
+        let options = StatePlotOptions {
+            reverse_bits,
+            ..StatePlotOptions::default()
+        };
+        for svg in [
+            plot_state_paulivec(&state, &options).unwrap(),
+            plot_state_paulivec(&density, &options).unwrap(),
+        ] {
+            let bar = |label: &str| {
+                let label_start = svg.find(&format!(">{label}</text>")).unwrap();
+                let bar_start = svg[..label_start].rfind("<rect ").unwrap();
+                let tag = &svg[bar_start..label_start];
+                (attr_f64(tag, "y"), attr_f64(tag, "height"))
+            };
+            let (one_y, one_height) = bar("II");
+            assert!(one_height > 1.0);
+            for (label, expected) in [("IX", 1.0), ("XI", 0.0), ("IZ", 0.0), ("ZI", 1.0)] {
+                let displayed = if reverse_bits {
+                    label.chars().rev().collect::<String>()
+                } else {
+                    label.to_string()
+                };
+                let (y, height) = bar(&displayed);
+                if expected == 1.0 {
+                    assert_eq!((y, height), (one_y, one_height), "{displayed}");
+                } else {
+                    assert_eq!(height, 1.0, "{displayed}");
+                    assert!((y - one_y - one_height).abs() < 1e-3, "{displayed}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn density_matrix_uses_same_state_plot_api() {
     let statevector = plus_state();
     let density_matrix =

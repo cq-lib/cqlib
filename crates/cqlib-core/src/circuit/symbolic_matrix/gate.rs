@@ -155,10 +155,7 @@ pub fn standard_gate_symbolic_matrix(
             [o.clone(), z.clone()],
             [z, SymbolicComplex::exp_i(params[0].clone())]
         ],
-        StandardGate::GPhase => {
-            let phase = SymbolicComplex::exp_i(params[0].clone());
-            ndarray::array![[phase.clone(), z.clone()], [z, phase]]
-        }
+        StandardGate::GPhase => ndarray::array![[SymbolicComplex::exp_i(params[0].clone())]],
         StandardGate::RXX => {
             let c = cos_half(&params[0]);
             let s = neg_i_times(sin_half(&params[0]));
@@ -430,7 +427,9 @@ pub fn circuit_to_symbolic_matrix(
                     flush_numeric_run(&mut matrix, &mut numeric_run, &full_bits)?;
                     let matrix = matrix.get_or_insert_with(|| symbolic_eye(dim));
                     let base = standard_gate_symbolic_matrix(*mc_gate.base_gate(), &params)?;
-                    let gate_matrix = control_matrix(&base, mc_gate.num_ctrl_qubits());
+                    // The base matrix already includes any inherent controls.
+                    let added_controls = mc_gate.num_qubits() - mc_gate.base_gate().num_qubits();
+                    let gate_matrix = control_matrix(&base, added_controls);
                     apply_gate_to_matrix(matrix, &gate_matrix, &reversed_bits)?;
                 }
             }
@@ -546,7 +545,10 @@ pub fn circuit_to_symbolic_matrix(
                         .circuit()
                         .assign_parameters(&Some(bindings))
                         .map_err(|_| CircuitError::SymbolicParameterError)?;
-                    let sub_matrix = circuit_to_matrix(&sub_circuit, None)?;
+                    // Match CircuitGate argument positions to the inner storage order.
+                    let order: Vec<usize> =
+                        sub_circuit.qubits().iter().map(|q| q.index()).collect();
+                    let sub_matrix = circuit_to_matrix(&sub_circuit, Some(&order))?;
                     push_numeric_gate(
                         &mut matrix,
                         &mut numeric_run,

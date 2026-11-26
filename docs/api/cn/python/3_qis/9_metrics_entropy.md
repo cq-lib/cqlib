@@ -370,6 +370,8 @@ assert abs(entropy.linear_entropy(dm_pure) - 0.0) < 1e-10
 
 ### `renyi_entropy(dm, alpha) -> float`
 
+阶数必须为正且不能为 NaN。`alpha = 1` 返回冯·诺依曼熵，正无穷返回最小熵；接近 1 时使用稳定计算。非对角矩阵中不超过 `矩阵维度 × f64::EPSILON × 最大特征值` 的特征值视为数值零；对角矩阵保留全部正特征值。
+
 计算阶数为 `alpha` 的 Rényi 熵。
 
 参数：
@@ -383,7 +385,7 @@ assert abs(entropy.linear_entropy(dm_pure) - 0.0) < 1e-10
 
 异常情况：
 
-- `ValueError`：`alpha` 不大于零，或特征分解失败。
+- `ValueError`：`alpha` 为 NaN 或不大于零，或特征分解失败。
 
 示例：
 
@@ -528,7 +530,7 @@ assert abs(entropy.entanglement_of_formation(dm_sep) - 0.0) < 1e-10
 
 | 异常 | 触发场景 |
 | --- | --- |
-| `ValueError` | 参与比较的两个量子态比特数不一致；`renyi_entropy` 的 `alpha` 不大于零；`entanglement_entropy_pure` 的子系统为空、包含全部比特或含重复下标；`concurrence` 与 `entanglement_of_formation` 的态不是 2 比特；特征分解失败。 |
+| `ValueError` | 参与比较的两个量子态比特数不一致；`renyi_entropy` 的 `alpha` 为 NaN 或不大于零；`entanglement_entropy_pure` 的子系统为空、包含全部比特或含重复下标；`concurrence` 与 `entanglement_of_formation` 的态不是 2 比特；特征分解失败。 |
 | `IndexError` | `partial_transpose`、`logarithmic_negativity`、`negativity`、`entanglement_entropy_pure` 的比特下标越界。 |
 
 注意 `cqlib.qis.entropy` 是子模块名，`cqlib.qis.metrics` 中另有一个同名函数 `entropy`，二者互不相干。

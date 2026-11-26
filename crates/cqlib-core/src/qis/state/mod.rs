@@ -172,3 +172,19 @@ pub use statevector::Statevector;
 #[cfg(test)]
 #[path = "state_test.rs"]
 mod state_test;
+
+// Validate both the exponent and allocation layout before shifting or allocating.
+fn checked_state_len(num_qubits: usize, density: bool) -> Result<usize, QisError> {
+    let invalid = || {
+        QisError::InvalidParameterValue(format!(
+            "state dimension is too large for {num_qubits} qubits"
+        ))
+    };
+    let exponent = num_qubits
+        .checked_mul(if density { 2 } else { 1 })
+        .ok_or_else(invalid)?;
+    let exponent = u32::try_from(exponent).map_err(|_| invalid())?;
+    let len = 1usize.checked_shl(exponent).ok_or_else(invalid)?;
+    std::alloc::Layout::array::<num_complex::Complex64>(len).map_err(|_| invalid())?;
+    Ok(len)
+}

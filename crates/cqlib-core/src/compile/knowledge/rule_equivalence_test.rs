@@ -425,3 +425,74 @@ fn qcis_fsim_to_cz_verify_timing() {
 fn verify_all_builtin_rules_layered_equivalence_ignored() {
     verify_all_builtin_rules_layered_equivalence();
 }
+
+/// Check registered DSL rules, including independent random parameters and all
+/// scalar phases. A copied formula test would not catch an incorrect DSL edit.
+#[test]
+fn native_single_qubit_paths_preserve_full_unitary_for_parameters() {
+    use crate::circuit::circuit_to_matrix::circuit_to_matrix;
+    use rand::{Rng, SeedableRng, rngs::SmallRng};
+
+    let library = RuleLibrary::builtin_rules().unwrap();
+    let mut rng = SmallRng::seed_from_u64(20261021);
+    for name in [
+        "decompose_h_to_u",
+        "decompose_rx_to_u",
+        "decompose_ry_to_u",
+        "decompose_rxy_to_u",
+        "decompose_rx_to_rxy",
+        "decompose_ry_to_rxy",
+        "decompose_xy2p_to_xy2m",
+        "decompose_u_to_x2p_rz_same_sign",
+        "decompose_u_to_x2m_rz_same_sign",
+        "decompose_u_to_y2p_rz_same_sign",
+        "decompose_u_to_y2m_rz_same_sign",
+    ] {
+        let rule = library
+            .get_by_name(name)
+            .expect("native rule must be registered");
+        let lhs = rule_items_to_circuit(&rule.operations, rule.num_qubits()).unwrap();
+        let rhs = rule_items_to_circuit(&rule.target, rule.num_qubits()).unwrap();
+        let mut symbols: Vec<_> = rule.collect_free_symbols().into_iter().collect();
+        symbols.sort();
+        for sample in 0..112 {
+            let bindings = Some(
+                symbols
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| {
+                        let edge = [
+                            0.0,
+                            std::f64::consts::FRAC_PI_2,
+                            -std::f64::consts::FRAC_PI_2,
+                            std::f64::consts::PI,
+                            -std::f64::consts::PI,
+                            2.0 * std::f64::consts::PI,
+                            -2.0 * std::f64::consts::PI,
+                            4.0 * std::f64::consts::PI,
+                            -4.0 * std::f64::consts::PI,
+                            1e-12,
+                            -1e-12,
+                            0.173,
+                        ];
+                        (
+                            name.as_str(),
+                            if sample < edge.len() {
+                                edge[(sample + index * 3) % edge.len()]
+                            } else {
+                                rng.random_range(-20.0..20.0)
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+            let a = circuit_to_matrix(&lhs.assign_parameters(&bindings).unwrap(), None).unwrap();
+            let b = circuit_to_matrix(&rhs.assign_parameters(&bindings).unwrap(), None).unwrap();
+            let error = max_diff_strict(&a, &b);
+            assert!(
+                error < 1e-10,
+                "{name}: strict error {error}, bindings={bindings:?}"
+            );
+        }
+    }
+}

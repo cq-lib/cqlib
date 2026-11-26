@@ -14,13 +14,13 @@ Add the crate to your project:
 
 ```toml
 [dependencies]
-cqlib-core = "0.1.0-beta.1"
+cqlib-core = "0.1.0-beta.7"
 ```
 
 Or use Cargo:
 
 ```shell
-cargo add cqlib-core@0.1.0-beta.1
+cargo add cqlib-core@0.1.0-beta.7
 ```
 
 ## Quick start
@@ -77,7 +77,8 @@ assert!(bound.parameters().is_empty());
 - **Simulation** — Statevector, density-matrix, noisy density-matrix, and
   stabilizer simulation
 - **Quantum information** — Pauli operators, Hamiltonians, observables,
-  evolution, metrics, and entropy functions
+  evolution, fermionic algebra, excitation generators, Jordan–Wigner mapping,
+  metrics, and entropy functions
 - **Error mitigation** — Zero-noise extrapolation and virtual distillation
 - **Interchange formats** — OpenQASM 2, OpenQASM 3, and QCIS
 - **Visualization** — Text and SVG circuit rendering plus state and result plots

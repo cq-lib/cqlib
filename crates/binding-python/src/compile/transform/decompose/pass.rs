@@ -40,7 +40,7 @@ pub fn py_expand_definitions(
     .map_err(compiler_error_to_py_err)
 }
 
-/// Synthesizes matrix-backed one- and two-qubit unitary gates.
+/// Synthesizes matrix-backed numeric unitary gates.
 #[pyfunction(name = "decompose_unitaries")]
 #[pyo3(signature = (circuit, config=None))]
 pub fn py_decompose_unitaries(

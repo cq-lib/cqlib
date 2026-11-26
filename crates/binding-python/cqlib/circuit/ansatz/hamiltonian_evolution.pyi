@@ -331,9 +331,10 @@ class PauliEvolutionAnsatz:
     def __init__(self, hamiltonian: Hamiltonian) -> None:
         """Creates a new ``PauliEvolutionAnsatz``.
 
-        The Hamiltonian is automatically **simplified** before processing:
-        Pauli phases are absorbed into coefficients, duplicate terms are merged,
-        and near-zero terms are removed.  The default strategy is
+        The Hamiltonian is normalized before processing: Pauli phases are absorbed,
+        duplicate terms are merged, and imaginary residuals of magnitude <= 1e-10
+        are projected to zero. Larger imaginary parts are rejected; every nonzero
+        real coefficient is retained. The default strategy is
         :meth:`EvolutionStrategy.auto` with ``steps=1``.
 
         Args:

@@ -21,6 +21,7 @@ pub mod bit;
 pub mod circuit_impl;
 pub mod circuit_to_matrix;
 pub mod classical;
+pub mod classical_data;
 pub mod classical_expr;
 pub mod control_flow;
 pub mod dag;
@@ -42,6 +43,7 @@ pub use circuit_to_matrix::py_circuit_to_matrix;
 pub use classical::{
     PyCircuitId, PyClassicalType, PyClassicalValue, PyClassicalVar, PyMeasurement,
 };
+pub use classical_data::PyClassicalDataOp;
 pub use classical_expr::PyClassicalExpr;
 pub use control_flow::{
     PyClassicalControlOp, PySwitchBuilder, PyValueControlBody, PyValueSwitchCase,
@@ -73,6 +75,7 @@ pub(crate) fn register_circuit_module(parent: &Bound<'_, PyModule>) -> PyResult<
     m.add_class::<PyClassicalValue>()?;
     m.add_class::<PyMeasurement>()?;
     m.add_class::<PyClassicalExpr>()?;
+    m.add_class::<PyClassicalDataOp>()?;
     m.add_class::<PySymbolicComplex>()?;
     m.add_class::<PySymbolicMatrix>()?;
     m.add_class::<PyInstruction>()?;

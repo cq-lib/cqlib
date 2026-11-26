@@ -99,9 +99,11 @@ Trotter-Suzuki 分解模式标签（`hamiltonian_to_trotter_circuit` 与 `hamilt
 
 ### hamiltonian_to_matrix_len(ptr) / hamiltonian_to_matrix(ptr, buffer, len)
 
-两步式读取稠密矩阵：`*_len` 返回边长 `2^N`（NULL 返回 0），填充接口把 `2^N × 2^N` 矩阵按行主序拷入 `buffer`（`Complex64` 值）。`len` 必须等于边长的平方。
+两步式读取稠密矩阵：`*_len` 返回边长 `2^N`（NULL 或边长无法表示时返回 0），填充接口把 `2^N × 2^N` 矩阵按行主序拷入 `buffer`（`Complex64` 值）。`len` 必须等于边长的平方。
 
-返回（填充接口）：0 成功；-1 空指针；-8 `len` 与矩阵元素数不符。
+返回（填充接口）：0 成功；-1 空指针；-7 元素数或字节数无法表示，或分配失败；-8 `len` 与矩阵元素数不符。失败不改写缓冲区。
+
+可表示的边长不保证完整矩阵可以分配；调用方应在计算 `dim * dim` 前检查溢出。
 
 ---
 
@@ -212,6 +214,7 @@ int32_t hamiltonian_variance_statevector(const struct CHamiltonian *ptr,
 ## 示例
 
 ```c
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "cqlib_c.h"
@@ -230,6 +233,8 @@ int main(void) {
     uintptr_t nq = hamiltonian_num_qubits(ham);       /* 2 */
     uintptr_t nt = hamiltonian_num_terms(ham);        /* 2 */
     int32_t commute = hamiltonian_all_terms_commute(ham);  /* 1（两单项对易） */
+    printf("qubits=%" PRIuPTR ", terms=%" PRIuPTR ", commute=%" PRId32 "\n",
+           nq, nt, commute);
     hamiltonian_simplify(ham);
 
     /* 3. 两步式读取 4x4 稠密矩阵 */
@@ -280,3 +285,86 @@ int main(void) {
 ```
 
 哈密顿量作为可观测量用于误差缓解流程（见 [零噪声外推](../6_error_mitigation/1_zne.md)、[虚拟蒸馏](../6_error_mitigation/2_virtual_distillation.md)），其期望值可直接由态矢量模拟器计算（见 [态矢量](1_statevector.md)）。
+
+
+## 带校验的稀疏 Pauli 代数
+
+`CHamiltonian` 同时表示一般非厄米稀疏算符。以下新接口采用与[费米子绑定](10_fermion.md)相同的错误码和输出约定：成功为 0，通过 `**out` 返回独立句柄，失败不改写输出或输入。输入 Pauli 句柄借用并复制，不消耗。保留旧 `from_pauli` 的所有权转移、原地 `scale` 和近零截断 `simplify` 行为。
+
+```c
+typedef struct CHamiltonianTerm {
+    const CPauliString *pauli;
+    Complex64 coefficient;
+} CHamiltonianTerm;
+
+int32_t hamiltonian_identity(size_t num_qubits, CHamiltonian **out);
+
+int32_t hamiltonian_from_terms(size_t num_qubits,
+                               const CHamiltonianTerm *terms,
+                               size_t len,
+                               CHamiltonian **out);
+
+int32_t hamiltonian_copy(const CHamiltonian *ptr, CHamiltonian **out);
+
+int32_t hamiltonian_normalized(const CHamiltonian *ptr, CHamiltonian **out);
+
+int32_t hamiltonian_normalized_hermitian(const CHamiltonian *ptr, CHamiltonian **out);
+
+int32_t hamiltonian_add(const CHamiltonian *left,
+                        const CHamiltonian *right,
+                        CHamiltonian **out);
+
+int32_t hamiltonian_sub(const CHamiltonian *left,
+                        const CHamiltonian *right,
+                        CHamiltonian **out);
+
+int32_t hamiltonian_mul(const CHamiltonian *left,
+                        const CHamiltonian *right,
+                        CHamiltonian **out);
+
+int32_t hamiltonian_scaled(const CHamiltonian *ptr,
+                           Complex64 factor,
+                           CHamiltonian **out);
+
+int32_t hamiltonian_adjoint(const CHamiltonian *ptr, CHamiltonian **out);
+
+int32_t hamiltonian_tensor(const CHamiltonian *left,
+                           const CHamiltonian *right,
+                           CHamiltonian **out);
+
+int32_t hamiltonian_remap_qubits(const CHamiltonian *ptr,
+                                 const size_t *mapping,
+                                 size_t len,
+                                 size_t target_width,
+                                 CHamiltonian **out);
+
+int32_t hamiltonian_chop(CHamiltonian *ptr, double atol);
+
+int32_t hamiltonian_equiv(const CHamiltonian *left,
+                          const CHamiltonian *right,
+                          double atol,
+                          uint8_t *out);
+
+int32_t hamiltonian_is_hermitian(const CHamiltonian *ptr, double atol, uint8_t *out);
+
+int32_t hamiltonian_get_term(const CHamiltonian *ptr,
+                             size_t index,
+                             CPauliString **out_pauli,
+                             Complex64 *out_coefficient);
+```
+
+| 接口 | 行为 |
+| --- | --- |
+| `identity/from_terms` | identity 支持零量子位标量一；空 terms 保留声明宽度。批量构造校验每项宽度和系数、吸收 Pauli 相位、合并重复项，仅删除精确零。 |
+| `copy/get_term` | 独立存储副本。get_term 返回项的 Pauli 副本及系数，不自动规范化；Pauli 用 pauli_string_free 释放，零宽度也合法。索引错误为 -2。 |
+| `normalized` | 返回经过校验和精确合并的副本，无近零截断。 |
+| `normalized_hermitian` | 规范化后将绝对值 ≤1e-10 的虚部投影到零，更大的虚部返回 -8；保留非零实系数。 |
+| `add/sub/mul/scaled/adjoint` | 调用 core checked 方法；校验输入与结果系数，非有限值或溢出返回 -8。二元运算要求宽度相同，mul 右侧先作用。 |
+| `tensor` | 左侧 ⊗ 右侧，右侧占低位 qubit；宽度相加，溢出返回 -8。 |
+| `remap_qubits` | mapping[source]=destination，长度等于输入宽度，目标唯一且小于 target_width；空闲 qubit 填 identity。不是费米模式置换。 |
+| `chop` | 原地规范化后删除模长 ≤atol 的系数；失败不修改对象。 |
+| `equiv/is_hermitian` | 写入 0/1；atol 有限且非负，0 为精确比较。equiv 要求宽度相同；厄米性检查等价于与伴随比较，不投影系数。 |
+
+对象结果用 `hamiltonian_free` 释放，输出槽须为空且有效。必需指针为空返回 -1；参数、宽度、系数或容差错误返回 -8；identity、tensor、remap 无法表示的 Pauli 位向量宽度返回 -7。零求和可以保留无需物化的较大声明宽度。
+
+atol 是系数容差；规范化后 `is_hermitian` 使用 `2*abs(imag) <= atol`，与 `normalized_hermitian` 的投影阈值是两个独立契约。稀疏代数不构造稠密矩阵，也不隐式调用旧 simplify。

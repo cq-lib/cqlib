@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.txt)
 [![Rust](https://img.shields.io/badge/rust-1.89%2B-orange.svg)](https://www.rust-lang.org)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org)
 [![C](https://img.shields.io/badge/c-11%2B-lightgrey.svg)](https://en.cppreference.com/w/c/11)
 
 [English](README.md)
@@ -16,13 +16,15 @@
 ## 概述
 
 Cqlib 是一个高性能量子计算 SDK，为量子程序的构建、优化与执行提供统一基础。核心采用 Rust 实现，兼顾极致性能与内存安全，并原生支持
-Python 3.10+ 和 C 11+ 语言接口。
+Python 3.11+ 和 C 11+ 语言接口。
 
 Cqlib 从底层设计兼顾科研与生产需求，覆盖量子计算全流程：从线路构建与参数化，到多层 IR 变换、基于规则的编译优化
 Pass，再到搭载噪声模型的真实设备模拟，并内置零噪声外推（ZNE）和虚拟蒸馏（Virtual
 Distillation）等误差缓解技术。其模块化设计支持独立使用各组件或组合为完整流水线，适用于量子算法原型开发、教学以及集成到更大规模软件栈中。
 
 了解更多请访问 **[qc.zdxlz.com/cqlib](https://qc.zdxlz.com/cqlib)**。
+
+**[阅读白皮书](docs/whitepaper/Cqlib.pdf)** —— 一份文档讲清 Cqlib 的设计理念、系统架构与技术细节。
 
 ## 核心特性
 
@@ -136,12 +138,12 @@ int main(void) {
 | 语言     | 最低版本 | 绑定技术              |
 |--------|------|-------------------|
 | Rust   | 1.89 | 原生                |
-| Python | 3.10 | PyO3 (abi3-py310) |
+| Python | 3.11 | PyO3 (abi3-py311) |
 | C      | 11   | cbindgen          |
 
 ## 从源码构建
 
-**前置条件：** Rust 1.89+，Python 3.10+（用于 Python 绑定）
+**前置条件：** Rust 1.89+，Python 3.11+（用于 Python 绑定）
 
 ```bash
 git clone https://gitee.com/cq-lib/cqlib.git
