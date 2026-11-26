@@ -29,7 +29,8 @@ use cqlib_core::compile::transform::decompose::unitary::{
     synthesize_numeric_2q_unitary as core_synthesize_numeric_2q_unitary,
 };
 use cqlib_core::compile::transform::decompose::{
-    DecompositionRuleStats, McGateDecomposeConfig, UnitaryDecomposeConfig,
+    BlockZxzDecomposeOptions, DecompositionRuleStats, McGateDecomposeConfig,
+    UnitaryDecomposeConfig, decompose_block_zxz_with_options,
     decompose_mc_gates_with_rule_stats as core_decompose_mc_gates_with_rule_stats,
     decompose_unitaries_with_rule_stats as core_decompose_unitaries_with_rule_stats,
     expand_definitions as core_expand_definitions,
@@ -71,6 +72,18 @@ pub const KAK_FACTOR_K1R: u8 = 1;
 pub const KAK_FACTOR_K2L: u8 = 2;
 pub const KAK_FACTOR_K2R: u8 = 3;
 
+/// Hard side-length cap matching `MAX_UNITARY_QUBITS = 20` in `circuit_unitary`.
+const BLOCK_ZXZ_MAX_DIM: usize = 1usize << 20;
+
+/// Absorb two outer controlled rotations' boundary CX gates per recursive layer.
+pub const BLOCK_ZXZ_OPT_A1: u8 = 1;
+/// Use a diagonal remainder between consecutive two-qubit leaves.
+pub const BLOCK_ZXZ_OPT_A2: u8 = 2;
+/// Permit A.2 on block-diagonal inputs when BLOCK_ZXZ_OPT_A2 is set.
+pub const BLOCK_ZXZ_OPT_A2_FORCE: u8 = 4;
+/// Default optimizations, with automatic block-diagonal handling.
+pub const BLOCK_ZXZ_OPT_ALL: u8 = BLOCK_ZXZ_OPT_A1 | BLOCK_ZXZ_OPT_A2;
+
 /// C snapshot of pass-local decomposition-rule cache statistics.
 #[repr(C)]
 pub struct CDecompositionRuleStats {
@@ -91,8 +104,16 @@ pub struct CDecompositionRuleStats {
 pub struct CUnitaryDecomposeConfig {
     /// 1 recurses into control-flow bodies, 0 does not.
     pub recurse_control_flow: u8,
+    /// When nonzero, `block_zxz_options` selects the Block-ZXZ optimization
+    /// bitmask; when 0 (including zero-initialized structs), default
+    /// optimizations (`BLOCK_ZXZ_OPT_ALL`) are used.
+    pub has_block_zxz_options: u8,
+    /// Block-ZXZ optimization mask applied to three-or-more-qubit unitary gates
+    /// when `has_block_zxz_options != 0` (bitwise OR of `BLOCK_ZXZ_OPT_*`, or
+    /// 0 for unoptimized synthesis).
+    pub block_zxz_options: u8,
     /// Reserved padding to keep the struct layout stable.
-    pub _reserved: [u8; 7],
+    pub _reserved: [u8; 5],
 }
 
 /// C form of [`McGateDecomposeConfig`].
@@ -174,7 +195,9 @@ pub struct CTargetBasisLowerer {
 pub extern "C" fn decompose_unitary_config_default() -> CUnitaryDecomposeConfig {
     CUnitaryDecomposeConfig {
         recurse_control_flow: 1,
-        _reserved: [0; 7],
+        has_block_zxz_options: 1,
+        block_zxz_options: BLOCK_ZXZ_OPT_ALL,
+        _reserved: [0; 5],
     }
 }
 
@@ -297,20 +320,32 @@ pub extern "C" fn decompose_unitaries_with_rule_stats(
     if circuit.is_null() {
         return std::ptr::null_mut();
     }
+    let block_zxz_options = if config.has_block_zxz_options == 0 {
+        BlockZxzDecomposeOptions::default()
+    } else {
+        let Some(options) = block_zxz_options_from_mask(config.block_zxz_options) else {
+            return std::ptr::null_mut();
+        };
+        options
+    };
     let config = UnitaryDecomposeConfig {
         two_qubit_target: Default::default(),
         recurse_control_flow: config.recurse_control_flow != 0,
+        block_zxz_options,
     };
-    let circuit = unsafe { &(*circuit).inner };
-    match core_decompose_unitaries_with_rule_stats(circuit, config) {
-        Ok((outcome, rule_stats)) => {
-            write_rule_stats(stats, &rule_stats);
-            Box::into_raw(Box::new(CCircuit {
-                inner: outcome.into_circuit(circuit),
-            }))
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let circuit = unsafe { &(*circuit).inner };
+        match core_decompose_unitaries_with_rule_stats(circuit, config) {
+            Ok((outcome, rule_stats)) => {
+                write_rule_stats(stats, &rule_stats);
+                Box::into_raw(Box::new(CCircuit {
+                    inner: outcome.into_circuit(circuit),
+                }))
+            }
+            Err(_) => std::ptr::null_mut(),
         }
-        Err(_) => std::ptr::null_mut(),
-    }
+    }))
+    .unwrap_or(std::ptr::null_mut())
 }
 
 /// Rewrites multi-controlled gates of `circuit` and returns the rebuilt
@@ -1142,4 +1177,64 @@ pub extern "C" fn decompose_unitary_target_cost_of_fixed_operations(
         };
     }
     CqlibError::Ok as i32
+}
+
+fn block_zxz_options_from_mask(options: u8) -> Option<BlockZxzDecomposeOptions> {
+    if options & !(BLOCK_ZXZ_OPT_ALL | BLOCK_ZXZ_OPT_A2_FORCE) != 0 {
+        return None;
+    }
+    Some(BlockZxzDecomposeOptions {
+        opt_a1: options & BLOCK_ZXZ_OPT_A1 != 0,
+        opt_a2: options & BLOCK_ZXZ_OPT_A2 != 0,
+        opt_a2_force: options & BLOCK_ZXZ_OPT_A2_FORCE != 0,
+    })
+}
+
+/// Synthesizes a row-major unitary into an owned circuit including global phase.
+/// `dim` must be a power of two in `[2, 2^20]`. `atol` must be finite and nonnegative.
+/// Pass a bitwise OR of BLOCK_ZXZ_OPT_* flags, or zero to disable both.
+/// Returns NULL on invalid input or synthesis failure. Release a successful
+/// result with circuit_free.
+///
+/// # Safety
+/// A non-null matrix pointer with a valid shape must be aligned and point to
+/// at least dim * dim initialized contiguous Complex64 values, each containing
+/// two doubles (real, imaginary). The caller owns the input for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn block_zxz_decompose(
+    matrix: *const Complex64,
+    dim: usize,
+    atol: f64,
+    options: u8,
+) -> *mut CCircuit {
+    let Some(options) = block_zxz_options_from_mask(options) else {
+        return std::ptr::null_mut();
+    };
+    if matrix.is_null()
+        || !matrix.is_aligned()
+        || !(2..=BLOCK_ZXZ_MAX_DIM).contains(&dim)
+        || !dim.is_power_of_two()
+        || !atol.is_finite()
+        || atol < 0.
+    {
+        return std::ptr::null_mut();
+    }
+    let Some(len) = dim.checked_mul(dim) else {
+        return std::ptr::null_mut();
+    };
+    if len > isize::MAX as usize / size_of::<Complex64>() {
+        return std::ptr::null_mut();
+    }
+    std::panic::catch_unwind(|| {
+        // Shape, multiplication and byte extent have been checked before the first read.
+        let slice = unsafe { std::slice::from_raw_parts(matrix, len) };
+        let matrix = ndarray::ArrayView2::from_shape((dim, dim), slice)
+            .ok()?
+            .to_owned();
+        let inner = decompose_block_zxz_with_options(&matrix, atol, &options).ok()?;
+        Some(Box::into_raw(Box::new(CCircuit { inner })))
+    })
+    .ok()
+    .flatten()
+    .unwrap_or(std::ptr::null_mut())
 }

@@ -1,6 +1,6 @@
 # Decompose / Resynthesis (C)
 
-This page covers the circuit-level decomposition passes (circuit-gate definition expansion `decompose_expand_definitions`, matrix-backed unitary synthesis `decompose_unitaries`, multi-controlled gate rewriting `decompose_mc_gates`), two-qubit block resynthesis `resynthesize_two_qubit_blocks`, the numeric unitary-matrix synthesis primitives (one-qubit / two-qubit), unitary synthesis targets `decompose_unitary_target_*`, KAK (Weyl) decomposition, target-basis lowering `target_basis_lowerer_*`, and device lowering `decompose_lower_to_device`. Decomposition is layered by the representation each operation carries: definition expansion runs before numeric synthesis, so unitary gates that ship their own implementation circuit are expanded before entering matrix synthesis. Matrix inputs use `Complex64` (`{double re; double im}` interleaved pairs, row-major); the layout is described in [Unitary Gates](../0_circuit/6_gate_unitary.md). Error codes, string and handle ownership conventions follow the [Overview](../0_overview.md).
+This page covers the circuit-level decomposition passes (circuit-gate definition expansion `decompose_expand_definitions`, matrix-backed unitary synthesis `decompose_unitaries`, multi-controlled gate rewriting `decompose_mc_gates`), two-qubit block resynthesis `resynthesize_two_qubit_blocks`, the numeric unitary-matrix synthesis primitives (including multi-qubit Block-ZXZ), unitary synthesis targets `decompose_unitary_target_*`, KAK (Weyl) decomposition, target-basis lowering `target_basis_lowerer_*`, and device lowering `decompose_lower_to_device`. Decomposition is layered by the representation each operation carries: definition expansion runs before numeric synthesis, so unitary gates that ship their own implementation circuit are expanded before entering matrix synthesis. Matrix inputs use `Complex64` (`{double re; double im}` interleaved pairs, row-major); the layout is described in [Unitary Gates](../0_circuit/6_gate_unitary.md). Error codes, string and handle ownership conventions follow the [Overview](../0_overview.md).
 
 ---
 
@@ -25,13 +25,22 @@ KAK local-factor tags (the `factor` parameter of `kak_decomposition_local_factor
 | `KAK_FACTOR_K2L` | 2 | `k2l` (left local factor, applied before the interaction). |
 | `KAK_FACTOR_K2R` | 3 | `k2r` (right local factor, applied before the interaction). |
 
+Block-ZXZ optimization flags (bitmask for `block_zxz_decompose` and `CUnitaryDecomposeConfig.block_zxz_options`):
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `BLOCK_ZXZ_OPT_A1` | 1 | Absorb two boundary `CX` gates per recursive layer. |
+| `BLOCK_ZXZ_OPT_A2` | 2 | Transfer a diagonal remainder between consecutive two-qubit leaves. |
+| `BLOCK_ZXZ_OPT_A2_FORCE` | 4 | Permit A.2 on block-diagonal inputs when `BLOCK_ZXZ_OPT_A2` is set. |
+| `BLOCK_ZXZ_OPT_ALL` | 3 | Default optimizations (`BLOCK_ZXZ_OPT_A1 | BLOCK_ZXZ_OPT_A2`), with automatic block-diagonal handling. |
+
 ---
 
 ## Configuration Construction
 
 ### decompose_unitary_config_default()
 
-Returns the default unitary-decompose configuration by value: `recurse_control_flow=1` (recurse into control-flow bodies).
+Returns the default unitary-decompose configuration by value: `recurse_control_flow=1` (recurse into control-flow bodies), `has_block_zxz_options=1`, and `block_zxz_options=BLOCK_ZXZ_OPT_ALL` (both Block-ZXZ CX reductions enabled for three-or-more-qubit unitary gates).
 
 ```c
 struct CUnitaryDecomposeConfig decompose_unitary_config_default(void);
@@ -216,6 +225,29 @@ Returns: a new `CCircuit*` on success (free with `circuit_free`); NULL when `cir
 ---
 
 ## Numeric Unitary Synthesis Primitives
+
+### block_zxz_decompose(matrix, dim, atol, options)
+
+```c
+struct CCircuit *block_zxz_decompose(const Complex64 *matrix, uintptr_t dim,
+                                     double atol, uint8_t options);
+```
+
+Supply a row-major square unitary. The caller owns an aligned buffer of at
+least `dim * dim` initialized `Complex64` values, each a real/imaginary
+pair of doubles. `matrix[row * dim + column]` is the corresponding element.
+The function borrows the buffer during the call. `dim` is the side length
+and must be a power of two in `[2, 2^20]`. The API checks the computed byte
+extent before reading. The caller supplies the storage for that extent.
+`atol` is a finite nonnegative absolute tolerance.
+
+Pass `BLOCK_ZXZ_OPT_ALL` for the default, zero for unoptimized synthesis,
+or combine `BLOCK_ZXZ_OPT_A1` and `BLOCK_ZXZ_OPT_A2` by bitwise OR.
+Add `BLOCK_ZXZ_OPT_A2_FORCE` to permit enabled A.2 on block-diagonal inputs.
+Success returns an owned circuit including the global phase. Release it
+with `circuit_free`. A null input, invalid shape, overflowing extent,
+unknown option bits, invalid tolerance, non-finite or non-unitary matrix,
+or numerical failure returns `NULL`.
 
 ### synthesize_numeric_1q_unitary(matrix, out)
 
@@ -781,14 +813,18 @@ Returns: a new `CCircuit*` on success (free with `circuit_free`); NULL when any 
 ```c
 typedef struct CUnitaryDecomposeConfig {
   uint8_t recurse_control_flow;
-  uint8_t _reserved[7];
+  uint8_t has_block_zxz_options;
+  uint8_t block_zxz_options;
+  uint8_t _reserved[5];
 } CUnitaryDecomposeConfig;
 ```
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `recurse_control_flow` | `uint8_t` | 1 recurses into control-flow bodies, 0 does not. |
-| `_reserved[7]` | `uint8_t[7]` | Padding that keeps the struct layout stable. |
+| `has_block_zxz_options` | `uint8_t` | Nonzero uses `block_zxz_options`; 0 (including zero-initialized structs) selects `BLOCK_ZXZ_OPT_ALL`. |
+| `block_zxz_options` | `uint8_t` | Bitmask of `BLOCK_ZXZ_OPT_*` switches applied to three-or-more-qubit Block-ZXZ synthesis when `has_block_zxz_options != 0` (`BLOCK_ZXZ_OPT_ALL` by default). |
+| `_reserved[5]` | `uint8_t[5]` | Padding that keeps the struct layout stable. |
 
 ### CMcGateDecomposeConfig
 

@@ -10,6 +10,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+use super::block_zxz::Options as PyBlockZxzDecomposeOptions;
 use crate::circuit::PyInstruction;
 use crate::compile::error::compiler_error_to_py_err;
 use crate::compile::resource::{PyResourceLimits, PyResourcePolicy};
@@ -20,7 +21,9 @@ use cqlib_core::compile::CompilerError;
 use cqlib_core::compile::transform::decompose::unitary::{
     TwoQubitSynthesisTarget, TwoQubitUnitaryDecomposeBasis,
 };
-use cqlib_core::compile::transform::decompose::{McGateDecomposeConfig, UnitaryDecomposeConfig};
+use cqlib_core::compile::transform::decompose::{
+    BlockZxzDecomposeOptions, McGateDecomposeConfig, UnitaryDecomposeConfig,
+};
 use pyo3::prelude::*;
 
 /// Output interaction basis used for numeric two-qubit unitary synthesis.
@@ -123,12 +126,13 @@ pub struct PyUnitaryDecomposeConfig {
 #[pymethods]
 impl PyUnitaryDecomposeConfig {
     #[new]
-    #[pyo3(signature = (*, two_qubit_basis=None, target_basis=None, recurse_control_flow=true))]
+    #[pyo3(signature = (*, two_qubit_basis=None, target_basis=None, recurse_control_flow=true, block_zxz_options=None))]
     fn new(
         py: Python<'_>,
         two_qubit_basis: Option<PyTwoQubitUnitaryDecomposeBasis>,
         target_basis: Option<Vec<PyTargetBasisItem>>,
         recurse_control_flow: bool,
+        block_zxz_options: Option<PyBlockZxzDecomposeOptions>,
     ) -> PyResult<Self> {
         if two_qubit_basis.is_some() && target_basis.is_some() {
             return Err(compiler_error_to_py_err(CompilerError::InvalidInput(
@@ -157,10 +161,12 @@ impl PyUnitaryDecomposeConfig {
                 target_for_basis(basis.inner)
             }),
         };
+        let block_zxz_options = block_zxz_options.map_or_else(Default::default, |value| value.0);
         Ok(Self {
             inner: UnitaryDecomposeConfig {
                 two_qubit_target,
                 recurse_control_flow,
+                block_zxz_options,
             },
             two_qubit_basis,
             target_basis,
@@ -184,22 +190,32 @@ impl PyUnitaryDecomposeConfig {
         self.inner.recurse_control_flow
     }
 
+    #[getter]
+    fn block_zxz_options(&self) -> PyBlockZxzDecomposeOptions {
+        PyBlockZxzDecomposeOptions(self.inner.block_zxz_options)
+    }
+
     fn __repr__(&self) -> String {
         let two_qubit_basis = self.two_qubit_basis.map_or_else(
             || "None".to_string(),
             |basis| basis.repr_value().to_string(),
         );
         let target_basis = format_target_basis_repr(&self.target_basis);
-        format!(
-            "UnitaryDecomposeConfig(two_qubit_basis={}, target_basis={}, recurse_control_flow={})",
-            two_qubit_basis,
-            target_basis,
-            if self.inner.recurse_control_flow {
-                "True"
-            } else {
-                "False"
-            }
-        )
+        let recurse = if self.inner.recurse_control_flow {
+            "True"
+        } else {
+            "False"
+        };
+        if self.inner.block_zxz_options == BlockZxzDecomposeOptions::default() {
+            format!(
+                "UnitaryDecomposeConfig(two_qubit_basis={two_qubit_basis}, target_basis={target_basis}, recurse_control_flow={recurse})",
+            )
+        } else {
+            let block_zxz = PyBlockZxzDecomposeOptions(self.inner.block_zxz_options).repr_value();
+            format!(
+                "UnitaryDecomposeConfig(two_qubit_basis={two_qubit_basis}, target_basis={target_basis}, recurse_control_flow={recurse}, block_zxz_options={block_zxz})",
+            )
+        }
     }
 
     fn __eq__(&self, other: &Self) -> bool {

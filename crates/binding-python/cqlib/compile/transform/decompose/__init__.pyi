@@ -14,8 +14,14 @@ from cqlib.circuit import Circuit, Instruction
 from cqlib.compile.resource import ResourceLimits, ResourcePolicy
 from cqlib.device import Device
 from .. import TransformResult
+from . import block_zxz as block_zxz
 from . import mc_gate as mc_gate
 from . import unitary as unitary
+from .block_zxz import (
+    BlockZxzDecomposeOptions,
+    decompose_block_zxz,
+    decompose_block_zxz_with_options,
+)
 
 class TwoQubitUnitaryDecomposeBasis:
     """Output interaction basis for numeric two-qubit unitary synthesis."""
@@ -56,6 +62,7 @@ class UnitaryDecomposeConfig:
         two_qubit_basis: TwoQubitUnitaryDecomposeBasis | None = None,
         target_basis: list[Instruction | str] | None = None,
         recurse_control_flow: bool = True,
+        block_zxz_options: BlockZxzDecomposeOptions | None = None,
     ) -> None: ...
     @property
     def two_qubit_basis(self) -> TwoQubitUnitaryDecomposeBasis | None:
@@ -76,6 +83,10 @@ class UnitaryDecomposeConfig:
     @property
     def recurse_control_flow(self) -> bool:
         """Whether unitary gates in control-flow bodies are synthesized."""
+        ...
+    @property
+    def block_zxz_options(self) -> BlockZxzDecomposeOptions:
+        """Optimization switches for three-or-more-qubit Block-ZXZ synthesis."""
         ...
     def __copy__(self) -> UnitaryDecomposeConfig: ...
     def __deepcopy__(self, memo: dict[int, object]) -> UnitaryDecomposeConfig: ...
@@ -135,7 +146,7 @@ def decompose_unitaries(
     circuit: Circuit,
     config: UnitaryDecomposeConfig | None = None,
 ) -> TransformResult:
-    """Synthesize matrix-backed one- and two-qubit unitary gates.
+    """Synthesize matrix-backed numeric unitary gates.
 
     Raises:
         CompilerConfigError: If a unitary is unresolved, invalid, or
@@ -186,6 +197,10 @@ def decompose_mc_gates_for_device(
     ...
 
 __all__ = [
+    "block_zxz",
+    "BlockZxzDecomposeOptions",
+    "decompose_block_zxz",
+    "decompose_block_zxz_with_options",
     "mc_gate",
     "unitary",
     "TwoQubitUnitaryDecomposeBasis",

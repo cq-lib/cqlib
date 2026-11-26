@@ -251,7 +251,134 @@ static void test_circuit_gate_operation_matrix(void) {
     }
 }
 
+static void test_block_zxz(void) {
+    Complex64 u[64] = {0};
+    for (size_t j = 0; j < 8; ++j) {
+        u[8 * ((j + 1) % 8) + j] = (Complex64){cos(0.37), sin(0.37)};
+    }
+    for (uint8_t opt = 0; opt <= (BLOCK_ZXZ_OPT_ALL | BLOCK_ZXZ_OPT_A2_FORCE); ++opt) {
+        CCircuit* c = block_zxz_decompose(u, 8, 1e-10, opt);
+        assert(c != NULL);
+        double actual[128];
+        assert(circuit_to_matrix(c, NULL, 0, actual, 128) == 64);
+        for (size_t i = 0; i < 64; ++i) {
+            assert(hypot(actual[2 * i] - u[i].re, actual[2 * i + 1] - u[i].im) <= 1e-10);
+        }
+        circuit_free(c);
+    }
+
+    /* Check 1q, 2q, and 4q dimensions with non-trivial global phase. */
+    size_t dims[3] = {2, 4, 16};
+    for (size_t k = 0; k < 3; ++k) {
+        size_t dim = dims[k];
+        size_t n2 = dim * dim;
+        Complex64* qft = (Complex64*)calloc(n2, sizeof(Complex64));
+        double* actual = (double*)malloc(2 * n2 * sizeof(double));
+        assert(qft != NULL && actual != NULL);
+        double scale = 1.0 / sqrt((double)dim);
+        double tau = 6.283185307179586476925286766559;
+        for (size_t r = 0; r < dim; ++r) {
+            for (size_t col = 0; col < dim; ++col) {
+                double ang = tau * (double)(r * col) / (double)dim + 0.51;
+                qft[r * dim + col] = (Complex64){scale * cos(ang), scale * sin(ang)};
+            }
+        }
+        CCircuit* c = block_zxz_decompose(qft, dim, 1e-10, BLOCK_ZXZ_OPT_ALL);
+        assert(c != NULL);
+        assert(circuit_to_matrix(c, NULL, 0, actual, 2 * n2) == (int64_t)n2);
+        for (size_t i = 0; i < n2; ++i) {
+            assert(hypot(actual[2 * i] - qft[i].re, actual[2 * i + 1] - qft[i].im) <= 1e-10);
+        }
+        circuit_free(c);
+        free(actual);
+        free(qft);
+    }
+
+    /* Slightly noisy input within a loose tolerance (> 1e-8) succeeds via unitary projection. */
+    Complex64 noisy[64];
+    for (size_t i = 0; i < 64; ++i) {
+        noisy[i] = (Complex64){u[i].re * (1.0 + 2e-7), u[i].im * (1.0 + 2e-7)};
+    }
+    CCircuit* cn = block_zxz_decompose(noisy, 8, 1e-5, BLOCK_ZXZ_OPT_ALL);
+    assert(cn != NULL);
+    double actual_noisy[128];
+    assert(circuit_to_matrix(cn, NULL, 0, actual_noisy, 128) == 64);
+    for (size_t i = 0; i < 64; ++i) {
+        assert(hypot(actual_noisy[2 * i] - noisy[i].re, actual_noisy[2 * i + 1] - noisy[i].im) <=
+               1e-5);
+    }
+    circuit_free(cn);
+
+    /* Exact zero and negative-zero tolerance on exact identity. */
+    Complex64 eye8[64] = {0};
+    for (size_t i = 0; i < 8; ++i) eye8[i * 8 + i] = (Complex64){1.0, 0.0};
+    CCircuit* c0 = block_zxz_decompose(eye8, 8, 0.0, BLOCK_ZXZ_OPT_ALL);
+    assert(c0 != NULL);
+    circuit_free(c0);
+    CCircuit* cneg0 = block_zxz_decompose(eye8, 8, -0.0, BLOCK_ZXZ_OPT_ALL);
+    assert(cneg0 != NULL);
+    circuit_free(cneg0);
+
+    /* Invalid inputs: null, unaligned, bad dims, overflow, unknown option bits, bad atol,
+     * non-finite. */
+    assert(block_zxz_decompose(NULL, 8, 1e-10, 0) == NULL);
+    unsigned char raw[64 * sizeof(Complex64) + 16] = {0};
+    uintptr_t aligned_addr = ((uintptr_t)raw + 7) & ~(uintptr_t)7;
+    assert(block_zxz_decompose((const Complex64*)(aligned_addr + 1), 2, 1e-10, 0) == NULL);
+    assert(block_zxz_decompose(u, 0, 1e-10, 0) == NULL);
+    assert(block_zxz_decompose(u, 1, 1e-10, 0) == NULL);
+    assert(block_zxz_decompose(u, 3, 1e-10, 0) == NULL);
+    assert(block_zxz_decompose(u, (size_t)1 << 21, 1e-10, 0) == NULL);
+    assert(block_zxz_decompose(u, SIZE_MAX / 2 + 1, 1e-10, 0) == NULL);
+    assert(block_zxz_decompose(u, (size_t)1 << (sizeof(size_t) * 4 - 1), 1e-10, 0) == NULL);
+    assert(block_zxz_decompose(u, 8, 1e-10, 8) == NULL);
+    assert(block_zxz_decompose(u, 8, 1e-10, 255) == NULL);
+
+    /* CUnitaryDecomposeConfig exposes block_zxz_options and rejects unknown option bits. */
+    CUnitaryDecomposeConfig cfg = decompose_unitary_config_default();
+    assert(cfg.has_block_zxz_options == 1);
+    assert(cfg.block_zxz_options == BLOCK_ZXZ_OPT_ALL);
+    CCircuit* src3 = circuit_new(3);
+    assert(src3 != NULL);
+    uint32_t qargs3[3] = {2, 1, 0};
+    assert(circuit_unitary(src3, "roll3", 3, u, qargs3, 3) == 0);
+    CCircuit* opt_out = decompose_unitaries(src3, cfg);
+    assert(opt_out != NULL);
+    double actual_pass[128];
+    assert(circuit_to_matrix(opt_out, NULL, 0, actual_pass, 128) == 64);
+    for (size_t i = 0; i < 64; ++i) {
+        assert(hypot(actual_pass[2 * i] - u[i].re, actual_pass[2 * i + 1] - u[i].im) <= 1e-10);
+    }
+    circuit_free(opt_out);
+    /* Zero-initialized CUnitaryDecomposeConfig uses default Block-ZXZ options. */
+    CUnitaryDecomposeConfig zero_cfg = {0};
+    zero_cfg.recurse_control_flow = 1;
+    CCircuit* zero_out = decompose_unitaries(src3, zero_cfg);
+    assert(zero_out != NULL);
+    circuit_free(zero_out);
+    cfg.block_zxz_options = 0;
+    CCircuit* unopt_out = decompose_unitaries(src3, cfg);
+    assert(unopt_out != NULL);
+    circuit_free(unopt_out);
+    cfg.block_zxz_options = 8;
+    assert(decompose_unitaries(src3, cfg) == NULL);
+    circuit_free(src3);
+    assert(block_zxz_decompose(u, 8, NAN, 0) == NULL);
+    assert(block_zxz_decompose(u, 8, INFINITY, 0) == NULL);
+    assert(block_zxz_decompose(u, 8, -INFINITY, 0) == NULL);
+    assert(block_zxz_decompose(u, 8, -1e-300, 0) == NULL);
+    assert(block_zxz_decompose(u, 8, -1, 0) == NULL);
+    u[0].re = 2.0;
+    assert(block_zxz_decompose(u, 8, 1e-10, 0) == NULL);
+    u[0].re = INFINITY;
+    assert(block_zxz_decompose(u, 8, 1e-10, 0) == NULL);
+    u[0].re = 0.0;
+    u[0].im = NAN;
+    assert(block_zxz_decompose(u, 8, 1e-10, 0) == NULL);
+}
+
 int main(void) {
+    test_block_zxz();
     test_basic_circuit();
     test_errors();
     test_symbolic_parameters();

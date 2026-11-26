@@ -48,8 +48,8 @@ use num_complex::Complex64;
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI};
 use std::sync::{Arc, LazyLock};
 
-const ANGLE_EPS: f64 = 1e-12;
-const TWO_QUBIT_EXACT_TOLERANCE: f64 = 1e-10;
+const ANGLE_EPS: f64 = 64.0 * f64::EPSILON;
+pub(crate) const TWO_QUBIT_EXACT_TOLERANCE: f64 = 1e-10;
 
 /// Output basis used for two-qubit unitary synthesis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1098,15 +1098,15 @@ pub(crate) fn minimum_constructive_entanglers(
 fn minimum_pauli_entanglers(decomp: &KakDecomposition) -> usize {
     [decomp.a, decomp.b, decomp.c]
         .into_iter()
-        .filter(|value| value.abs() > TWO_QUBIT_EXACT_TOLERANCE)
+        .filter(|value| value.abs() > ANGLE_EPS)
         .count()
 }
 
 fn minimum_cx_family_entanglers(decomp: &KakDecomposition) -> usize {
-    let near_zero = |value: f64| value.abs() <= TWO_QUBIT_EXACT_TOLERANCE;
+    let near_zero = |value: f64| value.abs() <= ANGLE_EPS;
     if near_zero(decomp.a) && near_zero(decomp.b) && near_zero(decomp.c) {
         0
-    } else if (decomp.a - std::f64::consts::FRAC_PI_4).abs() <= TWO_QUBIT_EXACT_TOLERANCE
+    } else if (decomp.a - std::f64::consts::FRAC_PI_4).abs() <= ANGLE_EPS
         && near_zero(decomp.b)
         && near_zero(decomp.c)
     {
@@ -2011,10 +2011,39 @@ mod tests {
         decomp.b = 0.17;
         assert_eq!(minimum_cx_family_entanglers(&decomp), 2);
 
-        decomp.c = 2.0 * TWO_QUBIT_EXACT_TOLERANCE;
+        decomp.c = 2.0 * ANGLE_EPS;
         assert_eq!(minimum_cx_family_entanglers(&decomp), 3);
-        decomp.c = 0.5 * TWO_QUBIT_EXACT_TOLERANCE;
+        decomp.c = 0.5 * ANGLE_EPS;
         assert_eq!(minimum_cx_family_entanglers(&decomp), 2);
+    }
+
+    #[test]
+    fn cx_family_backends_preserve_sub_tolerance_weak_xx_interaction() {
+        let angle = 9e-11_f64;
+        let u = Array2::from_shape_fn((4, 4), |(i, j)| match i ^ j {
+            0 => Complex64::from(angle.cos()),
+            3 => Complex64::i() * angle.sin(),
+            _ => Complex64::ZERO,
+        });
+        let qubits = [Qubit::new(1), Qubit::new(0)];
+        for basis in [
+            TwoQubitUnitaryDecomposeBasis::Cx,
+            TwoQubitUnitaryDecomposeBasis::Cy,
+            TwoQubitUnitaryDecomposeBasis::Cz,
+        ] {
+            let synth = synthesize_numeric_2q_unitary(&u, qubits, basis).unwrap();
+            let actual =
+                value_operations_matrix(&synth.operations, synth.global_phase, qubits).unwrap();
+            let max_err = actual
+                .iter()
+                .zip(u.iter())
+                .map(|(a, b)| (a - b).norm())
+                .fold(0.0_f64, f64::max);
+            assert!(
+                max_err < 1e-13,
+                "basis {basis:?} dropped weak XX interaction: max_err={max_err:e}"
+            );
+        }
     }
 
     #[test]

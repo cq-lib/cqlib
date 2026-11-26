@@ -47,12 +47,19 @@ The circuit-level entry points are in `cqlib_core::compile::transform::decompose
 - `decompose_unitaries_with_rule_stats(circuit: &Circuit, config: UnitaryDecomposeConfig) -> Result<(TransformOutcome, DecompositionRuleStats), CompilerError>`
 - `DecomposeUnitaries`: a `Transformer` adapter with the configuration bound at construction time, constructed with `DecomposeUnitaries::new(config)`; implements `Default`.
 
+For matrices acting on three or more qubits, the pass uses Block-ZXZ and emits
+standard gates before routing and target-basis conversion. The first gate
+argument is the most significant matrix bit. The cached rule stores the
+numeric phase together with the operations. A conditional body receives its
+own phase when that rule is applied inside control flow.
+
 ### UnitaryDecomposeConfig
 
 ```rust
 pub struct UnitaryDecomposeConfig {
     pub two_qubit_target: TwoQubitSynthesisTarget,
     pub recurse_control_flow: bool,
+    pub block_zxz_options: BlockZxzDecomposeOptions,
 }
 ```
 
@@ -60,8 +67,9 @@ Fields:
 
 - `two_qubit_target`: the target capabilities used by exact two-qubit numeric synthesis, constructed with `TwoQubitSynthesisTarget::from_instructions(target_basis: Option<&[Instruction]>)`; `None` means no target constraint, enabling the neutral Pauli rotation fallback.
 - `recurse_control_flow`: whether to recurse into control flow blocks.
+- `block_zxz_options`: optimization switches applied to three-or-more-qubit Block-ZXZ synthesis (`BlockZxzDecomposeOptions::default()` enables A.1 and A.2 with automatic block-diagonal handling).
 
-Implements `Default`, equivalent to no target constraint with recursion into control flow blocks.
+Implements `Default`, equivalent to no target constraint, recursion into control flow blocks, and default Block-ZXZ options.
 
 ### DecompositionRuleStats
 
@@ -76,6 +84,28 @@ pub struct DecompositionRuleStats {
 In-pass rule cache statistics: hits, misses and insert counts.
 
 ---
+
+## Block-ZXZ synthesis
+
+The module `cqlib_core::compile::transform::decompose` re-exports
+`decompose_block_zxz(matrix, atol)` and
+`decompose_block_zxz_with_options(matrix, atol, &options)`. Both accept
+`&Array2<Complex64>` and return `Result<Circuit, CompilerError>`. Supply a
+finite square unitary of dimension `2^n` with `n >= 1`. Local qubit 0 is
+the least significant bit. The circuit matrix includes the input's global
+phase. The finite nonnegative absolute tolerance validates input unitarity (`||M†M - I||_max <= atol`)
+and governs reconstruction checks for demultiplexers and two-qubit leaves; near-unitary inputs
+passing validation are projected onto the nearest unitary `U_proj` (in every unitarily invariant
+norm) when needed, and synthesis reconstructs `U_proj` within `atol`.
+
+`BlockZxzDecomposeOptions::default()` enables `opt_a1` (absorb boundary CX
+gates) and `opt_a2` (transfer a diagonal between two-qubit leaves).
+`opt_a2_force` permits A.2 on block-diagonal inputs when A.2 is enabled.
+For three or more qubits, exact block-diagonal inputs use a single multiplexer.
+Equal halves leave the highest qubit idle. If a two-qubit KAK leaf cannot meet
+the requested precision, synthesis checks an additional Block-ZXZ layer
+against the original 4×4 matrix.
+Numerical fallback may emit an explicit diagonal and additional gates.
 
 ## Numeric unitary gate synthesis
 

@@ -10,6 +10,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+mod block_zxz;
 pub(crate) mod config;
 mod mc_gate;
 mod pass;
@@ -47,6 +48,7 @@ pub(crate) fn register_decompose_module(parent: &Bound<'_, PyModule>) -> PyResul
         &m
     )?)?;
 
+    block_zxz::register(&m)?;
     unitary::register_unitary_module(&m)?;
     mc_gate::register_mc_gate_module(&m)?;
 
