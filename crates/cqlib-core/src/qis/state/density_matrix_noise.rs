@@ -284,14 +284,14 @@ impl DensityMatrixNoise {
                         }
                     }
                     Instruction::UnitaryGate(u_gate) => {
-                        if let Some(matrix) = u_gate.matrix() {
-                            sim.apply_unitary_gate(&qs, matrix)?;
-                            sim.apply_noise(StandardGate::U, &qs)?;
-                        } else {
+                        if u_gate.matrix_repr().is_none() {
                             return Err(QisError::CircuitError(
                                 crate::circuit::CircuitError::NoMatrixRepresentation,
                             ));
                         }
+                        let matrix = u_gate.matrix_for_params_in_gate_order(&params)?;
+                        sim.apply_unitary_gate(&qs, matrix.as_ref())?;
+                        sim.apply_noise(StandardGate::U, &qs)?;
                     }
                     Instruction::CircuitGate(_) => {
                         return Err(QisError::CircuitError(

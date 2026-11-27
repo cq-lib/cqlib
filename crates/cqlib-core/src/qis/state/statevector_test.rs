@@ -2395,3 +2395,59 @@ fn zero_control_gphase_circuit_evolution() {
         }
     }
 }
+
+#[test]
+fn controlled_circuit_gate_superposition_preserves_target_order_and_relative_phase() {
+    use crate::circuit::Parameter;
+    use crate::circuit::gate::{CircuitGate, FrozenCircuit};
+
+    let theta = Parameter::symbol("theta");
+    let mut sub = Circuit::from_qubits(vec![Qubit::new(7), Qubit::new(2)]).unwrap();
+    sub.h(Qubit::new(7)).unwrap();
+    sub.cx(Qubit::new(7), Qubit::new(2)).unwrap();
+    sub.rz(Qubit::new(2), theta.clone()).unwrap();
+    sub.set_global_phase(theta);
+
+    let cg = CircuitGate::with_signature(
+        "PhasedBell",
+        FrozenCircuit::new(sub),
+        ["unused".to_string(), "theta".to_string()],
+    )
+    .unwrap();
+    let cc_gate = cg.control(2).unwrap();
+
+    // 4-qubit circuit: controls = [q2, q0], targets = [q3, q1].
+    // Prepare controls in superposition (|01> + |11>)/sqrt(2) on (q2, q0), i.e. q0=1, q2 in |+>,
+    // and target q3=1 so target input |t0, t1> = |1, 0>.
+    let angle = 0.62_f64;
+    let mut circuit = Circuit::new(4);
+    circuit.x(Qubit::new(0)).unwrap();
+    circuit.h(Qubit::new(2)).unwrap();
+    circuit.x(Qubit::new(3)).unwrap();
+    circuit
+        .unitary_with_params(
+            cc_gate,
+            vec![Qubit::new(2), Qubit::new(0), Qubit::new(3), Qubit::new(1)],
+            [99.0_f64.into(), angle.into()],
+        )
+        .unwrap();
+
+    let sv = Statevector::from_circuit(&circuit).unwrap();
+    // Inactive branch (q2=0, q0=1, q3=1, q1=0 -> index 0b1001 = 9): amplitude 1/sqrt(2)
+    // Active branch (q2=1, q0=1): |t0=1, t1=0> -> H(t0): (|00> - |10>)/sqrt(2)
+    // -> CX(t0->t1): (|00> - |11>)/sqrt(2)
+    // -> RZ(angle) on t1 + global_phase(angle):
+    //    |t0=0, t1=0> (index 0b0101 = 5): e^{i*angle} * e^{-i*angle/2} / 2 = e^{i*angle/2} / 2
+    //    |t0=1, t1=1> (index 0b1111 = 15): -e^{i*angle} * e^{i*angle/2} / 2 = -e^{i*3*angle/2} / 2
+    let mut expected = vec![Complex64::default(); 16];
+    expected[9] = Complex64::new(1.0 / 2.0_f64.sqrt(), 0.0);
+    expected[5] = Complex64::from_polar(0.5, angle * 0.5);
+    expected[15] = -Complex64::from_polar(0.5, angle * 1.5);
+
+    for (idx, (actual, exp)) in sv.data().iter().zip(&expected).enumerate() {
+        assert!(
+            (actual - exp).norm() < 1e-12,
+            "amplitude mismatch at basis {idx}: got {actual:?}, expected {exp:?}"
+        );
+    }
+}

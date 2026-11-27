@@ -238,6 +238,16 @@ When appending, note that:
 
 ---
 
+## Controlled gate
+
+```python
+CircuitGate.control(num_controls: int = 1) -> UnitaryGate
+```
+
+Prepends `num_controls` ($\ge 1$) active-high ($|1\rangle$) control qubits before the target qubits and returns a matrix-backed `UnitaryGate` (labeled `ctl_{num_controls}_{name}`), preserving the positional parameter order (exposed as `matrix_params`) and promoting the sub-circuit's global phase into a relative phase on the active branch. Dense caps are 12 total qubits for numeric gates and 8 for symbolic gates, and formal parameter names cannot collide with built-in constants (`e`, `pi`, `π`).
+
+---
+
 ## Inverse gate
 
 ```python
@@ -274,4 +284,3 @@ After decomposition, the composite gate is replaced by its inner original operat
 - Both `FrozenCircuit` and `CircuitGate` support structural equality comparison with `==`. Comparison of `FrozenCircuit` ignores the circuit identity and the symbolic matrix cache and compares only the definition itself; comparison of `CircuitGate` includes the name, the ordered signature and the underlying definition circuit.
 - `repr` has the form `FrozenCircuit(qubits=2, operations=2)` and `CircuitGate("Bell", qubits=2, params=0)`.
 - Both support `copy` and `deepcopy`. Since both are immutable objects, the copy equals the original object.
-

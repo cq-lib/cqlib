@@ -20,12 +20,85 @@ use crate::circuit::Qubit;
 use crate::circuit::circuit_impl::Circuit;
 use crate::circuit::circuit_to_matrix;
 use crate::circuit::error::CircuitError;
-use crate::circuit::symbolic_matrix::{SymbolicMatrix, circuit_to_symbolic_matrix};
+use crate::circuit::gate::{UnitaryGate, gate_matrix};
+use crate::circuit::symbolic_matrix::{
+    SymbolicComplex, SymbolicMatrix, circuit_to_symbolic_matrix,
+};
 use indexmap::IndexSet;
 use ndarray::Array2;
 use num_complex::Complex64;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+
+/// Maximum total qubit count for dense numeric matrix-backed controlled custom gates.
+///
+/// Capping numeric controlled unitaries at 12 qubits (`4096 x 4096`, ~256 MiB)
+/// keeps dense matrix allocation bounded.
+pub(crate) const MAX_CONTROLLED_UNITARY_QUBITS: usize = 12;
+
+/// Maximum total qubit count for dense symbolic matrix-backed controlled custom gates.
+///
+/// Symbolic matrices allocate `4^n` [`SymbolicComplex`] entries (each holding two
+/// expression trees), so they use a tighter cap (`256 x 256` = 65,536 entries).
+pub(crate) const MAX_CONTROLLED_SYMBOLIC_UNITARY_QUBITS: usize = 8;
+
+/// Validates the target qubit count, `u16` arity, and byte allocation layout
+/// before building a controlled dense numeric or symbolic unitary matrix.
+pub(crate) fn validate_controlled_unitary_qubits(
+    base_qubits: usize,
+    num_controls: usize,
+    symbolic: bool,
+) -> Result<u16, CircuitError> {
+    let invalid = CircuitError::InvalidOperation;
+
+    let total_qubits = base_qubits
+        .checked_add(num_controls)
+        .ok_or_else(|| invalid("controlled gate qubit count overflows usize".to_string()))?;
+    let total_qubits_u16 = u16::try_from(total_qubits).map_err(|_| {
+        invalid(format!(
+            "controlled gate qubit count {total_qubits} exceeds u16::MAX"
+        ))
+    })?;
+    let max_qubits = if symbolic {
+        MAX_CONTROLLED_SYMBOLIC_UNITARY_QUBITS
+    } else {
+        MAX_CONTROLLED_UNITARY_QUBITS
+    };
+    if total_qubits > max_qubits {
+        return Err(invalid(format!(
+            "controlled gate requires {total_qubits} qubits, exceeding maximum dense unitary limit of {max_qubits}"
+        )));
+    }
+    let exponent = u32::try_from(total_qubits).map_err(|_| {
+        invalid(format!(
+            "cannot build matrix for {total_qubits} qubits: exponent overflows u32"
+        ))
+    })?;
+    let dim = 1usize.checked_shl(exponent).ok_or_else(|| {
+        invalid(format!(
+            "cannot build matrix for {total_qubits} qubits: dimension overflows usize"
+        ))
+    })?;
+    let elems = dim.checked_mul(dim).ok_or_else(|| {
+        invalid(format!(
+            "cannot build matrix for {total_qubits} qubits: element count overflows usize"
+        ))
+    })?;
+    if symbolic {
+        std::alloc::Layout::array::<SymbolicComplex>(elems).map_err(|_| {
+            invalid(format!(
+                "cannot allocate symbolic matrix for {total_qubits} qubits"
+            ))
+        })?;
+    } else {
+        std::alloc::Layout::array::<Complex64>(elems).map_err(|_| {
+            invalid(format!(
+                "cannot allocate numeric matrix for {total_qubits} qubits"
+            ))
+        })?;
+    }
+    Ok(total_qubits_u16)
+}
 
 /// An immutable, frozen circuit for use in gate definitions.
 ///
@@ -388,6 +461,18 @@ impl CircuitGate {
                 return Err(CircuitError::InvalidParameterValue(index, value));
             }
         }
+        if self.circuit.circuit.parameters().is_empty() {
+            // circuit_to_matrix takes LSB-first ordering; gate arguments are MSB-first.
+            let order: Vec<usize> = self
+                .circuit
+                .circuit
+                .qubits()
+                .iter()
+                .rev()
+                .map(|q| q.index())
+                .collect();
+            return circuit_to_matrix(&self.circuit.circuit, Some(&order));
+        }
         let bindings: HashMap<&str, f64> = self
             .signature_params
             .iter()
@@ -398,7 +483,10 @@ impl CircuitGate {
             .circuit
             .circuit
             .assign_parameters(&Some(bindings))
-            .map_err(|_| CircuitError::SymbolicParameterError)?;
+            .map_err(|err| match err {
+                CircuitError::InvalidOperation(_) => err,
+                _ => CircuitError::SymbolicParameterError,
+            })?;
         // circuit_to_matrix takes LSB-first ordering; gate arguments are MSB-first.
         let order: Vec<usize> = assigned.qubits().iter().rev().map(|q| q.index()).collect();
         circuit_to_matrix(&assigned, Some(&order))
@@ -481,6 +569,101 @@ impl CircuitGate {
             self.signature_params.iter().cloned(),
         )
     }
+
+    /// Wraps this composite gate as a controlled [`UnitaryGate`] with `num_controls`
+    /// active-high (`|1⟩`) control qubits prepended before the target qubits.
+    ///
+    /// When applied to a circuit, pass the `num_controls` control qubits first,
+    /// followed by the `self.num_qubits()` target qubits (mapped positionally in
+    /// the inner circuit's storage order). All declared positional parameters
+    /// (`signature_params`) and the inner circuit's global phase (converted into
+    /// a relative phase on the all-ones control subspace) are preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircuitError::InvalidOperation`] when `num_controls == 0`, when
+    /// the resulting dense matrix exceeds resource limits, when the inner circuit
+    /// contains unsupported control flow or produces a non-unitary numeric
+    /// result, or when a parameterized (`num_params > 0`) gate declares (directly
+    /// or in nested gates) a reserved constant parameter name (`e`, `pi`, `π`).
+    /// Returns [`CircuitError::NoMatrixRepresentation`] when the inner circuit
+    /// contains non-unitary operations.
+    pub fn control(&self, num_controls: usize) -> Result<UnitaryGate, CircuitError> {
+        if num_controls == 0 {
+            return Err(CircuitError::InvalidOperation(
+                "num_controls must be at least 1".to_string(),
+            ));
+        }
+        let num_params = u16::try_from(self.num_params).map_err(|_| {
+            CircuitError::InvalidOperation(format!(
+                "circuit gate parameter count {} exceeds u16::MAX",
+                self.num_params
+            ))
+        })?;
+        let symbolic = self.num_params > 0;
+        let total_qubits =
+            validate_controlled_unitary_qubits(self.num_qubits, num_controls, symbolic)?;
+        let label = format!("ctl_{}_{}", num_controls, self.name);
+
+        if !symbolic {
+            let base = self.matrix_for_params(&[])?;
+            UnitaryGate::validate_numeric_unitary_matrix(&base)?;
+            let controlled = gate_matrix::control_matrix(&base, num_controls);
+            UnitaryGate::new(&label, total_qubits, 0).with_validated_matrix(controlled)
+        } else {
+            validate_no_reserved_constant_params(self)?;
+            // UnitaryGate symbolic matrices put the first positional argument at MSB,
+            // whereas circuit_to_symbolic_matrix takes LSB-first qubit ordering.
+            let msb_order: Vec<usize> = self
+                .circuit
+                .circuit()
+                .qubits()
+                .iter()
+                .rev()
+                .map(|q| q.index())
+                .collect();
+            let base = circuit_to_symbolic_matrix(self.circuit.circuit(), Some(&msb_order))?;
+            let controlled =
+                crate::circuit::symbolic_matrix::gate::control_matrix(&base, num_controls);
+            UnitaryGate::new(&label, total_qubits, num_params)
+                .with_symbolic_matrix(self.signature_params.iter().cloned(), controlled)
+        }
+    }
+}
+
+fn validate_no_reserved_constant_params(gate: &CircuitGate) -> Result<(), CircuitError> {
+    for param in &gate.signature_params {
+        if matches!(param.as_str(), "e" | "pi" | "π") {
+            return Err(CircuitError::InvalidOperation(format!(
+                "controlled circuit gate parameter '{param}' conflicts with built-in mathematical constant"
+            )));
+        }
+    }
+    validate_circuit_no_reserved_constant_params(gate.circuit.circuit())
+}
+
+/// Recursively verifies that no nested `CircuitGate` (including inside
+/// circuit-backed `UnitaryGate` definitions) declares a formal parameter
+/// colliding with built-in mathematical constants (`e`, `pi`, `π`).
+pub(crate) fn validate_circuit_no_reserved_constant_params(
+    circuit: &Circuit,
+) -> Result<(), CircuitError> {
+    for op in circuit.operations() {
+        match &op.instruction {
+            crate::circuit::Instruction::CircuitGate(inner) => {
+                validate_no_reserved_constant_params(inner)?;
+            }
+            crate::circuit::Instruction::UnitaryGate(inner_u) => {
+                if inner_u.matrix_repr().is_none()
+                    && let Some(inner_circuit) = inner_u.circuit()
+                {
+                    validate_circuit_no_reserved_constant_params(inner_circuit.circuit())?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -678,5 +861,383 @@ mod tests {
         let mut other = Circuit::new(1);
         other.x(Qubit::new(0)).unwrap();
         assert_ne!(a, FrozenCircuit::new(other));
+    }
+
+    #[test]
+    fn control_bell_single_and_double_controls_match_block_unitary_and_targets() {
+        let mut bell = Circuit::from_qubits(vec![Qubit::new(7), Qubit::new(2)]).unwrap();
+        bell.h(Qubit::new(7)).unwrap();
+        bell.cx(Qubit::new(7), Qubit::new(2)).unwrap();
+        bell.set_global_phase(Parameter::from(0.31));
+        let bell_gate = CircuitGate::new("Bell", FrozenCircuit::new(bell)).unwrap();
+
+        let s2 = 1.0 / 2.0_f64.sqrt();
+        let phase = Complex64::from_polar(1.0, 0.31);
+        // MSB-first Bell unitary on |t0 t1>: H(t0) followed by CX(t0, t1).
+        let bell_mat = ndarray::array![
+            [
+                phase * s2,
+                Complex64::default(),
+                phase * s2,
+                Complex64::default()
+            ],
+            [
+                Complex64::default(),
+                phase * s2,
+                Complex64::default(),
+                phase * s2
+            ],
+            [
+                Complex64::default(),
+                phase * s2,
+                Complex64::default(),
+                -phase * s2
+            ],
+            [
+                phase * s2,
+                Complex64::default(),
+                -phase * s2,
+                Complex64::default()
+            ],
+        ];
+
+        for num_ctrls in [1usize, 2] {
+            let controlled = bell_gate.control(num_ctrls).unwrap();
+            assert_eq!(controlled.label(), format!("ctl_{num_ctrls}_Bell"));
+            assert_eq!(controlled.num_qubits(), (2 + num_ctrls) as u16);
+            assert_eq!(controlled.num_params(), 0);
+            assert!(controlled.circuit().is_none());
+
+            let mat = controlled.matrix().unwrap();
+            let dim = 1usize << (2 + num_ctrls);
+            assert_eq!(mat.shape(), &[dim, dim]);
+            let active_start = dim - 4;
+            for r in 0..dim {
+                for c in 0..dim {
+                    let expected = if r >= active_start && c >= active_start {
+                        bell_mat[[r - active_start, c - active_start]]
+                    } else if r == c {
+                        Complex64::new(1.0, 0.0)
+                    } else {
+                        Complex64::default()
+                    };
+                    assert!((mat[[r, c]] - expected).norm() < 1e-12);
+                }
+            }
+        }
+
+        // Apply doubly-controlled Bell on out-of-order, non-contiguous qubits [3, 1, 4, 0] in a 5-qubit circuit.
+        let cc_bell = bell_gate.control(2).unwrap();
+        let mut circuit = Circuit::new(5);
+        circuit
+            .unitary(
+                cc_bell,
+                vec![Qubit::new(3), Qubit::new(1), Qubit::new(4), Qubit::new(0)],
+            )
+            .unwrap();
+        let full = circuit_to_matrix(&circuit, None).unwrap();
+
+        for col in 0..32usize {
+            let c0 = (col >> 3) & 1;
+            let c1 = (col >> 1) & 1;
+            let t0 = (col >> 4) & 1;
+            let t1 = col & 1;
+            let local_col = (t0 << 1) | t1;
+
+            let mut expected_col = vec![Complex64::default(); 32];
+            if c0 == 1 && c1 == 1 {
+                for local_row in 0..4usize {
+                    let nr_t0 = (local_row >> 1) & 1;
+                    let nr_t1 = local_row & 1;
+                    let row = (col & !((1 << 4) | 1)) | (nr_t0 << 4) | nr_t1;
+                    expected_col[row] = bell_mat[[local_row, local_col]];
+                }
+            } else {
+                expected_col[col] = Complex64::new(1.0, 0.0);
+            }
+            for row in 0..32usize {
+                assert!(
+                    (full[[row, col]] - expected_col[row]).norm() < 1e-12,
+                    "mismatch at ({row}, {col}): got {:?}, expected {:?}",
+                    full[[row, col]],
+                    expected_col[row]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn control_parameterized_preserves_signature_nested_swaps_and_internal_prefix() {
+        use crate::circuit::ParameterValue;
+        use crate::circuit::symbolic_matrix::evaluate_symbolic_matrix;
+        use crate::circuit::test_utils::assert_matrix_approx_eq;
+
+        let alpha = Parameter::symbol("alpha");
+        let beta = Parameter::symbol("__cqlib_internal_sub_beta");
+        let mut inner = Circuit::from_qubits(vec![Qubit::new(9), Qubit::new(3)]).unwrap();
+        inner
+            .rx(Qubit::new(9), alpha.clone() + beta.clone())
+            .unwrap();
+        inner.cx(Qubit::new(9), Qubit::new(3)).unwrap();
+        inner.set_global_phase(alpha * 0.5 - beta);
+
+        let gate = CircuitGate::with_signature(
+            "ParamOp",
+            FrozenCircuit::new(inner),
+            [
+                "unused".to_string(),
+                "__cqlib_internal_sub_beta".to_string(),
+                "alpha".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let ctrl_gate = gate.control(1).unwrap();
+        assert_eq!(ctrl_gate.num_qubits(), 3);
+        assert_eq!(ctrl_gate.num_params(), 3);
+        assert_eq!(
+            ctrl_gate.matrix_params().unwrap(),
+            ["unused", "__cqlib_internal_sub_beta", "alpha"]
+        );
+
+        // Nest inside an outer circuit with swapped/same-name/expression symbolic arguments.
+        let mut outer = Circuit::new(3);
+        outer
+            .unitary_with_params(
+                ctrl_gate,
+                vec![Qubit::new(2), Qubit::new(0), Qubit::new(1)],
+                [
+                    ParameterValue::from(Parameter::symbol("alpha") + Parameter::from(5.0)),
+                    ParameterValue::from(Parameter::symbol("alpha")),
+                    ParameterValue::from(
+                        Parameter::symbol("__cqlib_internal_sub_beta") * Parameter::from(2.0),
+                    ),
+                ],
+            )
+            .unwrap();
+
+        let symbolic = circuit_to_symbolic_matrix(&outer, None).unwrap();
+        let bindings = HashMap::from([
+            ("alpha", 0.41_f64),
+            ("__cqlib_internal_sub_beta", -0.27_f64),
+        ]);
+        let evaluated = evaluate_symbolic_matrix(&symbolic, &Some(bindings.clone())).unwrap();
+        let bound = outer.assign_parameters(&Some(bindings)).unwrap();
+        let numeric = circuit_to_matrix(&bound, None).unwrap();
+        assert_matrix_approx_eq(&evaluated, &numeric, 1e-12);
+
+        // Compare against explicit controlled reference: alpha_inner = 2*(-0.27) = -0.54, beta_inner = 0.41.
+        let a_val = -0.54_f64;
+        let b_val = 0.41_f64;
+        let angle = a_val + b_val;
+        let rel_phase = Complex64::from_polar(1.0, a_val * 0.5 - b_val);
+        let c = Complex64::new((angle / 2.0).cos(), 0.0);
+        let s = Complex64::new(0.0, -(angle / 2.0).sin());
+        // Control is q2 (bit 2). When bit 2 == 0 (indices 0..4), must be identity;
+        // when bit 2 == 1 (indices 4..8): RX(angle) on q0 (bit 0) then CX(q0, q1) * rel_phase.
+        for col in 0..4usize {
+            for row in 0..8usize {
+                let expected = if row == col {
+                    Complex64::new(1.0, 0.0)
+                } else {
+                    Complex64::default()
+                };
+                assert!((numeric[[row, col]] - expected).norm() < 1e-12);
+            }
+        }
+        // Col 4 (|q2=1, q1=0, q0=0>): RX(q0) -> c|100> + s|101>, CX(q0->q1) -> c|100> + s|111>
+        assert!((numeric[[4, 4]] - rel_phase * c).norm() < 1e-12);
+        assert!((numeric[[7, 4]] - rel_phase * s).norm() < 1e-12);
+    }
+
+    #[test]
+    fn control_zero_qubit_phase_circuit_produces_controlled_phase_gate() {
+        let mut phase_only = Circuit::new(0);
+        phase_only.set_global_phase(Parameter::symbol("theta"));
+        let gate = CircuitGate::new("PhaseOnly", FrozenCircuit::new(phase_only)).unwrap();
+
+        let ctrl = gate.control(2).unwrap();
+        assert_eq!(ctrl.num_qubits(), 2);
+        assert_eq!(ctrl.num_params(), 1);
+        let mat = ctrl.matrix_for_params(&[0.73]).unwrap();
+        for r in 0..4 {
+            for c in 0..4 {
+                let expected = if r != c {
+                    Complex64::default()
+                } else if r == 3 {
+                    Complex64::from_polar(1.0, 0.73)
+                } else {
+                    Complex64::new(1.0, 0.0)
+                };
+                assert!((mat[[r, c]] - expected).norm() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn control_rejects_zero_controls_oversized_limits_and_nonunitary_bodies() {
+        let simple = CircuitGate::new("OneQ", FrozenCircuit::new(Circuit::new(1))).unwrap();
+        assert!(matches!(
+            simple.control(0),
+            Err(CircuitError::InvalidOperation(_))
+        ));
+        assert!(matches!(
+            simple.control(MAX_CONTROLLED_UNITARY_QUBITS),
+            Err(CircuitError::InvalidOperation(_))
+        ));
+        assert!(matches!(
+            simple.control(30),
+            Err(CircuitError::InvalidOperation(_))
+        ));
+        assert!(matches!(
+            simple.control(usize::MAX),
+            Err(CircuitError::InvalidOperation(_))
+        ));
+
+        let mut meas = Circuit::new(1);
+        meas.append(
+            crate::circuit::Instruction::Directive(crate::circuit::Directive::Measure),
+            [Qubit::new(0)],
+            [],
+            None,
+        )
+        .unwrap();
+        let nonunitary = CircuitGate::new("Meas", FrozenCircuit::new(meas)).unwrap();
+        assert!(matches!(
+            nonunitary.control(1),
+            Err(CircuitError::NoMatrixRepresentation)
+        ));
+
+        // Symbolic controlled gates enforce the tighter symbolic qubit cap (8 qubits).
+        let mut sym_one_q = Circuit::new(1);
+        sym_one_q
+            .rx(Qubit::new(0), Parameter::symbol("theta"))
+            .unwrap();
+        let sym_gate = CircuitGate::new("SymOneQ", FrozenCircuit::new(sym_one_q)).unwrap();
+        assert!(matches!(
+            sym_gate.control(MAX_CONTROLLED_SYMBOLIC_UNITARY_QUBITS),
+            Err(CircuitError::InvalidOperation(_))
+        ));
+
+        // Classical control flow reports InvalidOperation consistently for both numeric and symbolic gates.
+        let mut cond_num = Circuit::new(1);
+        cond_num
+            .if_else(
+                crate::circuit::ClassicalExpr::bool_literal(false),
+                |body| {
+                    body.x(Qubit::new(0))?;
+                    Ok(())
+                },
+                |body| {
+                    body.z(Qubit::new(0))?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        let cond_num_gate = CircuitGate::new("CondNum", FrozenCircuit::new(cond_num)).unwrap();
+        match cond_num_gate.control(1) {
+            Err(CircuitError::InvalidOperation(msg)) => {
+                assert!(msg.contains("control-flow"), "unexpected message: {msg}");
+            }
+            other => panic!("expected InvalidOperation for numeric if_else, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn control_rejects_constant_named_formal_parameters() {
+        use crate::circuit::gate::StandardGate;
+        use crate::circuit::{Instruction, ParameterValue};
+
+        for name in ["e", "pi", "π"] {
+            let mut sub = Circuit::new(1);
+            sub.append(
+                Instruction::Standard(StandardGate::RX),
+                [Qubit::new(0)],
+                [ParameterValue::Param(Parameter::symbol(name))],
+                None,
+            )
+            .unwrap();
+            let gate = CircuitGate::with_signature(
+                "ConstNamed",
+                FrozenCircuit::new(sub),
+                vec![name.to_string()],
+            )
+            .unwrap();
+            assert!(
+                matches!(gate.control(1), Err(CircuitError::InvalidOperation(_))),
+                "expected InvalidOperation for reserved constant parameter name '{name}'"
+            );
+
+            // Nested inner gate declaring a reserved constant parameter must also be rejected.
+            let mut outer = Circuit::new(1);
+            outer
+                .append(
+                    Instruction::CircuitGate(Box::new(gate)),
+                    [Qubit::new(0)],
+                    [ParameterValue::Param(Parameter::symbol("theta"))],
+                    None,
+                )
+                .unwrap();
+            let outer_gate = CircuitGate::new("OuterWrap", FrozenCircuit::new(outer)).unwrap();
+            assert!(
+                matches!(
+                    outer_gate.control(1),
+                    Err(CircuitError::InvalidOperation(_))
+                ),
+                "expected InvalidOperation for nested reserved constant parameter name '{name}'"
+            );
+        }
+
+        // Degenerate numeric base matrix (U(pi/2, 1e16, 1.0)) must still be rejected.
+        let mut degenerate = Circuit::new(1);
+        degenerate
+            .u(Qubit::new(0), std::f64::consts::FRAC_PI_2, 1e16, 1.0)
+            .unwrap();
+        let degenerate_gate =
+            CircuitGate::new("DegenerateU", FrozenCircuit::new(degenerate)).unwrap();
+        assert!(matches!(
+            degenerate_gate.control(1),
+            Err(CircuitError::InvalidOperation(_))
+        ));
+    }
+
+    #[test]
+    fn control_preserves_column_major_symbolic_unitary_inside_composite_gate() {
+        use crate::circuit::ParameterValue;
+        use ndarray::ShapeBuilder;
+
+        let theta = Parameter::symbol("theta");
+        // Column-major 1-qubit unitary M = [[0, 1], [exp(i*theta), 0]].
+        let col_major = Array2::from_shape_vec(
+            (2, 2).f(),
+            vec![
+                SymbolicComplex::zero(),
+                SymbolicComplex::exp_i(theta.clone()),
+                SymbolicComplex::one(),
+                SymbolicComplex::zero(),
+            ],
+        )
+        .unwrap();
+        assert!(!col_major.is_standard_layout());
+
+        let inner_u = UnitaryGate::new("ColMajorPhaseFlip", 1, 1)
+            .with_symbolic_matrix(["theta"], col_major)
+            .unwrap();
+        let mut sub = Circuit::new(1);
+        sub.unitary_with_params(inner_u, vec![Qubit::new(0)], [ParameterValue::from(theta)])
+            .unwrap();
+
+        let composite = CircuitGate::new("WrapColMajor", FrozenCircuit::new(sub)).unwrap();
+        let controlled = composite.control(1).unwrap();
+        let mat = controlled.matrix_for_params(&[0.5]).unwrap();
+
+        // Active 2x2 block at rows/cols 2..4 must be M, NOT M^T:
+        // mat[2, 3] == 1, mat[3, 2] == exp(0.5i).
+        assert!((mat[[0, 0]] - Complex64::new(1.0, 0.0)).norm() < 1e-12);
+        assert!((mat[[1, 1]] - Complex64::new(1.0, 0.0)).norm() < 1e-12);
+        assert!((mat[[2, 2]] - Complex64::default()).norm() < 1e-12);
+        assert!((mat[[2, 3]] - Complex64::new(1.0, 0.0)).norm() < 1e-12);
+        assert!((mat[[3, 2]] - Complex64::from_polar(1.0, 0.5)).norm() < 1e-12);
+        assert!((mat[[3, 3]] - Complex64::default()).norm() < 1e-12);
     }
 }

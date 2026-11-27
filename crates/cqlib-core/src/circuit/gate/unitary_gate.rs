@@ -19,8 +19,13 @@
 
 use crate::circuit::circuit_to_matrix;
 use crate::circuit::error::CircuitError;
-use crate::circuit::gate::circuit_gate::FrozenCircuit;
-use crate::circuit::symbolic_matrix::{SymbolicMatrix, evaluate_symbolic_matrix};
+use crate::circuit::gate::circuit_gate::{
+    FrozenCircuit, validate_circuit_no_reserved_constant_params, validate_controlled_unitary_qubits,
+};
+use crate::circuit::gate::gate_matrix;
+use crate::circuit::symbolic_matrix::{
+    SymbolicMatrix, circuit_to_symbolic_matrix, evaluate_symbolic_matrix,
+};
 use alloc::borrow::Cow;
 use ndarray::Array2;
 use num_complex::Complex;
@@ -263,6 +268,27 @@ impl UnitaryGate {
         Ok(self)
     }
 
+    /// Attaches a numeric matrix whose entries have already been proven finite
+    /// and unitary (for example, a block-diagonal controlled matrix lifted from
+    /// an already-validated base unitary), checking only parameter arity and
+    /// matrix dimensions to avoid an unnecessary `O(8^n)` `U†U` multiplication.
+    pub(crate) fn with_validated_matrix(
+        mut self,
+        mat: Array2<Complex<f64>>,
+    ) -> Result<Self, CircuitError> {
+        if self.num_params != 0 {
+            return Err(CircuitError::ParameterCountMismatch {
+                expected: 0,
+                actual: self.num_params as usize,
+            });
+        }
+        self.validate_symbolic_matrix_shape(&mat)?;
+
+        self.matrix = Some(Arc::new(UnitaryMatrix::Numeric(mat)));
+        self.matrix_params = None;
+        Ok(self)
+    }
+
     /// Attaches a symbolic matrix to the unitary definition.
     ///
     /// `params` defines the positional mapping between each gate application's
@@ -338,13 +364,6 @@ impl UnitaryGate {
         if let Some(circuit) = self.circuit.as_ref() {
             let inner = circuit.circuit();
             let symbols = circuit.used_symbols();
-            let mut bindings = HashMap::new();
-            for (symbol, value) in symbols.iter().zip(params.iter()) {
-                bindings.insert(symbol.as_str(), *value);
-            }
-            let assigned = inner
-                .assign_parameters(&Some(bindings))
-                .map_err(|_| CircuitError::SymbolicParameterError)?;
             let mut order: Vec<usize> = circuit
                 .qubits_in_numeric_order()
                 .iter()
@@ -355,7 +374,110 @@ impl UnitaryGate {
                 // instruction basis directly instead of permuting a dense matrix.
                 order.reverse();
             }
+            if inner.parameters().is_empty() {
+                return circuit_to_matrix(inner, Some(&order)).map(Cow::Owned);
+            }
+            let mut bindings = HashMap::new();
+            for (symbol, value) in symbols.iter().zip(params.iter()) {
+                bindings.insert(symbol.as_str(), *value);
+            }
+            let assigned = inner
+                .assign_parameters(&Some(bindings))
+                .map_err(|err| match err {
+                    CircuitError::InvalidOperation(_) => err,
+                    _ => CircuitError::SymbolicParameterError,
+                })?;
             return circuit_to_matrix(&assigned, Some(&order)).map(Cow::Owned);
+        }
+
+        Err(CircuitError::NoMatrixRepresentation)
+    }
+
+    /// Wraps this unitary gate as a controlled [`UnitaryGate`] with `num_controls`
+    /// active-high (`|1⟩`) control qubits prepended before the target qubits.
+    ///
+    /// Explicit matrix representations (numeric or symbolic) take precedence over
+    /// an attached circuit definition, matching [`Self::matrix_for_params`]. The
+    /// returned gate is matrix-backed and does not carry an attached circuit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircuitError::InvalidOperation`] when `num_controls == 0`, when
+    /// the resulting dense matrix exceeds resource limits (12 total qubits for
+    /// numeric matrices, 8 for symbolic matrices), when a circuit-backed
+    /// definition contains unsupported control flow or produces a non-unitary
+    /// numeric result, or when a parameterized (`num_params > 0`) circuit-backed
+    /// definition contains nested reserved constant parameter names (`e`, `pi`,
+    /// `π`).
+    /// Returns [`CircuitError::NoMatrixRepresentation`] for opaque gates without
+    /// a matrix or circuit definition, or for circuit-only definitions containing
+    /// non-unitary directives.
+    pub fn control(&self, num_controls: usize) -> Result<Self, CircuitError> {
+        if num_controls == 0 {
+            return Err(CircuitError::InvalidOperation(
+                "num_controls must be at least 1".to_string(),
+            ));
+        }
+
+        let label = format!("ctl_{}_{}", num_controls, self.label);
+
+        if let Some(matrix) = self.matrix.as_deref() {
+            match matrix {
+                UnitaryMatrix::Numeric(m) => {
+                    let total_qubits = validate_controlled_unitary_qubits(
+                        self.num_qubits as usize,
+                        num_controls,
+                        false,
+                    )?;
+                    let controlled = gate_matrix::control_matrix(m, num_controls);
+                    return Self::new(&label, total_qubits, 0).with_validated_matrix(controlled);
+                }
+                UnitaryMatrix::Symbolic(m) => {
+                    let total_qubits = validate_controlled_unitary_qubits(
+                        self.num_qubits as usize,
+                        num_controls,
+                        true,
+                    )?;
+                    let params = self
+                        .matrix_params
+                        .as_deref()
+                        .ok_or(CircuitError::SymbolicParameterError)?;
+                    let controlled =
+                        crate::circuit::symbolic_matrix::gate::control_matrix(m, num_controls);
+                    return Self::new(&label, total_qubits, self.num_params)
+                        .with_symbolic_matrix(params.iter().cloned(), controlled);
+                }
+            }
+        }
+
+        if let Some(frozen) = self.circuit.as_ref() {
+            let symbolic = self.num_params > 0;
+            let total_qubits = validate_controlled_unitary_qubits(
+                self.num_qubits as usize,
+                num_controls,
+                symbolic,
+            )?;
+            if !symbolic {
+                let base = self.matrix_for_params_in_gate_order(&[])?;
+                Self::validate_numeric_unitary_matrix(base.as_ref())?;
+                let controlled = gate_matrix::control_matrix(base.as_ref(), num_controls);
+                return Self::new(&label, total_qubits, 0).with_validated_matrix(controlled);
+            } else {
+                validate_circuit_no_reserved_constant_params(frozen.circuit())?;
+                // UnitaryGate circuit definitions map qubits in ascending numeric-ID
+                // order; reverse to MSB-first for circuit_to_symbolic_matrix.
+                let msb_order: Vec<usize> = frozen
+                    .qubits_in_numeric_order()
+                    .iter()
+                    .rev()
+                    .map(|q| q.index())
+                    .collect();
+                let base = circuit_to_symbolic_matrix(frozen.circuit(), Some(&msb_order))?;
+                let controlled =
+                    crate::circuit::symbolic_matrix::gate::control_matrix(&base, num_controls);
+                return Self::new(&label, total_qubits, self.num_params)
+                    .with_symbolic_matrix(frozen.used_symbols().iter().cloned(), controlled);
+            }
         }
 
         Err(CircuitError::NoMatrixRepresentation)
@@ -455,9 +577,11 @@ impl UnitaryGate {
         Ok(self)
     }
 
-    fn validate_matrix_shape(&self, mat: &Array2<Complex<f64>>) -> Result<(), CircuitError> {
-        self.validate_symbolic_matrix_shape(mat)?;
-
+    /// Validates that a numeric matrix contains only finite elements and is
+    /// unitary (`U†U ≈ I`).
+    pub(crate) fn validate_numeric_unitary_matrix(
+        mat: &Array2<Complex<f64>>,
+    ) -> Result<(), CircuitError> {
         // Reject matrices containing NaN or infinite elements.
         for ((row, col), val) in mat.indexed_iter() {
             if !val.re.is_finite() || !val.im.is_finite() {
@@ -491,6 +615,11 @@ impl UnitaryGate {
         }
 
         Ok(())
+    }
+
+    fn validate_matrix_shape(&self, mat: &Array2<Complex<f64>>) -> Result<(), CircuitError> {
+        self.validate_symbolic_matrix_shape(mat)?;
+        Self::validate_numeric_unitary_matrix(mat)
     }
 
     fn validate_symbolic_matrix_shape<T>(&self, mat: &Array2<T>) -> Result<(), CircuitError> {

@@ -1,6 +1,6 @@
 # UnitaryGate
 
-`cqlib.circuit.gates.UnitaryGate`  
+`cqlib.circuit.gates.UnitaryGate`
 
 ```python
 from cqlib.circuit.gates import UnitaryGate
@@ -160,6 +160,19 @@ assert np.array(gate).shape == (2, 2)
 
 ---
 
+## 受控版本
+
+```python
+control(num_controls: int = 1) -> UnitaryGate
+```
+
+为当前 `UnitaryGate` 在目标比特之前前置 `num_controls` 个高电平（$|1\rangle$）控制比特，返回新的矩阵型 `UnitaryGate`（标签格式 `ctl_{num_controls}_{label}`，不附带旧 `circuit`）：
+
+- 支持数值矩阵型（总比特数上限 12）、符号矩阵型（总比特数上限 8）以及纯电路型 `UnitaryGate`；若同时附带矩阵和电路，显式矩阵优先；
+- 对既无矩阵也无电路的 opaque `UnitaryGate` 或 `num_controls == 0` 抛出 `CircuitError`。
+
+---
+
 ## 追加到 `Circuit`
 
 ```python
@@ -187,4 +200,3 @@ Circuit.append_unitary_gate(
 | `with_matrix()` | 否 | 否 | 固定黑盒矩阵、oracle、校准门、小规模测试门。 |
 | `with_symbolic_matrix()` | 否 | 是 | 参数化黑盒矩阵、可调相位门、符号验证。 |
 | `with_circuit()` | 是 | 取决于内部线路 | 需要保留分解信息，同时以 `UnitaryGate` 形式应用的场景。 |
-

@@ -61,9 +61,12 @@ Classes
   circuit definition.
 """
 
+from __future__ import annotations
+
 from ..bit import Qubit
 from ..classical import ClassicalType
 from ..operation import ValueOperation
+from .unitary import UnitaryGate
 
 class FrozenCircuit:
     """Immutable circuit snapshot suitable for use inside a gate definition.
@@ -226,6 +229,28 @@ class CircuitGate:
         Raises:
             CircuitError: When the underlying circuit contains irreversible
                 operations.
+        """
+        ...
+
+    def control(self, num_controls: int = 1) -> UnitaryGate:
+        """Wrap this composite gate as a controlled :class:`UnitaryGate`.
+
+        Adds ``num_controls`` active-high (``|1>``) control qubits before the
+        target qubits while preserving :attr:`signature_params` (exposed via
+        ``matrix_params``) and converting the sub-circuit's global phase into a
+        relative phase on the active branch. When appending via
+        :meth:`~cqlib.circuit.Circuit.append_unitary_gate`, pass the control
+        qubits first followed by the target qubits.
+
+        Args:
+            num_controls: Number of control qubits to prepend (must be >= 1).
+                Defaults to ``1``.
+
+        Raises:
+            CircuitError: If ``num_controls == 0``, the resulting dense matrix
+                exceeds resource limits, any formal parameter collides with a
+                built-in mathematical constant (``e``, ``pi``, ``π``), or the
+                backing circuit contains non-unitary operations or control flow.
         """
         ...
 

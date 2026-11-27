@@ -1915,3 +1915,30 @@ fn zero_control_gphase_circuit_evolution() {
         }
     }
 }
+
+#[test]
+fn controlled_parameterized_circuit_gate_noisy_density_matrix_evolution() {
+    use crate::circuit::Parameter;
+    use crate::circuit::gate::{CircuitGate, FrozenCircuit};
+
+    let theta = Parameter::symbol("theta");
+    let mut sub = Circuit::new(1);
+    sub.rx(Qubit::new(0), theta.clone()).unwrap();
+    sub.set_global_phase(theta * 0.5);
+    let ctrl_rx = CircuitGate::new("SubRx", FrozenCircuit::new(sub))
+        .unwrap()
+        .control(1)
+        .unwrap();
+
+    let mut circuit = Circuit::new(2);
+    circuit.h(Qubit::new(0)).unwrap();
+    circuit
+        .unitary_with_params(ctrl_rx, vec![Qubit::new(0), Qubit::new(1)], [0.52.into()])
+        .unwrap();
+
+    let noisy = DensityMatrixNoise::from_circuit(&circuit, None).unwrap();
+    let ideal = crate::qis::state::DensityMatrix::from_circuit(&circuit).unwrap();
+    for (actual, expected) in noisy.state.data().iter().zip(ideal.data()) {
+        assert!((actual - expected).norm() < 1e-12);
+    }
+}

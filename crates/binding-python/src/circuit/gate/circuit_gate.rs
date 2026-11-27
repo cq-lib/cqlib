@@ -19,6 +19,7 @@
 use crate::circuit::bit::PyQubit;
 use crate::circuit::classical::PyClassicalType;
 use crate::circuit::error::CircuitError as PyCircuitError;
+use crate::circuit::gate::PyUnitaryGate;
 use crate::circuit::operation::PyValueOperation;
 use cqlib_core::circuit::Circuit;
 use cqlib_core::circuit::gate::{CircuitGate, FrozenCircuit};
@@ -216,6 +217,15 @@ impl PyCircuitGate {
         self.inner
             .inverse()
             .map(|inner| Self { inner })
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
+    /// Returns a controlled unitary gate with `num_controls` control qubits
+    /// prepended before the target qubits.
+    #[pyo3(signature = (num_controls=1))]
+    fn control(&self, py: Python<'_>, num_controls: usize) -> PyResult<PyUnitaryGate> {
+        py.detach(|| self.inner.control(num_controls))
+            .map(PyUnitaryGate::from)
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
 

@@ -507,3 +507,77 @@ fn payload_accessors_return_the_stored_payload() {
         Some(ClassicalControlOp::Continue)
     ));
 }
+
+#[test]
+fn control_on_circuit_gate_and_recontrolled_unitary_enforces_semantics_and_limits() {
+    let mut bell = Circuit::new(2);
+    bell.h(Qubit::new(0)).unwrap();
+    bell.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let inst = bell.to_gate("Bell").unwrap();
+
+    // control(0) preserves the CircuitGate instruction unchanged.
+    assert!(matches!(inst.control(0), Some(Instruction::CircuitGate(_))));
+
+    let controlled_once = inst.control(1).unwrap();
+    assert_eq!(controlled_once.name(), "ctl_1_Bell");
+    assert_eq!(controlled_once.gate_arity(), Some((3, 0)));
+
+    let controlled_twice = controlled_once.control(1).unwrap();
+    assert_eq!(controlled_twice.name(), "ctl_1_ctl_1_Bell");
+    assert_eq!(controlled_twice.gate_arity(), Some((4, 0)));
+
+    // Re-controlling past the dense unitary cap fails cleanly without panicking.
+    assert!(controlled_twice.control(20).is_none());
+    assert!(controlled_twice.control(usize::MAX).is_none());
+
+    // Circuit::multi_control works directly with a parameterized CircuitGate instruction.
+    let mut sub = Circuit::new(1);
+    sub.rx(Qubit::new(0), Parameter::symbol("theta")).unwrap();
+    let rx_gate = sub.to_gate("SubRx").unwrap();
+
+    let mut parent = Circuit::new(3);
+    parent
+        .multi_control(
+            rx_gate,
+            [Qubit::new(0), Qubit::new(1)],
+            [Qubit::new(2)],
+            [0.65_f64.into()],
+        )
+        .unwrap();
+    let mut expected = Circuit::new(3);
+    expected
+        .multi_control(
+            StandardGate::RX,
+            [Qubit::new(0), Qubit::new(1)],
+            [Qubit::new(2)],
+            [0.65_f64.into()],
+        )
+        .unwrap();
+    crate::circuit::test_utils::assert_matrix_approx_eq(
+        &crate::circuit::circuit_to_matrix(&parent, None).unwrap(),
+        &crate::circuit::circuit_to_matrix(&expected, None).unwrap(),
+        1e-12,
+    );
+
+    // Circuit-backed UnitaryGate now succeeds under Instruction::control (dropping old circuit).
+    let mut x_body = Circuit::new(1);
+    x_body.x(Qubit::new(0)).unwrap();
+    let u_circ = UnitaryGate::new("CircX", 1, 0)
+        .with_circuit(std::sync::Arc::new(FrozenCircuit::new(x_body)))
+        .unwrap();
+    let ctrl_u_circ = Instruction::UnitaryGate(Box::new(u_circ))
+        .control(1)
+        .expect("circuit-backed UnitaryGate control should succeed");
+    assert_eq!(ctrl_u_circ.gate_arity(), Some((2, 0)));
+    crate::circuit::test_utils::assert_matrix_approx_eq(
+        ctrl_u_circ.matrix(&[]).unwrap().as_ref(),
+        StandardGate::CX.matrix(&[]).unwrap().as_ref(),
+        1e-12,
+    );
+
+    // Opaque UnitaryGate retains placeholder control compatibility under Instruction::control.
+    let opaque = Instruction::UnitaryGate(Box::new(UnitaryGate::new("Opaque", 1, 0)));
+    let ctrl_opaque = opaque.control(1).expect("opaque placeholder control");
+    assert_eq!(ctrl_opaque.name(), "ctl_1_Opaque");
+    assert_eq!(ctrl_opaque.gate_arity(), Some((2, 0)));
+}

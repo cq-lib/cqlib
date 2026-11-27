@@ -179,6 +179,15 @@ impl PyUnitaryGate {
             .map_err(|error| PyCircuitError::new_err(error.to_string()))
     }
 
+    /// Returns a controlled unitary gate with `num_controls` active-high (`|1⟩`)
+    /// control qubits prepended before the target qubits.
+    #[pyo3(signature = (num_controls=1))]
+    fn control(&self, py: Python<'_>, num_controls: usize) -> PyResult<Self> {
+        py.detach(|| self.inner.control(num_controls))
+            .map(|inner| Self { inner })
+            .map_err(|error| PyCircuitError::new_err(error.to_string()))
+    }
+
     /// Implements the numpy array protocol for numpy 2.0+ compatibility.
     ///
     /// Allows direct conversion to numpy array: `np.array(gate)` or `gate.matrix`.
