@@ -366,6 +366,38 @@ frozen = FrozenCircuit(sub.qubits, sub.operations)
 gate = CircuitGate("HadamardBlock", frozen)
 ```
 
+### Controlled composite gate `CircuitGate.control(n)`
+
+When one or more control qubits need to be added to an entire sub-circuit, `CircuitGate.control(n)` (`n >= 1`) wraps the composite gate as a single controlled `UnitaryGate` (labeled `ctl_{n}_{name}`):
+
+- **Qubit order**: When appending via `append_unitary_gate`, pass the `n` control qubits first, followed by the target qubits in the sub-circuit's storage order. The sub-circuit executes only when all control qubits are in $|1\rangle$, while all other control basis states act as the identity; any sub-circuit global phase becomes a relative phase on the all-$|1\rangle$ control subspace.
+- **Parameter preservation**: Parametric `CircuitGate` definitions preserve their positional parameter order on the resulting `UnitaryGate` (exposed via `matrix_params`, including declared but unused parameters). Formal parameter names cannot collide with built-in mathematical constants (`e`, `pi`, `π`).
+
+For example, adding two control qubits to a two-qubit Bell sub-circuit produces a four-qubit doubly controlled composite gate:
+
+```python
+from cqlib import Circuit
+
+bell = Circuit(2)
+bell.h(0)
+bell.cx(0, 1)
+
+cc_bell = bell.to_gate("Bell").control(2)
+
+circuit = Circuit(4)
+circuit.x(0)
+circuit.x(1)
+# Pass control qubits [0, 1] first, then target qubits [2, 3]
+circuit.append_unitary_gate(cc_bell, [0, 1, 2, 3])
+```
+
+Note that `CircuitGate.control(n)` returns a matrix-backed `UnitaryGate` (without an attached circuit definition), which has the following current boundaries:
+
+- Calling `circuit.inverse()` on a circuit containing this gate raises an error, and `circuit.decompose()` only expands `CircuitGate` definitions rather than matrix-backed `UnitaryGate` instances.
+- `StabilizerState` does not directly simulate matrix-backed `UnitaryGate` instances (even when mathematically Clifford, and default `compile()` synthesis emits `U` gates that are not accepted by `StabilizerState`); use `Statevector` / `DensityMatrix` or keep native Clifford gates instead.
+- Dense controlled matrices are subject to qubit resource caps (up to 12 total qubits for numeric gates and up to 8 total qubits for symbolic parametric gates). Deep parametric sub-circuits can incur exponential symbolic expression growth during eager expansion, so bind concrete parameters before calling `control()` when possible.
+- OpenQASM 2.0 export emits an `opaque` declaration; OpenQASM 3.0 and QCIS do not directly serialize matrix-only `UnitaryGate` instances, so all arguments (including slots for unused formal parameters) must first be bound to finite numeric values and decomposed into basic gates via `compile()`.
+
 ---
 
 ## Directive: non-unitary instructions

@@ -837,7 +837,7 @@ fn test_circuit_gate_parameter_substitution_order() {
 }
 
 #[test]
-fn test_substitution_collision_detection() {
+fn test_substitution_supports_internal_prefix_symbols_in_circuit_gate() {
     let mut inner = Circuit::new(1);
     inner
         .rx(
@@ -845,7 +845,7 @@ fn test_substitution_collision_detection() {
             Parameter::symbol("__cqlib_internal_sub_theta"),
         )
         .unwrap();
-    let gate = inner.to_gate("BadGate").unwrap();
+    let gate = inner.to_gate("PrefixedGate").unwrap();
 
     let mut circuit = Circuit::new(1);
     circuit
@@ -857,19 +857,27 @@ fn test_substitution_collision_detection() {
         )
         .unwrap();
 
-    let err = circuit_to_symbolic_matrix(&circuit, None).unwrap_err();
-    assert!(matches!(err, CircuitError::InvalidOperation(_)));
+    let symbolic = circuit_to_symbolic_matrix(&circuit, None).unwrap();
+    let evaluated =
+        evaluate_symbolic_matrix(&symbolic, &Some(HashMap::from([("x", 0.7_f64)]))).unwrap();
+    let expected = StandardGate::RX.matrix(&[0.7]).unwrap();
+    assert_matrix_approx_eq(&evaluated, expected.as_ref(), 1e-12);
 }
 
 #[test]
-fn test_substitution_rejects_internal_prefix_in_input_matrix() {
+fn test_substitution_preserves_unreplaced_internal_prefix_in_input_matrix() {
     let theta = Parameter::symbol("__cqlib_internal_sub_theta");
     let symbolic = standard_gate_symbolic_matrix(StandardGate::RX, &[theta]).unwrap();
     let replacements = HashMap::from([("theta".to_string(), Parameter::from(1.0))]);
 
-    let result = substitute_symbolic_matrix(symbolic, &replacements);
-
-    assert!(matches!(result, Err(CircuitError::InvalidOperation(_))));
+    let substituted = substitute_symbolic_matrix(symbolic, &replacements).unwrap();
+    let evaluated = evaluate_symbolic_matrix(
+        &substituted,
+        &Some(HashMap::from([("__cqlib_internal_sub_theta", 0.4_f64)])),
+    )
+    .unwrap();
+    let expected = StandardGate::RX.matrix(&[0.4]).unwrap();
+    assert_matrix_approx_eq(&evaluated, expected.as_ref(), 1e-12);
 }
 
 #[test]

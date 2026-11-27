@@ -79,3 +79,17 @@ def test_stabilizer_probabilities_releases_gil(assert_releases_gil):
     state = StabilizerState(18)
 
     assert_releases_gil(state.probabilities)
+
+
+def test_circuit_gate_control_releases_gil(assert_releases_gil):
+    from cqlib.circuit import Parameter
+
+    numeric_sub = Circuit(1)
+    numeric_sub.h(0)
+    numeric_gate = numeric_sub.to_gate("OneQ")
+    assert_releases_gil(lambda: numeric_gate.control(5))
+
+    parametric_sub = Circuit(1)
+    parametric_sub.rx(0, Parameter("theta"))
+    parametric_gate = parametric_sub.to_gate("ParamOneQ")
+    assert_releases_gil(lambda: parametric_gate.control(5))

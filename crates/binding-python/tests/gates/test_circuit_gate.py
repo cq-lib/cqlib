@@ -487,3 +487,202 @@ class TestCircuitGateEquality:
             hash(g)
         with pytest.raises(TypeError):
             {g: 1}
+
+
+class TestCircuitGateControl:
+    """Tests for CircuitGate.control(n) producing a controlled UnitaryGate."""
+
+    def test_single_and_double_controlled_bell_columns_and_superposition(self):
+        from cqlib.circuit import CircuitError, UnitaryGate
+        from cqlib.qis import DensityMatrix, Statevector
+
+        bell = Circuit([7, 2])
+        bell.h(7)
+        bell.cx(7, 2)
+        bell.set_global_phase(0.31)
+        bell_gate = bell.to_gate("Bell")
+
+        phase = np.exp(1j * 0.31)
+        s2 = 1.0 / np.sqrt(2.0)
+        bell_local = (
+            phase
+            * s2
+            * np.array(
+                [
+                    [1, 0, 1, 0],
+                    [0, 1, 0, 1],
+                    [0, 1, 0, -1],
+                    [1, 0, -1, 0],
+                ],
+                dtype=complex,
+            )
+        )
+
+        c1_bell = bell_gate.control(1)
+        c2_bell = bell_gate.control(2)
+        assert isinstance(c1_bell, UnitaryGate)
+        assert isinstance(c2_bell, UnitaryGate)
+        assert c1_bell.label == "ctl_1_Bell"
+        assert c2_bell.label == "ctl_2_Bell"
+        assert c1_bell.num_qubits == 3 and c1_bell.num_params == 0
+        assert c2_bell.num_qubits == 4 and c2_bell.num_params == 0
+        assert c1_bell.matrix().shape == (8, 8)
+        assert c2_bell.matrix().shape == (16, 16)
+
+        expected_c1 = np.eye(8, dtype=complex)
+        expected_c1[4:, 4:] = bell_local
+        np.testing.assert_allclose(c1_bell.matrix(), expected_c1, rtol=0, atol=1e-12)
+
+        expected_c2 = np.eye(16, dtype=complex)
+        expected_c2[12:, 12:] = bell_local
+        np.testing.assert_allclose(c2_bell.matrix(), expected_c2, rtol=0, atol=1e-12)
+
+        # Out-of-order, non-contiguous placement [3, 1, 4, 0] in a 5-qubit circuit.
+        targets = [3, 1, 4, 0]
+        circuit = Circuit(5)
+        circuit.append_unitary_gate(c2_bell, targets)
+        expected_full = _embed_operation_matrix(expected_c2, targets, 5)
+        actual_full = circuit.to_matrix()
+        for col in range(32):
+            np.testing.assert_allclose(
+                actual_full[:, col], expected_full[:, col], rtol=0, atol=1e-12
+            )
+
+        # Superposition across inactive (|01>) and active (|11>) control branches
+        # on controls=(q2, q0), targets=(q3, q1), with initial target |t0=1, t1=0>.
+        sup = Circuit(4)
+        sup.x(0)
+        sup.h(2)
+        sup.x(3)
+        sup.append_unitary_gate(c2_bell, [2, 0, 3, 1])
+
+        expected_amps = np.zeros(16, dtype=complex)
+        expected_amps[0b1001] = s2
+        expected_amps[0b0101] = 0.5 * phase
+        expected_amps[0b1111] = -0.5 * phase
+
+        sv = Statevector.from_circuit(sup)
+        np.testing.assert_allclose(sv.data, expected_amps, rtol=0, atol=1e-12)
+
+        dm = DensityMatrix.from_circuit(sup)
+        expected_rho = np.outer(expected_amps, expected_amps.conj())
+        np.testing.assert_allclose(
+            np.asarray(dm.data).reshape(16, 16), expected_rho, rtol=0, atol=1e-12
+        )
+
+        # Matrix-only UnitaryGate currently rejects Circuit.inverse().
+        with pytest.raises(CircuitError):
+            sup.inverse()
+
+    def test_parameterized_signature_swaps_internal_prefix_and_compilation(self):
+        from cqlib.compile import compile as compile_circuit
+        from cqlib.qis import Statevector
+
+        alpha = Parameter("alpha")
+        beta = Parameter("__cqlib_internal_sub_beta")
+        sub = Circuit([9, 3])
+        sub.rx(9, alpha + beta)
+        sub.cx(9, 3)
+        sub.set_global_phase(alpha * 0.5 - beta)
+
+        gate = CircuitGate.with_signature(
+            "ParamBell",
+            sub.to_gate("raw").circuit,
+            ["unused", "__cqlib_internal_sub_beta", "alpha"],
+        )
+        ctrl = gate.control(1)
+        assert ctrl.num_qubits == 3
+        assert ctrl.num_params == 3
+        assert ctrl.matrix_params == ["unused", "__cqlib_internal_sub_beta", "alpha"]
+
+        # Outer call swaps and combines formal/actual symbols, including internal-prefix names.
+        outer = Circuit(3)
+        outer.h(2)
+        outer.append_unitary_gate(
+            ctrl,
+            [2, 0, 1],
+            [alpha + 3.0, alpha, beta * 2.0],
+        )
+
+        sym_mat = outer.to_symbolic_matrix()
+        bindings = {"alpha": 0.41, "__cqlib_internal_sub_beta": -0.27}
+        bound = outer.assign_parameters(bindings)
+        expected_mat = bound.to_matrix()
+
+        np.testing.assert_allclose(
+            sym_mat.evaluate(bindings), expected_mat, rtol=0, atol=1e-12
+        )
+        sv = Statevector.from_circuit(bound)
+        np.testing.assert_allclose(sv.data, expected_mat[:, 0], rtol=0, atol=1e-12)
+
+        # Compilation synthesizes the 3-qubit bound UnitaryGate (including unused slot bound).
+        compiled = compile_circuit(bound).circuit
+        np.testing.assert_allclose(
+            compiled.to_matrix(), expected_mat, rtol=0, atol=1e-9
+        )
+
+    def test_control_errors_and_ir_boundaries(self):
+        from cqlib.circuit import CircuitError
+        from cqlib.ir import qasm2, qasm3, qcis
+
+        one_q = Circuit(1)
+        one_q.h(0)
+        gate = one_q.to_gate("OneH")
+
+        with pytest.raises(CircuitError):
+            gate.control(0)
+        with pytest.raises(CircuitError):
+            gate.control(12)
+        with pytest.raises(CircuitError):
+            gate.control(30)
+        with pytest.raises(OverflowError):
+            gate.control(-1)
+
+        non_unitary = Circuit(1)
+        non_unitary.measure(0)
+        with pytest.raises(CircuitError):
+            non_unitary.to_gate("Meas").control(1)
+
+        bell = Circuit(2)
+        bell.h(0)
+        bell.cx(0, 1)
+        cc_bell = bell.to_gate("Bell").control(2)
+        c = Circuit(4)
+        c.append_unitary_gate(cc_bell, [0, 1, 2, 3])
+
+        qasm2_text = qasm2.dumps(c)
+        assert "opaque ctl_2_Bell q0,q1,q2,q3;" in qasm2_text
+        with pytest.raises(ValueError):
+            qasm3.dumps(c)
+        with pytest.raises(ValueError):
+            qcis.dumps(c)
+
+        # Symbolic controlled gates enforce the tighter 8-qubit symbolic cap.
+        sym_one = Circuit(1)
+        sym_one.rx(0, Parameter("theta"))
+        with pytest.raises(CircuitError):
+            sym_one.to_gate("SymOne").control(8)
+
+        # Classical if_else reports consistent control-flow error on non-parametric gates.
+        from cqlib.circuit import ClassicalExpr
+
+        cond = Circuit(1)
+        cond.if_else(
+            ClassicalExpr.bool_literal(False),
+            lambda body: body.x(0),
+            lambda body: body.z(0),
+        )
+        with pytest.raises(CircuitError, match="control-flow"):
+            cond.to_gate("CondNum").control(1)
+
+    @pytest.mark.parametrize("param_name", ["e", "pi", "π"])
+    def test_control_rejects_constant_named_formal_parameters(self, param_name):
+        from cqlib.circuit import CircuitError
+
+        sub = Circuit(1)
+        sub.rx(0, Parameter(param_name))
+        gate = CircuitGate.with_signature(
+            "ConstNamed", sub.to_gate("raw").circuit, [param_name]
+        )
+        with pytest.raises(CircuitError, match="built-in mathematical constant"):
+            gate.control(1)

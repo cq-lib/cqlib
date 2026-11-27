@@ -263,6 +263,27 @@ impl UnitaryGate {
         Ok(self)
     }
 
+    /// Attaches a numeric matrix whose entries have already been proven finite
+    /// and unitary (for example, a block-diagonal controlled matrix lifted from
+    /// an already-validated base unitary), checking only parameter arity and
+    /// matrix dimensions to avoid an unnecessary `O(8^n)` `U†U` multiplication.
+    pub(crate) fn with_validated_matrix(
+        mut self,
+        mat: Array2<Complex<f64>>,
+    ) -> Result<Self, CircuitError> {
+        if self.num_params != 0 {
+            return Err(CircuitError::ParameterCountMismatch {
+                expected: 0,
+                actual: self.num_params as usize,
+            });
+        }
+        self.validate_symbolic_matrix_shape(&mat)?;
+
+        self.matrix = Some(Arc::new(UnitaryMatrix::Numeric(mat)));
+        self.matrix_params = None;
+        Ok(self)
+    }
+
     /// Attaches a symbolic matrix to the unitary definition.
     ///
     /// `params` defines the positional mapping between each gate application's
@@ -455,9 +476,11 @@ impl UnitaryGate {
         Ok(self)
     }
 
-    fn validate_matrix_shape(&self, mat: &Array2<Complex<f64>>) -> Result<(), CircuitError> {
-        self.validate_symbolic_matrix_shape(mat)?;
-
+    /// Validates that a numeric matrix contains only finite elements and is
+    /// unitary (`U†U ≈ I`).
+    pub(crate) fn validate_numeric_unitary_matrix(
+        mat: &Array2<Complex<f64>>,
+    ) -> Result<(), CircuitError> {
         // Reject matrices containing NaN or infinite elements.
         for ((row, col), val) in mat.indexed_iter() {
             if !val.re.is_finite() || !val.im.is_finite() {
@@ -491,6 +514,11 @@ impl UnitaryGate {
         }
 
         Ok(())
+    }
+
+    fn validate_matrix_shape(&self, mat: &Array2<Complex<f64>>) -> Result<(), CircuitError> {
+        self.validate_symbolic_matrix_shape(mat)?;
+        Self::validate_numeric_unitary_matrix(mat)
     }
 
     fn validate_symbolic_matrix_shape<T>(&self, mat: &Array2<T>) -> Result<(), CircuitError> {

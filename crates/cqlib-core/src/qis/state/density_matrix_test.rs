@@ -1452,3 +1452,47 @@ fn zero_control_gphase_circuit_evolution() {
         }
     }
 }
+
+#[test]
+fn controlled_parameterized_circuit_gate_density_matrix_coherence() {
+    use crate::circuit::Parameter;
+    use crate::circuit::gate::{CircuitGate, FrozenCircuit};
+
+    let theta = Parameter::symbol("theta");
+    let mut sub = Circuit::from_qubits(vec![Qubit::new(4), Qubit::new(1)]).unwrap();
+    sub.h(Qubit::new(4)).unwrap();
+    sub.cx(Qubit::new(4), Qubit::new(1)).unwrap();
+    sub.set_global_phase(theta);
+    let ctrl_bell = CircuitGate::new("PhasedBell", FrozenCircuit::new(sub))
+        .unwrap()
+        .control(1)
+        .unwrap();
+
+    let angle = -0.47_f64;
+    let mut circuit = Circuit::new(3);
+    circuit.h(Qubit::new(1)).unwrap(); // control q1 in |+>
+    circuit
+        .unitary_with_params(
+            ctrl_bell,
+            vec![Qubit::new(1), Qubit::new(2), Qubit::new(0)],
+            [angle.into()],
+        )
+        .unwrap();
+
+    let dm = DensityMatrix::from_circuit(&circuit).unwrap();
+    // Statevector: (|000> + e^{i*angle}/sqrt(2) * (|010> + |111>)) / sqrt(2)
+    // wait: q1 is bit 1:
+    // q1=0 -> |000> (idx 0) with amp 1/sqrt(2)
+    // q1=1 -> Bell on (t0=q2, t1=q0): (|00> + |11>)/sqrt(2) => idx 0b010=2 and idx 0b111=7 with amp e^{i*angle}/2
+    let mut psi = [Complex64::default(); 8];
+    psi[0] = Complex64::new(1.0 / 2.0_f64.sqrt(), 0.0);
+    psi[2] = Complex64::from_polar(0.5, angle);
+    psi[7] = Complex64::from_polar(0.5, angle);
+
+    for r in 0..8 {
+        for c in 0..8 {
+            let expected = psi[r] * psi[c].conj();
+            assert!((dm.data()[r * 8 + c] - expected).norm() < 1e-12);
+        }
+    }
+}

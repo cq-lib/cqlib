@@ -188,15 +188,71 @@ fn test_substitute_symbolic_matrix_single_replacement() {
 }
 
 #[test]
-fn test_substitute_symbolic_matrix_collision_detection() {
-    let theta = Parameter::symbol("__cqlib_internal_sub_theta");
-    let symbolic = standard_gate_symbolic_matrix(StandardGate::RX, &[theta]).unwrap();
-    let replacements = HashMap::from([(
-        "__cqlib_internal_sub_theta".to_string(),
-        Parameter::from(1.0),
-    )]);
-    let result = substitute_symbolic_matrix(symbolic, &replacements);
-    assert!(result.is_err());
+fn test_substitute_symbolic_matrix_supports_internal_prefix_and_swaps() {
+    let a = Parameter::symbol("__cqlib_internal_sub_theta");
+    let b = Parameter::symbol("__cqlib_internal_sub_phi");
+    let symbolic = standard_gate_symbolic_matrix(StandardGate::RX, &[a + b * 2.0]).unwrap();
+    let replacements = HashMap::from([
+        (
+            "__cqlib_internal_sub_theta".to_string(),
+            Parameter::symbol("__cqlib_internal_sub_phi"),
+        ),
+        (
+            "__cqlib_internal_sub_phi".to_string(),
+            Parameter::symbol("__cqlib_internal_sub_theta"),
+        ),
+    ]);
+    let substituted = substitute_symbolic_matrix(symbolic, &replacements).unwrap();
+    let bindings = HashMap::from([
+        ("__cqlib_internal_sub_theta", 0.3_f64),
+        ("__cqlib_internal_sub_phi", 0.5_f64),
+    ]);
+    let evaluated = evaluate_symbolic_matrix(&substituted, &Some(bindings)).unwrap();
+    let expected = StandardGate::RX.matrix(&[0.5 + 2.0 * 0.3]).unwrap();
+    assert_matrix_approx_eq(&evaluated, expected.as_ref(), 1e-12);
+}
+
+#[test]
+fn test_substitute_symbolic_matrix_normalizes_column_major_layout_for_downstream_apply() {
+    use crate::circuit::symbolic_matrix::{apply_gate_to_matrix, symbolic_eye};
+    use ndarray::ShapeBuilder;
+
+    let theta = Parameter::symbol("theta");
+    // Logical matrix [[0, 1], [exp(i*theta), 0]] stored in column-major (Fortran) order:
+    // memory order is [M(0,0)=0, M(1,0)=exp(i*theta), M(0,1)=1, M(1,1)=0].
+    let col_major = Array2::from_shape_vec(
+        (2, 2).f(),
+        vec![
+            SymbolicComplex::zero(),
+            SymbolicComplex::exp_i(theta),
+            SymbolicComplex::one(),
+            SymbolicComplex::zero(),
+        ],
+    )
+    .unwrap();
+    assert!(!col_major.is_standard_layout());
+
+    let replacements = HashMap::from([("theta".to_string(), Parameter::symbol("phi"))]);
+    let mut substituted = substitute_symbolic_matrix(col_major.clone(), &replacements).unwrap();
+    let mut simplified = simplify_matrix(&col_major).unwrap();
+    assert!(substituted.is_standard_layout());
+    assert!(simplified.is_standard_layout());
+
+    // Downstream in-place matrix applications require contiguous standard layout.
+    let eye = symbolic_eye(2);
+    apply_gate_to_matrix(&mut substituted, &eye, &[0]).unwrap();
+    apply_gate_to_matrix(&mut simplified, &eye, &[0]).unwrap();
+
+    let eval_sub =
+        evaluate_symbolic_matrix(&substituted, &Some(HashMap::from([("phi", 0.5_f64)]))).unwrap();
+    let eval_simp =
+        evaluate_symbolic_matrix(&simplified, &Some(HashMap::from([("theta", 0.5_f64)]))).unwrap();
+    for evaluated in [&eval_sub, &eval_simp] {
+        assert!((evaluated[[0, 0]] - Complex64::new(0.0, 0.0)).norm() < 1e-12);
+        assert!((evaluated[[0, 1]] - Complex64::new(1.0, 0.0)).norm() < 1e-12);
+        assert!((evaluated[[1, 0]] - Complex64::from_polar(1.0, 0.5)).norm() < 1e-12);
+        assert!((evaluated[[1, 1]] - Complex64::new(0.0, 0.0)).norm() < 1e-12);
+    }
 }
 
 // --- Fast-path (diagonal / permutation) tests ---

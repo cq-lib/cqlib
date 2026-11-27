@@ -366,6 +366,38 @@ frozen = FrozenCircuit(sub.qubits, sub.operations)
 gate = CircuitGate("HadamardBlock", frozen)
 ```
 
+### 受控复合门 `CircuitGate.control(n)`
+
+当需要为整段子线路统一添加一个或多个控制位时，可以调用 `CircuitGate.control(n)`（`n >= 1`），将该复合门整体包装为一个受控 `UnitaryGate`（标签格式为 `ctl_{n}_{name}`）：
+
+- **比特顺序**：通过 `append_unitary_gate` 追加到线路时，先传入 `n` 个控制位，再按子线路的比特存储顺序传入目标位。仅当所有控制位均处于 $|1\rangle$ 时执行原子线路，其余控制状态对应恒等操作；子线路的全局相位会自动成为全 $|1\rangle$ 控制分支上的相对相位。
+- **参数保留**：若原 `CircuitGate` 带有参数，受控 `UnitaryGate` 会保留原有的位置参数顺序（以 `matrix_params` 暴露，包括显式声明但未使用的参数）；形参名不可与内置数学常量（`e`、`pi`、`π`）重名。
+
+例如，给一个两比特 Bell 电路添加两个控制位，即可得到一个四比特的双控复合门：
+
+```python
+from cqlib import Circuit
+
+bell = Circuit(2)
+bell.h(0)
+bell.cx(0, 1)
+
+cc_bell = bell.to_gate("Bell").control(2)
+
+circuit = Circuit(4)
+circuit.x(0)
+circuit.x(1)
+# 先传控制位 [0, 1]，再传目标位 [2, 3]
+circuit.append_unitary_gate(cc_bell, [0, 1, 2, 3])
+```
+
+需要注意的是，`CircuitGate.control(n)` 返回的是基于矩阵表示的 `UnitaryGate`（不附带受控子线路定义），在当前版本中具有以下使用边界：
+
+- 对包含该受控门的线路直接调用 `circuit.inverse()` 会报错；`circuit.decompose()` 仅展开 `CircuitGate`，不会展开矩阵型 `UnitaryGate`。
+- `StabilizerState` 不直接支持矩阵型 `UnitaryGate`（即使数学上属于 Clifford 门，且默认 `compile()` 综合会生成非 Clifford 的 `U` 门），如需稳定子模拟请保持原生 Clifford 门结构，或改用 `Statevector` / `DensityMatrix`。
+- 稠密受控矩阵受资源上限约束（数值型最多 12 比特，符号参数化型最多 8 比特）；深层参数化子线路在符号展开时可能产生指数级表达式增长，建议先绑定数值参数再调用 `control()`。
+- 导出 OpenQASM 2.0 时会生成对应的 `opaque` 门声明；OpenQASM 3.0 与 QCIS 不直接支持矩阵型 `UnitaryGate`，需先将所有实参（含未使用形参对应的实参）绑定为具体数值，并通过编译器 `compile()` 将其综合分解为基础门后再导出。
+
 ---
 
 ## Directive：非酉指令

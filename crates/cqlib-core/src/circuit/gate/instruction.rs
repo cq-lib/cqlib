@@ -22,7 +22,9 @@
 //!
 //! By using `Instruction`, the circuit can store a heterogeneous list of operations in a single vector.
 
-use crate::circuit::gate::circuit_gate::{CircuitGate, FrozenCircuit};
+use crate::circuit::gate::circuit_gate::{
+    CircuitGate, FrozenCircuit, validate_controlled_unitary_qubits,
+};
 use crate::circuit::gate::directive::Directive;
 use crate::circuit::gate::standard_gate::StandardGate;
 use crate::circuit::gate::{ClassicalDataOp, MCGate, UnitaryGate, gate_matrix};
@@ -464,15 +466,27 @@ impl Instruction {
                 }
             }
             Instruction::UnitaryGate(uni) => {
+                let total_qubits = if uni.matrix().is_some() || uni.symbolic_matrix().is_some() {
+                    validate_controlled_unitary_qubits(
+                        uni.num_qubits() as usize,
+                        num_new_ctrls,
+                        uni.symbolic_matrix().is_some(),
+                    )
+                    .ok()?
+                } else {
+                    (uni.num_qubits() as usize)
+                        .checked_add(num_new_ctrls)
+                        .and_then(|q| u16::try_from(q).ok())?
+                };
                 let mut g = UnitaryGate::new(
                     format!("ctl_{}_{}", num_new_ctrls, uni.label()).as_str(),
-                    uni.num_qubits() + num_new_ctrls as u16,
+                    total_qubits,
                     uni.num_params(),
                 );
                 if let Some(m) = uni.matrix() {
                     let controlled = gate_matrix::control_matrix(m, num_new_ctrls);
-                    // Handle possible matrix dimension error, return None on failure
-                    g = match g.with_matrix(controlled) {
+                    // `uni.matrix()` was already validated as finite and unitary.
+                    g = match g.with_validated_matrix(controlled) {
                         Ok(gate) => gate,
                         Err(_) => return None,
                     };
@@ -495,7 +509,10 @@ impl Instruction {
 
                 Some(Instruction::UnitaryGate(Box::from(g)))
             }
-            Instruction::CircuitGate(_) => None, // CircuitGate does not support control yet
+            Instruction::CircuitGate(cg) => cg
+                .control(num_new_ctrls)
+                .ok()
+                .map(|u| Instruction::UnitaryGate(Box::new(u))),
             Instruction::Directive(_) => None,
             Instruction::ClassicalData(_) => None,
             Instruction::Delay => None,

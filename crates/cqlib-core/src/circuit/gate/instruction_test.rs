@@ -507,3 +507,55 @@ fn payload_accessors_return_the_stored_payload() {
         Some(ClassicalControlOp::Continue)
     ));
 }
+
+#[test]
+fn control_on_circuit_gate_and_recontrolled_unitary_enforces_semantics_and_limits() {
+    let mut bell = Circuit::new(2);
+    bell.h(Qubit::new(0)).unwrap();
+    bell.cx(Qubit::new(0), Qubit::new(1)).unwrap();
+    let inst = bell.to_gate("Bell").unwrap();
+
+    // control(0) preserves the CircuitGate instruction unchanged.
+    assert!(matches!(inst.control(0), Some(Instruction::CircuitGate(_))));
+
+    let controlled_once = inst.control(1).unwrap();
+    assert_eq!(controlled_once.name(), "ctl_1_Bell");
+    assert_eq!(controlled_once.gate_arity(), Some((3, 0)));
+
+    let controlled_twice = controlled_once.control(1).unwrap();
+    assert_eq!(controlled_twice.name(), "ctl_1_ctl_1_Bell");
+    assert_eq!(controlled_twice.gate_arity(), Some((4, 0)));
+
+    // Re-controlling past the dense unitary cap fails cleanly without panicking.
+    assert!(controlled_twice.control(20).is_none());
+    assert!(controlled_twice.control(usize::MAX).is_none());
+
+    // Circuit::multi_control works directly with a parameterized CircuitGate instruction.
+    let mut sub = Circuit::new(1);
+    sub.rx(Qubit::new(0), Parameter::symbol("theta")).unwrap();
+    let rx_gate = sub.to_gate("SubRx").unwrap();
+
+    let mut parent = Circuit::new(3);
+    parent
+        .multi_control(
+            rx_gate,
+            [Qubit::new(0), Qubit::new(1)],
+            [Qubit::new(2)],
+            [0.65_f64.into()],
+        )
+        .unwrap();
+    let mut expected = Circuit::new(3);
+    expected
+        .multi_control(
+            StandardGate::RX,
+            [Qubit::new(0), Qubit::new(1)],
+            [Qubit::new(2)],
+            [0.65_f64.into()],
+        )
+        .unwrap();
+    crate::circuit::test_utils::assert_matrix_approx_eq(
+        &crate::circuit::circuit_to_matrix(&parent, None).unwrap(),
+        &crate::circuit::circuit_to_matrix(&expected, None).unwrap(),
+        1e-12,
+    );
+}

@@ -504,11 +504,11 @@ impl DensityMatrix {
                     }
                 }
                 Instruction::UnitaryGate(u_gate) => {
-                    if let Some(matrix) = u_gate.matrix() {
-                        dm.apply_unitary_gate(&qubit_indices, matrix)?;
-                    } else {
+                    if u_gate.matrix_repr().is_none() {
                         return Err(QisError::CircuitError(CircuitError::NoMatrixRepresentation));
                     }
+                    let matrix = u_gate.matrix_for_params_in_gate_order(&params)?;
+                    dm.apply_unitary_gate(&qubit_indices, matrix.as_ref())?;
                 }
                 Instruction::CircuitGate(_) => {
                     return Err(QisError::CircuitError(CircuitError::InvalidOperation(
