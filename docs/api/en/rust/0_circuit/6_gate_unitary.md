@@ -194,6 +194,19 @@ pub fn matrix_for_params(
 
 ---
 
+## Controlled form
+
+```rust
+pub fn control(&self, num_controls: usize) -> Result<UnitaryGate, CircuitError>
+```
+
+Prepends `num_controls` ($\ge 1$) active-high ($|1\rangle$) control qubits before the target qubits and returns a new matrix-backed `UnitaryGate` (labeled `ctl_{num_controls}_{label}`, dropping any attached circuit):
+
+- Supports numeric-matrix (up to 12 total qubits), symbolic-matrix (up to 8 total qubits), and circuit-only `UnitaryGate` definitions (explicit matrices take precedence over an attached circuit);
+- Returns `CircuitError::NoMatrixRepresentation` for opaque gates and `CircuitError::InvalidOperation` for `num_controls == 0` or limit violations.
+
+---
+
 ## Appending to `Circuit`
 
 A `UnitaryGate` can be added to a circuit through the custom unitary gate appending interfaces provided by `Circuit`.

@@ -897,3 +897,268 @@ fn circuit_definition_order_preserves_nested_symbolic_parameters_and_phase() {
         );
     }
 }
+
+#[test]
+fn test_unitary_gate_control_numeric_chained_and_zero_qubit_phase() {
+    // 1-qubit numeric X gate -> CX -> CCX via chained control().
+    let x_mat = StandardGate::X.matrix(&[]).unwrap().into_owned();
+    let u_x = UnitaryGate::new("MyX", 1, 0).with_matrix(x_mat).unwrap();
+    let cx = u_x.control(1).unwrap();
+    assert_eq!(cx.label(), "ctl_1_MyX");
+    assert_eq!(cx.num_qubits(), 2);
+    assert_eq!(cx.num_params(), 0);
+    assert!(cx.circuit().is_none());
+    assert_matrix_approx_eq(
+        cx.matrix().unwrap(),
+        StandardGate::CX.matrix(&[]).unwrap().as_ref(),
+        1e-12,
+    );
+
+    let ccx = cx.control(1).unwrap();
+    assert_eq!(ccx.label(), "ctl_1_ctl_1_MyX");
+    assert_eq!(ccx.num_qubits(), 3);
+    assert_matrix_approx_eq(
+        ccx.matrix().unwrap(),
+        StandardGate::CCX.matrix(&[]).unwrap().as_ref(),
+        1e-12,
+    );
+
+    // 0-qubit global phase 1x1 matrix -> controlled phase gate.
+    let phase = Complex::from_polar(1.0, 0.42);
+    let gphase_u = UnitaryGate::new("Phase0", 0, 0)
+        .with_matrix(array![[phase]])
+        .unwrap();
+    let c2_phase = gphase_u.control(2).unwrap();
+    assert_eq!(c2_phase.num_qubits(), 2);
+    let mat = c2_phase.matrix().unwrap();
+    for r in 0..4 {
+        for c in 0..4 {
+            let expected = if r != c {
+                Complex::new(0.0, 0.0)
+            } else if r == 3 {
+                phase
+            } else {
+                Complex::new(1.0, 0.0)
+            };
+            assert!((mat[[r, c]] - expected).norm() < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn test_unitary_gate_control_symbolic_column_major_and_zero_param() {
+    use ndarray::ShapeBuilder;
+
+    let theta = Parameter::symbol("theta");
+    // Asymmetric column-major symbolic unitary [[0, 1], [exp(i*theta), 0]] to catch transpose bugs.
+    let col_major = Array2::from_shape_vec(
+        (2, 2).f(),
+        vec![
+            SymbolicComplex::zero(),
+            SymbolicComplex::exp_i(theta),
+            SymbolicComplex::one(),
+            SymbolicComplex::zero(),
+        ],
+    )
+    .unwrap();
+    assert!(!col_major.is_standard_layout());
+
+    let u_sym = UnitaryGate::new("AsymSym", 1, 1)
+        .with_symbolic_matrix(["theta"], col_major)
+        .unwrap();
+    let ctrl = u_sym.control(1).unwrap();
+    assert_eq!(ctrl.num_qubits(), 2);
+    assert_eq!(ctrl.num_params(), 1);
+    assert_eq!(ctrl.matrix_params(), Some(["theta".to_string()].as_slice()));
+    let evaluated = ctrl.matrix_for_params(&[0.5]).unwrap();
+    assert!((evaluated[[2, 3]] - Complex::new(1.0, 0.0)).norm() < 1e-12);
+    assert!((evaluated[[3, 2]] - Complex::from_polar(1.0, 0.5)).norm() < 1e-12);
+
+    // Zero-parameter symbolic matrix (constant symbolic entries) uses symbolic cap (8q).
+    let const_sym = array![
+        [SymbolicComplex::zero(), SymbolicComplex::one()],
+        [SymbolicComplex::one(), SymbolicComplex::zero()]
+    ];
+    let u_const_sym = UnitaryGate::new("ConstSym", 1, 0)
+        .with_symbolic_matrix(Vec::<String>::new(), const_sym)
+        .unwrap();
+    let ctrl_const = u_const_sym.control(1).unwrap();
+    assert_eq!(ctrl_const.matrix_params(), Some([].as_slice()));
+    assert_matrix_approx_eq(
+        ctrl_const.matrix_for_params(&[]).unwrap().as_ref(),
+        StandardGate::CX.matrix(&[]).unwrap().as_ref(),
+        1e-12,
+    );
+    assert!(matches!(
+        u_const_sym.control(8),
+        Err(CircuitError::InvalidOperation(_))
+    ));
+}
+
+#[test]
+fn test_unitary_gate_control_circuit_only_and_matrix_precedence() {
+    // Non-ascending storage order [Qubit(5), Qubit(2)] -> UnitaryGate uses numeric order [2, 5].
+    let mut sub = Circuit::from_qubits(vec![Qubit::new(5), Qubit::new(2)]).unwrap();
+    sub.rx(Qubit::new(2), Parameter::symbol("theta")).unwrap();
+    sub.cx(Qubit::new(2), Qubit::new(5)).unwrap();
+    sub.set_global_phase(Parameter::symbol("theta") * 0.25);
+    let frozen = Arc::new(FrozenCircuit::new(sub));
+
+    let u_circ = UnitaryGate::new("CircOnly", 2, 1)
+        .with_circuit(frozen)
+        .unwrap();
+    let ctrl = u_circ.control(1).unwrap();
+    assert_eq!(ctrl.num_qubits(), 3);
+    assert_eq!(ctrl.num_params(), 1);
+    assert!(ctrl.circuit().is_none());
+
+    let angle = 0.63;
+    let actual = ctrl.matrix_for_params(&[angle]).unwrap();
+    let base = u_circ.matrix_for_params_in_gate_order(&[angle]).unwrap();
+    let expected = crate::circuit::gate::gate_matrix::control_matrix(base.as_ref(), 1);
+    assert_matrix_approx_eq(actual.as_ref(), &expected, 1e-12);
+
+    // Matrix + circuit precedence: explicit matrix wins and old circuit is dropped cleanly.
+    let mut z_circ = Circuit::new(1);
+    z_circ.z(Qubit::new(0)).unwrap();
+    let u_both = UnitaryGate::new("Both", 1, 0)
+        .with_matrix(StandardGate::X.matrix(&[]).unwrap().into_owned())
+        .unwrap()
+        .with_circuit(Arc::new(FrozenCircuit::new(z_circ)))
+        .unwrap();
+    let ctrl_both = u_both.control(1).unwrap();
+    assert!(ctrl_both.circuit().is_none());
+    assert_matrix_approx_eq(
+        ctrl_both.matrix().unwrap(),
+        StandardGate::CX.matrix(&[]).unwrap().as_ref(),
+        1e-12,
+    );
+
+    // Indexed constant expression (no free symbols) in a circuit-only gate still evaluates cleanly.
+    let mut const_expr_circ = Circuit::new(1);
+    const_expr_circ
+        .append(
+            crate::circuit::Instruction::Standard(StandardGate::RX),
+            [Qubit::new(0)],
+            [crate::circuit::ParameterValue::Param(Parameter::pi() / 2.0)],
+            None,
+        )
+        .unwrap();
+    let u_const_expr = UnitaryGate::new("ConstExprRx", 1, 0)
+        .with_circuit(Arc::new(FrozenCircuit::new(const_expr_circ)))
+        .unwrap();
+    let ctrl_const_expr = u_const_expr.control(1).unwrap();
+    let expected_crx = StandardGate::CRX
+        .matrix(&[std::f64::consts::FRAC_PI_2])
+        .unwrap();
+    assert_matrix_approx_eq(
+        ctrl_const_expr.matrix().unwrap(),
+        expected_crx.as_ref(),
+        1e-12,
+    );
+}
+
+#[test]
+fn test_unitary_gate_control_errors_opaque_control_flow_and_limits() {
+    // Opaque unitary has no matrix representation.
+    let opaque = UnitaryGate::new("Opaque", 1, 0);
+    assert!(matches!(
+        opaque.control(1),
+        Err(CircuitError::NoMatrixRepresentation)
+    ));
+
+    // Zero controls, over-limit numeric (13q), over-limit symbolic (9q), overflow.
+    let u_x = UnitaryGate::new("X", 1, 0)
+        .with_matrix(StandardGate::X.matrix(&[]).unwrap().into_owned())
+        .unwrap();
+    assert!(matches!(
+        u_x.control(0),
+        Err(CircuitError::InvalidOperation(_))
+    ));
+    assert!(matches!(
+        u_x.control(12),
+        Err(CircuitError::InvalidOperation(_))
+    ));
+    assert!(matches!(
+        u_x.control(usize::MAX),
+        Err(CircuitError::InvalidOperation(_))
+    ));
+
+    // Numeric & symbolic circuit-only classical control flow both return InvalidOperation("control-flow").
+    for parameterized in [false, true] {
+        let mut cond = Circuit::new(1);
+        if parameterized {
+            cond.rx(Qubit::new(0), Parameter::symbol("theta")).unwrap();
+        }
+        cond.if_else(
+            crate::circuit::ClassicalExpr::bool_literal(false),
+            |body| {
+                body.x(Qubit::new(0))?;
+                Ok(())
+            },
+            |body| {
+                body.z(Qubit::new(0))?;
+                Ok(())
+            },
+        )
+        .unwrap();
+        let u_cond = UnitaryGate::new("Cond", 1, u16::from(parameterized))
+            .with_circuit(Arc::new(FrozenCircuit::new(cond)))
+            .unwrap();
+        match u_cond.control(1) {
+            Err(CircuitError::InvalidOperation(msg)) => {
+                assert!(msg.contains("control-flow"), "unexpected message: {msg}");
+            }
+            other => panic!("expected InvalidOperation for if_else, got {other:?}"),
+        }
+    }
+
+    // Degenerate numeric base matrix in circuit-only unitary is rejected.
+    let mut degenerate = Circuit::new(1);
+    degenerate
+        .u(Qubit::new(0), std::f64::consts::FRAC_PI_2, 1e16, 1.0)
+        .unwrap();
+    let u_deg = UnitaryGate::new("Deg", 1, 0)
+        .with_circuit(Arc::new(FrozenCircuit::new(degenerate)))
+        .unwrap();
+    assert!(matches!(
+        u_deg.control(1),
+        Err(CircuitError::InvalidOperation(_))
+    ));
+
+    // Nested reserved constant parameter behind circuit-only UnitaryGate is rejected.
+    let mut inner_pi = Circuit::new(1);
+    inner_pi
+        .append(
+            crate::circuit::Instruction::Standard(StandardGate::RX),
+            [Qubit::new(0)],
+            [crate::circuit::ParameterValue::Param(Parameter::symbol(
+                "pi",
+            ))],
+            None,
+        )
+        .unwrap();
+    let cg_pi = crate::circuit::gate::CircuitGate::with_signature(
+        "InnerPi",
+        FrozenCircuit::new(inner_pi),
+        vec!["pi".to_string()],
+    )
+    .unwrap();
+    let mut wrap = Circuit::new(1);
+    wrap.append(
+        crate::circuit::Instruction::CircuitGate(Box::new(cg_pi)),
+        [Qubit::new(0)],
+        [crate::circuit::ParameterValue::Param(Parameter::symbol(
+            "theta",
+        ))],
+        None,
+    )
+    .unwrap();
+    let u_wrap = UnitaryGate::new("WrapPi", 1, 1)
+        .with_circuit(Arc::new(FrozenCircuit::new(wrap)))
+        .unwrap();
+    assert!(matches!(
+        u_wrap.control(1),
+        Err(CircuitError::InvalidOperation(_))
+    ));
+}

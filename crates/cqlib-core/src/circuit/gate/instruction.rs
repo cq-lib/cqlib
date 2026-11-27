@@ -22,12 +22,10 @@
 //!
 //! By using `Instruction`, the circuit can store a heterogeneous list of operations in a single vector.
 
-use crate::circuit::gate::circuit_gate::{
-    CircuitGate, FrozenCircuit, validate_controlled_unitary_qubits,
-};
+use crate::circuit::gate::circuit_gate::{CircuitGate, FrozenCircuit};
 use crate::circuit::gate::directive::Directive;
 use crate::circuit::gate::standard_gate::StandardGate;
-use crate::circuit::gate::{ClassicalDataOp, MCGate, UnitaryGate, gate_matrix};
+use crate::circuit::gate::{ClassicalDataOp, MCGate, UnitaryGate};
 use crate::circuit::{ClassicalControlOp, ClassicalValue, Parameter};
 use alloc::borrow::Cow;
 use ndarray::Array2;
@@ -466,48 +464,22 @@ impl Instruction {
                 }
             }
             Instruction::UnitaryGate(uni) => {
-                let total_qubits = if uni.matrix().is_some() || uni.symbolic_matrix().is_some() {
-                    validate_controlled_unitary_qubits(
-                        uni.num_qubits() as usize,
-                        num_new_ctrls,
-                        uni.symbolic_matrix().is_some(),
-                    )
-                    .ok()?
+                if uni.matrix_repr().is_some() || uni.circuit().is_some() {
+                    uni.control(num_new_ctrls)
+                        .ok()
+                        .map(|u| Instruction::UnitaryGate(Box::new(u)))
                 } else {
-                    (uni.num_qubits() as usize)
+                    // Preserve opaque placeholder control semantics for backward compatibility.
+                    let total_qubits = (uni.num_qubits() as usize)
                         .checked_add(num_new_ctrls)
-                        .and_then(|q| u16::try_from(q).ok())?
-                };
-                let mut g = UnitaryGate::new(
-                    format!("ctl_{}_{}", num_new_ctrls, uni.label()).as_str(),
-                    total_qubits,
-                    uni.num_params(),
-                );
-                if let Some(m) = uni.matrix() {
-                    let controlled = gate_matrix::control_matrix(m, num_new_ctrls);
-                    // `uni.matrix()` was already validated as finite and unitary.
-                    g = match g.with_validated_matrix(controlled) {
-                        Ok(gate) => gate,
-                        Err(_) => return None,
-                    };
-                } else if let Some(m) = uni.symbolic_matrix() {
-                    let controlled =
-                        crate::circuit::symbolic_matrix::gate::control_matrix(m, num_new_ctrls);
-                    let params = uni.matrix_params().unwrap_or(&[]);
-                    g = match g.with_symbolic_matrix(params.iter().cloned(), controlled) {
-                        Ok(gate) => gate,
-                        Err(_) => return None,
-                    };
+                        .and_then(|q| u16::try_from(q).ok())?;
+                    let g = UnitaryGate::new(
+                        format!("ctl_{}_{}", num_new_ctrls, uni.label()).as_str(),
+                        total_qubits,
+                        uni.num_params(),
+                    );
+                    Some(Instruction::UnitaryGate(Box::from(g)))
                 }
-                // Copy circuit field if present
-                if let Some(c) = uni.circuit() {
-                    g = match g.with_circuit(c.clone()) {
-                        Ok(gate) => gate,
-                        Err(_) => return None,
-                    };
-                }
-
-                Some(Instruction::UnitaryGate(Box::from(g)))
             }
             Instruction::CircuitGate(cg) => cg
                 .control(num_new_ctrls)

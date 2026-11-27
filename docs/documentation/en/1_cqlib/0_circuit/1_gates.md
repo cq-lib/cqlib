@@ -366,12 +366,13 @@ frozen = FrozenCircuit(sub.qubits, sub.operations)
 gate = CircuitGate("HadamardBlock", frozen)
 ```
 
-### Controlled composite gate `CircuitGate.control(n)`
+### Controlled custom gates `CircuitGate.control(n=1)` and `UnitaryGate.control(n=1)`
 
-When one or more control qubits need to be added to an entire sub-circuit, `CircuitGate.control(n)` (`n >= 1`) wraps the composite gate as a single controlled `UnitaryGate` (labeled `ctl_{n}_{name}`):
+When one or more control qubits need to be added to an entire sub-circuit or custom unitary gate, `CircuitGate.control(n)` and `UnitaryGate.control(n)` (default `n = 1`, requiring `n >= 1`) wrap the gate as a single controlled `UnitaryGate` (labeled `ctl_{n}_{name}`, and chainable via further `.control()` calls):
 
-- **Qubit order**: When appending via `append_unitary_gate`, pass the `n` control qubits first, followed by the target qubits in the sub-circuit's storage order. The sub-circuit executes only when all control qubits are in $|1\rangle$, while all other control basis states act as the identity; any sub-circuit global phase becomes a relative phase on the all-$|1\rangle$ control subspace.
+- **Qubit order**: When appending via `append_unitary_gate`, pass the `n` control qubits first, followed by the target qubits (`CircuitGate` uses the sub-circuit's storage order; circuit-only `UnitaryGate` uses ascending numeric-ID order). The gate executes only when all control qubits are in $|1\rangle$, while all other control basis states act as the identity; any sub-circuit global phase becomes a relative phase on the all-$|1\rangle$ control subspace.
 - **Parameter preservation**: Parametric `CircuitGate` definitions preserve their positional parameter order on the resulting `UnitaryGate` (exposed via `matrix_params`, including declared but unused parameters). Formal parameter names cannot collide with built-in mathematical constants (`e`, `pi`, `π`).
+- **`UnitaryGate` representations**: Numeric-matrix, symbolic-matrix, and circuit-only `UnitaryGate` definitions are supported (when both a matrix and a circuit are attached, the explicit matrix takes precedence and the old circuit is dropped); opaque `UnitaryGate` definitions without a matrix or circuit raise `CircuitError`.
 
 For example, adding two control qubits to a two-qubit Bell sub-circuit produces a four-qubit doubly controlled composite gate:
 

@@ -366,12 +366,13 @@ frozen = FrozenCircuit(sub.qubits, sub.operations)
 gate = CircuitGate("HadamardBlock", frozen)
 ```
 
-### 受控复合门 `CircuitGate.control(n)`
+### 受控自定义门 `CircuitGate.control(n=1)` 与 `UnitaryGate.control(n=1)`
 
-当需要为整段子线路统一添加一个或多个控制位时，可以调用 `CircuitGate.control(n)`（`n >= 1`），将该复合门整体包装为一个受控 `UnitaryGate`（标签格式为 `ctl_{n}_{name}`）：
+当需要为整段子线路或自定义酉门添加一个或多个控制位时，可以调用 `CircuitGate.control(n)` 或 `UnitaryGate.control(n)`（默认 `n = 1`，要求 `n >= 1`），将其包装为一个受控 `UnitaryGate`（标签格式为 `ctl_{n}_{name}`，支持链式继续调用 `.control()`）：
 
-- **比特顺序**：通过 `append_unitary_gate` 追加到线路时，先传入 `n` 个控制位，再按子线路的比特存储顺序传入目标位。仅当所有控制位均处于 $|1\rangle$ 时执行原子线路，其余控制状态对应恒等操作；子线路的全局相位会自动成为全 $|1\rangle$ 控制分支上的相对相位。
+- **比特顺序**：通过 `append_unitary_gate` 追加到线路时，先传入 `n` 个控制位，再按原门的目标位顺序传入目标位（`CircuitGate` 按子线路比特存储顺序；纯电路型 `UnitaryGate` 按比特数字 ID 升序）。仅当所有控制位均处于 $|1\rangle$ 时执行原门操作，其余控制状态对应恒等操作；子线路的全局相位会自动成为全 $|1\rangle$ 控制分支上的相对相位。
 - **参数保留**：若原 `CircuitGate` 带有参数，受控 `UnitaryGate` 会保留原有的位置参数顺序（以 `matrix_params` 暴露，包括显式声明但未使用的参数）；形参名不可与内置数学常量（`e`、`pi`、`π`）重名。
+- **`UnitaryGate` 形态处理**：支持数值矩阵型、符号矩阵型与纯电路型 `UnitaryGate`（若同时附带矩阵与线路，优先使用矩阵并丢弃旧线路定义）；既无矩阵也无线路的 opaque `UnitaryGate` 会抛出 `CircuitError`。
 
 例如，给一个两比特 Bell 电路添加两个控制位，即可得到一个四比特的双控复合门：
 

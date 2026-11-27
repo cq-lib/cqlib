@@ -238,6 +238,16 @@ main.append_circuit_gate(rx_block, [0], params=[alpha])
 
 ---
 
+## 受控门
+
+```python
+CircuitGate.control(num_controls: int = 1) -> UnitaryGate
+```
+
+在目标比特之前前置 `num_controls`（$\ge 1$）个高电平（$|1\rangle$）控制比特，返回矩阵型 `UnitaryGate`（标签 `ctl_{num_controls}_{name}`），保留位置参数顺序（以 `matrix_params` 暴露）并将子线路全局相位转为全 $|1\rangle$ 控制分支上的相对相位。受限上限为数值型 12 比特、符号型 8 比特，且不允许形参与内置数学常量（`e`、`pi`、`π`）重名。
+
+---
+
 ## 反门
 
 ```python
@@ -274,4 +284,3 @@ expanded = outer.decompose()
 - `FrozenCircuit` 与 `CircuitGate` 都支持结构相等比较 `==`。`FrozenCircuit` 的比较忽略线路标识与符号矩阵缓存，只比较定义本身；`CircuitGate` 的比较包含名称、有序签名与底层定义线路。
 - `repr` 形如 `FrozenCircuit(qubits=2, operations=2)` 与 `CircuitGate("Bell", qubits=2, params=0)`。
 - 两者都支持 `copy`、`deepcopy`。由于二者都是不可变对象，复制结果与原对象相等。
-

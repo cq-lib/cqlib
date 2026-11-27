@@ -461,7 +461,7 @@ impl CircuitGate {
                 return Err(CircuitError::InvalidParameterValue(index, value));
             }
         }
-        if self.signature_params.is_empty() {
+        if self.circuit.circuit.parameters().is_empty() {
             // circuit_to_matrix takes LSB-first ordering; gate arguments are MSB-first.
             let order: Vec<usize> = self
                 .circuit
@@ -581,10 +581,13 @@ impl CircuitGate {
     ///
     /// # Errors
     ///
-    /// Returns [`CircuitError::InvalidOperation`] when `num_controls == 0` or the
-    /// resulting dense matrix exceeds resource limits, or
-    /// [`CircuitError::NoMatrixRepresentation`] when the inner circuit contains
-    /// non-unitary operations.
+    /// Returns [`CircuitError::InvalidOperation`] when `num_controls == 0`, when
+    /// the resulting dense matrix exceeds resource limits, when the inner circuit
+    /// contains unsupported control flow or produces a non-unitary numeric
+    /// result, or when a parameterized (`num_params > 0`) gate declares (directly
+    /// or in nested gates) a reserved constant parameter name (`e`, `pi`, `π`).
+    /// Returns [`CircuitError::NoMatrixRepresentation`] when the inner circuit
+    /// contains non-unitary operations.
     pub fn control(&self, num_controls: usize) -> Result<UnitaryGate, CircuitError> {
         if num_controls == 0 {
             return Err(CircuitError::InvalidOperation(
@@ -636,9 +639,28 @@ fn validate_no_reserved_constant_params(gate: &CircuitGate) -> Result<(), Circui
             )));
         }
     }
-    for op in gate.circuit.circuit().operations() {
-        if let crate::circuit::Instruction::CircuitGate(inner) = &op.instruction {
-            validate_no_reserved_constant_params(inner)?;
+    validate_circuit_no_reserved_constant_params(gate.circuit.circuit())
+}
+
+/// Recursively verifies that no nested `CircuitGate` (including inside
+/// circuit-backed `UnitaryGate` definitions) declares a formal parameter
+/// colliding with built-in mathematical constants (`e`, `pi`, `π`).
+pub(crate) fn validate_circuit_no_reserved_constant_params(
+    circuit: &Circuit,
+) -> Result<(), CircuitError> {
+    for op in circuit.operations() {
+        match &op.instruction {
+            crate::circuit::Instruction::CircuitGate(inner) => {
+                validate_no_reserved_constant_params(inner)?;
+            }
+            crate::circuit::Instruction::UnitaryGate(inner_u) => {
+                if inner_u.matrix_repr().is_none()
+                    && let Some(inner_circuit) = inner_u.circuit()
+                {
+                    validate_circuit_no_reserved_constant_params(inner_circuit.circuit())?;
+                }
+            }
+            _ => {}
         }
     }
     Ok(())

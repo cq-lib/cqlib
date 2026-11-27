@@ -93,3 +93,11 @@ def test_circuit_gate_control_releases_gil(assert_releases_gil):
     parametric_sub.rx(0, Parameter("theta"))
     parametric_gate = parametric_sub.to_gate("ParamOneQ")
     assert_releases_gil(lambda: parametric_gate.control(5))
+
+
+def test_unitary_gate_control_releases_gil(assert_releases_gil):
+    from cqlib.circuit.gates import UnitaryGate
+
+    h_mat = np.array([[1.0, 1.0], [1.0, -1.0]], dtype=complex) / np.sqrt(2.0)
+    gate = UnitaryGate("OneH", 1).with_matrix(h_mat)
+    assert_releases_gil(lambda: gate.control(6))

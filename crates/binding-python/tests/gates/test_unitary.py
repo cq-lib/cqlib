@@ -311,3 +311,103 @@ class TestUnitaryGateNumpyArray:
         arr = np.asarray(gate)
         assert arr.shape == (2, 2)
         assert np.allclose(arr, h_mat)
+
+
+class TestUnitaryGateControl:
+    """Test UnitaryGate.control() across numeric, symbolic, circuit-only, and opaque gates."""
+
+    def test_numeric_control_default_chained_and_block_zxz_compile(self):
+        from cqlib.circuit.gates import StandardGate
+        from cqlib.compile import compile as compile_circuit
+        from cqlib.qis import Statevector
+
+        x_mat = np.array([[0, 1], [1, 0]], dtype=complex)
+        u_x = UnitaryGate("CustomX", 1).with_matrix(x_mat)
+
+        # Default num_controls=1 across UnitaryGate, CircuitGate, and StandardGate.
+        cx = u_x.control()
+        assert cx.label == "ctl_1_CustomX"
+        assert cx.num_qubits == 2
+        assert cx.num_params == 0
+
+        ccx = cx.control()
+        assert ccx.label == "ctl_1_ctl_1_CustomX"
+        assert ccx.num_qubits == 3
+
+        # StandardGate.control() default = 1.
+        assert StandardGate.X.control().num_ctrl_qubits == 1
+
+        # Chained CircuitGate.control().control() produces a 3-qubit controlled unitary
+        # that compiles cleanly through Block-ZXZ synthesis.
+        sub = Circuit(1)
+        sub.h(0)
+        cc_h = sub.to_gate("SubH").control().control()
+        assert cc_h.num_qubits == 3
+
+        circ = Circuit(3)
+        circ.append_unitary_gate(cc_h, [0, 1, 2])
+        compiled = compile_circuit(circ).circuit
+        np.testing.assert_allclose(
+            compiled.to_matrix(),
+            circ.to_matrix(),
+            rtol=0,
+            atol=1e-9,
+        )
+        # Also verify superposed-control statevector amplitudes match.
+        sup = Circuit(3)
+        sup.h(0)
+        sup.x(1)
+        sup.append_unitary_gate(cc_h, [0, 1, 2])
+        sup_compiled = compile_circuit(sup).circuit
+        np.testing.assert_allclose(
+            Statevector.from_circuit(sup_compiled).data,
+            Statevector.from_circuit(sup).data,
+            rtol=0,
+            atol=1e-9,
+        )
+
+    def test_symbolic_and_circuit_only_control_with_compile(self):
+        from cqlib.circuit import Parameter
+        from cqlib.compile import compile as compile_circuit
+
+        theta = Parameter("theta")
+        sub = Circuit(1)
+        sub.rx(0, theta)
+        u_circ = UnitaryGate("CircRx", 1, 1).with_circuit(sub.to_gate("raw").circuit)
+
+        # Control a circuit-only UnitaryGate, then re-control the resulting symbolic UnitaryGate.
+        c2_rx = u_circ.control(1).control(1)
+        assert c2_rx.num_qubits == 3
+        assert c2_rx.num_params == 1
+        assert c2_rx.circuit is None
+
+        circ = Circuit(3)
+        circ.x(0)
+        circ.x(1)
+        circ.append_unitary_gate(c2_rx, [0, 1, 2], [theta])
+        bound = circ.assign_parameters({"theta": 0.45})
+        compiled = compile_circuit(bound).circuit
+        np.testing.assert_allclose(
+            compiled.to_matrix(), bound.to_matrix(), rtol=0, atol=1e-9
+        )
+
+    def test_control_errors_for_opaque_zero_and_limits(self):
+        from cqlib.circuit import CircuitError, Parameter
+
+        opaque = UnitaryGate("Opaque", 1)
+        with pytest.raises(CircuitError):
+            opaque.control()
+
+        u_x = UnitaryGate("X", 1).with_matrix(np.array([[0, 1], [1, 0]], dtype=complex))
+        with pytest.raises(CircuitError):
+            u_x.control(0)
+        with pytest.raises(CircuitError):
+            u_x.control(12)
+        with pytest.raises(OverflowError):
+            u_x.control(-1)
+
+        sub = Circuit(1)
+        sub.rx(0, Parameter("theta"))
+        u_sym = UnitaryGate("SymRx", 1, 1).with_circuit(sub.to_gate("raw").circuit)
+        with pytest.raises(CircuitError):
+            u_sym.control(8)

@@ -544,7 +544,10 @@ pub fn circuit_to_symbolic_matrix(
                         .circuit()
                         .circuit()
                         .assign_parameters(&Some(bindings))
-                        .map_err(|_| CircuitError::SymbolicParameterError)?;
+                        .map_err(|err| match err {
+                            CircuitError::InvalidOperation(_) => err,
+                            _ => CircuitError::SymbolicParameterError,
+                        })?;
                     // Match CircuitGate argument positions to the inner storage order.
                     let order: Vec<usize> =
                         sub_circuit.qubits().iter().map(|q| q.index()).collect();

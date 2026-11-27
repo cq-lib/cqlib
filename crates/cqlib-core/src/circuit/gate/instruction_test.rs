@@ -558,4 +558,26 @@ fn control_on_circuit_gate_and_recontrolled_unitary_enforces_semantics_and_limit
         &crate::circuit::circuit_to_matrix(&expected, None).unwrap(),
         1e-12,
     );
+
+    // Circuit-backed UnitaryGate now succeeds under Instruction::control (dropping old circuit).
+    let mut x_body = Circuit::new(1);
+    x_body.x(Qubit::new(0)).unwrap();
+    let u_circ = UnitaryGate::new("CircX", 1, 0)
+        .with_circuit(std::sync::Arc::new(FrozenCircuit::new(x_body)))
+        .unwrap();
+    let ctrl_u_circ = Instruction::UnitaryGate(Box::new(u_circ))
+        .control(1)
+        .expect("circuit-backed UnitaryGate control should succeed");
+    assert_eq!(ctrl_u_circ.gate_arity(), Some((2, 0)));
+    crate::circuit::test_utils::assert_matrix_approx_eq(
+        ctrl_u_circ.matrix(&[]).unwrap().as_ref(),
+        StandardGate::CX.matrix(&[]).unwrap().as_ref(),
+        1e-12,
+    );
+
+    // Opaque UnitaryGate retains placeholder control compatibility under Instruction::control.
+    let opaque = Instruction::UnitaryGate(Box::new(UnitaryGate::new("Opaque", 1, 0)));
+    let ctrl_opaque = opaque.control(1).expect("opaque placeholder control");
+    assert_eq!(ctrl_opaque.name(), "ctl_1_Opaque");
+    assert_eq!(ctrl_opaque.gate_arity(), Some((2, 0)));
 }

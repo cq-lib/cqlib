@@ -194,6 +194,19 @@ pub fn matrix_for_params(
 
 ---
 
+## 受控版本
+
+```rust
+pub fn control(&self, num_controls: usize) -> Result<UnitaryGate, CircuitError>
+```
+
+在目标比特之前前置 `num_controls`（$\ge 1$）个高电平（$|1\rangle$）控制比特，返回新的矩阵型 `UnitaryGate`（标签 `ctl_{num_controls}_{label}`，不保留旧 `circuit`）：
+
+- 支持数值矩阵型（总比特数上限 12）、符号矩阵型（总比特数上限 8）和纯电路型 `UnitaryGate`（显式矩阵优先于附带线路）；
+- 对 opaque 门返回 `CircuitError::NoMatrixRepresentation`，对 `num_controls == 0` 或超限返回 `CircuitError::InvalidOperation`。
+
+---
+
 ## 追加到 `Circuit`
 
 `UnitaryGate` 可以通过 `Circuit` 提供的自定义酉门追加接口加入线路。

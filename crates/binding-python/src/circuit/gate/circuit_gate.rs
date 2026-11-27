@@ -222,6 +222,7 @@ impl PyCircuitGate {
 
     /// Returns a controlled unitary gate with `num_controls` control qubits
     /// prepended before the target qubits.
+    #[pyo3(signature = (num_controls=1))]
     fn control(&self, py: Python<'_>, num_controls: usize) -> PyResult<PyUnitaryGate> {
         py.detach(|| self.inner.control(num_controls))
             .map(PyUnitaryGate::from)

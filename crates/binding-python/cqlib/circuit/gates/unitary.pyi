@@ -99,6 +99,26 @@ class UnitaryGate:
             params: Numeric values for each positional parameter.
         """
         ...
+    def control(self, num_controls: int = 1) -> UnitaryGate:
+        """Return a controlled unitary gate with ``num_controls`` active-high
+        (``|1>``) control qubits prepended before the target qubits.
+
+        Explicit matrix representations (numeric or symbolic) take precedence
+        over an attached circuit definition. The returned gate is matrix-backed
+        and does not carry an attached circuit.
+
+        Args:
+            num_controls: Number of control qubits to prepend (must be >= 1).
+                Defaults to ``1``.
+
+        Raises:
+            CircuitError: If ``num_controls == 0``, the gate is opaque (no
+                matrix or circuit definition), the resulting dense matrix
+                exceeds resource limits (12 total qubits for numeric gates, 8
+                for symbolic gates), or a circuit-only definition contains
+                non-unitary operations or control flow.
+        """
+        ...
     def __array__(
         self, dtype: Any | None = ..., copy: bool | None = ...
     ) -> NDArray[np.complex128]:

@@ -1,6 +1,6 @@
 # UnitaryGate
 
-`cqlib.circuit.gates.UnitaryGate`  
+`cqlib.circuit.gates.UnitaryGate`
 
 ```python
 from cqlib.circuit.gates import UnitaryGate
@@ -160,6 +160,19 @@ assert np.array(gate).shape == (2, 2)
 
 ---
 
+## Controlled form
+
+```python
+control(num_controls: int = 1) -> UnitaryGate
+```
+
+Prepends `num_controls` active-high ($|1\rangle$) control qubits before the target qubits and returns a new matrix-backed `UnitaryGate` (labeled `ctl_{num_controls}_{label}`, without carrying an attached circuit):
+
+- Supports numeric-matrix (up to 12 total qubits), symbolic-matrix (up to 8 total qubits), and circuit-only `UnitaryGate` definitions; when both a matrix and a circuit are attached, the explicit matrix takes precedence;
+- Raises `CircuitError` for `num_controls == 0`, resource-limit violations, or opaque gates without a matrix or circuit definition.
+
+---
+
 ## Appending to `Circuit`
 
 ```python
@@ -187,4 +200,3 @@ Appending must satisfy the following conditions:
 | `with_matrix()` | No | No | Fixed black-box matrices, oracles, calibration gates, small-scale test gates. |
 | `with_symbolic_matrix()` | No | Yes | Parameterized black-box matrices, tunable phase gates, symbolic verification. |
 | `with_circuit()` | Yes | Depends on the inner circuit | Scenarios that need to preserve decomposition information while applying the gate in `UnitaryGate` form. |
-

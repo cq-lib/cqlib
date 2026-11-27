@@ -1,6 +1,6 @@
 # StandardGate
 
-`cqlib.circuit.gates.StandardGate`  
+`cqlib.circuit.gates.StandardGate`
 
 ```python
 from cqlib import Parameter
@@ -222,7 +222,7 @@ assert StandardGate.T.inverse() == StandardGate.TDG
 ## 生成多控制门
 
 ```python
-control(num_controls: int) -> MCGate
+control(num_controls: int = 1) -> MCGate
 ```
 
 `control(num_controls)` 用于在已有标准门基础上增加指定数量的控制比特，并返回一个 `MCGate`。该接口适合构造多控制 `X` 门、多控制相位门、多控制旋转门以及 `oracle` 中常见的受控操作。
@@ -247,7 +247,7 @@ circuit.append_mc_gate(mcx, [0, 1, 2, 3])  # controls: 0, 1, 2; target: 3
 
 ---
 
-## `StandardGate` 与 `Circuit` 
+## `StandardGate` 与 `Circuit`
 
 `Circuit` 提供了大量便捷门方法，这些方法本质上会向线路中追加对应的 `StandardGate`：
 

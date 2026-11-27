@@ -1,6 +1,6 @@
 # StandardGate
 
-`cqlib.circuit.gates.StandardGate`  
+`cqlib.circuit.gates.StandardGate`
 
 ```python
 from cqlib import Parameter
@@ -222,7 +222,7 @@ Calling `inverse()` on a parameterized gate that has not bound all parameters ra
 ## Generating multi-controlled gates
 
 ```python
-control(num_controls: int) -> MCGate
+control(num_controls: int = 1) -> MCGate
 ```
 
 `control(num_controls)` adds the given number of control qubits on top of an existing standard gate and returns an `MCGate`. This interface suits constructing multi-controlled `X` gates, multi-controlled phase gates, multi-controlled rotation gates and the controlled operations commonly found in `oracle`.
@@ -247,7 +247,7 @@ circuit.append_mc_gate(mcx, [0, 1, 2, 3])  # controls: 0, 1, 2; target: 3
 
 ---
 
-## `StandardGate` and `Circuit` 
+## `StandardGate` and `Circuit`
 
 `Circuit` provides a large number of convenience gate methods, which in essence append the corresponding `StandardGate` to the circuit:
 
